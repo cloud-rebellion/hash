@@ -3,6 +3,12 @@
 # Stage 1: build the SvelteKit frontend with Bun (repo policy: no npm/pnpm/yarn).
 FROM oven/bun:1.3.9-alpine@sha256:9028ee7a60a04777190f0c3129ce49c73384d3fc918f3e5c75f5af188e431981 AS frontend
 WORKDIR /app/frontend
+ARG PUBLIC_FLARE_DSN
+ARG PUBLIC_FLARE_ENVIRONMENT=production
+ARG PUBLIC_FLARE_RELEASE=development
+ENV PUBLIC_FLARE_DSN=${PUBLIC_FLARE_DSN} \
+    PUBLIC_FLARE_ENVIRONMENT=${PUBLIC_FLARE_ENVIRONMENT} \
+    PUBLIC_FLARE_RELEASE=${PUBLIC_FLARE_RELEASE}
 COPY frontend/package.json frontend/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile

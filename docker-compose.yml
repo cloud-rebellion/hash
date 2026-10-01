@@ -92,7 +92,12 @@ services:
 
   worker:
     image: ${HASH_IMAGE:-hash-hash:dev}
-    build: .
+    build:
+      context: .
+      args:
+        PUBLIC_FLARE_DSN: ${FLARE_DSN:-}
+        PUBLIC_FLARE_ENVIRONMENT: ${FLARE_ENVIRONMENT:-production}
+        PUBLIC_FLARE_RELEASE: ${HASH_RELEASE:-development}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -151,7 +156,12 @@ services:
 
   hash:
     image: ${HASH_IMAGE:-hash-hash:dev}
-    build: .
+    build:
+      context: .
+      args:
+        PUBLIC_FLARE_DSN: ${FLARE_DSN:-}
+        PUBLIC_FLARE_ENVIRONMENT: ${FLARE_ENVIRONMENT:-production}
+        PUBLIC_FLARE_RELEASE: ${HASH_RELEASE:-development}
     restart: unless-stopped
     depends_on:
       postgres:

@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { FileSignature, LayoutDashboard, FileText, LayoutTemplate, Settings, ShieldCheck } from 'lucide-svelte';
+  import { installFlareBrowserCapture } from '$lib/flare-client';
 
   let { children } = $props();
 
@@ -28,15 +29,25 @@
     return path === href || path.startsWith(href + '/');
   }
 
-  onMount(async () => {
-    // Only the app surfaces need the identity; skip the probe on public pages.
-    if (!showChrome) return;
-    try {
-      const res = await fetch('/api/v1/me', { credentials: 'include' });
-      if (res.ok) me = await res.json();
-    } catch {
-      // not signed in -> nav still renders; the pages themselves gate.
-    }
+  onMount(() => {
+    const stopFlareCapture = installFlareBrowserCapture({
+      dsn: import.meta.env.PUBLIC_FLARE_DSN,
+      environment: import.meta.env.PUBLIC_FLARE_ENVIRONMENT || 'production',
+      release: import.meta.env.PUBLIC_FLARE_RELEASE
+    });
+
+    void (async () => {
+      // Only the app surfaces need the identity; skip the probe on public pages.
+      if (!showChrome) return;
+      try {
+        const res = await fetch('/api/v1/me', { credentials: 'include' });
+        if (res.ok) me = await res.json();
+      } catch {
+        // not signed in -> nav still renders; the pages themselves gate.
+      }
+    })();
+
+    return stopFlareCapture;
   });
 </script>
 

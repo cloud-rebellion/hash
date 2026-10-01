@@ -733,7 +733,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		"style-src 'self' 'unsafe-inline'; " +
 		"font-src 'self'; " +
 		scriptSrc + "; " +
-		"connect-src 'self'; " +
+		"connect-src 'self' https://flare.brightinteraction.com; " +
 		"frame-ancestors 'none'; " +
 		"base-uri 'self'; " +
 		"form-action 'self'"

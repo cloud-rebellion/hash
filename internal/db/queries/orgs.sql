@@ -41,6 +41,18 @@ RETURNING *;
 -- name: GetUser :one
 SELECT * FROM users WHERE id = $1;
 
+-- name: GetUserForShare :one
+-- Mutations that wait on their parent row must reauthorize the live member
+-- afterward and retain this lock until commit or rollback.
+SELECT * FROM users WHERE id = $1 AND org_id = $2 FOR SHARE;
+
+-- name: RevokeUserSessions :execrows
+-- Account-wide logout fences every copied cookie from the accepted generation.
+-- A concurrent logout of the same old generation must not revoke a new login.
+UPDATE users
+SET session_generation = session_generation + 1
+WHERE id = $1 AND org_id = $2 AND session_generation = $3;
+
 -- name: ListUsersByOrg :many
 SELECT * FROM users WHERE org_id = $1 ORDER BY created_at DESC;
 

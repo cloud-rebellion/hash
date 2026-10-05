@@ -100,7 +100,8 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := auth.MintSession(w, s.Cookies, SessionCookieName, auth.SessionPayload{
-		UserID: user.ID,
+		UserID:     user.ID,
+		Generation: user.SessionGeneration,
 	}, 24*time.Hour); err != nil {
 		writeError(w, http.StatusInternalServerError, "session mint failed")
 		return
@@ -261,8 +262,25 @@ func nameOrEmail(name, email string) string {
 	return email
 }
 
-// handleAuthLogout clears the session cookie.
+// handleAuthLogout revokes the account's accepted browser-session generation.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	u, ok := requireSessionUser(w, r.Context())
+	if !ok {
+		return
+	}
+	generation, ok := r.Context().Value(auth.SessionGenerationKey).(int64)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "session required")
+		return
+	}
+	if _, err := s.Queries.RevokeUserSessions(r.Context(), generated.RevokeUserSessionsParams{ID: u.UserID, OrgID: u.OrgID, SessionGeneration: generation}); err != nil {
+		writeInternalErrorMsg(w, "session revocation failed", err)
+		return
+	}
 	auth.ClearSession(w, SessionCookieName)
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

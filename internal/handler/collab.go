@@ -7,11 +7,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +41,23 @@ const collabMaxMessageSize = 2 * 1024 * 1024
 const collabPingInterval = 30 * time.Second
 const collabPingTimeout = 10 * time.Second
 
+const maxPendingCollabHandshakes = 32
+
+type collabHandshakeGate struct{ active atomic.Int64 }
+
+func (g *collabHandshakeGate) acquire() (func(), bool) {
+	for {
+		active := g.active.Load()
+		if active >= maxPendingCollabHandshakes {
+			return nil, false
+		}
+		if g.active.CompareAndSwap(active, active+1) {
+			var once sync.Once
+			return func() { once.Do(func() { g.active.Add(-1) }) }, true
+		}
+	}
+}
+
 // wsPeer wraps a nhooyr websocket as a collab.Peer. Implements
 // thread-safe Send + serializes outgoing writes via a mutex inside the
 // wsjson layer (nhooyr ws is safe for one writer + one reader).
@@ -46,11 +66,23 @@ type wsPeer struct {
 	conn        *websocket.Conn
 	userID      uuid.UUID
 	displayName string
+	cancel      context.CancelFunc
+	done        chan struct{}
 }
 
 func (p *wsPeer) ID() string          { return p.id }
 func (p *wsPeer) UserID() uuid.UUID   { return p.userID }
 func (p *wsPeer) DisplayName() string { return p.displayName }
+
+func (p *wsPeer) Terminate() {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	_ = p.conn.CloseNow()
+	if p.done != nil {
+		<-p.done
+	}
+}
 
 func (p *wsPeer) Send(ctx context.Context, frame []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -59,10 +91,8 @@ func (p *wsPeer) Send(ctx context.Context, frame []byte) error {
 }
 
 // handleCollabSocket upgrades the connection to a WebSocket + joins
-// the per-document collab room. Authentication is session-cookie OR
-// doc-scoped agent token (both come through the auth middleware
-// chain). Per-document scope is re-enforced here because the agent
-// token may be scoped to a different document.
+// the per-document collab room. The /api/v1 route requires a sender session
+// cookie; the socket rechecks that cookie and live permissions per frame.
 func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 	if s.Collab == nil {
 		writeError(w, http.StatusServiceUnavailable, "collab not enabled on this instance")
@@ -88,9 +118,39 @@ func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	releaseHandshake, admitted := s.collabHandshakes.acquire()
+	if !admitted {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "collaboration connection capacity busy; retry later")
+		return
+	}
+	defer releaseHandshake()
 	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "document not found")
+		return
+	}
+	if doc.Status != "draft" {
+		writeError(w, http.StatusConflict, "collaboration requires a draft document")
+		return
+	}
+	query, queryErr := url.ParseQuery(r.URL.RawQuery)
+	observations := query["expected_updated_at"]
+	var expected time.Time
+	if queryErr == nil && len(observations) == 1 {
+		expected, queryErr = time.Parse(time.RFC3339Nano, observations[0])
+	}
+	if queryErr != nil || len(observations) != 1 || expected.IsZero() {
+		writeError(w, http.StatusBadRequest, "exact expected_updated_at document observation required")
+		return
+	}
+	if !expected.Equal(doc.UpdatedAt.Time) {
+		writeError(w, http.StatusPreconditionFailed, "document changed; preserve your draft and load the current document before connecting")
+		return
+	}
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "session required")
 		return
 	}
 	// nhooyr.io/websocket OriginPatterns: lock to the configured public
@@ -119,30 +179,64 @@ func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 		conn:        conn,
 		userID:      u.UserID,
 		displayName: firstNonEmpty(u.Email, "Anonymous"),
+		done:        make(chan struct{}),
 	}
+	defer close(peer.done)
 
 	// Detach from the request context so a slow client doesn't tear
 	// the room down when the request handler returns; the websocket
 	// connection has its own lifecycle.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	peer.cancel = cancel
 
 	join, err := s.Collab.Join(ctx, doc.ID, doc.OrgID, peer)
 	if err != nil {
-		conn.Close(websocket.StatusInternalError, "join failed")
+		if errors.Is(err, collab.ErrCapacity) {
+			conn.Close(websocket.StatusTryAgainLater, "collaboration capacity busy; retry later")
+		} else if errors.Is(err, collab.ErrGeneration) || errors.Is(err, collab.ErrLegacyHistory) {
+			conn.Close(websocket.StatusPolicyViolation, "collaboration history needs recovery; preserve draft and reload")
+		} else {
+			conn.Close(websocket.StatusInternalError, "join failed")
+		}
 		return
 	}
-	defer s.Collab.Leave(ctx, doc.ID, peerID)
+	defer s.Collab.LeaveRoom(ctx, join.Room, peerID)
 
 	stopPing := startCollabKeepalive(ctx, cancel, conn, peerID)
 	defer stopPing()
 
-	// Send the persisted state as a sync_step2 frame so the client's
-	// Y.Doc fast-forwards before the user starts typing.
-	if len(join.InitialState) > 0 {
-		header := []byte{collab.MessageSync, collab.SyncStep2}
-		_ = conn.Write(ctx, websocket.MessageBinary, append(header, join.InitialState...))
+	initialCtx, cancelInitial := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelInitial()
+	if err := s.withCollabFrameAuthorization(initialCtx, cookie.Value, doc.ID, doc.OrgID, u.UserID, func(frameCtx context.Context) error {
+		if !expected.Equal(frameCtx.Value(collabCanonicalUpdatedAtKey{}).(time.Time)) {
+			return errors.New("collaboration document observation changed before initialization")
+		}
+		if err := join.Room.CheckGeneration(frameCtx.Value(collabCanonicalGenerationKey{}).(int64)); err != nil {
+			return err
+		}
+		if err := conn.Write(frameCtx, websocket.MessageBinary, join.Room.GenerationFrame()); err != nil {
+			return err
+		}
+		if err := conn.Write(frameCtx, websocket.MessageBinary, join.Room.BootstrapFrame(peerID)); err != nil {
+			return err
+		}
+		initialFrames, err := collab.SyncFrames(join.InitialState)
+		if err != nil {
+			return err
+		}
+		for _, frame := range initialFrames {
+			if err := conn.Write(frameCtx, websocket.MessageBinary, frame); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = conn.Close(websocket.StatusPolicyViolation, "collaboration generation or authorization changed; preserve draft and reload")
+		return
 	}
+	cancelInitial()
+	releaseHandshake()
 
 	_, _ = s.Audit.Log(ctx, audit.Entry{
 		OrgID:       doc.OrgID,
@@ -157,7 +251,11 @@ func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 	// On the way out, log the peer leaving so the timeline shows the
 	// full collaboration window.
 	defer func() {
-		_, _ = s.Audit.Log(context.Background(), audit.Entry{
+		// Transport/room cleanup must finish even if the audit chain is busy.
+		// Recovery waits for this handler before releasing counted capacity.
+		auditCtx, auditCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer auditCancel()
+		_, _ = s.Audit.Log(auditCtx, audit.Entry{
 			OrgID:       doc.OrgID,
 			ActorUserID: &u.UserID,
 			DocumentID:  &doc.ID,
@@ -165,6 +263,10 @@ func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 			Payload:     map[string]any{"peer_id": peerID},
 		})
 	}()
+	// These execute before the peer-left audit (LIFO) and are idempotent.
+	defer s.Collab.LeaveRoom(ctx, join.Room, peerID)
+	defer stopPing()
+	defer cancel()
 
 	// Read loop: every frame routes to the hub. nhooyr cancels Read on
 	// connection close so we exit cleanly.
@@ -182,10 +284,69 @@ func (s *Server) handleCollabSocket(w http.ResponseWriter, r *http.Request) {
 			// client doesn't trigger weird state.
 			continue
 		}
-		if err := join.Room.HandleFrame(ctx, peer, payload); err != nil {
+		// An upgrade does not grant indefinite access. Recheck cookie expiry,
+		// membership and draft state for every frame, holding row locks through
+		// the mutation so demotion and sealing cannot race the authorization.
+		if err := s.withCollabFrameAuthorization(ctx, cookie.Value, doc.ID, doc.OrgID, u.UserID, func(frameCtx context.Context) error {
+			if err := join.Room.CheckGeneration(frameCtx.Value(collabCanonicalGenerationKey{}).(int64)); err != nil {
+				return err
+			}
+			return join.Room.HandleFrame(frameCtx, peer, payload)
+		}); err != nil {
 			slog.Debug("collab: bad frame", "peer_id", peerID, "err", err)
+			_ = conn.Close(websocket.StatusPolicyViolation, "collaboration authorization or frame rejected")
+			return
 		}
 	}
+}
+
+type collabCanonicalGenerationKey struct{}
+type collabCanonicalUpdatedAtKey struct{}
+
+func (s *Server) withCollabFrameAuthorization(ctx context.Context, cookie string, docID, orgID, userID uuid.UUID, apply func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	payload, err := s.Cookies.Verify(cookie)
+	if err != nil {
+		return errors.New("collaboration session expired")
+	}
+	var session auth.SessionPayload
+	if err := json.Unmarshal(payload, &session); err != nil || session.UserID != userID {
+		return errors.New("collaboration session identity invalid")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	doc, err := s.Queries.WithTx(tx).GetDocumentForShare(ctx, generated.GetDocumentForShareParams{ID: docID, OrgID: orgID})
+	if err != nil || doc.Status != "draft" {
+		return errors.New("collaboration document is no longer an accessible draft")
+	}
+	var role string
+	var generation int64
+	if err := tx.QueryRow(ctx, `SELECT role, session_generation FROM users WHERE id = $1 AND org_id = $2 FOR SHARE`, userID, orgID).Scan(&role, &generation); err != nil {
+		return errors.New("collaboration membership unavailable")
+	}
+	if role != string(auth.RoleSender) && role != string(auth.RoleOwner) {
+		return errors.New("collaboration write permission revoked")
+	}
+	if session.Generation != generation {
+		return errors.New("collaboration session revoked")
+	}
+	if _, err := s.Cookies.Verify(cookie); err != nil {
+		return errors.New("collaboration session expired while awaiting authorization")
+	}
+	canonicalGeneration, err := s.Queries.WithTx(tx).GetDocumentCollabGeneration(ctx, generated.GetDocumentCollabGenerationParams{ID: docID, OrgID: orgID})
+	if err != nil {
+		return errors.New("collaboration canonical generation unavailable")
+	}
+	ctx = context.WithValue(ctx, collabCanonicalGenerationKey{}, canonicalGeneration)
+	ctx = context.WithValue(ctx, collabCanonicalUpdatedAtKey{}, doc.UpdatedAt.Time)
+	if err := apply(ctx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func newPeerID() string {
@@ -231,7 +392,9 @@ func collabHost(publicURL string) string {
 // Returns a stop func the caller must call on disconnect.
 func startCollabKeepalive(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, peerID string) func() {
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		ticker := time.NewTicker(collabPingInterval)
 		defer ticker.Stop()
 		for {
@@ -252,5 +415,6 @@ func startCollabKeepalive(ctx context.Context, cancel context.CancelFunc, conn *
 			}
 		}
 	}()
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { cancel(); close(done) }); <-stopped }
 }

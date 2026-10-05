@@ -4,8 +4,10 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"html"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/actiontoken"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // One-click email actions. A signed, expiring token authorizes a single action
@@ -114,8 +117,21 @@ func (s *Server) handleChangeActionConfirm(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if _, err := s.Sign.ResolveChange(r.Context(), orgID, docID, crID, c.Action == "approve"); err != nil {
-		// Most likely already resolved; show a friendly terminal state.
-		s.actionPage(w, http.StatusOK, "Already handled", `<p class="muted">This change request was already approved or denied.</p>`)
+		switch {
+		case errors.Is(err, sign.ErrChangeAlreadyResolved):
+			s.actionPage(w, http.StatusOK, "Already handled", `<p class="muted">This change request was already approved or denied.</p>`)
+		case errors.Is(err, sign.ErrChangeRequestNotFound):
+			s.actionPage(w, http.StatusNotFound, "Not found", `<p class="muted">This change request no longer exists for this document.</p>`)
+		case errors.Is(err, sign.ErrNotRevisable):
+			s.actionPage(w, http.StatusConflict, "Cannot resolve change", `<p class="muted">This document is no longer awaiting revision. Open the document to review its current state.</p>`)
+		case errors.Is(err, sign.ErrRevisionWouldDestroyEvidence):
+			s.actionPage(w, http.StatusConflict, "Cannot apply change", `<p class="muted">This change cannot be applied because the document already contains captured legal evidence.</p>`)
+		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
+			s.actionPage(w, http.StatusConflict, "Cannot resolve change", `<p class="muted">This change is not supported for envelopes.</p>`)
+		default:
+			slog.Error("change action resolution failed", "document_id", docID, "change_request_id", crID, "err", err)
+			s.actionPage(w, http.StatusInternalServerError, "Change not saved", `<p class="muted">The change request could not be saved. Please retry or open the document to review the request.</p>`)
+		}
 		return
 	}
 	done := "approved"

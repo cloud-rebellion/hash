@@ -302,6 +302,7 @@ func main() {
 	}
 	go runWorker(ctx, "quota_warnings", func() { w.loopQuotaWarnings(ctx) })
 	go runWorker(ctx, "soft_delete_purge", func() { w.loopSoftDeletePurge(ctx) })
+	go runWorker(ctx, "collab_archive_purge", func() { w.loopCollabArchivePurge(ctx) })
 	go runWorker(ctx, "finalize_retry", func() { w.loopFinalizeRetry(ctx) })
 	go runWorker(ctx, "send_sealing", func() { w.loopSendSealing(ctx) })
 
@@ -358,13 +359,14 @@ func (w *worker) runSendSealingOnce(ctx context.Context) {
 }
 
 type worker struct {
-	pool           *pgxpool.Pool
-	queries        *generated.Queries
-	audit          *audit.Logger
-	mailer         dispatch.Mailer // queue-backed: enqueues into email_deliveries
-	emailSender    dispatch.Mailer // real SMTP, used only by loopEmailDispatch
-	dispatcher     *dispatch.Dispatcher
-	webhookSecrets *webhooksecret.Manager
+	pool             *pgxpool.Pool
+	queries          *generated.Queries
+	audit            *audit.Logger
+	mailer           dispatch.Mailer // queue-backed: enqueues into email_deliveries
+	emailSender      dispatch.Mailer // real SMTP, used only by loopEmailDispatch
+	emailDrainFailed bool            // owned exclusively by the email dispatch loop
+	dispatcher       *dispatch.Dispatcher
+	webhookSecrets   *webhooksecret.Manager
 	// signEngine drives the finalize-retry loop. nil when storage init failed
 	// at boot, in which case the loop short-circuits.
 	signEngine *sign.Engine
@@ -423,20 +425,30 @@ func (w *worker) fireReminder(ctx context.Context, rem *generated.Reminder) {
 		return
 	}
 
+	if !doc.SentAt.Valid {
+		slog.Warn("reminders: sent document has no send timestamp", "document_id", doc.ID)
+		return
+	}
+
 	// Route the mint + email + audit through the shared lifecycle engine so the
 	// reminder link always carries an expiry. The raw UPDATE this replaced left
 	// magic_token_expires_at NULL, so worker-minted reminder links never
 	// expired (and re-mints of post-expiry links would otherwise be born dead).
-	senderEmail := ""
-	if sender, serr := w.queries.GetUser(ctx, doc.SenderID); serr == nil {
-		senderEmail = sender.Email
+	sender, err := w.queries.GetUser(ctx, doc.SenderID)
+	if err != nil {
+		slog.Warn("reminders: load negotiation owner failed", "document_id", doc.ID, "err", err)
+		return
+	}
+	if sender == nil || sender.ID != doc.SenderID || sender.OrgID != doc.OrgID || sender.Email == "" {
+		slog.Warn("reminders: negotiation owner identity unavailable", "document_id", doc.ID)
+		return
 	}
 	if w.sendEngine == nil {
 		slog.Warn("reminders: lifecycle engine unavailable", "document_id", doc.ID)
 		return
 	}
 	if _, rerr := w.sendEngine.Remind(ctx, send.Actor{
-		OrgID: doc.OrgID, Email: senderEmail, Via: "worker",
+		OrgID: doc.OrgID, Email: sender.Email, Via: "worker",
 	}, doc.ID, true); rerr != nil {
 		slog.Warn("reminders: engine remind failed", "document_id", doc.ID, "err", rerr)
 		// Leave the schedule due. A later worker tick retries token rotation,
@@ -444,34 +456,6 @@ func (w *worker) fireReminder(ctx context.Context, rem *generated.Reminder) {
 		return
 	}
 
-	// The worker still owns the schedule advance.
-	next, fires := nextReminderTime(rem.ScheduleJson, int(rem.FiresRemaining))
-	if err := w.queries.AdvanceReminder(ctx, generated.AdvanceReminderParams{
-		DocumentID: rem.DocumentID,
-		NextFireAt: pgtype.Timestamptz{Time: next, Valid: true},
-	}); err != nil {
-		// If AdvanceReminder fails the loop fires again next tick, which is the
-		// desired safety: better re-send the same reminder than skip a future one.
-		slog.Warn("reminders: advance failed", "err", err, "document_id", doc.ID, "fires", fires)
-	}
-}
-
-// nextReminderTime walks schedule_json and returns when the next reminder
-// should fire after the current one. Schedule shape: [{"days_after_send": N}, ...].
-func nextReminderTime(scheduleJSON []byte, firesRemaining int) (time.Time, int) {
-	var schedule []struct {
-		DaysAfterSend int `json:"days_after_send"`
-	}
-	_ = json.Unmarshal(scheduleJSON, &schedule)
-	// firesRemaining starts at len(schedule); after this fire it drops by 1
-	// (the AdvanceReminder query handles the decrement). We pick the next
-	// entry from the schedule by index.
-	idx := len(schedule) - firesRemaining + 1
-	if idx >= 0 && idx < len(schedule) {
-		return time.Now().Add(time.Duration(schedule[idx].DaysAfterSend) * 24 * time.Hour), firesRemaining - 1
-	}
-	// No more entries: fire-and-done.
-	return time.Now().Add(365 * 24 * time.Hour), 0
 }
 
 // loopExpirations transitions sent / in_progress documents past expires_at.
@@ -516,6 +500,10 @@ func (w *worker) expireDocument(ctx context.Context, candidate *generated.Docume
 	}
 	return w.sendEngine.Expire(ctx, candidate)
 }
+
+// expireDocument delegates to the shared lifecycle engine so envelope wrappers
+// and children expire atomically under the same parent-first lock order used by
+// send, void, topology changes, and finalize.
 
 // loopWebhookRedrive ships pending + retrying deliveries until success or
 // the backoff schedule is exhausted.
@@ -627,17 +615,47 @@ func (w *worker) loopEmailDispatch(ctx context.Context) {
 }
 
 func (w *worker) runEmailDispatchOnce(ctx context.Context) {
-	due, err := w.queries.ClaimDueEmailDeliveries(ctx, 50)
-	if err != nil {
-		slog.Warn("email_dispatch: list due", "err", err)
+	err := dispatchClaimedEmails(ctx, w.queries.ClaimDueEmailDeliveries, w.attemptEmail)
+	if ctx.Err() != nil {
 		return
 	}
-	for _, d := range due {
-		w.attemptEmail(ctx, d)
+	if err != nil {
+		slog.Warn("email_dispatch: drain failed", "err", err)
+		if !w.emailDrainFailed {
+			// Report a stable, data-free incident rather than raw database or SMTP
+			// errors that may contain customer addresses or connection details.
+			flarereport.CaptureErr(errors.New("hash-worker email dispatch persistence unavailable"))
+		}
+		w.emailDrainFailed = true
+		return
 	}
+	if w.emailDrainFailed {
+		slog.Info("email_dispatch: persistence recovered")
+	}
+	w.emailDrainFailed = false
 }
 
-func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) {
+// Lease just the next message, not a batch that waits behind SMTP I/O.
+func dispatchClaimedEmails(ctx context.Context, claim func(context.Context, int32) ([]*generated.EmailDelivery, error), attempt func(context.Context, *generated.EmailDelivery) error) error {
+	for i := 0; i < 50; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		due, err := claim(ctx, 1)
+		if err != nil {
+			return err
+		}
+		if len(due) == 0 {
+			return nil
+		}
+		if err := attempt(ctx, due[0]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) error {
 	var headers map[string]string
 	if len(d.HeadersJson) > 0 {
 		_ = json.Unmarshal(d.HeadersJson, &headers)
@@ -649,23 +667,30 @@ func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) {
 	})
 	cancel()
 	if err == nil {
-		_ = w.queries.MarkEmailDeliverySent(ctx, d.ID)
-		return
+		if err := w.queries.MarkEmailDeliverySent(ctx, d.ID); err != nil {
+			return fmt.Errorf("email delivery %s sent acknowledgement failed: %w", d.ID, err)
+		}
+		return nil
 	}
 	// The claimed row has not recorded this failure yet; use the number of prior
 	// failures so a first SMTP outage retries after one minute.
 	next, ok := dispatch.Backoff(int(d.Attempts))
 	if !ok {
-		_ = w.queries.MarkEmailDeliveryFailed(ctx, generated.MarkEmailDeliveryFailedParams{
+		if markErr := w.queries.MarkEmailDeliveryFailed(ctx, generated.MarkEmailDeliveryFailedParams{
 			ID: d.ID, LastError: truncate(err.Error(), 500),
-		})
-		return
+		}); markErr != nil {
+			return fmt.Errorf("email delivery %s failure acknowledgement failed: %w", d.ID, markErr)
+		}
+		return nil
 	}
-	_ = w.queries.MarkEmailDeliveryRetrying(ctx, generated.MarkEmailDeliveryRetryingParams{
+	if markErr := w.queries.MarkEmailDeliveryRetrying(ctx, generated.MarkEmailDeliveryRetryingParams{
 		ID:            d.ID,
 		LastError:     truncate(err.Error(), 500),
 		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(next), Valid: true},
-	})
+	}); markErr != nil {
+		return fmt.Errorf("email delivery %s retry acknowledgement failed: %w", d.ID, markErr)
+	}
+	return nil
 }
 
 func truncate(s string, n int) string {

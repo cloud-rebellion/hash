@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -202,6 +204,10 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
+		return
+	}
 	var in senderDSRInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -227,12 +233,15 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid recipient_id")
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), sessionTransactionTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer rollbackSessionTransaction(ctx, tx)
 	q := s.Queries.WithTx(tx)
 
 	// Validate any body-supplied recipient/document FK belongs to the caller's
@@ -248,7 +257,7 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "recipient lookup failed")
+			writeInternalErrorMsg(w, "load DSR recipient", err)
 			return
 		}
 		if docID != uuid.Nil && rec.DocumentID != docID {
@@ -270,6 +279,27 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
+		return
+	}
+	// The admission lookup identifies the parent to lock. A recipient can be
+	// removed or moved while that lock is pending, so validate its exact scope
+	// again from this fresh statement after the parent and live caller checks.
+	if recID != uuid.Nil {
+		freshRecipient, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: recID, OrgID: u.OrgID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "recipient not found")
+			return
+		}
+		if err != nil {
+			writeInternalErrorMsg(w, "reload DSR recipient", err)
+			return
+		}
+		if freshRecipient.DocumentID != docID {
+			writeError(w, http.StatusConflict, "recipient no longer belongs to document_id")
+			return
+		}
+	}
 	payload := map[string]any{"source": "sender", "raised_by": u.UserID}
 	raw, _ := json.Marshal(payload)
 	req, err := q.CreateDataSubjectRequest(r.Context(), generated.CreateDataSubjectRequestParams{
@@ -300,6 +330,9 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeInternalErrorMsg(w, "audit", err)
+		return
+	}
+	if !s.transactionSessionFresh(w, cookie) {
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
@@ -340,6 +373,10 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid id")
@@ -351,13 +388,46 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Status = strings.ToLower(strings.TrimSpace(in.Status))
-	tx, err := s.Pool.Begin(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), sessionTransactionTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer rollbackSessionTransaction(ctx, tx)
 	q := s.Queries.WithTx(tx)
+	// Lock the linked document before the request for every transition, including
+	// reopening. Recovery expiry/deletion uses this parent lock as its privacy
+	// fence; request-first ordering would invert erasure against that fence.
+	observed, err := q.GetDataSubjectRequest(r.Context(), generated.GetDataSubjectRequestParams{ID: id, OrgID: u.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	var linkedDocumentID uuid.UUID
+	if observed.DocumentID.Valid {
+		linkedDocumentID = uuid.UUID(observed.DocumentID.Bytes)
+	}
+	if linkedDocumentID == uuid.Nil && observed.RecipientID.Valid {
+		recipient, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: uuid.UUID(observed.RecipientID.Bytes), OrgID: u.OrgID})
+		if err != nil {
+			writeError(w, http.StatusConflict, "linked recipient not found in this org")
+			return
+		}
+		linkedDocumentID = recipient.DocumentID
+	}
+	if linkedDocumentID != uuid.Nil {
+		if _, err := q.GetDocumentForPrivacyUpdate(r.Context(), generated.GetDocumentForPrivacyUpdateParams{DocumentID: linkedDocumentID, OrgID: u.OrgID}); err != nil {
+			writeError(w, http.StatusConflict, "linked document unavailable for privacy review")
+			return
+		}
+	}
 	cur, err := q.GetDataSubjectRequestForUpdate(r.Context(), generated.GetDataSubjectRequestForUpdateParams{ID: id, OrgID: u.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "request not found")
@@ -365,6 +435,13 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeInternalError(w, err)
+		return
+	}
+	if cur.DocumentID != observed.DocumentID || cur.RecipientID != observed.RecipientID {
+		writeError(w, http.StatusConflict, "request scope changed; review before retrying")
+		return
+	}
+	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
 		return
 	}
 	if !IsValidDSRStatusTransition(cur.Status, in.Status) {
@@ -398,11 +475,25 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "linked recipient does not belong to the linked document")
 			return
 		}
-		lockedDoc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{
-			ID: recipient.DocumentID, OrgID: u.OrgID,
+		lockedDoc, err := q.GetDocumentForPrivacyUpdate(r.Context(), generated.GetDocumentForPrivacyUpdateParams{
+			DocumentID: recipient.DocumentID, OrgID: u.OrgID,
 		})
 		if err != nil {
 			writeInternalErrorMsg(w, "lock linked document", err)
+			return
+		}
+		// Recovery archives can contain replaced personal data that cannot be
+		// selectively scrubbed from opaque Yjs replay. Recovery takes this same
+		// document lock, so the check remains true through the erasure commit.
+		hasRecoveryArchives, err := q.HasCollabRecoveryArchivesForDSR(r.Context(), generated.HasCollabRecoveryArchivesForDSRParams{
+			DocumentID: lockedDoc.ID, OrgID: u.OrgID,
+		})
+		if err != nil {
+			writeInternalErrorMsg(w, "check collaboration recovery archives", err)
+			return
+		}
+		if hasRecoveryArchives {
+			writeError(w, http.StatusConflict, "collaboration recovery archives require a separate privacy review; keep this request in progress")
 			return
 		}
 		signatures, err := q.ListSignaturesByDocument(r.Context(), lockedDoc.ID)
@@ -516,6 +607,9 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		}
 		pendingAudits = append(pendingAudits, pendingAudit)
 	}
+	if !s.transactionSessionFresh(w, cookie) {
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeInternalErrorMsg(w, "commit", err)
 		return
@@ -536,18 +630,28 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
+		return
+	}
 	email := strings.TrimSpace(r.URL.Query().Get("email"))
 	if email == "" {
 		writeError(w, http.StatusBadRequest, "email query param required")
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), sessionTransactionTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer rollbackSessionTransaction(ctx, tx)
 	q := s.Queries.WithTx(tx)
+	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
+		return
+	}
 	rows, err := q.ExportSubjectData(r.Context(), generated.ExportSubjectDataParams{
 		OrgID: u.OrgID,
 		Lower: email,
@@ -567,6 +671,9 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeInternalErrorMsg(w, "audit export", err)
+		return
+	}
+	if !s.transactionSessionFresh(w, cookie) {
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {

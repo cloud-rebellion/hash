@@ -166,6 +166,10 @@ func RequireAPIKey(v APIKeyVerifier) func(http.Handler) http.Handler {
 			// malformed token record fails closed instead of inheriting full session
 			// privileges.
 			ctx = context.WithValue(ctx, TokenScopesKey, scopes)
+			ctx = context.WithValue(ctx, apiCredentialContextKey{}, apiCredentialReceipt{
+				ID: id, UserID: userID, OrgID: orgID, DocumentID: docScopeID,
+				Hash: append([]byte(nil), incoming[:]...), Scopes: append([]string(nil), scopes...),
+			})
 			if docScopeID != uuid.Nil {
 				ctx = context.WithValue(ctx, DocumentScopeKey, docScopeID)
 			}

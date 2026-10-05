@@ -49,3 +49,16 @@ func TestBuildMIME_EncodesNonASCIISubject(t *testing.T) {
 		t.Errorf("non-ASCII subject was not RFC 2047 encoded:\n%s", out)
 	}
 }
+
+func TestBuildMIMERejectsMalformedAndManagedExtraHeaders(t *testing.T) {
+	for _, name := range []string{"", "Bad:Name", "X-Foo\r\nBcc", "Bad Name", "FrOm", "Content-Type", "Reply-To", "Bcc"} {
+		out, err := buildMIME("sender@example.test", Message{To: "signer@example.test", Subject: "Sign", Text: "Contract", Headers: map[string]string{name: "value"}})
+		if err == nil || out != "" {
+			t.Fatalf("unsafe header %q accepted", name)
+		}
+	}
+	out, err := buildMIME("sender@example.test", Message{To: "signer@example.test", Subject: "Sign", Text: "Contract", Headers: map[string]string{"X-Hash-Trace": "trace"}})
+	if err != nil || !strings.Contains(out, "X-Hash-Trace: trace\r\n") {
+		t.Fatalf("valid extension refused: %v", err)
+	}
+}

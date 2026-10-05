@@ -38,6 +38,7 @@ import (
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/evidence"
 	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -109,6 +110,7 @@ type Server struct {
 	ComplianceFeed         compliance.Feed
 	Billing                *billing.Engine
 	Collab                 *collab.Hub
+	collabHandshakes       collabHandshakeGate
 	BrightCRMWebhookSecret string
 	// WebhookSecrets encrypts new per-endpoint outbound HMAC keys before any
 	// database write. Production config always wires it; nil test/dev servers
@@ -230,7 +232,7 @@ func (s *Server) Routes() http.Handler {
 		// Logout mutates an ambient cookie. SameSite=Strict does not stop a
 		// sibling subdomain (same-site, different origin) from forcing it, so
 		// apply the same exact-origin browser guard as the authenticated API.
-		r.With(s.requireSameOriginMutation).Post("/auth/logout", s.handleAuthLogout)
+		r.With(s.requireSameOriginMutation, auth.RequireSession(s.Cookies, SessionCookieName, s.Queries)).Post("/auth/logout", s.handleAuthLogout)
 	})
 
 	// Public signature-verification surface (anonymous, CPU-heavy crypto +
@@ -538,6 +540,11 @@ func (s *Server) Routes() http.Handler {
 			// time before joining the hub.
 			if s.Collab != nil {
 				r.Get("/{id}/collab", s.handleCollabSocket)
+				r.Post("/{id}/collab/save", s.handleCollabSave)
+				r.With(auth.RequireRole(auth.RoleOwner)).Get("/{id}/collab/recovery", s.handleCollabRecoveryState)
+				r.With(auth.RequireRole(auth.RoleOwner)).Post("/{id}/collab/recovery", s.handleCollabRecovery)
+				r.With(auth.RequireRole(auth.RoleOwner)).Get("/{id}/collab/recovery/archives/{archiveID}", s.handleCollabArchiveDownload)
+				r.With(auth.RequireRole(auth.RoleOwner)).Delete("/{id}/collab/recovery/archives/{archiveID}", s.handleCollabArchiveDelete)
 			}
 
 			// Phase 11.2: negotiation copilot.
@@ -748,10 +755,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
 		h.Set("Content-Security-Policy", csp)
-		// Magic/action URLs are bearer credentials and their responses contain
-		// contract content or signer identity. Do not let browsers, shared
-		// proxies, or service workers retain a reusable copy.
-		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") {
+		// Credential routes and APIs contain private document/user data or
+		// authentication redirects. Apply no-store even to error responses.
+		// Public branding and static assets retain their own caching policy.
+		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
 			h.Set("Cache-Control", "no-store")
 			h.Set("Pragma", "no-cache")
 		}
@@ -795,6 +802,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		checks = append(checks, dc)
 	}
 	check("postgres", s.Pool.Ping)
+	check("malware", malwarescan.CheckActive)
 	if s.Storage != nil {
 		check("storage", s.Storage.Ping)
 	}

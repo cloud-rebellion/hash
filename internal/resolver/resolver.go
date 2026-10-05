@@ -94,14 +94,22 @@ var ErrNotConfigured = errors.New("source plugin not configured")
 // referenced entity doesn't exist. Falls through to the binding's fallback.
 var ErrNotFound = errors.New("source entity not found")
 
+var ErrBindingPersistence = errors.New("binding observation could not be saved")
+
 // Resolver chains a static-document layer, a per-document binding layer, and
 // an optional agent-override layer. It is the single entry point used by
 // every render path (preview, signer view, final PDF) so resolution rules
 // stay in one place.
 type Resolver struct {
-	Q       *generated.Queries
+	Q       BindingStore
 	Sources map[SourceKind]Source
 	Cache   *cache
+}
+
+type BindingStore interface {
+	ListVariableBindings(context.Context, uuid.UUID) ([]*generated.DocumentVariableBinding, error)
+	UpdateVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error
+	UpdateVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error
 }
 
 // New builds a Resolver with the given source plugins. A static source is
@@ -127,9 +135,8 @@ type ResolveOptions struct {
 	// already know the value (e.g. a workflow tool computing a derived value
 	// before re-rendering for preview).
 	AgentOverrides map[string]string
-	// FreezeMode disables live binding fetches and uses last_value from the
-	// binding row instead. Used by the send-time freeze and by re-renders of
-	// already-sent documents (which cannot pick up new live data).
+	// FreezeMode uses only the document snapshot variables. Binding rows are
+	// consulted for reporting, never as a source of mutable replacement values.
 	FreezeMode bool
 }
 
@@ -168,9 +175,19 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 			SourceRef:  b.SourceRef,
 			SourcePath: b.SourcePath,
 		}
-		val, src := r.fetchOne(ctx, doc, b, opts)
+		if opts.FreezeMode {
+			entry.Value = out[b.VariableName]
+			entry.ResolvedFrom = "frozen"
+			report = append(report, entry)
+			continue
+		}
+		val, src, err := r.fetchOne(ctx, doc, b)
+		if err != nil {
+			return nil, nil, err
+		}
 		entry.ResolvedFrom = src
-		if val != "" {
+		// Successful empty source values are authoritative, not fetch failures.
+		if src == "source" || src == "cached" || val != "" {
 			out[b.VariableName] = val
 			entry.Value = val
 		} else if b.Fallback != "" {
@@ -179,6 +196,10 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 			entry.ResolvedFrom = "fallback"
 		}
 		report = append(report, entry)
+	}
+
+	if opts.FreezeMode && len(opts.AgentOverrides) != 0 {
+		return nil, nil, errors.New("resolve: frozen variables cannot be overridden")
 	}
 
 	// Layer 3: agent overrides win.
@@ -213,41 +234,40 @@ func (r *Resolver) FreezeForSend(ctx context.Context, doc *generated.Document) (
 // fetchOne runs the binding through the configured source, persists the
 // result back to last_value/last_error, and returns the resolved string plus
 // a label saying which layer answered ("source", "cached", "fallback", "").
-func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *generated.DocumentVariableBinding, opts ResolveOptions) (string, string) {
-	if opts.FreezeMode {
-		// Frozen renders read the last_value the resolver wrote at
-		// freeze time; never touch external systems.
-		return b.LastValue, "frozen"
-	}
+func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *generated.DocumentVariableBinding) (string, string, error) {
 	if b.SourceKind == string(SourceStatic) {
 		// 'static' bindings exist so the UI shows them as a row, but the
 		// actual value comes from variables_json (already merged in Resolve
 		// before fetchOne). Skip the source plugin.
-		return "", ""
+		return "", "", nil
 	}
 	src, ok := r.Sources[SourceKind(b.SourceKind)]
 	if !ok {
-		_ = r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
+		if persistErr := r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
 			DocumentID:   b.DocumentID,
 			VariableName: b.VariableName,
 			LastError:    fmt.Sprintf("source kind %q not registered", b.SourceKind),
-		})
-		return "", ""
+		}); persistErr != nil {
+			return "", "", ErrBindingPersistence
+		}
+		return "", "", nil
 	}
-	cacheKey := fmt.Sprintf("%s|%s|%s|%s",
-		doc.OrgID.String(), b.SourceKind, b.SourceRef, b.SourcePath)
-	if hit, ok := r.Cache.get(cacheKey); ok {
+	cacheKey := sourceCacheKey(doc.OrgID, b.SourceKind, b.SourceRef, b.SourcePath)
+	hit, cached, generation := r.Cache.getWithGeneration(cacheKey)
+	if cached {
 		// Cache entries intentionally span documents in the same org. The
 		// resolved value still belongs in this binding's audit/cache columns:
 		// otherwise a new document that reuses an org setting resolves correctly
 		// in memory but list_variable_bindings reports an empty last_value, and a
-		// later frozen render has no binding-local value to read.
-		_ = r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
+		// subsequent binding inspection can report the successful observation.
+		if persistErr := r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
 			DocumentID:   b.DocumentID,
 			VariableName: b.VariableName,
 			LastValue:    hit,
-		})
-		return hit, "cached"
+		}); persistErr != nil {
+			return "", "", ErrBindingPersistence
+		}
+		return hit, "cached", nil
 	}
 	val, err := src.Fetch(ctx, Ref{
 		OrgID:  doc.OrgID,
@@ -256,20 +276,24 @@ func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *gen
 		Path:   b.SourcePath,
 	})
 	if err != nil {
-		_ = r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
+		if persistErr := r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
 			DocumentID:   b.DocumentID,
 			VariableName: b.VariableName,
 			LastError:    err.Error(),
-		})
-		return "", ""
+		}); persistErr != nil {
+			return "", "", ErrBindingPersistence
+		}
+		return "", "", nil
 	}
-	_ = r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
+	if persistErr := r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
 		DocumentID:   b.DocumentID,
 		VariableName: b.VariableName,
 		LastValue:    val,
-	})
-	r.Cache.put(cacheKey, val)
-	return val, "source"
+	}); persistErr != nil {
+		return "", "", ErrBindingPersistence
+	}
+	r.Cache.putIfGeneration(cacheKey, val, generation)
+	return val, "source", nil
 }
 
 // ResolveReport is one row in the per-document resolve audit. Returned to
@@ -316,13 +340,22 @@ func stringify(v any) (string, bool) {
 	}
 }
 
-// cache is a thin per-process LRU keyed by source+ref+path. 30s TTL means
+// sourceCacheKey encodes fields independently: delimiter-bearing CRM refs
+// and paths must never share a cached value or invalidation identity.
+func sourceCacheKey(orgID uuid.UUID, kind, ref, path string) string {
+	encoded, _ := json.Marshal([4]string{orgID.String(), kind, ref, path})
+	return string(encoded)
+}
+
+// cache is a bounded per-process TTL cache keyed by tenant+source+ref+path.
+// Eviction follows insertion time rather than access time. 30s TTL means
 // the editor reload cycle reuses the same value but a freshly-saved BrightCRM
 // edit propagates within half a minute.
 type cache struct {
-	mu  sync.Mutex
-	ttl time.Duration
-	m   map[string]cacheEntry
+	mu         sync.Mutex
+	ttl        time.Duration
+	m          map[string]cacheEntry
+	generation uint64
 }
 
 type cacheEntry struct {
@@ -335,23 +368,73 @@ func newCache(ttl time.Duration) *cache {
 }
 
 func (c *cache) get(key string) (string, bool) {
+	value, ok, _ := c.getWithGeneration(key)
+	return value, ok
+}
+
+func (c *cache) getWithGeneration(key string) (string, bool, uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.m[key]
 	if !ok {
-		return "", false
+		return "", false, c.generation
 	}
 	if time.Since(e.at) > c.ttl {
 		delete(c.m, key)
-		return "", false
+		return "", false, c.generation
 	}
-	return e.value, true
+	return e.value, true, c.generation
 }
+
+const maxCacheEntries = 1024
+const maxCacheBytes = 8 << 20
 
 func (c *cache) put(key, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.m[key] = cacheEntry{value: value, at: time.Now()}
+	c.putLocked(key, value)
+}
+
+func (c *cache) putIfGeneration(key, value string, generation uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != generation {
+		return false
+	}
+	c.putLocked(key, value)
+	return true
+}
+
+func (c *cache) putLocked(key, value string) {
+	now := time.Now()
+	// Bound both map cardinality and retained customer text. Expired keys are
+	// removed even when no caller ever asks for them again.
+	bytes := 0
+	for k, entry := range c.m {
+		if now.Sub(entry.at) > c.ttl || k == key {
+			delete(c.m, k)
+			continue
+		}
+		bytes += len(k) + len(entry.value)
+	}
+	size := len(key) + len(value)
+	if size > maxCacheBytes {
+		return
+	}
+	for len(c.m) >= maxCacheEntries || bytes+size > maxCacheBytes {
+		var oldest string
+		var timestamp time.Time
+		for k, entry := range c.m {
+			if timestamp.IsZero() || entry.at.Before(timestamp) {
+				oldest = k
+				timestamp = entry.at
+			}
+		}
+		entry := c.m[oldest]
+		bytes -= len(oldest) + len(entry.value)
+		delete(c.m, oldest)
+	}
+	c.m[key] = cacheEntry{value: value, at: now}
 }
 
 // InvalidateForSourceOrgs drops cache entries for the supplied source tuple
@@ -372,16 +455,17 @@ func (r *Resolver) InvalidateForSourceOrgs(sourceKind, sourceRef string, orgIDs 
 	if len(allowed) == 0 {
 		return 0
 	}
-	sourcePrefix := "|" + sourceKind + "|" + sourceRef + "|"
 	r.Cache.mu.Lock()
 	defer r.Cache.mu.Unlock()
+	// Fence in-flight misses even when no matching cached entry exists yet.
+	r.Cache.generation++
 	dropped := 0
 	for k := range r.Cache.m {
-		separator := strings.IndexByte(k, '|')
-		if separator <= 0 {
+		var fields []string
+		if err := json.Unmarshal([]byte(k), &fields); err != nil || len(fields) != 4 {
 			continue
 		}
-		if _, ok := allowed[k[:separator]]; ok && strings.HasPrefix(k[separator:], sourcePrefix) {
+		if _, ok := allowed[fields[0]]; ok && fields[1] == sourceKind && fields[2] == sourceRef {
 			delete(r.Cache.m, k)
 			dropped++
 		}

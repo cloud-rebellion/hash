@@ -62,14 +62,10 @@ func Normalize(in Values) (Values, error) {
 	out.Email = strings.TrimSpace(in.Email)
 	out.Name = strings.TrimSpace(in.Name)
 	out.Role = strings.ToLower(strings.TrimSpace(in.Role))
-	out.Locale = strings.ToLower(strings.TrimSpace(in.Locale))
-	if !i18n.Has(out.Locale) && regionalLocalePattern.MatchString(strings.TrimSpace(in.Locale)) {
-		if separator := strings.IndexAny(out.Locale, "-_"); separator > 0 {
-			base := out.Locale[:separator]
-			if i18n.Has(base) {
-				out.Locale = base
-			}
-		}
+	var err error
+	out.Locale, err = NormalizeLocale(in.Locale)
+	if err != nil {
+		return Values{}, err
 	}
 
 	if out.Email == "" {
@@ -112,10 +108,26 @@ func Normalize(in Values) (Values, error) {
 	if out.OrderIndex < 0 || out.OrderIndex > MaxOrderIndex {
 		return Values{}, invalid("order_index", "must be between 0 and 1000")
 	}
-	if out.Locale == "" || !i18n.Has(out.Locale) {
-		return Values{}, invalid("locale", "is not supported")
-	}
 	return out, nil
+}
+
+// NormalizeLocale accepts only a shipped language, including its regional tags.
+func NormalizeLocale(value string) (string, error) {
+	var locale string
+	locale = strings.ToLower(strings.TrimSpace(value))
+	if !i18n.Has(locale) && regionalLocalePattern.MatchString(strings.TrimSpace(value)) {
+		if separator := strings.IndexAny(locale, "-_"); separator > 0 {
+			base := locale[:separator]
+			if i18n.Has(base) {
+				locale = base
+			}
+		}
+	}
+
+	if locale == "" || !i18n.Has(locale) {
+		return "", invalid("locale", "is not supported")
+	}
+	return locale, nil
 }
 
 // ValidatePersisted applies the same validation but also requires the stored

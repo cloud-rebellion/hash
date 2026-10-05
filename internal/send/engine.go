@@ -97,6 +97,9 @@ type Actor struct {
 	IP     string
 	Via    string // "rest" | "mcp" | "worker"
 	Tool   string // optional MCP tool name
+	// Authorize binds transport admission to the live user and credential after
+	// lock waits, then checks it again immediately before the durable commit.
+	Authorize auth.TransactionAuthorization
 	// LawfulBasis is an explicit controller instruction captured by the
 	// initial send surface. A database default is never treated as consent to
 	// make an Article 13 representation to the signer.
@@ -181,15 +184,18 @@ type SendResult struct {
 // schedule, and queues invite emails. Returns billing.ErrQuotaExceeded /
 // *eidas.GuardError for the caller to surface.
 func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult, error) {
+	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
+		return SendResult{}, errors.New("send document: lifecycle store unavailable")
+	}
+	if err := requireActorAuthorization(a); err != nil {
+		return SendResult{}, err
+	}
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: a.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SendResult{}, ErrDocumentNotFound
 	}
 	if err != nil {
 		return SendResult{}, err
-	}
-	if e.Audit == nil {
-		return SendResult{}, errors.New("send document: audit logger unavailable")
 	}
 	if doc.Status != "draft" {
 		return SendResult{}, ErrNotDraft
@@ -216,9 +222,6 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 
 	if e.Billing != nil {
 		if err := e.Billing.EnforceDocumentQuota(ctx, a.OrgID); err != nil {
-			if errors.Is(err, billing.ErrQuotaExceeded) {
-				_ = e.log(ctx, a, &doc.ID, nil, audit.KindBillingQuotaExceeded, map[string]any{"error": err.Error()})
-			}
 			return SendResult{}, err
 		}
 	}
@@ -247,9 +250,21 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 		}
 	}
 
-	// Freeze variables so the snapshot captures resolved values.
+	// Resolver preflight must not write either document variables or binding
+	// observations. Keep the original snapshots for comparison under the family
+	// locks, and stage all resolved values until authorization succeeds.
+	originalDoc := doc
+	originalChildren := append([]*generated.Document(nil), envelopeChildren...)
+	var bindingPreparation *sendBindingPreparation
+	var preparedResolver *resolver.Resolver
 	if e.Resolver != nil {
-		frozen, _, ferr := e.Resolver.FreezeForSend(ctx, doc)
+		bindingPreparation = &sendBindingPreparation{reader: e.Resolver.Q, definitions: make(map[uuid.UUID][]*generated.DocumentVariableBinding)}
+		copyResolver := *e.Resolver
+		copyResolver.Q = bindingPreparation
+		preparedResolver = &copyResolver
+	}
+	if e.Resolver != nil {
+		frozen, _, ferr := preparedResolver.FreezeForSend(ctx, doc)
 		if ferr != nil {
 			return SendResult{}, fmt.Errorf("freeze variables: %w", ferr)
 		}
@@ -258,24 +273,20 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 		if verr := validateResolvedBlockVariables(&candidate); verr != nil {
 			return SendResult{}, verr
 		}
-		updated, uerr := persistFrozenDocument(ctx, e.Queries, doc, frozen)
-		if uerr != nil {
-			return SendResult{}, fmt.Errorf("persist frozen vars: %w", uerr)
-		}
-		doc = updated
+		doc = &candidate
 	} else if verr := validateResolvedBlockVariables(doc); verr != nil {
 		return SendResult{}, verr
 	}
 
-	// The wrapper does not contain the legal content. Resolve and persist every
-	// child as its own immutable draft snapshot before the status transaction.
+	// The wrapper does not contain the legal content. Prepare every child as a
+	// separate frozen copy without changing any persisted draft.
 	// Envelopes fail closed if the resolver dependency is missing; silently
 	// skipping a child freeze would make the signed artifact depend on live data.
 	if doc.IsEnvelope {
 		if e.Resolver == nil {
 			return SendResult{}, errors.New("send envelope: variable resolver unavailable")
 		}
-		envelopeChildren, err = freezeEnvelopeChildren(ctx, e.Resolver, e.Queries, envelopeChildren)
+		envelopeChildren, err = prepareFrozenEnvelopeChildren(ctx, preparedResolver, envelopeChildren)
 		if err != nil {
 			return SendResult{}, err
 		}
@@ -317,6 +328,7 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	}
 
 	preparedDoc := doc
+	preparedChildren := envelopeChildren
 
 	// Transactional core: lock the document, re-check draft UNDER the lock, then mint
 	// tokens + flip recipient/doc/child statuses + set the reminder schedule
@@ -325,12 +337,18 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	// other's just-emailed link), and any mid-loop error left some recipients invited
 	// + emailed while the document stayed draft with no reminder schedule. This is the
 	// airtight pattern the Sign path already uses; Send had never adopted it.
-	tx, err := e.Pool.Begin(ctx)
+	txCtx, cancelTransaction := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelTransaction()
+	tx, err := e.Pool.BeginTx(txCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return SendResult{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollbackLifecycleTransaction(txCtx, tx)
 	q := e.Queries.WithTx(tx)
+	// Only the admission transaction is bounded here. Retention/sealing recovery
+	// below must keep the original caller context after this transaction ends.
+	requestCtx := ctx
+	ctx = txCtx
 
 	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -343,7 +361,10 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 		// A concurrent send won the race (or it was already sent): lose cleanly.
 		return SendResult{}, ErrNotDraft
 	}
-	if err := verifyPreparedSendDocument(preparedDoc, lockedDoc); err != nil {
+	if err := verifyPreparedSendDocument(originalDoc, lockedDoc); err != nil {
+		return SendResult{}, err
+	}
+	if err := verifyOriginalDocumentTimestamp(originalDoc, lockedDoc); err != nil {
 		return SendResult{}, err
 	}
 	if err := requireLifecycleRoot(lockedDoc); err != nil {
@@ -376,15 +397,39 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 			}
 			lockedChildren = append(lockedChildren, lockedChild)
 		}
-		roles, verr := validateEnvelopeChildren(doc.ID, lockedChildren)
-		if verr != nil {
+		if verr := validateEnvelopeChildrenStructure(doc.ID, lockedChildren, "draft"); verr != nil {
 			return SendResult{}, verr
 		}
-		if verr := verifyPreparedEnvelopeChildren(envelopeChildren, lockedChildren); verr != nil {
+		if verr := verifyOriginalEnvelopeChildren(originalChildren, lockedChildren); verr != nil {
 			return SendResult{}, verr
 		}
 		envelopeChildren = lockedChildren
-		envelopeRoles = roles
+	}
+	actorUser, err := authorizeLifecycleActor(ctx, tx, q, &a)
+	if err != nil {
+		return SendResult{}, err
+	}
+	if bindingPreparation != nil {
+		if err := bindingPreparation.verifyAndPersist(ctx, q); err != nil {
+			return SendResult{}, err
+		}
+		doc, err = persistAuthorizedFrozenDocument(ctx, q, doc, preparedDoc.VariablesJson)
+		if err != nil {
+			return SendResult{}, fmt.Errorf("persist frozen variables: %w", err)
+		}
+		for i, child := range envelopeChildren {
+			updated, freezeErr := persistAuthorizedFrozenDocument(ctx, q, child, preparedChildren[i].VariablesJson)
+			if freezeErr != nil {
+				return SendResult{}, fmt.Errorf("persist frozen envelope child %s: %w", child.ID, freezeErr)
+			}
+			envelopeChildren[i] = updated
+		}
+	}
+	if doc.IsEnvelope {
+		envelopeRoles, err = validateEnvelopeChildren(doc.ID, envelopeChildren)
+		if err != nil {
+			return SendResult{}, err
+		}
 	}
 
 	// Recipient CRUD shares this parent row lock. Re-list only after acquiring
@@ -482,10 +527,19 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	if _, err := q.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: doc.OrgID}); err != nil {
 		return SendResult{}, fmt.Errorf("begin document send sealing: %w", err)
 	}
+	if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
+		return SendResult{}, err
+	}
+	// The intent and credential queries may also wait. Keep the admission
+	// deadline valid at commit rather than relying on the earlier snapshot.
+	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
+		return SendResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return SendResult{}, fmt.Errorf("commit send sealing intent: %w", err)
 	}
-	return e.ResumeSendSealing(ctx, doc.ID, doc.OrgID)
+	cancelTransaction()
+	return e.ResumeSendSealing(requestCtx, doc.ID, doc.OrgID)
 }
 
 type sealedSendSnapshot struct {
@@ -1411,6 +1465,132 @@ type documentFreezer interface {
 	FreezeForSend(context.Context, *generated.Document) (json.RawMessage, []resolver.ResolveReport, error)
 }
 
+type preparedBindingObservation struct {
+	documentID   uuid.UUID
+	variableName string
+	value        string
+	failed       bool
+}
+
+// sendBindingPreparation stages resolver observations without modifying the
+// binding ledger before the caller's current authority has been established.
+type sendBindingPreparation struct {
+	reader       resolver.BindingStore
+	definitions  map[uuid.UUID][]*generated.DocumentVariableBinding
+	observations []preparedBindingObservation
+}
+
+func (p *sendBindingPreparation) ListVariableBindings(ctx context.Context, documentID uuid.UUID) ([]*generated.DocumentVariableBinding, error) {
+	if p.reader == nil {
+		return nil, errors.New("send preparation: binding store unavailable")
+	}
+	bindings, err := p.reader.ListVariableBindings(ctx, documentID)
+	if err != nil {
+		return nil, err
+	}
+	copyBindings := make([]*generated.DocumentVariableBinding, len(bindings))
+	for i, binding := range bindings {
+		if binding == nil || binding.DocumentID != documentID {
+			return nil, errors.New("send preparation: invalid binding snapshot")
+		}
+		copyBinding := *binding
+		copyBindings[i] = &copyBinding
+	}
+	p.definitions[documentID] = copyBindings
+	return bindings, nil
+}
+
+func (p *sendBindingPreparation) UpdateVariableBindingResolved(ctx context.Context, arg generated.UpdateVariableBindingResolvedParams) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.observations = append(p.observations, preparedBindingObservation{documentID: arg.DocumentID, variableName: arg.VariableName, value: arg.LastValue})
+	return nil
+}
+
+func (p *sendBindingPreparation) UpdateVariableBindingError(ctx context.Context, arg generated.UpdateVariableBindingErrorParams) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.observations = append(p.observations, preparedBindingObservation{documentID: arg.DocumentID, variableName: arg.VariableName, value: arg.LastError, failed: true})
+	return nil
+}
+
+func (p *sendBindingPreparation) verifyAndPersist(ctx context.Context, q *generated.Queries) error {
+	for documentID, prepared := range p.definitions {
+		current, err := q.ListVariableBindings(ctx, documentID)
+		if err != nil {
+			return fmt.Errorf("recheck send variable bindings: %w", err)
+		}
+		if len(current) != len(prepared) {
+			return fmt.Errorf("%w: variable binding membership changed", ErrDraftChangedDuringSend)
+		}
+		for i, before := range prepared {
+			after := current[i]
+			if after == nil || before.DocumentID != after.DocumentID || before.VariableName != after.VariableName ||
+				before.SourceKind != after.SourceKind || before.SourceRef != after.SourceRef || before.SourcePath != after.SourcePath || before.Fallback != after.Fallback ||
+				!sameLifecycleTimestamp(before.CreatedAt, after.CreatedAt) || !sameLifecycleTimestamp(before.UpdatedAt, after.UpdatedAt) {
+				return fmt.Errorf("%w: variable binding changed", ErrDraftChangedDuringSend)
+			}
+		}
+	}
+	for _, observation := range p.observations {
+		var err error
+		if observation.failed {
+			err = q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
+				DocumentID: observation.documentID, VariableName: observation.variableName, LastError: observation.value,
+			})
+		} else {
+			err = q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
+				DocumentID: observation.documentID, VariableName: observation.variableName, LastValue: observation.value,
+			})
+		}
+		if err != nil {
+			return fmt.Errorf("persist send binding observation: %w", err)
+		}
+	}
+	return nil
+}
+
+func prepareFrozenEnvelopeChildren(ctx context.Context, freezer documentFreezer, children []*generated.Document) ([]*generated.Document, error) {
+	if freezer == nil {
+		return nil, errors.New("send envelope: variable resolver unavailable")
+	}
+	prepared := make([]*generated.Document, len(children))
+	for i, child := range children {
+		if child == nil {
+			return nil, errors.New("send envelope: cannot freeze nil child")
+		}
+		frozen, _, err := freezer.FreezeForSend(ctx, child)
+		if err != nil {
+			return nil, fmt.Errorf("freeze envelope child %s: %w", child.ID, err)
+		}
+		candidate := *child
+		candidate.VariablesJson = frozen
+		if err := validateResolvedBlockVariables(&candidate); err != nil {
+			return nil, fmt.Errorf("freeze envelope child %s: %w", child.ID, err)
+		}
+		prepared[i] = &candidate
+	}
+	return prepared, nil
+}
+
+func persistAuthorizedFrozenDocument(ctx context.Context, q *generated.Queries, doc *generated.Document, frozen json.RawMessage) (*generated.Document, error) {
+	updated, err := q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
+		ID: doc.ID, OrgID: doc.OrgID, VariablesJson: frozen, ExpectedUpdatedAt: doc.UpdatedAt,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrDraftChangedDuringSend
+	}
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, errors.New("freeze document returned no document")
+	}
+	return updated, nil
+}
+
 func freezeEnvelopeChildren(ctx context.Context, freezer documentFreezer, q documentBlocksUpdater, children []*generated.Document) ([]*generated.Document, error) {
 	if freezer == nil {
 		return nil, errors.New("send envelope: variable resolver unavailable")
@@ -1882,11 +2062,83 @@ func verifyPreparedEnvelopeChildren(prepared, locked []*generated.Document) erro
 	return nil
 }
 
+func sameLifecycleTimestamp(before, after pgtype.Timestamptz) bool {
+	return before.Valid == after.Valid && (!before.Valid || before.Time.Equal(after.Time))
+}
+
+func verifyOriginalDocumentTimestamp(prepared, locked *generated.Document) error {
+	if prepared == nil || locked == nil || !sameLifecycleTimestamp(prepared.UpdatedAt, locked.UpdatedAt) {
+		return fmt.Errorf("%w: original timestamp changed", ErrDraftChangedDuringSend)
+	}
+	return nil
+}
+
+func verifyOriginalEnvelopeChildren(prepared, locked []*generated.Document) error {
+	if len(prepared) != len(locked) {
+		return fmt.Errorf("%w: envelope child membership changed", ErrDraftChangedDuringSend)
+	}
+	for i, before := range prepared {
+		if err := verifyPreparedSendDocument(before, locked[i]); err != nil {
+			return err
+		}
+		if err := verifyOriginalDocumentTimestamp(before, locked[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireActorAuthorization(a Actor) error {
+	if a.UserID == nil || *a.UserID == uuid.Nil {
+		return auth.ErrMutationPermissionRevoked
+	}
+	if (a.Via == "rest" || a.Via == "mcp" || a.Via == "automation") && a.Authorize == nil {
+		return auth.ErrMutationPermissionRevoked
+	}
+	return nil
+}
+
+func authorizeLifecycleActor(ctx context.Context, tx pgx.Tx, q *generated.Queries, actor *Actor) (*generated.User, error) {
+	if err := requireActorAuthorization(*actor); err != nil {
+		return nil, err
+	}
+	user, err := q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: *actor.UserID, OrgID: actor.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, auth.ErrMutationPermissionRevoked
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load lifecycle authorization: %w", err)
+	}
+	if user.Role != string(auth.RoleOwner) && user.Role != string(auth.RoleSender) {
+		return nil, auth.ErrMutationPermissionRevoked
+	}
+	actor.Email = user.Email
+	if err := reauthorizeLifecycleActor(ctx, tx, *actor, user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func reauthorizeLifecycleActor(ctx context.Context, tx pgx.Tx, actor Actor, user *generated.User) error {
+	if actor.Authorize != nil {
+		if err := actor.Authorize(ctx, tx, user); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func rollbackLifecycleTransaction(ctx context.Context, tx pgx.Tx) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	_ = tx.Rollback(rollbackCtx)
+}
+
 func verifyPreparedSendDocument(prepared, locked *generated.Document) error {
 	if prepared == nil || locked == nil || prepared.ID != locked.ID || prepared.OrgID != locked.OrgID {
 		return ErrDraftChangedDuringSend
 	}
-	if prepared.Name != locked.Name || prepared.Status != locked.Status ||
+	if prepared.Name != locked.Name || prepared.Status != locked.Status || prepared.SenderID != locked.SenderID ||
 		prepared.SourceKind != locked.SourceKind || prepared.RoutingMode != locked.RoutingMode ||
 		prepared.RoutingTier != locked.RoutingTier || prepared.RequiresSignature != locked.RequiresSignature ||
 		prepared.IsEnvelope != locked.IsEnvelope || prepared.DefaultLocale != locked.DefaultLocale ||
@@ -1956,14 +2208,19 @@ type documentStatusSetter interface {
 // Void moves a sent/in-progress document to voided, cancels reminders, and
 // invalidates every magic link so a still-live link can do nothing further.
 func (e *Engine) Void(ctx context.Context, a Actor, docID uuid.UUID, reason string) error {
-	if e.Pool == nil || e.Queries == nil || e.Audit == nil {
+	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
 		return errors.New("void document: lifecycle store unavailable")
 	}
-	tx, err := e.Pool.Begin(ctx)
+	if err := requireActorAuthorization(a); err != nil {
+		return err
+	}
+	ctx, cancelTransaction := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelTransaction()
+	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin void: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollbackLifecycleTransaction(ctx, tx)
 	q := e.Queries.WithTx(tx)
 
 	// Parent first is the shared lock order used by send, envelope topology
@@ -2006,6 +2263,10 @@ func (e *Engine) Void(ctx context.Context, a Actor, docID uuid.UUID, reason stri
 			children = append(children, child)
 		}
 	}
+	actorUser, err := authorizeLifecycleActor(ctx, tx, q, &a)
+	if err != nil {
+		return err
+	}
 
 	voidedChildIDs, err := voidLockedDocumentFamily(ctx, q, doc, children)
 	if err != nil {
@@ -2038,6 +2299,9 @@ func (e *Engine) Void(ctx context.Context, a Actor, docID uuid.UUID, reason stri
 	pendingAudits, err := appendAuditEntriesTx(ctx, e.Audit, tx, auditEntries)
 	if err != nil {
 		return fmt.Errorf("audit void: %w", err)
+	}
+	if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit void: %w", err)
@@ -2279,11 +2543,16 @@ func expireLockedEnvelopeChildren(ctx context.Context, q documentStatusSetter, c
 // Remind re-mints magic links (always with an expiry) and re-sends reminder
 // emails to recipients still pending on a sent/in-progress document. The
 // automatic flag distinguishes the worker's scheduled fire from a manual
-// remind; the worker continues to own AdvanceReminder, so a manual remind also
-// pushes the next scheduled fire out.
+// remind. The engine advances a locked, due automatic schedule atomically
+// with the reminder; a manual remind pushes the next scheduled fire out.
 func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic bool) (int, error) {
-	if e.Pool == nil || e.Queries == nil || e.Audit == nil {
+	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
 		return 0, errors.New("remind document: lifecycle store unavailable")
+	}
+	if !automatic {
+		if err := requireActorAuthorization(a); err != nil {
+			return 0, err
+		}
 	}
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: a.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2298,21 +2567,65 @@ func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic
 	// Mint the reminder tokens (and the manual-remind reset) in one tx under a row
 	// lock + remindable re-check, so a concurrent remind/void cannot interleave token
 	// rotations. Reminder emails fire only after commit.
-	tx, err := e.Pool.Begin(ctx)
+	txCtx := ctx
+	if !automatic {
+		var cancelTransaction context.CancelFunc
+		txCtx, cancelTransaction = context.WithTimeout(ctx, 10*time.Second)
+		defer cancelTransaction()
+	}
+	tx, err := e.Pool.BeginTx(txCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollbackLifecycleTransaction(txCtx, tx)
 	q := e.Queries.WithTx(tx)
-	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
+	lockedDoc, err := q.GetDocumentForUpdate(txCtx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrDocumentNotFound
+	}
 	if err != nil {
 		return 0, fmt.Errorf("lock document: %w", err)
 	}
 	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
 		return 0, ErrNotRemindable
 	}
+	// Status can lag behind the expiration worker. Recheck the actual deadline
+	// after waiting for the authoritative lock, before rotating tokens or mail.
+	if lockedDoc.ExpiresAt.Valid && !lockedDoc.ExpiresAt.Time.After(e.now()) {
+		return 0, fmt.Errorf("%w: document deadline has passed", ErrNotRemindable)
+	}
 	doc = lockedDoc
-	recs, err := q.ListRecipientsByDocument(ctx, doc.ID)
+	var actorUser *generated.User
+	if !automatic {
+		actorUser, err = authorizeLifecycleActor(txCtx, tx, q, &a)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if automatic {
+		schedule, err := q.GetReminderForUpdate(txCtx, doc.ID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("lock automatic reminder: %w", err)
+		}
+		if schedule.FiresRemaining <= 0 || !schedule.NextFireAt.Valid || schedule.NextFireAt.Time.After(e.now()) {
+			return 0, nil
+		}
+		if !doc.SentAt.Valid {
+			return 0, errors.New("automatic reminder requires send timestamp")
+		}
+		next, err := nextAutomaticReminder(schedule.ScheduleJson, int(schedule.FiresRemaining), doc.SentAt.Time)
+		if err != nil {
+			return 0, err
+		}
+		if err := q.AdvanceReminder(txCtx, generated.AdvanceReminderParams{DocumentID: doc.ID, NextFireAt: pgtype.Timestamptz{Time: next, Valid: true}}); err != nil {
+			return 0, fmt.Errorf("advance automatic reminder: %w", err)
+		}
+	}
+
+	recs, err := q.ListRecipientsByDocument(txCtx, doc.ID)
 	if err != nil {
 		return 0, fmt.Errorf("re-list reminder recipients: %w", err)
 	}
@@ -2327,7 +2640,7 @@ func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic
 		if rec.Status != "pending" && rec.Status != "sent" && rec.Status != "viewed" {
 			continue
 		}
-		tok, err := e.rotateToken(ctx, q, rec.ID, doc.ID, exp)
+		tok, err := e.rotateToken(txCtx, q, rec.ID, doc.ID, exp)
 		if err != nil {
 			return 0, err
 		}
@@ -2335,7 +2648,7 @@ func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic
 			e.PublicURL + "/sign/" + tok, e.PublicURL + "/e/o/" + tok})
 	}
 	if !automatic {
-		if err := q.ResetReminderAfterManualRemind(ctx, doc.ID); err != nil {
+		if err := q.ResetReminderAfterManualRemind(txCtx, doc.ID); err != nil {
 			return 0, fmt.Errorf("reset manual reminder schedule: %w", err)
 		}
 	}
@@ -2349,7 +2662,7 @@ func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic
 			}
 			messages = append(messages, msg)
 		}
-		if err := enqueueLifecycleEmails(ctx, q, messages); err != nil {
+		if err := enqueueLifecycleEmails(txCtx, q, messages); err != nil {
 			return 0, fmt.Errorf("persist reminder outbox: %w", err)
 		}
 	}
@@ -2364,11 +2677,21 @@ func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic
 		}
 		auditEntries = append(auditEntries, e.auditEntry(a, &doc.ID, &rm.recID, audit.KindReminderSent, payload))
 	}
-	pendingAudits, err := appendAuditEntriesTx(ctx, e.Audit, tx, auditEntries)
+	pendingAudits, err := appendAuditEntriesTx(txCtx, e.Audit, tx, auditEntries)
 	if err != nil {
 		return 0, fmt.Errorf("audit reminder: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if !automatic {
+		if err := reauthorizeLifecycleActor(txCtx, tx, a, actorUser); err != nil {
+			return 0, err
+		}
+	}
+	// A schedule or audit wait must not commit links that expired while this
+	// reminder was being prepared, for either manual or automatic dispatch.
+	if doc.ExpiresAt.Valid && !doc.ExpiresAt.Time.After(e.now()) {
+		return 0, fmt.Errorf("%w: document deadline has passed", ErrNotRemindable)
+	}
+	if err := tx.Commit(txCtx); err != nil {
 		return 0, fmt.Errorf("commit remind: %w", err)
 	}
 	for _, pending := range pendingAudits {

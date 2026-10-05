@@ -65,6 +65,7 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx = automationCredentialContextE2E(t, ctx, q, user)
 	tree := blocks.Tree{Version: blocks.SchemaVersion, Blocks: []blocks.Block{
 		{ID: "intro", Type: blocks.TypeParagraph, Text: "Agreement for {{customer.name}}"},
 		{ID: "signature", Type: blocks.TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},

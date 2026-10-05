@@ -48,7 +48,6 @@ block_roots(reference_class, owner_type, owner_id, org_id, legal_evidence, expec
 	  FROM documents d
 	  JOIN document_retention retention ON retention.document_id = d.id
 	 WHERE d.blocks_json IS NOT NULL
-	   AND NOT (d.status = 'draft' AND d.deleted_at IS NOT NULL)
     UNION ALL
 	    SELECT 'template_block_image', 'template', t.id::text, t.org_id,
 	           false, NULL::timestamptz, t.blocks_json
@@ -61,7 +60,6 @@ block_roots(reference_class, owner_type, owner_id, org_id, legal_evidence, expec
 	  JOIN documents d ON d.id = v.document_id
 	  JOIN document_retention retention ON retention.document_id = d.id
 	 WHERE v.block_tree_json IS NOT NULL
-	   AND NOT (d.status = 'draft' AND d.deleted_at IS NOT NULL)
 ),
 block_nodes(reference_class, owner_type, owner_id, org_id, legal_evidence, expected_retain_until, node) AS (
 	    SELECT r.reference_class, r.owner_type, r.owner_id, r.org_id, r.legal_evidence, r.expected_retain_until, b.node
@@ -118,7 +116,6 @@ object_references(reference_class, owner_type, owner_id, org_id, object_key, exp
 	  FROM documents d
 	  JOIN document_retention retention ON retention.document_id = d.id
 	 WHERE d.rendered_pdf_key IS NOT NULL
-	   AND NOT (d.status = 'draft' AND d.deleted_at IS NOT NULL)
     UNION ALL
 	SELECT 'document_source_pdf', 'document', d.id::text, d.org_id,
 	       d.pdf_storage_key, encode(d.pdf_sha256, 'hex'), d.pdf_storage_version_id,
@@ -128,7 +125,6 @@ object_references(reference_class, owner_type, owner_id, org_id, object_key, exp
 	  FROM documents d
 	  JOIN document_retention retention ON retention.document_id = d.id
 	 WHERE d.pdf_storage_key IS NOT NULL
-	   AND NOT (d.status = 'draft' AND d.deleted_at IS NOT NULL)
     UNION ALL
     SELECT 'document_final_pdf', 'document', d.id::text, d.org_id,
            d.final_pdf_key, encode(d.final_pdf_sha, 'hex'), d.final_pdf_version_id,

@@ -21,6 +21,8 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/templatepin"
 )
@@ -259,8 +261,16 @@ func (s *Server) handleCreateStarterTemplate(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) {
+	release, err := importguard.Shared.Acquire(orgID)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer release()
 	r.Body = http.MaxBytesReader(w, r.Body, maxPDFUpload+(1<<20))
-	if err := r.ParseMultipartForm(maxPDFUpload); err != nil {
+	defer cleanupMultipart(r)
+	if err := r.ParseMultipartForm(multipartFileMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "could not parse upload: "+err.Error())
 		return
 	}
@@ -293,8 +303,12 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 	// PDF is persisted. pdfcpu rewrites the PDF canonically; failure
 	// here is a hard error so we never silently ship a metadata-rich
 	// PDF that later gets attached to signed agreements.
-	cleaned, err := sanitize.Clean("template-pdf", "application/pdf", data)
+	cleaned, err := sanitize.CleanWithContext(r.Context(), "template-pdf", "application/pdf", data)
 	if err != nil {
+		if errors.Is(err, malwarescan.ErrUnavailable) {
+			writeScanError(w, err)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "sanitize PDF: "+err.Error())
 		return
 	}

@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/resolver"
 )
@@ -93,7 +95,7 @@ func registerVariableBindingTools(s *Server, d Deps) {
 				if err := json.Unmarshal(args, &raw); err != nil {
 					return nil, err
 				}
-				return runBind(r, d, u.OrgID, &u.UserID, raw, kind, refField, pathField)
+				return runBind(r, d, u.OrgID, u.UserID, raw, kind, refField, pathField, name)
 			},
 		}
 	}
@@ -121,7 +123,7 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			// org.setting bindings have no source_ref; reuse runBind by
 			// injecting an empty deal_id-shaped key.
 			raw["deal_id"] = ""
-			return runBind(r, d, u.OrgID, &u.UserID, raw, resolver.SourceOrgSetting, "deal_id", "path")
+			return runBind(r, d, u.OrgID, u.UserID, raw, resolver.SourceOrgSetting, "deal_id", "path", "bind_variable_to_org_setting")
 		},
 	})
 
@@ -152,48 +154,14 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
-			}
-			if err != nil {
+			if err := resolver.ValidateBindingName(p.Variable); err != nil {
 				return nil, err
 			}
-			if doc.Status != "draft" {
-				return nil, fmt.Errorf("bindings frozen (status=%s)", doc.Status)
-			}
-			tx, err := d.Pool.Begin(r.Context())
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			q := d.Queries.WithTx(tx)
-			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
-			if err != nil {
-				return nil, err
-			}
-			if locked.Status != "draft" {
-				return nil, fmt.Errorf("bindings frozen (status=%s)", locked.Status)
-			}
-			if err := q.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
-				DocumentID: id, VariableName: p.Variable,
+			if _, err := runVariableBindingMutation(r, d, u.OrgID, u.UserID, id, p.Variable, "unbind_variable", "", func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
+				return nil, q.DeleteVariableBinding(ctx, generated.DeleteVariableBindingParams{DocumentID: id, VariableName: p.Variable})
 			}); err != nil {
 				return nil, err
 			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID:       u.OrgID,
-				ActorUserID: &u.UserID,
-				DocumentID:  &id,
-				Kind:        audit.KindDocumentUpdated,
-				Payload:     map[string]any{"via": "mcp", "tool": "unbind_variable", "variable": p.Variable},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
 			return map[string]any{"unbound": p.Variable}, nil
 		},
 	})
@@ -245,7 +213,7 @@ func registerVariableBindingTools(s *Server, d Deps) {
 	})
 }
 
-func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args map[string]any, kind resolver.SourceKind, refField, pathField string) (any, error) {
+func runBind(r *http.Request, d Deps, orgID, userID uuid.UUID, args map[string]any, kind resolver.SourceKind, refField, pathField, tool string) (any, error) {
 	if d.Pool == nil || d.Audit == nil {
 		return nil, errors.New("atomic audit dependencies unavailable")
 	}
@@ -258,6 +226,13 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 	// sibling document in the same org. (No-op for org-wide keys.)
 	if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 		return nil, err
+	}
+	for _, field := range []string{"variable", refField, pathField, "fallback"} {
+		if value, supplied := args[field]; supplied {
+			if _, ok := value.(string); !ok {
+				return nil, errors.New("binding arguments must be strings")
+			}
+		}
 	}
 	variable, _ := args["variable"].(string)
 	if variable == "" {
@@ -272,61 +247,69 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 		return nil, fmt.Errorf("%s required", refField)
 	}
 	fallback, _ := args["fallback"].(string)
+	if err := resolver.ValidateBinding(variable, kind, ref, path, fallback); err != nil {
+		return nil, err
+	}
+	row, err := runVariableBindingMutation(r, d, orgID, userID, id, variable, tool, string(kind), func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
+		return q.UpsertVariableBinding(ctx, generated.UpsertVariableBindingParams{
+			DocumentID: id, VariableName: variable, SourceKind: string(kind), SourceRef: ref, SourcePath: path, Fallback: fallback,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return bindingRow(row), nil
+}
 
-	doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: orgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errors.New("document not found")
+func runVariableBindingMutation(r *http.Request, d Deps, orgID, userID, docID uuid.UUID, variable, tool, sourceKind string,
+	mutation func(context.Context, *generated.Queries) (*generated.DocumentVariableBinding, error),
+) (*generated.DocumentVariableBinding, error) {
+	if d.Pool == nil || d.Audit == nil {
+		return nil, errors.New("atomic audit dependencies unavailable")
 	}
+	authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), docID, mcpScopeWriteAuthoring)
 	if err != nil {
 		return nil, err
 	}
-	if doc.Status != "draft" {
-		return nil, fmt.Errorf("bindings frozen (status=%s)", doc.Status)
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("begin variable binding mutation: %w", err)
 	}
-	tx, err := d.Pool.Begin(r.Context())
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize}, docID)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	q := d.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: orgID})
+	row, err := mutation(ctx, generated.New(tx))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mutate variable binding: %w", err)
 	}
-	if locked.Status != "draft" {
-		return nil, fmt.Errorf("bindings frozen (status=%s)", locked.Status)
+	actorID := guard.UserID()
+	payload := map[string]any{"via": "mcp", "tool": tool, "variable": variable}
+	if sourceKind != "" {
+		payload["source_kind"] = sourceKind
 	}
-	row, err := q.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
-		DocumentID:   id,
-		VariableName: variable,
-		SourceKind:   string(kind),
-		SourceRef:    ref,
-		SourcePath:   path,
-		Fallback:     fallback,
-	})
-	if err != nil {
-		return nil, err
-	}
-	pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
+	pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
 		OrgID:       orgID,
-		ActorUserID: userID,
-		DocumentID:  &id,
+		ActorUserID: &actorID,
+		DocumentID:  &docID,
 		Kind:        audit.KindDocumentUpdated,
-		Payload: map[string]any{
-			"via":         "mcp",
-			"tool":        "bind_variable_to_" + string(kind),
-			"variable":    variable,
-			"source_kind": string(kind),
-		},
+		UserAgent:   r.UserAgent(),
+		Payload:     payload,
 	})
 	if err != nil {
+		return nil, fmt.Errorf("audit variable binding mutation: %w", err)
+	}
+	if err := guard.Recheck(ctx); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		return nil, err
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit variable binding mutation: %w", err)
 	}
 	d.Audit.Publish(pending)
-	return bindingRow(row), nil
+	return row, nil
 }
 
 func bindingRow(b *generated.DocumentVariableBinding) map[string]any {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -419,6 +420,26 @@ func completeDurableSendSignE2E(
 	return sent
 }
 
+// sendCommentFixtureE2E completes the single-recipient synthetic fixture through
+// the same frozen-branding and durable sealing gates used by the signing tests.
+func sendCommentFixtureE2E(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	q *generated.Queries,
+	doc *generated.Document,
+) *generated.Document {
+	t.Helper()
+	recipients, err := q.ListRecipientsByDocument(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("load synthetic send fixture recipients: %v", err)
+	}
+	if len(recipients) != 1 {
+		t.Fatalf("synthetic send fixture requires one recipient, got %d", len(recipients))
+	}
+	return completeDurableSendSignE2E(t, ctx, pool, q, doc, recipients[0])
+}
+
 func assertEmailDeliveryCountE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, recipients []string, want int) {
 	t.Helper()
 	var count int
@@ -438,5 +459,105 @@ func assertCommentEventCountE2E(t *testing.T, ctx context.Context, pool *pgxpool
 	}
 	if count != want {
 		t.Fatalf("comment audit events = %d, want %d", count, want)
+	}
+}
+
+func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
+	for _, deadlineKind := range []string{"recipient", "document"} {
+		t.Run(deadlineKind, func(t *testing.T) {
+			dsn := os.Getenv("HASH_E2E_DB_URL")
+			if dsn == "" {
+				t.Skip("set HASH_E2E_DB_URL to run")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			config, err := pgxpool.ParseConfig(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			migrationDB := stdlib.OpenDB(*config.ConnConfig)
+			if err := mdb.RunMigrations(migrationDB); err != nil {
+				t.Fatal(err)
+			}
+			_ = migrationDB.Close()
+			pool, err := pgxpool.NewWithConfig(ctx, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			q := generated.New(pool)
+			org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "expiry lock " + uuid.NewString(), Plan: "pro"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			user, err := q.CreateUser(ctx, generated.CreateUserParams{OrgID: org.ID, Email: uuid.NewString() + "@expiry.test", Name: "Sender", Role: "owner"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := time.Now().UTC()
+			var clock atomic.Int64
+			clock.Store(base.UnixNano())
+			engine := &Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool), Now: func() time.Time { return time.Unix(0, clock.Load()).UTC() }}
+			params := generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "expiry boundary", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), SenderID: user.ID}
+			if deadlineKind == "document" {
+				params.ExpiresAt = pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true}
+			}
+			doc, err := q.CreateBlocksDocument(ctx, params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tokenDeadline := base.Add(time.Hour)
+			if deadlineKind == "recipient" {
+				tokenDeadline = base.Add(time.Second)
+			}
+			rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.expiry.test", Name: "Recipient", MagicTokenHash: []byte(uuid.NewString()), MagicTokenExpiresAt: pgtype.Timestamptz{Time: tokenDeadline, Valid: true}, Locale: "en"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, rec)
+			rc := &RecipientContext{Document: doc, Recipient: &generated.GetRecipientByTokenHashRow{ID: rec.ID, DocumentID: doc.ID, DocOrgID: org.ID, Role: rec.Role, Status: rec.Status, Email: rec.Email, Name: rec.Name, MagicTokenExpiresAt: rec.MagicTokenExpiresAt}}
+			evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
+			if err := checkMagicLinkExpiry(rc.Recipient, doc, engine.now()); err != nil {
+				t.Fatalf("admission already expired: %v", err)
+			}
+			lockTx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lockTx.Rollback(context.Background()) }()
+			if _, err := q.WithTx(lockTx).GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: org.ID}); err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan error, 1)
+			go func() { result <- engine.MarkViewed(ctx, rc, evidence) }()
+			select {
+			case err := <-result:
+				t.Fatalf("mutation did not wait for the document lock: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			clock.Store(base.Add(2 * time.Second).UnixNano())
+			if err := lockTx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, ErrMagicLinkExpired) {
+					t.Fatalf("expired mutation result: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			fresh, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: org.ID})
+			if err != nil || fresh.Status != "sent" {
+				t.Fatalf("expired mutation changed recipient: %v %v", fresh, err)
+			}
+			var events int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE document_id=$1 AND kind='document.viewed'`, doc.ID).Scan(&events); err != nil {
+				t.Fatal(err)
+			}
+			if events != 0 {
+				t.Fatal("expired mutation emitted viewed audit evidence")
+			}
+		})
 	}
 }

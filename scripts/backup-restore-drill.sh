@@ -323,7 +323,7 @@ docker exec "$s3_source" mc mb --ignore-existing "source/$S3_BUCKET" >/dev/null
 docker exec "$s3_source" mc version enable "source/$S3_BUCKET" >/dev/null
 
 mkdir -p "$output_dir/seed" "$output_dir/snapshot/objects" "$output_dir/restored"
-for pdf_name in template.pdf source.pdf rendered.pdf final.pdf audit.pdf pending-final.pdf pending-audit.pdf; do
+for pdf_name in template.pdf source.pdf rendered.pdf final.pdf audit.pdf pending-final.pdf pending-audit.pdf deleted-source.pdf deleted-rendered.pdf; do
   printf '%s\n' \
     '%PDF-1.4' \
     '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj' \
@@ -344,6 +344,8 @@ printf '%s\n' '<span class="hash-signature">Synthetic Signer</span>' \
 printf '%s\n' 'synthetic-document-image-bytes' > "$output_dir/seed/document-image.png"
 printf '%s\n' 'synthetic-template-image-bytes' > "$output_dir/seed/template-image.png"
 printf '%s\n' 'synthetic-version-image-bytes' > "$output_dir/seed/version-image.png"
+printf '%s\n' 'synthetic-deleted-document-image-bytes' > "$output_dir/seed/deleted-document-image.png"
+printf '%s\n' 'synthetic-deleted-version-image-bytes' > "$output_dir/seed/deleted-version-image.png"
 printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg"><text>org logo</text></svg>' \
   > "$output_dir/seed/org-logo.svg"
 printf '%s\n' 'synthetic-document-logo-png-bytes' > "$output_dir/seed/document-logo.png"
@@ -375,6 +377,10 @@ seed_names=(
   pending-audit.pdf
   pending-audit.payload.txt
   pending-audit.signature.txt
+  deleted-source.pdf
+  deleted-rendered.pdf
+  deleted-document-image.png
+  deleted-version-image.png
 )
 seed_keys=(
   "org/$ORG_ID/templates/$TEMPLATE_ID.pdf"
@@ -394,6 +400,10 @@ seed_keys=(
   "org/$ORG_ID/documents/$FINALIZING_DOCUMENT_ID/audit-$pending_audit_content_sha.pdf"
   "org/$ORG_ID/documents/$FINALIZING_DOCUMENT_ID/audit-payload-$pending_payload_content_sha.txt"
   "org/$ORG_ID/documents/$FINALIZING_DOCUMENT_ID/audit-signature-$pending_signature_content_sha.txt"
+  "org/$ORG_ID/documents/dddddddd-dddd-4ddd-8ddd-dddddddddddd.pdf"
+  "org/$ORG_ID/documents/dddddddd-dddd-4ddd-8ddd-dddddddddddd/rendered.pdf"
+  "org/$ORG_ID/assets/deleted-document-image.png"
+  "org/$ORG_ID/assets/deleted-version-image.png"
 )
 seed_hashes=()
 for i in "${!seed_names[@]}"; do
@@ -429,6 +439,10 @@ docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$pg_source" \
     --set pending_audit_key="${seed_keys[14]}" \
     --set pending_payload_key="${seed_keys[15]}" \
     --set pending_signature_key="${seed_keys[16]}" \
+    --set deleted_source_key="${seed_keys[17]}" \
+    --set deleted_rendered_key="${seed_keys[18]}" \
+    --set deleted_image_key="${seed_keys[19]}" \
+    --set deleted_version_image_key="${seed_keys[20]}" \
     --set template_sha="${seed_hashes[0]}" \
     --set source_sha="${seed_hashes[1]}" \
     --set rendered_sha="${seed_hashes[2]}" \
@@ -440,7 +454,9 @@ docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$pg_source" \
     --set pending_final_sha="${seed_hashes[13]}" \
     --set pending_audit_sha="${seed_hashes[14]}" \
     --set pending_payload_sha="${seed_hashes[15]}" \
-    --set pending_signature_sha="${seed_hashes[16]}" <<'SQL' >/dev/null
+    --set pending_signature_sha="${seed_hashes[16]}" \
+    --set deleted_source_sha="${seed_hashes[17]}" \
+    --set deleted_rendered_sha="${seed_hashes[18]}" <<'SQL' >/dev/null
 CREATE TABLE templates (
     id uuid PRIMARY KEY,
     org_id uuid NOT NULL,
@@ -476,7 +492,9 @@ CREATE TABLE documents (
     audit_signature_version_id text,
     evidence_version_pins_required boolean NOT NULL DEFAULT false,
     parent_envelope_id uuid,
-    deleted_at timestamptz
+    deleted_at timestamptz,
+    article13_notice_epoch_at timestamptz,
+    finalization_retain_until timestamptz
 );
 CREATE TABLE document_versions (
     id uuid PRIMARY KEY,
@@ -508,8 +526,36 @@ CREATE TABLE document_finalization_intents (
     audit_signature_key text NOT NULL,
     audit_signature_sha256 bytea NOT NULL,
     audit_signature_version_id text,
-    evidence_version_pins_required boolean NOT NULL DEFAULT false
+    evidence_version_pins_required boolean NOT NULL DEFAULT false,
+    retain_until timestamptz
 );
+CREATE TABLE send_sealing_intents (
+    document_id uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    retain_until timestamptz,
+    retention_started_at timestamptz
+);
+-- Match migration 00060's UTC calendar normalization and upward whole-second
+-- rounding. The recovery projection validates exact database deadlines.
+CREATE FUNCTION hash_evidence_retain_until(anchor TIMESTAMPTZ, retention_years INTEGER)
+RETURNS TIMESTAMPTZ
+LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog
+AS $$
+WITH raw_target AS (
+    SELECT make_date(
+        extract(year FROM anchor AT TIME ZONE 'UTC')::integer + retention_years,
+        extract(month FROM anchor AT TIME ZONE 'UTC')::integer, 1
+    )::timestamp
+    + ((extract(day FROM anchor AT TIME ZONE 'UTC')::integer - 1) * interval '1 day')
+    + ((anchor AT TIME ZONE 'UTC') - date_trunc('day', anchor AT TIME ZONE 'UTC')) AS value
+)
+SELECT (
+    date_trunc('second', value)
+    + CASE WHEN value = date_trunc('second', value) THEN interval '0 seconds'
+           ELSE interval '1 second' END
+) AT TIME ZONE 'UTC'
+FROM raw_target;
+$$;
 CREATE TABLE org_branding (
     org_id uuid PRIMARY KEY,
     logo_url text NOT NULL
@@ -594,9 +640,8 @@ INSERT INTO documents (
     :'audit_signature_key', decode(:'audit_signature_sha', 'hex')
 );
 -- A deleted draft deliberately retains its database row for the 90-day grace
--- period after its transient source/preview/tree objects have been removed.
--- The canonical recovery inventory must not report those absent objects as
--- lost evidence, while the completed agreement above remains fully covered.
+-- period together with its source/preview/tree objects. The canonical recovery
+-- inventory must retain those objects until the guarded parent purge completes.
 INSERT INTO documents (
     id, org_id, status, requires_signature, deleted_at, blocks_json,
     rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256
@@ -604,10 +649,10 @@ INSERT INTO documents (
     'dddddddd-dddd-4ddd-8ddd-dddddddddddd', :'org_id', 'draft', true, now(),
     jsonb_build_object('blocks', jsonb_build_array(jsonb_build_object(
       'type', 'image',
-      'attrs', jsonb_build_object('storage_key', 'org/deleted/assets/draft-image.png')
+      'attrs', jsonb_build_object('storage_key', :'deleted_image_key')
     ))),
-    'org/deleted/documents/draft/rendered.pdf', decode(repeat('11', 32), 'hex'),
-    'org/deleted/documents/draft/source.pdf', decode(repeat('22', 32), 'hex')
+    :'deleted_rendered_key', decode(:'deleted_rendered_sha', 'hex'),
+    :'deleted_source_key', decode(:'deleted_source_sha', 'hex')
 );
 INSERT INTO document_versions (id, document_id, org_id, block_tree_json)
 VALUES (
@@ -626,7 +671,7 @@ VALUES (
     'dddddddd-dddd-4ddd-8ddd-dddddddddddd', :'org_id',
     jsonb_build_object('blocks', jsonb_build_array(jsonb_build_object(
       'type', 'image',
-      'attrs', jsonb_build_object('storage_key', 'org/deleted/assets/version-image.png')
+      'attrs', jsonb_build_object('storage_key', :'deleted_version_image_key')
     )))
 );
 INSERT INTO signatures (id, document_id, image_storage_key, image_sha256)
@@ -635,6 +680,13 @@ INSERT INTO org_branding (org_id, logo_url)
 VALUES (:'org_id', 'https://hash.invalid/branding/logo/' || :'org_id' || '.svg');
 INSERT INTO document_branding_override (document_id, logo_url)
 VALUES (:'document_id', '/branding/logo/' || :'org_id' || '.png');
+UPDATE documents
+   SET article13_notice_epoch_at = '2026-01-01T00:00:00Z',
+       finalization_retain_until = hash_evidence_retain_until('2026-01-01T00:00:00Z', 7)
+ WHERE status <> 'draft';
+UPDATE document_finalization_intents i
+   SET retain_until = d.finalization_retain_until
+  FROM documents d WHERE d.id = i.document_id;
 INSERT INTO hash_restore_drill (document_id, status)
 VALUES ('drill-document-1', 'completed');
 SQL

@@ -36,6 +36,9 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 		if uerr != nil {
 			return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, uerr
 		}
+		if user.OrgID != row.OrgID {
+			return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, errors.New("api key membership mismatch")
+		}
 		return row.ID, user.ID, user.OrgID, user.Role, user.Email, row.KeyHash, uuid.Nil, row.Scopes, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

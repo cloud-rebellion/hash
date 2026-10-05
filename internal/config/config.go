@@ -25,11 +25,12 @@ import (
 )
 
 type Config struct {
-	Port        int
-	PublicURL   string
-	LogLevel    string
-	Release     string
-	Environment string
+	Port          int
+	PublicURL     string
+	LogLevel      string
+	Release       string
+	Environment   string
+	MalwareSocket string
 	// ProxyAuth is a shared, host-only secret which the production Caddy
 	// overwrites into X-Hash-Proxy-Auth. It authenticates the immediate HTTP
 	// hop because Hash necessarily shares its Docker networks with workloads
@@ -171,6 +172,7 @@ func Load() (*Config, error) {
 		LogLevel:                     envString("HASH_LOG_LEVEL", "info"),
 		Release:                      envString("HASH_RELEASE", "unknown"),
 		Environment:                  os.Getenv("HASH_ENVIRONMENT"),
+		MalwareSocket:                os.Getenv("HASH_MALWARE_SOCKET"),
 		ProxyAuth:                    os.Getenv("HASH_PROXY_AUTH"),
 		OperatorName:                 os.Getenv("HASH_OPERATOR_NAME"),
 		PrivacyContact:               os.Getenv("HASH_PRIVACY_CONTACT"),

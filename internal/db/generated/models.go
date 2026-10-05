@@ -154,6 +154,28 @@ type CollabDocState struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type CollabDocumentGeneration struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	Generation int64     `json:"generation"`
+}
+
+type CollabRecoveryArchive struct {
+	ID                          uuid.UUID          `json:"id"`
+	DocumentID                  uuid.UUID          `json:"document_id"`
+	ObservedCanonicalGeneration int64              `json:"observed_canonical_generation"`
+	HistoryGeneration           pgtype.Int8        `json:"history_generation"`
+	Origin                      string             `json:"origin"`
+	YdocState                   []byte             `json:"ydoc_state"`
+	RecoveredBy                 pgtype.UUID        `json:"recovered_by"`
+	CreatedAt                   pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                   pgtype.Timestamptz `json:"expires_at"`
+}
+
+type CollabStateGeneration struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	Generation int64     `json:"generation"`
+}
+
 type ComplianceBaseline struct {
 	OrgID           uuid.UUID          `json:"org_id"`
 	BusinessType    string             `json:"business_type"`
@@ -637,13 +659,14 @@ type Template struct {
 }
 
 type User struct {
-	ID         uuid.UUID          `json:"id"`
-	OrgID      uuid.UUID          `json:"org_id"`
-	Email      string             `json:"email"`
-	Name       string             `json:"name"`
-	Role       string             `json:"role"`
-	ZitadelSub pgtype.Text        `json:"zitadel_sub"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ID                uuid.UUID          `json:"id"`
+	OrgID             uuid.UUID          `json:"org_id"`
+	Email             string             `json:"email"`
+	Name              string             `json:"name"`
+	Role              string             `json:"role"`
+	ZitadelSub        pgtype.Text        `json:"zitadel_sub"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	SessionGeneration int64              `json:"session_generation"`
 }
 
 type WebhookDelivery struct {

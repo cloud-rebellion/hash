@@ -14,6 +14,9 @@ import (
 
 var signingRolePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
+const MaxTreeDepth = 64
+const MaxTreeBlocks = 10_000
+
 // Validate enforces the structural rules every block tree must satisfy
 // before we render or persist it. Errors include the offending block id
 // when available so agents can self-correct.
@@ -29,11 +32,17 @@ func Validate(t *Tree) error {
 	}
 
 	seen := make(map[string]struct{})
-	return validateBlocks(t.Blocks, seen, "")
+	return validateBlocks(t.Blocks, seen, "", 1)
 }
 
-func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string) error {
+func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string, depth int) error {
+	if depth > MaxTreeDepth {
+		return fmt.Errorf("%w: block nesting exceeds %d levels", ErrInvalidBlock, MaxTreeDepth)
+	}
 	for i := range blocks {
+		if len(seen) >= MaxTreeBlocks {
+			return fmt.Errorf("%w: tree exceeds %d blocks", ErrInvalidBlock, MaxTreeBlocks)
+		}
 		b := &blocks[i]
 		path := fmt.Sprintf("%s[%d]", parentPath, i)
 
@@ -57,7 +66,7 @@ func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string)
 			if !b.Type.IsContainer() {
 				return fmt.Errorf("%w: type=%q at %s carries content but is not a container", ErrInvalidBlock, b.Type, path)
 			}
-			if err := validateBlocks(b.Content, seen, path); err != nil {
+			if err := validateBlocks(b.Content, seen, path, depth+1); err != nil {
 				return err
 			}
 		}

@@ -13,7 +13,9 @@ WITH draft_document AS MATERIALIZED (
   SELECT d.id
   FROM documents d
   WHERE d.id = sqlc.arg(document_id)
+    AND d.org_id = sqlc.arg(org_id)
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 INSERT INTO document_fields (document_id, recipient_id, type, page, x_pct, y_pct, w_pct, h_pct, required, label, options_json)
@@ -75,13 +77,29 @@ WITH draft_document AS MATERIALIZED (
   WHERE candidate.id = sqlc.arg(id)
     AND d.org_id = sqlc.arg(org_id)
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 DELETE FROM document_fields f
 USING draft_document d
 WHERE f.id = sqlc.arg(id)
   AND d.id = f.document_id
+  AND f.value IS NULL AND f.completed_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM signatures s WHERE s.field_id = f.id)
 RETURNING f.id;
+
+-- name: GetFieldForAuthoring :one
+-- Caller already holds the fresh parent; never trust the admission-only owner
+-- lookup as authority to remove a field from a different document.
+SELECT f.* FROM document_fields f JOIN documents d ON d.id = f.document_id
+WHERE f.id = sqlc.arg(id) AND f.document_id = sqlc.arg(document_id)
+  AND d.org_id = sqlc.arg(org_id) AND d.deleted_at IS NULL;
+
+-- name: CountDocumentFieldsForAuthoring :one
+-- Parent lock serializes creation. Bound this count so quota admission itself
+-- does not scan arbitrarily many legacy rows.
+SELECT count(*) FROM (SELECT 1 FROM document_fields
+WHERE document_id = sqlc.arg(document_id) LIMIT 1000) bounded_fields;
 
 -- name: CountUnfilledRequiredForRecipient :one
 SELECT COUNT(*) FROM document_fields

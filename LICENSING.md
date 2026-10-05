@@ -45,4 +45,4 @@ What you cannot get from this repo is not code, it is standing:
 If you want to do something the Sustainable Use License does not permit (for
 example, offering Hash as a hosted service to third parties, or embedding it in
 a closed product), a commercial license is available at
-licensing@brightinteraction.com.
+tom@cloudrebellion.se.

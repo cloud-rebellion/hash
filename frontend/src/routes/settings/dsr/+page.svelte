@@ -1,34 +1,69 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import {
     listDSR,
     transitionDSR,
     exportSubjectData,
+    getMe,
     type DSRRequest,
   } from '$lib/api/client';
   import { UserSearch, Download, Check, X, Pause } from 'lucide-svelte';
+  import RecoveryPanel from '$lib/components/BlockEditor/RecoveryPanel.svelte';
 
   let requests = $state<DSRRequest[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let statusFilter = $state<string>('open');
+  let archiveOwnerOrgID = $state<string | null>(null);
+  let archiveAccessChecked = $state(false);
+  let selectedArchiveRequest = $state<Pick<DSRRequest, 'id' | 'document_id' | 'org_id'> | null>(null);
+  let disposed = false;
+  let refreshVersion = 0;
 
   let exportEmail = $state('');
   let exporting = $state(false);
   let exportResult = $state<string | null>(null);
 
   async function refresh() {
+    const version = ++refreshVersion;
+    const filter = statusFilter;
     loading = true;
     try {
-      const res = await listDSR(statusFilter);
+      const res = await listDSR(filter);
+      if (disposed || version !== refreshVersion || filter !== statusFilter) return;
       requests = res.requests ?? [];
+      if (selectedArchiveRequest && !requests.some((request) => request.id === selectedArchiveRequest?.id
+          && request.document_id === selectedArchiveRequest.document_id && request.org_id === selectedArchiveRequest.org_id)) {
+        selectedArchiveRequest = null;
+      }
     } catch (e) {
-      error = (e as Error).message;
+      if (!disposed && version === refreshVersion) error = (e as Error).message;
     } finally {
-      loading = false;
+      if (!disposed && version === refreshVersion) loading = false;
     }
   }
-  onMount(refresh);
+
+  async function checkArchiveAccess() {
+    try {
+      const user = await getMe();
+      if (disposed) return;
+      archiveOwnerOrgID = user.role === 'owner' ? user.org_id : null;
+    } catch {
+      if (!disposed) archiveOwnerOrgID = null;
+    } finally {
+      if (!disposed) archiveAccessChecked = true;
+    }
+  }
+
+  function reviewDocumentArchives(requestID: string) {
+    if (disposed || !archiveOwnerOrgID) return;
+    const selected = requests.find((request) => request.id === requestID);
+    if (!selected?.document_id || selected.org_id !== archiveOwnerOrgID) return;
+    selectedArchiveRequest = { id: selected.id, document_id: selected.document_id, org_id: selected.org_id };
+  }
+
+  onMount(() => { void refresh(); void checkArchiveAccess(); });
+  onDestroy(() => { disposed = true; refreshVersion++; });
 
   async function transition(id: string, status: string) {
     const note = status === 'denied'
@@ -115,6 +150,23 @@
     {/if}
   </section>
 
+  {#if selectedArchiveRequest?.document_id}
+    <section class="card p-5 mb-6" aria-label="Selected request archive review">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <h2 class="font-display font-extralight text-lg">Document recovery archives</h2>
+        <button type="button" class="btn btn-secondary" onclick={() => (selectedArchiveRequest = null)}>Close archive review</button>
+      </div>
+      <p class="text-sm text-text-secondary mb-3">
+        Review the archives associated with this request, including deleted documents during cleanup grace.
+        Archives may contain personal data. A downloaded archive alone is not a complete rights response;
+        follow the approved scope and disclosure procedure.
+      </p>
+      {#key `${selectedArchiveRequest.id}:${selectedArchiveRequest.document_id}`}
+        <RecoveryPanel documentID={selectedArchiveRequest.document_id} orgID={selectedArchiveRequest.org_id} archiveReviewOnly />
+      {/key}
+    </section>
+  {/if}
+
   <section class="card p-5">
     <div class="flex items-center justify-between mb-4">
       <h2 class="font-display font-extralight text-lg flex items-center gap-2">
@@ -129,6 +181,9 @@
         <option value="">All</option>
       </select>
     </div>
+    {#if archiveAccessChecked && !archiveOwnerOrgID}
+      <p class="text-sm text-text-secondary mb-3">Document archive review requires an organization owner.</p>
+    {/if}
 
     {#if loading}
       <p class="text-text-muted text-sm">Loading...</p>
@@ -137,7 +192,7 @@
     {:else}
       <ul class="divide-y divide-border-light">
         {#each requests as r (r.id)}
-          <li class="py-4 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
+          <li data-request-id={r.id} class="py-4 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
             <div class="space-y-1">
               <div class="text-sm">
                 <span class="font-mono uppercase tracking-widest text-xs text-text-muted">{r.kind}</span>
@@ -153,6 +208,11 @@
                 Due {new Date(r.due_at).toLocaleDateString()} ·
                 requested {new Date(r.requested_at).toLocaleDateString()}
               </div>
+              {#if r.document_id && archiveOwnerOrgID === r.org_id}
+                <button type="button" class="btn btn-secondary text-xs" onclick={() => reviewDocumentArchives(r.id)}>
+                  Review document archives
+                </button>
+              {/if}
             </div>
             <div class="flex gap-2 justify-end">
               {#if r.status === 'open' || r.status === 'in_progress'}

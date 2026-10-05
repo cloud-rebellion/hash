@@ -67,10 +67,14 @@ func registerWorkflowTools(s *Server, d Deps) {
 			// enforces the SAME quota gate, variable freeze, eIDAS guard, and
 			// magic-token expiry as the REST surface. The raw UPDATE this
 			// replaced left magic_token_expires_at NULL (fail-open).
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteWorkflow)
+			if err != nil {
+				return nil, err
+			}
 			res, err := d.Send.Send(r.Context(), send.Actor{
 				UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email,
 				IP: clientIP(r), Via: "mcp", Tool: "send_document",
-				LawfulBasis: p.LawfulBasis,
+				LawfulBasis: p.LawfulBasis, Authorize: authorize,
 			}, id)
 			if err != nil {
 				return nil, err
@@ -107,9 +111,14 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteWorkflow)
+			if err != nil {
+				return nil, err
+			}
 			if err := d.Send.Void(r.Context(), send.Actor{
 				UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email,
 				IP: clientIP(r), Via: "mcp", Tool: "void_document",
+				Authorize: authorize,
 			}, id, p.Reason); err != nil {
 				return nil, err
 			}
@@ -139,9 +148,14 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteWorkflow)
+			if err != nil {
+				return nil, err
+			}
 			sent, err := d.Send.Remind(r.Context(), send.Actor{
 				UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email,
 				IP: clientIP(r), Via: "mcp", Tool: "remind_recipient",
+				Authorize: authorize,
 			}, id, false)
 			if err != nil {
 				return nil, err

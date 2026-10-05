@@ -16,6 +16,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countDocumentFieldsForAuthoring = `-- name: CountDocumentFieldsForAuthoring :one
+SELECT count(*) FROM (SELECT 1 FROM document_fields
+WHERE document_id = $1 LIMIT 1000) bounded_fields
+`
+
+// Parent lock serializes creation. Bound this count so quota admission itself
+// does not scan arbitrarily many legacy rows.
+func (q *Queries) CountDocumentFieldsForAuthoring(ctx context.Context, documentID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countDocumentFieldsForAuthoring, documentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUnfilledRequiredForRecipient = `-- name: CountUnfilledRequiredForRecipient :one
 SELECT COUNT(*) FROM document_fields
 WHERE document_id = $1
@@ -45,7 +59,9 @@ WITH draft_document AS MATERIALIZED (
   SELECT d.id
   FROM documents d
   WHERE d.id = $11
+    AND d.org_id = $12
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 INSERT INTO document_fields (document_id, recipient_id, type, page, x_pct, y_pct, w_pct, h_pct, required, label, options_json)
@@ -77,6 +93,7 @@ type CreateDraftFieldParams struct {
 	Label       pgtype.Text     `json:"label"`
 	OptionsJson json.RawMessage `json:"options_json"`
 	DocumentID  uuid.UUID       `json:"document_id"`
+	OrgID       uuid.UUID       `json:"org_id"`
 }
 
 // Atomic authoring guard: a stale REST/MCP draft read cannot add a field after
@@ -94,6 +111,7 @@ func (q *Queries) CreateDraftField(ctx context.Context, arg CreateDraftFieldPara
 		arg.Label,
 		arg.OptionsJson,
 		arg.DocumentID,
+		arg.OrgID,
 	)
 	var i DocumentField
 	err := row.Scan(
@@ -182,12 +200,15 @@ WITH draft_document AS MATERIALIZED (
   WHERE candidate.id = $1
     AND d.org_id = $2
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 DELETE FROM document_fields f
 USING draft_document d
 WHERE f.id = $1
   AND d.id = f.document_id
+  AND f.value IS NULL AND f.completed_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM signatures s WHERE s.field_id = f.id)
 RETURNING f.id
 `
 
@@ -204,6 +225,43 @@ func (q *Queries) DeleteFieldByID(ctx context.Context, arg DeleteFieldByIDParams
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getFieldForAuthoring = `-- name: GetFieldForAuthoring :one
+SELECT f.id, f.document_id, f.recipient_id, f.type, f.page, f.x_pct, f.y_pct, f.w_pct, f.h_pct, f.required, f.label, f.options_json, f.value, f.completed_at, f.created_at FROM document_fields f JOIN documents d ON d.id = f.document_id
+WHERE f.id = $1 AND f.document_id = $2
+  AND d.org_id = $3 AND d.deleted_at IS NULL
+`
+
+type GetFieldForAuthoringParams struct {
+	ID         uuid.UUID `json:"id"`
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+// Caller already holds the fresh parent; never trust the admission-only owner
+// lookup as authority to remove a field from a different document.
+func (q *Queries) GetFieldForAuthoring(ctx context.Context, arg GetFieldForAuthoringParams) (*DocumentField, error) {
+	row := q.db.QueryRow(ctx, getFieldForAuthoring, arg.ID, arg.DocumentID, arg.OrgID)
+	var i DocumentField
+	err := row.Scan(
+		&i.ID,
+		&i.DocumentID,
+		&i.RecipientID,
+		&i.Type,
+		&i.Page,
+		&i.XPct,
+		&i.YPct,
+		&i.WPct,
+		&i.HPct,
+		&i.Required,
+		&i.Label,
+		&i.OptionsJson,
+		&i.Value,
+		&i.CompletedAt,
+		&i.CreatedAt,
+	)
+	return &i, err
 }
 
 const getFieldOwnerDoc = `-- name: GetFieldOwnerDoc :one

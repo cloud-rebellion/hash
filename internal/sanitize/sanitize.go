@@ -25,15 +25,18 @@ package sanitize
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bright-interaction/hash/internal/imageguard"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -69,12 +72,30 @@ type Result struct {
 // viewer.
 var ErrActivePDFContent = errors.New("sanitize: PDF contains active content")
 
+// MaxPDFPages applies to document and template uploads before optimization.
+const MaxPDFPages = 500
+
+// MaxPDFBytes bounds all PDF entry points, including renderer/MCP output.
+const MaxPDFBytes = 50 << 20
+
+var ErrPDFTooLarge = errors.New("sanitize: PDF exceeds byte limit")
+
+var ErrTooManyPages = errors.New("sanitize: PDF exceeds the page limit")
+
 // Clean dispatches by content type. Unknown content types pass through
 // unchanged with Method="passthrough" + UnsupportedT=true so callers can
 // log + decide whether to reject.
 //
 // asset is a human-friendly label for the Report ("template-pdf", "logo"...).
 func Clean(asset string, contentType string, raw []byte) (Result, error) {
+	return CleanWithContext(context.Background(), asset, contentType, raw)
+}
+
+// CleanWithContext requires the configured scanner verdict before parsing.
+func CleanWithContext(ctx context.Context, asset string, contentType string, raw []byte) (Result, error) {
+	if err := malwarescan.ScanActive(ctx, raw); err != nil {
+		return Result{}, err
+	}
 	if raw == nil {
 		return Result{}, errors.New("sanitize: nil input")
 	}
@@ -103,6 +124,24 @@ func Clean(asset string, contentType string, raw []byte) (Result, error) {
 	}
 }
 
+// boundedPDFBuffer prevents optimizer output from growing without limit.
+// This bounds the output buffer, not pdfcpu's internal parsed object graph.
+type boundedPDFBuffer struct {
+	buffer        bytes.Buffer
+	limitExceeded bool
+}
+
+func (b *boundedPDFBuffer) Write(p []byte) (int, error) {
+	if len(p) > MaxPDFBytes-b.buffer.Len() {
+		b.limitExceeded = true
+		return 0, ErrPDFTooLarge
+	}
+	return b.buffer.Write(p)
+}
+func (b *boundedPDFBuffer) Bytes() []byte { return b.buffer.Bytes() }
+func (b *boundedPDFBuffer) Len() int      { return b.buffer.Len() }
+func (b *boundedPDFBuffer) Reset()        { b.buffer.Reset() }
+
 // cleanPDF runs the raw PDF through pdfcpu's optimizer with a config
 // that drops every metadata-bearing facility. Pdfcpu rewrites the PDF
 // in canonical form, so XMP streams + the /Info dictionary disappear in
@@ -111,8 +150,18 @@ func Clean(asset string, contentType string, raw []byte) (Result, error) {
 //
 // pdfcpu's API is byte-slice in, byte-slice out via in-memory buffers.
 func cleanPDF(asset, ct string, raw []byte) (Result, error) {
+	if len(raw) > MaxPDFBytes {
+		return Result{}, ErrPDFTooLarge
+	}
+	pages, err := PageCount(raw)
+	if err != nil {
+		return Result{}, fmt.Errorf("pdf preflight: %w", err)
+	}
+	if pages > MaxPDFPages {
+		return Result{}, fmt.Errorf("%w: %d pages exceeds %d", ErrTooManyPages, pages, MaxPDFPages)
+	}
 	in := bytes.NewReader(raw)
-	var out bytes.Buffer
+	var out boundedPDFBuffer
 
 	conf := model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
@@ -152,7 +201,11 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 	// Additional removal passes for JS + forms + attachments would go
 	// here. pdfcpu has RemoveAttachmentsFile + RemoveForm; calling them
 	// requires resetting the reader, so we do those as a second pass.
-	stripped = append(stripped, secondPassStrip(cleaned, &out)...)
+	extra, err := secondPassStrip(cleaned, &out)
+	if err != nil {
+		return Result{}, fmt.Errorf("PDF cleanup: %w", err)
+	}
+	stripped = append(stripped, extra...)
 
 	// Defence in depth: assert that no active construct survived or was
 	// introduced by a rewrite pass. Never return bytes we have not checked.
@@ -282,29 +335,35 @@ func collectActivePDFDict(d pdftypes.Dict, found map[string]struct{}) {
 //
 // Note: pdfcpu's APIs in v0.12 require io.ReadSeeker for input. We feed
 // it the already-optimized output from the first pass and overwrite.
-func secondPassStrip(in []byte, out *bytes.Buffer) []string {
+func secondPassStrip(in []byte, out *boundedPDFBuffer) ([]string, error) {
 	stripped := []string{}
 	current := in
 
 	// Try: remove embedded attachments.
 	{
-		var buf bytes.Buffer
+		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
 		if err := pdfapi.RemoveAttachments(bytes.NewReader(current), &buf, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "embedded_files")
 		}
+		if buf.limitExceeded {
+			return nil, ErrPDFTooLarge
+		}
 	}
 
 	// Try: remove form (AcroForm) data.
 	{
-		var buf bytes.Buffer
+		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
 		if err := pdfapi.RemoveFormFields(bytes.NewReader(current), &buf, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "acroform")
+		}
+		if buf.limitExceeded {
+			return nil, ErrPDFTooLarge
 		}
 	}
 
@@ -312,26 +371,31 @@ func secondPassStrip(in []byte, out *bytes.Buffer) []string {
 	// like signature visuals are typically images embedded as XObject
 	// streams, not annotations, so this is safe for our signed PDFs.
 	{
-		var buf bytes.Buffer
+		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
 		if err := pdfapi.RemoveAnnotations(bytes.NewReader(current), &buf, nil, nil, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "annotations")
 		}
+		if buf.limitExceeded {
+			return nil, ErrPDFTooLarge
+		}
 	}
 
 	// Overwrite the caller's buffer with the final pass.
 	out.Reset()
-	out.Write(current)
-	return stripped
+	if _, err := out.Write(current); err != nil {
+		return nil, err
+	}
+	return stripped, nil
 }
 
 // cleanImage decodes + re-encodes the image. The stdlib's image package
 // does NOT preserve EXIF, GPS, or ICC profile data on encode, so the
 // round-trip naturally strips them.
 func cleanImage(asset, ct string, raw []byte, format string) (Result, error) {
-	img, _, err := image.Decode(bytes.NewReader(raw))
+	img, err := imageguard.Decode(bytes.NewReader(raw), format)
 	if err != nil {
 		return Result{}, fmt.Errorf("decode %s: %w", format, err)
 	}

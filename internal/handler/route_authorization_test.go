@@ -44,7 +44,7 @@ type routeAuthorizationRow struct {
 }
 
 func (row routeAuthorizationRow) Scan(dest ...interface{}) error {
-	if len(dest) != 7 {
+	if len(dest) != 8 {
 		return errors.New("route reached a non-user query")
 	}
 	*(dest[0].(*uuid.UUID)) = row.user.ID
@@ -54,6 +54,7 @@ func (row routeAuthorizationRow) Scan(dest ...interface{}) error {
 	*(dest[4].(*string)) = row.user.Role
 	*(dest[5].(*pgtype.Text)) = row.user.ZitadelSub
 	*(dest[6].(*pgtype.Timestamptz)) = row.user.CreatedAt
+	*(dest[7].(*int64)) = row.user.SessionGeneration
 	return nil
 }
 

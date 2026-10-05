@@ -94,9 +94,19 @@
 <h2>5. Retention</h2>
 <ul>
   <li>Only draft documents can currently be deleted through the product. Deletion hides the draft
-    immediately, then keeps its database row for a fixed 90-day grace period before the worker
-    hard-deletes it; deletion of an independently owned source object is retried until successful.
-    A source object shared from a template remains with that template;</li>
+    immediately, then keeps its database row and source files for a 90-day grace period before
+    guarded worker cleanup. An unresolved linked or organization-wide data-subject request delays
+    deletion for review. Cleanup targets the recorded independently owned source-file version and
+    is retried on storage failure; shared source objects remain with their other owners. Other
+    object versions, previews, images and backup copies require the separate retention procedure;</li>
+  <li>Collaboration recovery archives preserve earlier document edits, including content that was
+    replaced or deleted. They are recovery data, not signing evidence. Each archive has a
+    recovery grace period of up to 90 days from creation and is subject to a bounded expiry purge; deleting the parent
+    document also removes its archives when that deletion completes. An unresolved data-subject
+    request can delay archive or parent deletion for review. Owners can review and download archives
+    from the privacy-request page during a deleted draft's grace period. The operator must separately account for archived
+    personal data and backup copies; these records do not inherit the seven-year signing-artifact
+    retention period;</li>
   <li>Sent, in-progress, declined, voided, and expired documents cannot currently be deleted through
     the document API and have no general automatic purge. The approved agreement and operating
     schedule must state how those rows are handled, subject to the immutable signature-artifact rule
@@ -127,7 +137,7 @@
 <h2>6. Your rights</h2>
 <p>
   You can request access, correction, deletion, restriction, portability, or to object to processing.
-  Email <code>tom@brightinteraction.com</code> with your request. Requests are handled under the
+  Email <code>tom@cloudrebellion.se</code> with your request. Requests are handled under the
   applicable GDPR deadline and the approved identity-verification and extension procedure; this
   draft does not replace that procedure with a fixed operational promise.
   You also have the right to lodge a complaint with the Swedish IMY (Integritetsskyddsmyndigheten).
@@ -169,5 +179,5 @@
 
 <h2>Contact</h2>
 <p>
-  Bright Interaction AB, Stockholm, Sweden. Privacy questions: <code>tom@brightinteraction.com</code>.
+  Bright Interaction AB, Stockholm, Sweden. Privacy questions: <code>tom@cloudrebellion.se</code>.
 </p>

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -202,5 +203,28 @@ func TestVerifyProductionServerLeaseFailsWhenSessionIsLost(t *testing.T) {
 	lost := &fakeProductionLease{rows: []pgx.Row{fakeProductionLeaseRow{err: errors.New("connection closed")}}}
 	if err := verifyProductionServerLease(context.Background(), lost); err == nil || !strings.Contains(err.Error(), "connection closed") {
 		t.Fatalf("lost production singleton lease error = %v", err)
+	}
+}
+
+func TestShutdownReservesLivePersistenceContextAfterHTTPTimeout(t *testing.T) {
+	var drained context.Context
+	flushed := false
+	persistenceErr := errors.New("final database write failed")
+	err := shutdownRuntime(func(ctx context.Context) error {
+		drained = ctx
+		<-ctx.Done()
+		return ctx.Err()
+	}, func(ctx context.Context) error {
+		flushed = true
+		if ctx == drained || ctx.Err() != nil {
+			t.Fatal("persistence inherited exhausted HTTP context")
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("persistence has no deadline")
+		}
+		return persistenceErr
+	}, time.Millisecond, time.Second)
+	if !flushed || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, persistenceErr) {
+		t.Fatalf("shutdown lost phase or error: %v", err)
 	}
 }

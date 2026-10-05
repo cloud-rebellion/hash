@@ -295,14 +295,13 @@ func TestSignerPrivacyNoticeFailsClosedWithoutConfiguredInstanceIdentity(t *test
 			ControllerName: "Customer AB", ControllerContact: "sender@customer.example",
 		},
 	}
-	base := Server{OperatorName: "Operator AB", PrivacyContact: "privacy@operator.example", SupervisoryAuthority: "Applicable DPA", PrivacyPolicyURL: "https://operator.example/privacy"}
 	for _, mutate := range []func(*Server){
 		func(s *Server) { s.OperatorName = "" },
 		func(s *Server) { s.PrivacyContact = "" },
 		func(s *Server) { s.SupervisoryAuthority = "" },
 		func(s *Server) { s.PrivacyPolicyURL = "" },
 	} {
-		server := base
+		server := Server{OperatorName: "Operator AB", PrivacyContact: "privacy@operator.example", SupervisoryAuthority: "Applicable DPA", PrivacyPolicyURL: "https://operator.example/privacy"}
 		mutate(&server)
 		if _, err := server.signerPrivacyNotice(httptest.NewRequest(http.MethodGet, "/", nil), rc); err == nil {
 			t.Fatal("incomplete instance disclosure identity was accepted")

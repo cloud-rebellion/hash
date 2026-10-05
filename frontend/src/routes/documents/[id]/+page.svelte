@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/stores';
+  import { beforeNavigate } from '$app/navigation';
   import {
     getDocument,
     getMe,
@@ -34,6 +35,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showPreview = $state(false);
+  let recipientRevision = $state(0);
   let savingTemplate = $state(false);
   let savedTemplateFlash = $state(false);
   let changeRequests = $state<ChangeRequest[]>([]);
@@ -43,116 +45,208 @@
   let comments = $state<DocComment[]>([]);
   let commentBody = $state('');
   let postingComment = $state(false);
+  let commentLoadRevision = 0;
+  let commentRefreshError = $state<string | null>(null);
   let savingMode = $state(false);
+  let changeRequestRefreshError = $state<string | null>(null);
+  let refreshingChanges = $state(false);
+  let savingApprovalMode = $state(false);
+  let changeRequestLoadRevision = 0;
+  let routeRevision = $state(0);
+  let documentRevision = $state(0);
+  let disposed = false;
+  let templateFlashTimer: ReturnType<typeof setTimeout> | null = null;
+  const routeDocumentID = $derived($page.params.id);
+
+  type DocumentScope = { id: string; routeRevision: number; documentRevision: number };
+  function isCurrentRoute(id: string, revision: number): boolean {
+    return !disposed && revision === routeRevision && id === $page.params.id;
+  }
+  function captureDocument(): DocumentScope | null {
+    if (!doc || !isCurrentRoute(doc.id, routeRevision)) return null;
+    return { id: doc.id, routeRevision, documentRevision };
+  }
+  function isCurrentDocument(scope: DocumentScope, unchanged = false): boolean {
+    return isCurrentRoute(scope.id, scope.routeRevision) && doc?.id === scope.id
+      && (!unchanged || scope.documentRevision === documentRevision);
+  }
+  function receiveDocument(updated: DocumentResponse, scope: DocumentScope): boolean {
+    if (!isCurrentDocument(scope, true) || updated.id !== scope.id) return false;
+    doc = updated;
+    documentRevision++;
+    return true;
+  }
+  function receiveEditorDocument(updated: DocumentResponse, scope: DocumentScope) {
+    if (!isCurrentDocument(scope) || updated.id !== scope.id) return;
+    doc = updated;
+    documentRevision++;
+  }
+  function receiveStatus(next: string, scope: DocumentScope) {
+    if (!doc || !isCurrentDocument(scope)) return;
+    doc = { ...doc, status: next };
+    documentRevision++;
+  }
+  async function changeDefaultLocale(locale: string, scope: DocumentScope) {
+    if (!doc || !isCurrentDocument(scope)) return;
+    const actionScope = captureDocument();
+    if (!actionScope) return;
+    try {
+      const updated = await updateDocument(actionScope.id, { expected_updated_at: doc.updated_at, default_locale: locale });
+      receiveDocument(updated, actionScope);
+    } catch (e) {
+      if (isCurrentDocument(actionScope)) error = (e as Error).message;
+    }
+  }
 
   async function toggleSignatureMode() {
-    if (!doc) return;
+    const scope = captureDocument();
+    if (!scope || !doc || doc.status !== 'draft' || savingMode || revising || resolvingId) return;
     savingMode = true;
     error = null;
     try {
-      doc = await updateDocument(doc.id, { requires_signature: !doc.requires_signature });
+      const updated = await updateDocument(scope.id, { expected_updated_at: doc.updated_at, requires_signature: !doc.requires_signature });
+      receiveDocument(updated, scope);
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) error = (e as Error).message;
     } finally {
-      savingMode = false;
+      if (isCurrentDocument(scope)) savingMode = false;
     }
   }
 
   async function loadComments(id: string) {
+    const scope = captureDocument();
+    if (!scope || scope.id !== id) return;
+    const revision = ++commentLoadRevision;
     try {
       const res = await listComments(id);
-      comments = res.comments;
-    } catch {
-      comments = [];
+      if (revision === commentLoadRevision && isCurrentDocument(scope)) {
+        comments = res.comments;
+        commentRefreshError = null;
+      }
+    } catch (e) {
+      if (revision === commentLoadRevision && isCurrentDocument(scope)) {
+        commentRefreshError = `Messages could not be refreshed. ${(e as Error).message}`;
+      }
     }
   }
 
   async function sendComment() {
-    if (!doc || !commentBody.trim()) return;
+    const scope = captureDocument();
+    if (!scope || postingComment || !commentBody.trim()) return;
+    const documentID = scope.id;
+    const submittedBody = commentBody;
     postingComment = true;
     error = null;
     try {
-      await postComment(doc.id, commentBody.trim());
-      commentBody = '';
-      await loadComments(doc.id);
+      await postComment(documentID, submittedBody.trim());
+      if (!isCurrentDocument(scope)) return;
+      if (commentBody === submittedBody) commentBody = '';
+      await loadComments(documentID);
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) error = (e as Error).message;
     } finally {
-      postingComment = false;
+      if (isCurrentDocument(scope)) postingComment = false;
     }
   }
 
   async function loadChangeRequests(id: string) {
+    const scope = captureDocument();
+    if (!scope || scope.id !== id) return;
+    const revision = ++changeRequestLoadRevision;
+    refreshingChanges = true;
     try {
       const res = await listChangeRequests(id);
-      changeRequests = res.change_requests;
-    } catch {
-      changeRequests = [];
+      if (revision === changeRequestLoadRevision && isCurrentDocument(scope, true)) {
+        changeRequests = res.change_requests;
+        changeRequestRefreshError = null;
+      }
+    } catch (e) {
+      if (revision === changeRequestLoadRevision && isCurrentDocument(scope, true)) {
+        changeRequestRefreshError = `Change requests could not be refreshed. ${(e as Error).message}`;
+      }
+    } finally {
+      if (revision === changeRequestLoadRevision && isCurrentDocument(scope)) refreshingChanges = false;
     }
   }
 
   async function resolveCr(cr: ChangeRequest, approve: boolean) {
-    if (!doc) return;
+    const scope = captureDocument();
+    if (!scope || doc?.status !== 'changes_requested' || resolvingId || revising || savingMode || !changeRequests.some((request) => request.id === cr.id && request.status === 'open')) return;
     resolvingId = cr.id;
     error = null;
     try {
-      if (approve) await approveChangeRequest(doc.id, cr.id);
-      else await denyChangeRequest(doc.id, cr.id);
-      await loadChangeRequests(doc.id);
+      if (approve) await approveChangeRequest(scope.id, cr.id);
+      else await denyChangeRequest(scope.id, cr.id);
+      if (isCurrentDocument(scope)) await loadChangeRequests(scope.id);
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) error = (e as Error).message;
     } finally {
-      resolvingId = null;
+      if (isCurrentDocument(scope)) resolvingId = null;
     }
   }
 
   async function changeApprovalMode(mode: 'accept' | 'auto_apply') {
+    const scope = captureDocument();
+    if (!scope || savingApprovalMode) return;
+    const previousMode = approvalMode;
+    savingApprovalMode = true;
     approvalMode = mode;
     try {
       await setChangeApprovalMode(mode);
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) {
+        approvalMode = previousMode;
+        error = (e as Error).message;
+      }
+    } finally {
+      if (isCurrentDocument(scope)) savingApprovalMode = false;
     }
   }
 
   async function revise() {
-    if (!doc) return;
+    const scope = captureDocument();
+    if (!scope || doc?.status !== 'changes_requested' || revising || resolvingId || savingMode) return;
     revising = true;
     error = null;
     try {
-      const updated = await reviseDocument(doc.id);
-      doc = updated;
+      const updated = await reviseDocument(scope.id);
+      if (!receiveDocument(updated, scope)) return;
       changeRequests = [];
       showPreview = false; // back to the editor so the sender can make the changes
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) error = (e as Error).message;
     } finally {
-      revising = false;
+      if (isCurrentDocument(scope)) revising = false;
     }
   }
 
   async function saveAsTemplate() {
-    if (!doc) return;
+    const scope = captureDocument();
+    if (!scope || !doc || savingTemplate) return;
+    const submittedDocument = doc;
     const name = window.prompt('Template name?', `${doc.name} (mall)`);
     if (!name) return;
     savingTemplate = true;
     error = null;
     try {
       await createBlocksTemplate(name, {
-        blocks_json: doc.blocks_json,
-        variables_json: doc.variables_json,
+        blocks_json: submittedDocument.blocks_json,
+        variables_json: submittedDocument.variables_json,
       });
+      if (!isCurrentDocument(scope)) return;
       savedTemplateFlash = true;
-      setTimeout(() => (savedTemplateFlash = false), 3000);
+      if (templateFlashTimer) clearTimeout(templateFlashTimer);
+      templateFlashTimer = setTimeout(() => {
+        if (isCurrentDocument(scope)) savedTemplateFlash = false;
+      }, 3000);
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentDocument(scope)) error = (e as Error).message;
     } finally {
-      savingTemplate = false;
+      if (isCurrentDocument(scope)) savingTemplate = false;
     }
   }
 
-  onMount(async () => {
-    const id = $page.params.id;
+  async function loadDocument(id: string, revision: number) {
     if (!id) {
       error = 'Missing document id';
       loading = false;
@@ -160,7 +254,10 @@
     }
     try {
       const [d, me] = await Promise.all([getDocument(id), getMe().catch(() => null)]);
+      if (!isCurrentRoute(id, revision)) return;
+      if (d.id !== id) throw new Error('The server returned a different document.');
       doc = d;
+      documentRevision++;
       // A draft opens in the editor; anything already sent opens read-only so
       // the sender reviews the frozen content rather than appearing to edit it.
       showPreview = d.status !== 'draft';
@@ -177,10 +274,71 @@
         approvalMode = me.change_approval_mode;
       }
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrentRoute(id, revision)) error = (e as Error).message;
     } finally {
-      loading = false;
+      if (isCurrentRoute(id, revision)) loading = false;
     }
+  }
+
+  function resetRouteState() {
+    doc = null;
+    userName = 'You';
+    loading = true;
+    error = null;
+    showPreview = false;
+    savingTemplate = false;
+    savedTemplateFlash = false;
+    changeRequests = [];
+    revising = false;
+    approvalMode = 'accept';
+    resolvingId = null;
+    comments = [];
+    commentBody = '';
+    postingComment = false;
+    commentRefreshError = null;
+    savingMode = false;
+    changeRequestRefreshError = null;
+    refreshingChanges = false;
+    savingApprovalMode = false;
+    commentLoadRevision++;
+    changeRequestLoadRevision++;
+    documentRevision++;
+    if (templateFlashTimer) clearTimeout(templateFlashTimer);
+    templateFlashTimer = null;
+  }
+
+  $effect(() => {
+    const id = routeDocumentID;
+    const revision = untrack(() => ++routeRevision);
+    untrack(() => {
+      resetRouteState();
+      if (!id) {
+        error = 'Missing document id';
+        loading = false;
+        return;
+      }
+      void loadDocument(id, revision);
+    });
+    return () => { untrack(() => routeRevision++); };
+  });
+
+  beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (!willUnload && to?.url.pathname !== from?.url.pathname && commentBody.trim()
+        && !window.confirm('You have an unsent comment. Leave this document and discard the draft?')) cancel();
+  });
+  function protectCommentDraft(event: BeforeUnloadEvent) {
+    if (!commentBody.trim()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  }
+  onMount(() => {
+    window.addEventListener('beforeunload', protectCommentDraft);
+    return () => window.removeEventListener('beforeunload', protectCommentDraft);
+  });
+  onDestroy(() => {
+    disposed = true;
+    routeRevision++;
+    if (templateFlashTimer) clearTimeout(templateFlashTimer);
   });
 </script>
 
@@ -191,9 +349,12 @@
 
   {#if loading}
     <p class="text-text-muted">Loading…</p>
-  {:else if error}
+  {:else if error && !doc}
     <div class="card p-6 text-danger">{error}</div>
-  {:else if doc}
+  {:else if doc && doc.id === $page.params.id}
+    {#key doc.id}
+    {@const documentScope = { id: doc.id, routeRevision, documentRevision }}
+    {#if error}<div role="alert" class="card p-4 text-danger mb-4">{error}</div>{/if}
     <div class="mb-6 space-y-2">
       <p class="page-eyebrow">Document · {doc.status}</p>
       <div class="flex items-baseline justify-between gap-4">
@@ -242,18 +403,30 @@
           <button
             class="px-2 py-1 rounded-md border {approvalMode === 'accept' ? 'border-accent text-accent' : 'border-border-light text-text-muted'}"
             onclick={() => changeApprovalMode('accept')}
+            disabled={savingApprovalMode}
           >Markera godkänd (ändra vid revidering)</button>
           <button
             class="px-2 py-1 rounded-md border {approvalMode === 'auto_apply' ? 'border-accent text-accent' : 'border-border-light text-text-muted'}"
             onclick={() => changeApprovalMode('auto_apply')}
+            disabled={savingApprovalMode}
           >Tillämpa föreslagen text automatiskt</button>
           <span class="text-text-muted">(global inställning)</span>
         </div>
 
+        {#if changeRequestRefreshError}
+          <div role="alert" class="text-danger mb-4">
+            <p>{changeRequestRefreshError}</p>
+            <button type="button" class="btn btn-secondary" disabled={refreshingChanges} onclick={() => doc && loadChangeRequests(doc.id)}>Retry change request refresh</button>
+          </div>
+        {/if}
+        <button type="button" class="btn btn-secondary mb-4" disabled={refreshingChanges} onclick={() => doc && loadChangeRequests(doc.id)}>
+          {refreshingChanges ? 'Refreshing change requests…' : 'Refresh change requests'}
+        </button>
+
         {#if changeRequests.length}
           <ul class="space-y-3 mb-4">
             {#each changeRequests as cr (cr.id)}
-              <li class="rounded-md border border-border-light bg-bg-elevated p-3">
+              <li data-change-request-id={cr.id} class="rounded-md border border-border-light bg-bg-elevated p-3">
                 <p class="text-xs text-text-muted mb-1">
                   {cr.recipient_name || 'Mottagare'}{cr.recipient_email ? ` · ${cr.recipient_email}` : ''}
                   · {new Date(cr.created_at).toLocaleString()}
@@ -266,30 +439,46 @@
                 {#if cr.proposed}<p class="text-sm text-success"><span class="text-text-muted text-xs">Föreslår: </span>{cr.proposed}</p>{/if}
                 {#if cr.status === 'open'}
                   <div class="flex gap-2 mt-2">
-                    <button class="btn btn-primary text-xs" disabled={resolvingId === cr.id} onclick={() => resolveCr(cr, true)}>Godkänn</button>
-                    <button class="btn btn-secondary text-xs" disabled={resolvingId === cr.id} onclick={() => resolveCr(cr, false)}>Neka</button>
+                    <button class="btn btn-primary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, true)}>Godkänn</button>
+                    <button class="btn btn-secondary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, false)}>Neka</button>
                   </div>
                 {/if}
               </li>
             {/each}
           </ul>
         {/if}
-        <button class="btn btn-primary" disabled={revising} onclick={revise}>
+        <button class="btn btn-primary" disabled={revising || !!resolvingId} onclick={revise}>
           {revising ? 'Reviderar…' : 'Revidera och redigera'}
         </button>
       </div>
     {/if}
 
-    {#if showPreview}
+    {#if doc.status === 'draft' && doc.source_kind === 'blocks'}
+      <div hidden={showPreview}>
+        <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
+      </div>
+      {#if showPreview}
+        <p class="text-sm text-text-muted mb-3" role="note">Preview shows the saved document. Unsaved edits remain available when you return to editing.</p>
+        <iframe title="preview" src={previewURL(doc.id)} sandbox="" class="w-full h-[80vh] card"></iframe>
+      {/if}
+    {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
+      <div hidden={showPreview}>
+        <PdfFieldDesigner documentID={doc.id} {recipientRevision} />
+      </div>
+      {#if showPreview}
+        <iframe title="preview" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
+      {/if}
+    {:else if showPreview}
       <iframe
         title="preview"
         src={doc.source_kind === 'pdf' ? documentPdfURL(doc.id) : previewURL(doc.id)}
+        sandbox={doc.source_kind === 'blocks' ? '' : undefined}
         class="w-full h-[80vh] card"
       ></iframe>
     {:else if doc.source_kind === 'blocks'}
-      <BlockEditor document={doc} onChange={(d) => (doc = d)} {userName} />
+      <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
-      <PdfFieldDesigner documentID={doc.id} />
+      <PdfFieldDesigner documentID={doc.id} {recipientRevision} />
     {/if}
 
     <div class="mt-8">
@@ -299,14 +488,9 @@
         requiresSignature={doc.requires_signature !== false}
         defaultLocale={doc.default_locale}
         signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : []}
-        onStatusChange={(next) => {
-          if (doc) doc = { ...doc, status: next };
-        }}
-        onDefaultLocaleChange={async (locale) => {
-          if (!doc) return;
-          const updated = await updateDocument(doc.id, { default_locale: locale });
-          doc = updated;
-        }}
+        onStatusChange={(next) => receiveStatus(next, documentScope)}
+        onRecipientsChange={() => { if (isCurrentDocument(documentScope)) recipientRevision++; }}
+        onDefaultLocaleChange={(locale) => changeDefaultLocale(locale, documentScope)}
       />
       {#if doc.status !== 'draft'}
         <section class="card p-5 mb-6">
@@ -314,6 +498,12 @@
           <p class="text-sm text-text-secondary mb-4 leading-relaxed">
             Ställ och besvara frågor med motparten. Varje inlägg mejlas till den andra parten.
           </p>
+          {#if commentRefreshError}
+            <div role="alert" class="text-danger mb-4">
+              <p>{commentRefreshError}</p>
+              <button type="button" class="btn btn-secondary" onclick={() => doc && loadComments(doc.id)}>Retry message refresh</button>
+            </div>
+          {/if}
           {#if comments.length}
             <ul class="space-y-3 mb-4">
               {#each comments as c (c.id)}
@@ -346,5 +536,6 @@
       <TimelinePanel documentID={doc.id} />
       <AgentTokensPanel documentID={doc.id} />
     </div>
+    {/key}
   {/if}
 </div>

@@ -100,6 +100,15 @@
   those unsupported steps and prevent a request from being treated as fulfilled without the required
   manual evidence.
 </p>
+<p>
+  Collaboration recovery archives can retain earlier edits and replaced personal data. They are
+  separate recovery records, not signing evidence. The automated recipient erasure workflow refuses
+  to mark a request fulfilled while its document has recovery archives. The Customer and operator
+  must review the archived content, other affected people, the approved deletion or disclosure scope,
+  and backup copies before resolving the request. A recipient-row export or an archive download alone
+  is not a complete response. Hash does not selectively redact personal data from opaque
+  collaboration replay.
+</p>
 
 <h2>9. Breach notification</h2>
 <p>
@@ -121,6 +130,14 @@
   and any legally required or immutable evidence-retention period. Data held under Object Lock cannot
   be deleted before its retention expires; the customer agreement must describe that limitation.
 </p>
+<p>
+  Recovery archives have a separate 90-day grace period from creation and a bounded expiry purge;
+  unresolved data-subject requests can defer that purge for review. The production procedure must
+  account for export, deletion, backup expiry, and restored copies of these archives. Any additional
+  preservation requirement needs an approved operator procedure; the recovery grace period does not
+  determine the retention of signed artifacts. Hash does not currently implement a general
+  legal-hold control for recovery archives.
+</p>
 
 <h2>12. Standard Contractual Clauses</h2>
 <p>
@@ -131,5 +148,5 @@
 
 <h2>Contact</h2>
 <p>
-  Bright Interaction AB, Stockholm, Sweden. <code>tom@brightinteraction.com</code>.
+  Bright Interaction AB, Stockholm, Sweden. <code>tom@cloudrebellion.se</code>.
 </p>

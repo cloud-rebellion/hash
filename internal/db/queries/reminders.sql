@@ -28,3 +28,6 @@ ON CONFLICT (document_id) DO UPDATE
 UPDATE reminders
 SET next_fire_at = now() + interval '3 days', last_fired_at = now()
 WHERE document_id = $1;
+
+-- name: GetReminderForUpdate :one
+SELECT * FROM reminders WHERE document_id = $1 FOR UPDATE;

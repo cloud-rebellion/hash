@@ -17,6 +17,17 @@ LIMIT $3;
 SELECT * FROM data_subject_requests
 WHERE id = $1 AND org_id = $2;
 
+-- name: HasCollabRecoveryArchivesForDSR :one
+-- Caller holds the document FOR UPDATE so recovery cannot add an archive
+-- between this check and the recipient erasure transaction. Archived replay
+-- is opaque and may retain replaced personal data; recipient anonymization
+-- alone cannot account for it. Keep the check independently tenant-scoped.
+SELECT EXISTS (
+    SELECT 1 FROM collab_recovery_archives a
+    JOIN documents d ON d.id = a.document_id
+    WHERE d.id = sqlc.arg(document_id) AND d.org_id = sqlc.arg(org_id)
+) AS present;
+
 -- name: GetDataSubjectRequestForUpdate :one
 -- Serialize competing fulfill/deny/withdraw transitions. All destructive
 -- erasure work and its audit rows run in the same caller-owned transaction
@@ -24,6 +35,11 @@ WHERE id = $1 AND org_id = $2;
 SELECT * FROM data_subject_requests
 WHERE id = $1 AND org_id = $2
 FOR UPDATE;
+
+-- name: GetDocumentForPrivacyUpdate :one
+-- Privacy transitions remain available during the soft-delete grace period.
+-- Caller locks this parent before its linked request and archive checks.
+SELECT * FROM documents WHERE id = sqlc.arg(document_id) AND org_id = sqlc.arg(org_id) FOR UPDATE;
 
 -- name: UpdateDataSubjectRequestStatus :one
 UPDATE data_subject_requests

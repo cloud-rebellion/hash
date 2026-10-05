@@ -706,7 +706,10 @@ reachable HTTPS URL -- signer magic links and the audit-verify endpoint are buil
 from it.
 
 Readiness check: `GET /health` returns `200` only when PostgreSQL, object
-storage, and Gotenberg are reachable. Treat `503` as not ready and do not route
+storage, and Gotenberg are reachable and the configured malware scanner passes
+its capability and signature-freshness check. Provision the required private
+ClamD socket and verify its deployed behavior as described in
+[Malware scanning](./docs/MALWARE-SCANNING.md). Treat `503` as not ready and do not route
 traffic. The response also carries `X-Hash-Release` and
 `X-Hash-Environment`; a production cutover must compare those to the exact
 approved release and `production`, rather than accepting a generic healthy

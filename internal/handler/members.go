@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -75,6 +77,10 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
+		return
+	}
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
@@ -92,15 +98,24 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 	// Serialize role changes for the whole organization. Locking only the target
 	// user permits two concurrent last-owner demotions to both observe two owners
 	// and leave the tenant ownerless.
-	tx, err := s.Pool.Begin(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), sessionTransactionTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "begin role update failed")
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer rollbackSessionTransaction(ctx, tx)
 	var lockedOrg uuid.UUID
-	if err := tx.QueryRow(r.Context(), `SELECT id FROM orgs WHERE id = $1 FOR UPDATE`, u.OrgID).Scan(&lockedOrg); err != nil {
+	// Non-key locking keeps same-org owner-floor checks serialized while
+	// permitting the FK KEY SHARE needed by another transaction's audit append.
+	// That transaction may hold a user SHARE lock this role update awaits.
+	if err := tx.QueryRow(r.Context(), `SELECT id FROM orgs WHERE id = $1 FOR NO KEY UPDATE`, u.OrgID).Scan(&lockedOrg); err != nil {
 		writeError(w, http.StatusInternalServerError, "lock organization failed")
+		return
+	}
+	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleOwner) {
 		return
 	}
 	q := s.Queries.WithTx(tx)
@@ -161,6 +176,9 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "audit role update failed")
+		return
+	}
+	if !s.transactionSessionFresh(w, cookie) {
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {

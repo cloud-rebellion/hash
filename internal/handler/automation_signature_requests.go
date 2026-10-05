@@ -295,17 +295,34 @@ func (s *Server) processAutomationSignatureRequest(ctx context.Context, input au
 }
 
 func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, input automationSignatureRequestProcessInput) (*generated.AutomationSignatureRequest, bool, error) {
-	tx, err := s.Pool.Begin(ctx)
+	authorize, err := auth.APIKeyTransactionAuthorization(ctx, uuid.Nil, "write:authoring", "write:workflow")
+	if err != nil {
+		return nil, false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, sessionTransactionTimeout)
+	defer cancel()
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, false, fmt.Errorf("begin automation signature request: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollbackSessionTransaction(ctx, tx)
 	q := generated.New(tx)
 	billingEngine := s.automationBillingEngine()
 	if billingEngine != nil {
 		if err := q.LockAutomationSignatureRequestQuota(ctx, input.User.OrgID.String()); err != nil {
 			return nil, false, fmt.Errorf("lock automation signature request quota: %w", err)
 		}
+	}
+
+	user, err := q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: input.User.UserID, OrgID: input.User.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && user.Role != string(auth.RoleSender) && user.Role != string(auth.RoleOwner)) {
+		return nil, false, auth.ErrMutationPermissionRevoked
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("load automation transaction authorization: %w", err)
+	}
+	if err := authorize(ctx, tx, user); err != nil {
+		return nil, false, err
 	}
 
 	request, err := q.ClaimAutomationSignatureRequest(ctx, generated.ClaimAutomationSignatureRequestParams{
@@ -322,6 +339,9 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 		}
 		if len(request.RequestHash) != sha256.Size || subtle.ConstantTimeCompare(request.RequestHash, input.RequestHash[:]) != 1 {
 			return nil, false, errAutomationIdempotencyConflict
+		}
+		if err := authorize(ctx, tx, user); err != nil {
+			return nil, false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("commit automation signature request replay: %w", err)
@@ -461,6 +481,9 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 	if err != nil {
 		return nil, false, fmt.Errorf("bind automation signature document: %w", err)
 	}
+	if err := authorize(ctx, tx, user); err != nil {
+		return nil, false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit automation signature request: %w", err)
 	}
@@ -495,6 +518,10 @@ func (s *Server) sendAutomationSignatureRequest(ctx context.Context, user auth.S
 	actor := send.Actor{
 		UserID: &user.UserID, OrgID: user.OrgID, Email: user.Email, IP: ip,
 		Via: "automation", Tool: "signature_request", LawfulBasis: lawfulBasis,
+	}
+	actor.Authorize, err = auth.APIKeyTransactionAuthorization(ctx, document.ID, "write:authoring", "write:workflow")
+	if err != nil {
+		return "", err
 	}
 	// Materialization already acquired the org quota lock and committed this
 	// document as the command's durable reservation. Re-running the ordinary

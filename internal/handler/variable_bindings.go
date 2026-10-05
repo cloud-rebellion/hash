@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/resolver"
 )
@@ -133,78 +136,28 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		Fallback   string `json:"fallback"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if !resolver.SourceKind(in.SourceKind).Valid() {
-		writeError(w, http.StatusBadRequest, "unknown source_kind")
+	if err := resolver.ValidateBinding(name, resolver.SourceKind(in.SourceKind), in.SourceRef, in.SourcePath, in.Fallback); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		writeInternalError(w, err)
+	authorize, ok := s.sessionMutationAuthorization(w, r, sess)
+	if !ok {
 		return
 	}
-	if doc.Status != "draft" {
-		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
-		return
-	}
-	tx, err := s.Pool.Begin(r.Context())
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	q := s.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if locked.Status != "draft" {
-		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
-		return
-	}
-	row, err := q.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
-		DocumentID:   docID,
-		VariableName: name,
-		SourceKind:   in.SourceKind,
-		SourceRef:    in.SourceRef,
-		SourcePath:   in.SourcePath,
-		Fallback:     in.Fallback,
+	row, err := s.mutateVariableBinding(r, sess, authorize, docID, name, "upsert_variable_binding", in.SourceKind, func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
+		return q.UpsertVariableBinding(ctx, generated.UpsertVariableBindingParams{
+			DocumentID: docID, VariableName: name, SourceKind: in.SourceKind,
+			SourceRef: in.SourceRef, SourcePath: in.SourcePath, Fallback: in.Fallback,
+		})
 	})
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeDraftAuthoringError(w, "mutate variable binding", err)
 		return
 	}
-	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &docID,
-		Kind:        audit.KindDocumentUpdated,
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload: map[string]any{
-			"via":         "rest",
-			"tool":        "upsert_variable_binding",
-			"variable":    name,
-			"source_kind": in.SourceKind,
-		},
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, bindingToDTO(row))
 }
 
@@ -224,61 +177,64 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "variable name required")
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		writeInternalError(w, err)
+	if err := resolver.ValidateBindingName(name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if doc.Status != "draft" {
-		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
+	authorize, ok := s.sessionMutationAuthorization(w, r, sess)
+	if !ok {
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	q := s.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if locked.Status != "draft" {
-		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
-		return
-	}
-	if err := q.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
-		DocumentID:   docID,
-		VariableName: name,
+	if _, err := s.mutateVariableBinding(r, sess, authorize, docID, name, "delete_variable_binding", "", func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
+		return nil, q.DeleteVariableBinding(ctx, generated.DeleteVariableBindingParams{DocumentID: docID, VariableName: name})
 	}); err != nil {
-		writeInternalError(w, err)
+		s.writeDraftAuthoringError(w, "mutate variable binding", err)
 		return
 	}
-	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &docID,
-		Kind:        audit.KindDocumentUpdated,
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload:     map[string]any{"via": "rest", "tool": "delete_variable_binding", "variable": name},
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) mutateVariableBinding(r *http.Request, sess auth.SessionUser, authorize auth.TransactionAuthorization,
+	docID uuid.UUID, name, tool, sourceKind string, mutation func(context.Context, *generated.Queries) (*generated.DocumentVariableBinding, error),
+) (*generated.DocumentVariableBinding, error) {
+	if s.Pool == nil || s.Audit == nil {
+		return nil, errors.New("atomic variable binding dependencies unavailable")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("begin variable binding mutation: %w", err)
+	}
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, docID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := mutation(ctx, generated.New(tx))
+	if err != nil {
+		return nil, fmt.Errorf("mutate variable binding: %w", err)
+	}
+	actorID := guard.UserID()
+	payload := map[string]any{"via": "rest", "tool": tool, "variable": name}
+	if sourceKind != "" {
+		payload["source_kind"] = sourceKind
+	}
+	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: sess.OrgID, ActorUserID: &actorID, DocumentID: &docID, Kind: audit.KindDocumentUpdated,
+		IP: firstIPFromHeader(r), UserAgent: r.UserAgent(), Payload: payload,
 	})
 	if err != nil {
-		writeInternalError(w, err)
-		return
+		return nil, fmt.Errorf("audit variable binding mutation: %w", err)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalError(w, err)
-		return
+	if err := guard.Recheck(ctx); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit variable binding mutation: %w", err)
 	}
 	s.Audit.Publish(pending)
-	w.WriteHeader(http.StatusNoContent)
+	return row, nil
 }
 
 // GET /api/v1/documents/{id}/resolve-preview

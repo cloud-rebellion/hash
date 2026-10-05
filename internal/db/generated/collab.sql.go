@@ -10,6 +10,7 @@ package generated
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -32,6 +33,167 @@ func (q *Queries) GetCollabDocState(ctx context.Context, documentID uuid.UUID) (
 		&i.CreatedAt,
 	)
 	return &i, err
+}
+
+const getCollabDocStateWithGeneration = `-- name: GetCollabDocStateWithGeneration :one
+SELECT s.document_id, s.ydoc_state, s.state_size, s.update_count, s.last_user_id, s.updated_at, s.created_at, g.generation FROM collab_doc_states s
+LEFT JOIN collab_state_generations g USING (document_id)
+WHERE s.document_id = $1
+`
+
+type GetCollabDocStateWithGenerationRow struct {
+	DocumentID  uuid.UUID          `json:"document_id"`
+	YdocState   []byte             `json:"ydoc_state"`
+	StateSize   int32              `json:"state_size"`
+	UpdateCount int32              `json:"update_count"`
+	LastUserID  pgtype.UUID        `json:"last_user_id"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	Generation  pgtype.Int8        `json:"generation"`
+}
+
+// Null generation denotes legacy state with no established canonical association.
+func (q *Queries) GetCollabDocStateWithGeneration(ctx context.Context, documentID uuid.UUID) (*GetCollabDocStateWithGenerationRow, error) {
+	row := q.db.QueryRow(ctx, getCollabDocStateWithGeneration, documentID)
+	var i GetCollabDocStateWithGenerationRow
+	err := row.Scan(
+		&i.DocumentID,
+		&i.YdocState,
+		&i.StateSize,
+		&i.UpdateCount,
+		&i.LastUserID,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.Generation,
+	)
+	return &i, err
+}
+
+const getDocumentCollabGeneration = `-- name: GetDocumentCollabGeneration :one
+SELECT g.generation FROM collab_document_generations g
+JOIN documents d ON d.id = g.document_id
+WHERE d.id = $1 AND d.org_id = $2
+`
+
+type GetDocumentCollabGenerationParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) GetDocumentCollabGeneration(ctx context.Context, arg GetDocumentCollabGenerationParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getDocumentCollabGeneration, arg.ID, arg.OrgID)
+	var generation int64
+	err := row.Scan(&generation)
+	return generation, err
+}
+
+const persistCollabDocStateForGeneration = `-- name: PersistCollabDocStateForGeneration :one
+SELECT hash_persist_collab_generation(
+    $1::uuid, $2::uuid,
+    $3::bigint, $4::bytea,
+    $5::integer, $6::integer,
+    $7::uuid
+)::boolean AS accepted
+`
+
+type PersistCollabDocStateForGenerationParams struct {
+	DocumentID  uuid.UUID   `json:"document_id"`
+	OrgID       uuid.UUID   `json:"org_id"`
+	Generation  int64       `json:"generation"`
+	YdocState   []byte      `json:"ydoc_state"`
+	StateSize   int32       `json:"state_size"`
+	UpdateCount int32       `json:"update_count"`
+	LastUserID  pgtype.UUID `json:"last_user_id"`
+}
+
+func (q *Queries) PersistCollabDocStateForGeneration(ctx context.Context, arg PersistCollabDocStateForGenerationParams) (bool, error) {
+	row := q.db.QueryRow(ctx, persistCollabDocStateForGeneration,
+		arg.DocumentID,
+		arg.OrgID,
+		arg.Generation,
+		arg.YdocState,
+		arg.StateSize,
+		arg.UpdateCount,
+		arg.LastUserID,
+	)
+	var accepted bool
+	err := row.Scan(&accepted)
+	return accepted, err
+}
+
+const recoverCanonicalCollab = `-- name: RecoverCanonicalCollab :one
+SELECT hash_recover_canonical_collab(
+    $1::uuid, $2::uuid,
+    $3::bigint, $4::timestamptz,
+    $5::uuid, $6::boolean,
+    $7::bytea, $8::bigint
+)::bigint AS generation
+`
+
+type RecoverCanonicalCollabParams struct {
+	DocumentID        uuid.UUID          `json:"document_id"`
+	OrgID             uuid.UUID          `json:"org_id"`
+	Generation        int64              `json:"generation"`
+	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
+	UserID            uuid.UUID          `json:"user_id"`
+	Acknowledged      bool               `json:"acknowledged"`
+	RoomState         []byte             `json:"room_state"`
+	RoomGeneration    pgtype.Int8        `json:"room_generation"`
+}
+
+func (q *Queries) RecoverCanonicalCollab(ctx context.Context, arg RecoverCanonicalCollabParams) (int64, error) {
+	row := q.db.QueryRow(ctx, recoverCanonicalCollab,
+		arg.DocumentID,
+		arg.OrgID,
+		arg.Generation,
+		arg.ExpectedUpdatedAt,
+		arg.UserID,
+		arg.Acknowledged,
+		arg.RoomState,
+		arg.RoomGeneration,
+	)
+	var generation int64
+	err := row.Scan(&generation)
+	return generation, err
+}
+
+const saveCanonicalCollab = `-- name: SaveCanonicalCollab :one
+SELECT hash_save_canonical_collab(
+    $1::uuid, $2::uuid,
+    $3::bigint, $4::timestamptz,
+    $5::jsonb, $6::jsonb,
+    $7::bytea, $8::integer,
+    $9::uuid
+)::boolean AS accepted
+`
+
+type SaveCanonicalCollabParams struct {
+	DocumentID        uuid.UUID          `json:"document_id"`
+	OrgID             uuid.UUID          `json:"org_id"`
+	Generation        int64              `json:"generation"`
+	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
+	BlocksJson        json.RawMessage    `json:"blocks_json"`
+	VariablesJson     []byte             `json:"variables_json"`
+	YdocState         []byte             `json:"ydoc_state"`
+	UpdateCount       int32              `json:"update_count"`
+	UserID            uuid.UUID          `json:"user_id"`
+}
+
+func (q *Queries) SaveCanonicalCollab(ctx context.Context, arg SaveCanonicalCollabParams) (bool, error) {
+	row := q.db.QueryRow(ctx, saveCanonicalCollab,
+		arg.DocumentID,
+		arg.OrgID,
+		arg.Generation,
+		arg.ExpectedUpdatedAt,
+		arg.BlocksJson,
+		arg.VariablesJson,
+		arg.YdocState,
+		arg.UpdateCount,
+		arg.UserID,
+	)
+	var accepted bool
+	err := row.Scan(&accepted)
+	return accepted, err
 }
 
 const upsertCollabDocState = `-- name: UpsertCollabDocState :one

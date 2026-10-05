@@ -20,7 +20,7 @@ UPDATE users
 SET zitadel_sub = $2
 WHERE id = $1
   AND (zitadel_sub IS NULL OR zitadel_sub = $2)
-RETURNING id, org_id, email, name, role, zitadel_sub, created_at
+RETURNING id, org_id, email, name, role, zitadel_sub, created_at, session_generation
 `
 
 type BindUserZitadelSubParams struct {
@@ -42,6 +42,7 @@ func (q *Queries) BindUserZitadelSub(ctx context.Context, arg BindUserZitadelSub
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }
@@ -145,7 +146,7 @@ func (q *Queries) CreateOrg(ctx context.Context, arg CreateOrgParams) (*Org, err
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (org_id, email, name, role, zitadel_sub)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, org_id, email, name, role, zitadel_sub, created_at
+RETURNING id, org_id, email, name, role, zitadel_sub, created_at, session_generation
 `
 
 type CreateUserParams struct {
@@ -173,6 +174,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (*User, 
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }
@@ -237,7 +239,7 @@ func (q *Queries) GetOrg(ctx context.Context, id uuid.UUID) (*Org, error) {
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, org_id, email, name, role, zitadel_sub, created_at FROM users WHERE id = $1
+SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
@@ -251,12 +253,13 @@ func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, org_id, email, name, role, zitadel_sub, created_at FROM users WHERE lower(email) = lower($1)
+SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE lower(email) = lower($1)
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, lower string) (*User, error) {
@@ -270,12 +273,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, lower string) (*User, erro
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }
 
 const getUserByZitadelSub = `-- name: GetUserByZitadelSub :one
-SELECT id, org_id, email, name, role, zitadel_sub, created_at FROM users WHERE zitadel_sub = $1
+SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE zitadel_sub = $1
 `
 
 func (q *Queries) GetUserByZitadelSub(ctx context.Context, zitadelSub pgtype.Text) (*User, error) {
@@ -289,6 +293,34 @@ func (q *Queries) GetUserByZitadelSub(ctx context.Context, zitadelSub pgtype.Tex
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
+	)
+	return &i, err
+}
+
+const getUserForShare = `-- name: GetUserForShare :one
+SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE id = $1 AND org_id = $2 FOR SHARE
+`
+
+type GetUserForShareParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// Mutations that wait on their parent row must reauthorize the live member
+// afterward and retain this lock until commit or rollback.
+func (q *Queries) GetUserForShare(ctx context.Context, arg GetUserForShareParams) (*User, error) {
+	row := q.db.QueryRow(ctx, getUserForShare, arg.ID, arg.OrgID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Email,
+		&i.Name,
+		&i.Role,
+		&i.ZitadelSub,
+		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }
@@ -377,7 +409,7 @@ func (q *Queries) ListOrgIDsAfter(ctx context.Context, arg ListOrgIDsAfterParams
 }
 
 const listUsersByOrg = `-- name: ListUsersByOrg :many
-SELECT id, org_id, email, name, role, zitadel_sub, created_at FROM users WHERE org_id = $1 ORDER BY created_at DESC
+SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE org_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListUsersByOrg(ctx context.Context, orgID uuid.UUID) ([]*User, error) {
@@ -397,6 +429,7 @@ func (q *Queries) ListUsersByOrg(ctx context.Context, orgID uuid.UUID) ([]*User,
 			&i.Role,
 			&i.ZitadelSub,
 			&i.CreatedAt,
+			&i.SessionGeneration,
 		); err != nil {
 			return nil, err
 		}
@@ -406,6 +439,28 @@ func (q *Queries) ListUsersByOrg(ctx context.Context, orgID uuid.UUID) ([]*User,
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeUserSessions = `-- name: RevokeUserSessions :execrows
+UPDATE users
+SET session_generation = session_generation + 1
+WHERE id = $1 AND org_id = $2 AND session_generation = $3
+`
+
+type RevokeUserSessionsParams struct {
+	ID                uuid.UUID `json:"id"`
+	OrgID             uuid.UUID `json:"org_id"`
+	SessionGeneration int64     `json:"session_generation"`
+}
+
+// Account-wide logout fences every copied cookie from the accepted generation.
+// A concurrent logout of the same old generation must not revoke a new login.
+func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeUserSessions, arg.ID, arg.OrgID, arg.SessionGeneration)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setOrgChangeApprovalMode = `-- name: SetOrgChangeApprovalMode :one
@@ -432,7 +487,7 @@ func (q *Queries) SetOrgChangeApprovalMode(ctx context.Context, arg SetOrgChange
 }
 
 const updateUserRole = `-- name: UpdateUserRole :one
-UPDATE users SET role = $3 WHERE id = $1 AND org_id = $2 RETURNING id, org_id, email, name, role, zitadel_sub, created_at
+UPDATE users SET role = $3 WHERE id = $1 AND org_id = $2 RETURNING id, org_id, email, name, role, zitadel_sub, created_at, session_generation
 `
 
 type UpdateUserRoleParams struct {
@@ -452,6 +507,7 @@ func (q *Queries) UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) 
 		&i.Role,
 		&i.ZitadelSub,
 		&i.CreatedAt,
+		&i.SessionGeneration,
 	)
 	return &i, err
 }

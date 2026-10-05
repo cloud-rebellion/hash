@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/send"
 )
 
@@ -22,11 +23,20 @@ func (s *Server) handleRemindDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
 	sent, err := s.Send.Remind(r.Context(), send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
+		Authorize: authorize,
 	}, docID, false)
 	if err != nil {
 		switch {
+		case errors.Is(err, auth.ErrMutationCredentialExpired):
+			writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
+		case errors.Is(err, auth.ErrMutationPermissionRevoked):
+			writeError(w, http.StatusForbidden, "permission or credential revoked")
 		case errors.Is(err, send.ErrDocumentNotFound):
 			writeError(w, http.StatusNotFound, "document not found")
 		case errors.Is(err, send.ErrNotRemindable):

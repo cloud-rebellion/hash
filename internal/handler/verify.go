@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"io"
 	"net/http"
 	"path"
@@ -25,6 +26,7 @@ import (
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
 	"github.com/bright-interaction/hash/internal/evidence"
+	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -129,8 +131,16 @@ const maxVerifyBundleSize = 160 * 1024 * 1024 // exact final (<=128 MiB) + bound
 // downloads the bundle (auditor, regulator, opposing counsel) can post it
 // here and get a structured pass/fail report.
 func (s *Server) handleVerifyBundle(w http.ResponseWriter, r *http.Request) {
+	release, err := importguard.Shared.AcquireAnonymous()
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer release()
 	r.Body = http.MaxBytesReader(w, r.Body, maxVerifyBundleSize)
-	if err := r.ParseMultipartForm(maxVerifyBundleSize); err != nil {
+	defer cleanupMultipart(r)
+	if err := r.ParseMultipartForm(multipartFileMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "bundle too large or malformed multipart")
 		return
 	}
@@ -143,6 +153,10 @@ func (s *Server) handleVerifyBundle(w http.ResponseWriter, r *http.Request) {
 	pdfBytes, err := io.ReadAll(f)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read bundle: "+err.Error())
+		return
+	}
+	if err := malwarescan.ScanActive(r.Context(), pdfBytes); err != nil {
+		writeScanError(w, err)
 		return
 	}
 	report := VerifyEvidenceBundleWithTrust(pdfBytes, EvidenceTrustSet{

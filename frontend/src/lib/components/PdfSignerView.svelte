@@ -21,10 +21,11 @@
     token: string;
     noticeDigest: string;
     signed?: boolean;
+    readOnly?: boolean;
     onFilledChange?: (filled: boolean) => void;
     onSignatureClick?: () => void;
   };
-  let { token, noticeDigest, signed = false, onFilledChange, onSignatureClick }: Props = $props();
+  let { token, noticeDigest, signed = false, readOnly = false, onFilledChange, onSignatureClick }: Props = $props();
 
   type PageInfo = { num: number; w: number };
 
@@ -140,6 +141,7 @@
   }
 
   async function saveField(f: Field) {
+    if (readOnly) return;
     const nextValue = buf[f.id] ?? emptyValue(f);
     const previousValue = persisted[f.id] ?? emptyValue(f);
     if (saving[f.id] || nextValue === previousValue) return;
@@ -206,16 +208,18 @@
         <canvas bind:this={canvasEls[p.num]}></canvas>
         <div class="overlay">
           {#each fieldsOnPage(p.num) as f (f.id)}
-            {#if f.type === 'signature'}
+            {#if f.type === 'signature' && readOnly}
+              <span class="fld sig" style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%">Signing paused</span>
+            {:else if f.type === 'signature'}
               <button
                 type="button"
                 class="fld sig"
                 class:done={signed}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 onclick={() => {
-                  if (recomputeFilled()) onSignatureClick?.();
+                  if (!readOnly && recomputeFilled()) onSignatureClick?.();
                 }}
-                disabled={signed || !recomputeFilled()}
+                disabled={readOnly || signed || !recomputeFilled()}
                 title={!recomputeFilled() ? $t('sign.fillRequiredTitle') : ''}
               >
                 {signed ? $t('pdf.signed') : $t('pdf.signHere')}
@@ -231,7 +235,7 @@
                   class:save-failed={Boolean(saveErrors[f.id])}
                   aria-invalid={Boolean(saveErrors[f.id])}
                   aria-busy={Boolean(saving[f.id])}
-                  disabled={Boolean(saving[f.id])}
+                  disabled={readOnly || Boolean(saving[f.id])}
                   onchange={(e) => {
                     buf[f.id] = (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false';
                     void saveField(f);
@@ -246,7 +250,7 @@
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={Boolean(saving[f.id])}
+                disabled={readOnly || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               >
                 <option value="">{f.label || 'Select…'}</option>
@@ -264,7 +268,7 @@
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={Boolean(saving[f.id])}
+                disabled={readOnly || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               />
             {/if}

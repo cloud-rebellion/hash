@@ -30,12 +30,12 @@ var ErrSanitizePDF = errors.New("docintake: pdf sanitize failed")
 // callers map it to a 400. Guards the HTML->PDF amplification vector (a tiny
 // input can render into thousands of pages) whose direct-upload 50 MB cap the
 // render path bypasses.
-var ErrTooManyPages = errors.New("docintake: document exceeds the page limit")
+var ErrTooManyPages = sanitize.ErrTooManyPages
 
 // maxIntakePages bounds a one-step intake document. Legitimate proposals and
 // contracts are far under this; the cap exists to reject amplification bombs
 // before they reach the (in-memory, ctx-less) pdfcpu rewrite passes.
-const maxIntakePages = 500
+const maxIntakePages = sanitize.MaxPDFPages
 
 const orphanCleanupTimeout = 15 * time.Second
 
@@ -59,9 +59,12 @@ type objectStore interface {
 // untouched, so the frozen audit-cert + hash-chain wire format is never
 // affected by this intake.
 func CreatePDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, data []byte) (*generated.Document, int, error) {
-	cleaned, err := sanitize.Clean("proposal-pdf", "application/pdf", data)
+	cleaned, err := sanitize.CleanWithContext(ctx, "proposal-pdf", "application/pdf", data)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: %v", ErrSanitizePDF, err)
+		if errors.Is(err, ErrTooManyPages) {
+			return nil, 0, err
+		}
+		return nil, 0, fmt.Errorf("%w: %w", ErrSanitizePDF, err)
 	}
 	// Reject an amplification bomb BEFORE storing it or handing it to the
 	// downstream pdfcpu passes.

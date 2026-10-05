@@ -87,6 +87,10 @@ async function friendlyError(res: Response): Promise<string> {
   }
 }
 
+export class APIError extends Error {
+ constructor(public status: number, message: string) { super(message); }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -99,7 +103,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const res = await fetch(path, opts);
   if (!res.ok) {
-    throw new Error(await friendlyError(res));
+    throw new APIError(res.status, await friendlyError(res));
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -280,6 +284,7 @@ export function documentSignatureFields(doc: DocumentResponse): { role: string; 
 export async function updateDocument(
   id: string,
   patch: {
+    expected_updated_at: string;
     name?: string;
     blocks_json?: BlockTree;
     variables_json?: Record<string, string>;
@@ -291,28 +296,70 @@ export async function updateDocument(
   return request('PATCH', `/api/v1/documents/${id}`, patch);
 }
 
-export async function appendBlock(docID: string, block: Omit<Block, 'id'>): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/blocks`, { block });
+export async function appendBlock(docID: string, block: Omit<Block, 'id'>, expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('POST', `/api/v1/documents/${docID}/blocks`, { block, expected_updated_at: expectedUpdatedAt });
 }
 
-export async function updateBlock(docID: string, blockID: string, block: Block): Promise<DocumentResponse> {
-  return request('PATCH', `/api/v1/documents/${docID}/blocks/${blockID}`, { block });
+export async function saveCollaborativeDocument(id: string, input: {
+  peer_id: string; checkpoint: string; generation: string;
+  expected_updated_at: string; blocks_json: BlockTree;
+}): Promise<{ document: DocumentResponse; generation: string }> {
+  return request('POST', `/api/v1/documents/${id}/collab/save`, input);
 }
 
-export async function deleteBlock(docID: string, blockID: string): Promise<DocumentResponse> {
-  return request('DELETE', `/api/v1/documents/${docID}/blocks/${blockID}`);
+export interface CollaborationRecoveryArchive {
+  id: string;
+  origin: 'persisted' | 'active_room';
+  history_generation: string | null;
+  observed_canonical_generation: string;
+  created_at: string;
+  expires_at: string;
+  size_bytes: number;
 }
 
-export async function reorderBlocks(docID: string, ids: string[]): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/blocks/reorder`, { block_ids: ids });
+export interface CollaborationRecoveryState {
+  document: DocumentResponse;
+  document_deleted: boolean;
+  generation: string;
+  archives: CollaborationRecoveryArchive[];
 }
 
-export async function importHTML(docID: string, html: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/import-html`, { html });
+export async function getCollaborationRecovery(id: string): Promise<CollaborationRecoveryState> {
+  return request('GET', `/api/v1/documents/${encodeURIComponent(id)}/collab/recovery`);
 }
 
-export async function importMarkdown(docID: string, markdown: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/import-md`, { markdown });
+export async function recoverCollaboration(id: string, input: {
+  generation: string; expected_updated_at: string; acknowledged: true;
+}): Promise<{ document: DocumentResponse; generation: string }> {
+  return request('POST', `/api/v1/documents/${encodeURIComponent(id)}/collab/recovery`, input);
+}
+
+export function collaborationArchiveURL(id: string, archiveID: string): string {
+  return `/api/v1/documents/${encodeURIComponent(id)}/collab/recovery/archives/${encodeURIComponent(archiveID)}`;
+}
+
+export async function deleteCollaborationArchive(id: string, archiveID: string): Promise<void> {
+  return request('DELETE', collaborationArchiveURL(id, archiveID), { acknowledged: true });
+}
+
+export async function updateBlock(docID: string, blockID: string, block: Block, expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('PATCH', `/api/v1/documents/${docID}/blocks/${blockID}`, { block, expected_updated_at: expectedUpdatedAt });
+}
+
+export async function deleteBlock(docID: string, blockID: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('DELETE', `/api/v1/documents/${docID}/blocks/${blockID}`, { expected_updated_at: expectedUpdatedAt });
+}
+
+export async function reorderBlocks(docID: string, ids: string[], expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('POST', `/api/v1/documents/${docID}/blocks/reorder`, { block_ids: ids, expected_updated_at: expectedUpdatedAt });
+}
+
+export async function importHTML(docID: string, html: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('POST', `/api/v1/documents/${docID}/import-html`, { html, expected_updated_at: expectedUpdatedAt });
+}
+
+export async function importMarkdown(docID: string, markdown: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
+  return request('POST', `/api/v1/documents/${docID}/import-md`, { markdown, expected_updated_at: expectedUpdatedAt });
 }
 
 export function previewURL(docID: string): string {

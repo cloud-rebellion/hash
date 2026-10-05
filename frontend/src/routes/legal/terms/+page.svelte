@@ -107,5 +107,5 @@
 
 <h2>Contact</h2>
 <p>
-  Bright Interaction AB · Stockholm, Sweden · <code>tom@brightinteraction.com</code>
+  Bright Interaction AB · Stockholm, Sweden · <code>tom@cloudrebellion.se</code>
 </p>

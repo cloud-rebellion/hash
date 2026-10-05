@@ -107,6 +107,7 @@
   let showChangesModal = $state(false);
   let changesMessage = $state('');
   let changesRequested = $state(false);
+  let requestingChanges = $state(false);
 
   // Inline annotation: the signer marks a span of text and proposes a change.
   let showAnno = $state(false);
@@ -125,22 +126,31 @@
   let comments = $state<DocComment[]>([]);
   let commentBody = $state('');
   let postingComment = $state(false);
+  let commentLoadRevision = 0;
+  let commentRefreshError = $state<string | null>(null);
 
   async function loadComments(token = $page.params.token, signal?: AbortSignal) {
     if (!token) return;
+    const revision = ++commentLoadRevision;
+    const recipientID = ctx?.recipient.id;
     try {
       const res = await fetch(`/sign/${token}/comments`, { signal });
-      const body = res.ok ? await res.json() : null;
-      if (res.ok && !signal?.aborted && token === $page.params.token) {
+      if (!res.ok) throw new Error(`Messages could not be refreshed (HTTP ${res.status}).`);
+      const body = await res.json();
+      if (!signal?.aborted && revision === commentLoadRevision && token === $page.params.token && recipientID === ctx?.recipient.id) {
         comments = body?.comments ?? [];
+        commentRefreshError = null;
       }
-    } catch {
-      /* best effort */
+    } catch (e) {
+      if (!signal?.aborted && revision === commentLoadRevision && token === $page.params.token && recipientID === ctx?.recipient.id) {
+        commentRefreshError = (e as Error).message;
+      }
     }
   }
 
   async function sendComment() {
-    if (!ctx || !commentBody.trim()) return;
+    if (!ctx || postingComment || !commentBody.trim()) return;
+    const submittedBody = commentBody;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
@@ -151,10 +161,11 @@
       const res = await fetch(`/sign/${token}/comments`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
-        body: JSON.stringify({ body: commentBody.trim() })
+        body: JSON.stringify({ body: submittedBody.trim() })
       });
-      if (res.ok && token === $page.params.token && recipientID === ctx?.recipient.id) {
-        commentBody = '';
+      if (!res.ok) throw new Error(`Message could not be sent (HTTP ${res.status}). Your draft has been kept.`);
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        if (commentBody === submittedBody) commentBody = '';
         await loadComments(token);
       }
     } catch (e) {
@@ -188,6 +199,7 @@
   }
 
   async function submitAnno() {
+    if (requestingChanges) return;
     if (!annoComment.trim() && !annoProposed.trim()) {
       annoError = $t('changes.placeholder');
       return;
@@ -197,6 +209,7 @@
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
     if (!token) return;
+    requestingChanges = true;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
       const res = await fetch(`/sign/${token}/request-changes`, {
@@ -220,13 +233,23 @@
       }
       if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       annoCount += 1;
-      showAnno = false;
+      pauseSigningForChanges();
       window.getSelection()?.removeAllRanges();
     } catch (e) {
       if (token === $page.params.token && recipientID === ctx?.recipient.id) {
         annoError = (e as Error).message;
       }
+    } finally {
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) requestingChanges = false;
     }
+  }
+
+  function pauseSigningForChanges() {
+    changesRequested = true;
+    showAdoptModal = false;
+    showDeclineModal = false;
+    showChangesModal = false;
+    showAnno = false;
   }
 
   // v1.2: fillable fields gate. Defaults true so docs without fields
@@ -258,6 +281,7 @@
     showChangesModal = false;
     changesMessage = '';
     changesRequested = false;
+    requestingChanges = false;
     showAnno = false;
     annoQuote = '';
     annoContext = '';
@@ -267,6 +291,8 @@
     annoCount = 0;
     annoError = null;
     comments = [];
+    commentRefreshError = null;
+    commentLoadRevision++;
     commentBody = '';
     postingComment = false;
     fieldsFilled = true;
@@ -350,7 +376,7 @@
   });
 
   async function adopt() {
-    if (!ctx) return;
+    if (!ctx || changesRequested || requestingChanges) return;
     if (!typedName.trim()) {
       signError = 'Please type your name first.';
       return;
@@ -377,7 +403,7 @@
   }
 
   async function confirmSign() {
-    if (!ctx) return;
+    if (!ctx || changesRequested || requestingChanges) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
@@ -422,12 +448,13 @@
   }
 
   async function decline() {
+    if (changesRequested || requestingChanges) return;
     signError = null;
     showDeclineModal = true;
   }
 
   async function accept() {
-    if (!ctx) return;
+    if (!ctx || changesRequested || requestingChanges) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
@@ -467,7 +494,7 @@
   }
 
   async function confirmDecline() {
-    if (!ctx) return;
+    if (!ctx || changesRequested || requestingChanges) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
@@ -499,11 +526,12 @@
   }
 
   function requestChanges() {
+    if (requestingChanges) return;
     showChangesModal = true;
   }
 
   async function confirmRequestChanges() {
-    if (!ctx) return;
+    if (!ctx || requestingChanges) return;
     if (!changesMessage.trim()) {
       signError = $t('changes.placeholder');
       return;
@@ -512,6 +540,7 @@
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
     if (!token) return;
+    requestingChanges = true;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
       const res = await fetch(`/sign/${token}/request-changes`, {
@@ -528,12 +557,13 @@
         return;
       }
       if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
-      changesRequested = true;
-      showChangesModal = false;
+      pauseSigningForChanges();
     } catch (e) {
       if (token === $page.params.token && recipientID === ctx?.recipient.id) {
         signError = (e as Error).message;
       }
+    } finally {
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) requestingChanges = false;
     }
   }
 
@@ -604,20 +634,15 @@
       <h2>{$t('sign.accepted.title')}</h2>
       <p>{$t('sign.accepted.body')}</p>
     </div>
-  {:else if changesRequested}
-    <div class="state-card">
-      <CheckCircle2 class="size-10 text-info mb-3 mx-auto" />
-      <h2>{$t('changes.requested.title')}</h2>
-      <p>{$t('changes.requested.body')}</p>
-    </div>
   {:else}
     <main class="signer-main">
-      <article class="document-frame">
+      <article class="document-frame" aria-label="Current document">
         {#if ctx.source_kind === 'pdf'}
           <PdfSignerView
             token={$page.params.token ?? ''}
             noticeDigest={ctx.privacy.notice_digest}
             signed={!!completed}
+            readOnly={changesRequested || requestingChanges}
             onFilledChange={(v) => (fieldsFilled = v)}
             onSignatureClick={adopt}
           />
@@ -630,7 +655,16 @@
       </article>
 
       <aside class="signer-actions">
-        {#if ctx.routing_tier === 'AES' || ctx.routing_tier === 'QES'}
+        {#if changesRequested}
+          <section class="negotiation-status" role="status" aria-label="Changes requested">
+            <h2>{$t('changes.requested.title')}</h2>
+            <p>{$t('changes.requested.body')}</p>
+            <p>Signing and field changes are paused. Review this version and continue the conversation below.</p>
+          </section>
+          {#if ctx.source_kind === 'blocks'}
+            <p class="anno-hint">{$t('changes.markHint')}</p>
+          {/if}
+        {:else if ctx.routing_tier === 'AES' || ctx.routing_tier === 'QES'}
           <h3 class="section-eyebrow">{$t('sign.tierUnavailable.title')}</h3>
           <p class="text-xs text-text-muted mb-3">
             {$t('sign.tierUnavailable.body', { tier: ctx.routing_tier })}
@@ -640,7 +674,7 @@
         {:else if !ctx.requires_signature}
           <h3 class="section-eyebrow">{$t('sign.accept.title')}</h3>
           <p class="text-xs text-text-muted mb-3">{$t('sign.accept.body')}</p>
-          <button class="btn btn-primary w-full" disabled={accepting} onclick={accept}>
+          <button class="btn btn-primary w-full" disabled={accepting || requestingChanges} onclick={accept}>
             <CheckCircle2 class="size-4" /> {accepting ? $t('common.loading') : $t('sign.accept.button')}
           </button>
           <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
@@ -670,7 +704,7 @@
 
         <button
           class="btn btn-primary w-full"
-          disabled={!typedName.trim() || !fieldsFilled}
+          disabled={requestingChanges || !typedName.trim() || !fieldsFilled}
           onclick={adopt}
           title={!fieldsFilled ? $t('sign.fillRequiredTitle') : ''}
         >
@@ -684,16 +718,24 @@
         <button class="btn btn-secondary w-full" onclick={requestChanges}>{$t('common.requestChanges')}</button>
         {/if}
 
+        {#if !changesRequested}
         <p class="legal-note">
           <ShieldCheck class="size-3 inline" />
 		  {ctx.requires_signature ? $t('sign.legalNote') : $t('sign.accept.legalNote')}
         </p>
+        {/if}
         {#if signError}
           <p class="error">{signError}</p>
         {/if}
 
         <div class="comments">
           <h3 class="section-eyebrow">{$t('comments.title')}</h3>
+          {#if commentRefreshError}
+            <div role="alert">
+              <p class="error">{commentRefreshError}</p>
+              <button type="button" class="btn btn-secondary" onclick={() => loadComments()}>Retry message refresh</button>
+            </div>
+          {/if}
           {#if comments.length}
             <ul class="comment-list">
               {#each comments as c (c.id)}
@@ -719,7 +761,7 @@
   {/if}
 </div>
 
-{#if showAdoptModal && ctx}
+{#if showAdoptModal && ctx && !changesRequested}
   <div class="modal-backdrop" role="dialog" aria-modal="true">
     <div class="modal">
       <h3 class="modal-title">{$t('adopt.title')}</h3>
@@ -754,7 +796,7 @@
   </div>
 {/if}
 
-{#if showDeclineModal}
+{#if showDeclineModal && !changesRequested}
   <div class="modal-backdrop" role="dialog" aria-modal="true">
     <div class="modal">
       <h3 class="modal-title">{$t('decline.title')}</h3>
@@ -791,7 +833,7 @@
       ></textarea>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick={() => (showChangesModal = false)}>{$t('common.cancel')}</button>
-        <button class="btn btn-primary" onclick={confirmRequestChanges}>{$t('changes.confirm')}</button>
+        <button class="btn btn-primary" disabled={requestingChanges} onclick={confirmRequestChanges}>{requestingChanges ? $t('common.loading') : $t('changes.confirm')}</button>
       </div>
     </div>
   </div>
@@ -810,7 +852,7 @@
     <input bind:value={annoProposed} placeholder={$t('changes.proposedPlaceholder')} class="anno-input anno-single" />
     <div class="anno-popup-actions">
       <button class="btn btn-secondary" onclick={() => (showAnno = false)}>{$t('common.cancel')}</button>
-      <button class="btn btn-primary" onclick={submitAnno}>{$t('changes.confirm')}</button>
+      <button class="btn btn-primary" disabled={requestingChanges} onclick={submitAnno}>{requestingChanges ? $t('common.loading') : $t('changes.confirm')}</button>
     </div>
     {#if annoError}<p class="error">{annoError}</p>{/if}
   </div>
@@ -905,6 +947,8 @@
     color: var(--t-text-muted);
     margin: 0;
   }
+  .negotiation-status h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+  .negotiation-status p { font-size: 12px; line-height: 1.5; color: var(--t-text-muted); }
   .name-input {
     width: 100%;
     padding: 0.5rem 0.75rem;

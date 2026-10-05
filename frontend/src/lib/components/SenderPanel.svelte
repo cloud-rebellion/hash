@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { beforeNavigate } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { sameRecipientDraft, type RecipientDraft } from './senderDraft';
   import {
     listRecipients,
     createRecipient,
@@ -45,6 +48,7 @@
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
     onDefaultLocaleChange?: (locale: string) => Promise<void> | void;
+    onRecipientsChange?: () => void;
   };
 
   let {
@@ -55,6 +59,7 @@
     signatureFields = [],
     onStatusChange,
     onDefaultLocaleChange,
+    onRecipientsChange,
   }: Props = $props();
 
   // Distinct roles that have a signature field; each needs a recipient to sign.
@@ -75,22 +80,37 @@
   // This is deliberately an initial value, not a live mirror of the prop:
   // subsequent changes come from the select and are persisted explicitly.
   let docLocale = $state(untrack(() => defaultLocale || 'en'));
+  let confirmedDocLocale = $state(untrack(() => defaultLocale || 'en'));
   let savingLocale = $state(false);
 
   async function changeDocLocale(e: Event) {
+    const scope = captureScope();
+    if (!scope || !editable || savingLocale || busy || saving) return;
     const next = (e.currentTarget as HTMLSelectElement).value;
     docLocale = next;
     savingLocale = true;
     try {
-      await onDefaultLocaleChange?.(next);
+      const saveLocale = onDefaultLocaleChange;
+      if (!saveLocale) throw new Error('Document language cannot be saved here.');
+      await saveLocale(next);
+      await tick();
+      if (!isCurrent(scope)) return;
+      if (defaultLocale !== next) throw new Error('The document language was not confirmed. The previous language has been restored.');
+      confirmedDocLocale = next;
+    } catch (e) {
+      if (isCurrent(scope)) {
+        docLocale = confirmedDocLocale;
+        error = (e as Error).message;
+      }
     } finally {
-      savingLocale = false;
+      if (isCurrent(scope)) savingLocale = false;
     }
   }
 
   let recipients = $state<Recipient[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let recipientRefreshError = $state<string | null>(null);
   let sendErr = $state<SendError | null>(null);
 
   // Recipient add/edit form.
@@ -101,6 +121,38 @@
   let fRole = $state('signer');
   let fLocale = $state('en');
   let saving = $state(false);
+  let formBaseline = $state<RecipientDraft | null>(null);
+  let formRevision = 0;
+  let panelRevision = 0;
+  let refreshRevision = 0;
+  let disposed = false;
+  let initialized = false;
+  let boundDocumentID = $state(untrack(() => documentID));
+  let documentChanged = $state(false);
+  let removingID = $state<string | null>(null);
+  let reminderTimer: ReturnType<typeof setTimeout> | null = null;
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  type PanelScope = { id: string; revision: number };
+  function captureScope(): PanelScope | null {
+    if (disposed || documentChanged || boundDocumentID !== documentID || $page.params.id !== documentID) return null;
+    return { id: documentID, revision: panelRevision };
+  }
+  function isCurrent(scope: PanelScope): boolean {
+    return !disposed && !documentChanged && scope.id === boundDocumentID && scope.id === documentID
+      && scope.id === $page.params.id && scope.revision === panelRevision;
+  }
+  function currentForm(): RecipientDraft {
+    return { editingId, name: fName, email: fEmail, role: fRole, locale: fLocale };
+  }
+  function recipientDraftChanged(): boolean {
+    return showForm && formBaseline !== null && !sameRecipientDraft(currentForm(), formBaseline);
+  }
+  function hasMeaningfulDraft(): boolean {
+    return recipientDraftChanged() || lawfulBasis !== '' || docLocale !== confirmedDocLocale;
+  }
+  function confirmFormReplacement(): boolean {
+    return !recipientDraftChanged() || window.confirm('Discard the unsaved recipient changes?');
+  }
 
   // Lifecycle action state.
   let busy = $state<'send' | 'remind' | 'void' | null>(null);
@@ -124,19 +176,96 @@
   );
 
   async function refresh() {
+    const scope = captureScope();
+    if (!scope) return;
+    const revision = ++refreshRevision;
     loading = true;
     try {
-      recipients = await listRecipients(documentID);
-      error = null;
+      const loaded = await listRecipients(scope.id);
+      if (!loaded.every((recipient) => recipient.document_id === scope.id)) throw new Error('The server returned recipients for a different document.');
+      if (isCurrent(scope) && revision === refreshRevision) {
+        recipients = loaded;
+        recipientRefreshError = null;
+      }
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrent(scope) && revision === refreshRevision) recipientRefreshError = (e as Error).message;
     } finally {
-      loading = false;
+      if (isCurrent(scope) && revision === refreshRevision) loading = false;
     }
   }
-  onMount(refresh);
+  function initializePanel(id: string) {
+    panelRevision++;
+    refreshRevision++;
+    formRevision++;
+    boundDocumentID = id;
+    documentChanged = false;
+    recipients = [];
+    loading = true;
+    error = null;
+    recipientRefreshError = null;
+    sendErr = null;
+    showForm = false;
+    editingId = null;
+    fName = '';
+    fEmail = '';
+    fRole = 'signer';
+    fLocale = 'en';
+    formBaseline = null;
+    saving = false;
+    savingLocale = false;
+    removingID = null;
+    busy = null;
+    links = null;
+    lawfulBasis = '';
+    remindedFlash = null;
+    copiedID = null;
+    confirmedDocLocale = defaultLocale || 'en';
+    docLocale = confirmedDocLocale;
+    if (reminderTimer) clearTimeout(reminderTimer);
+    if (copyTimer) clearTimeout(copyTimer);
+    initialized = true;
+    void refresh();
+  }
+  $effect(() => {
+    const id = documentID;
+    untrack(() => {
+      if (initialized && id === boundDocumentID) return;
+      if (initialized && hasMeaningfulDraft()) {
+        panelRevision++;
+        documentChanged = true;
+        error = 'The document changed. Your recipient and sending draft has been retained; review it before opening the current document.';
+        return;
+      }
+      initializePanel(id);
+    });
+  });
+  function discardRetainedDraft() {
+    if (!window.confirm('Discard the retained recipient and sending draft and open the current document?')) return;
+    initializePanel(documentID);
+  }
+  beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (!willUnload && to?.url.pathname !== from?.url.pathname && hasMeaningfulDraft()
+        && !window.confirm('You have unsaved recipient or sending changes. Leave this document and discard the draft? Changes already being saved may still complete.')) cancel();
+  });
+  function protectDraft(event: BeforeUnloadEvent) {
+    if (!hasMeaningfulDraft()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  }
+  onMount(() => {
+    window.addEventListener('beforeunload', protectDraft);
+    return () => window.removeEventListener('beforeunload', protectDraft);
+  });
+  onDestroy(() => {
+    disposed = true;
+    panelRevision++;
+    refreshRevision++;
+    if (reminderTimer) clearTimeout(reminderTimer);
+    if (copyTimer) clearTimeout(copyTimer);
+  });
 
   function openAdd() {
+    if (!captureScope() || !editable || saving || busy || !confirmFormReplacement()) return;
     editingId = null;
     fName = '';
     fEmail = '';
@@ -146,128 +275,175 @@
     fRole = requiresSignature ? (firstSupportedRequiredRole?.value ?? 'signer') : 'approver';
     fLocale = requiresSignature ? (docLocale || 'en') : 'en';
     showForm = true;
+    formRevision++;
+    formBaseline = currentForm();
   }
 
   function openEdit(r: Recipient) {
+    if (!captureScope() || !editable || saving || busy || !recipients.some((recipient) => recipient.id === r.id) || !confirmFormReplacement()) return;
     editingId = r.id;
     fName = r.name;
     fEmail = r.email;
     fRole = r.role;
     fLocale = requiresSignature ? (r.locale || 'en') : 'en';
     showForm = true;
+    formRevision++;
+    formBaseline = currentForm();
   }
 
-  function closeForm() {
+  function closeForm(confirmed = false) {
+    if (!confirmed && (saving || !confirmFormReplacement())) return;
     showForm = false;
     editingId = null;
+    formBaseline = null;
+    formRevision++;
   }
 
   async function submitForm() {
+    const scope = captureScope();
+    if (!scope || !editable || saving || busy || savingLocale || !showForm) return;
     if (!fName.trim() || !fEmail.trim()) {
       error = 'Name and email are required.';
       return;
     }
     saving = true;
     error = null;
+    const submitted = currentForm();
+    const revision = formRevision;
     try {
-      if (editingId) {
-        await updateRecipient(documentID, editingId, {
-          name: fName.trim(),
-          email: fEmail.trim(),
-          role: fRole,
-          locale: fLocale,
-        });
+      let saved: Recipient;
+      const input = { name: submitted.name.trim(), email: submitted.email.trim(), role: submitted.role, locale: submitted.locale };
+      if (submitted.editingId) {
+        saved = await updateRecipient(scope.id, submitted.editingId, input);
       } else {
         const nextOrder = recipients.reduce((m, r) => Math.max(m, r.order_index), -1) + 1;
-        await createRecipient(documentID, {
-          name: fName.trim(),
-          email: fEmail.trim(),
-          role: fRole,
+        saved = await createRecipient(scope.id, {
+          ...input,
           order_index: nextOrder,
-          locale: fLocale,
         });
       }
-      closeForm();
+      if (!isCurrent(scope)) return;
+      if (saved.document_id !== scope.id || (submitted.editingId && saved.id !== submitted.editingId)) throw new Error('The server did not confirm this recipient. Your draft has been retained.');
+      onRecipientsChange?.();
+      if (revision === formRevision) {
+        if (sameRecipientDraft(currentForm(), submitted)) closeForm(true);
+        else {
+          editingId = saved.id;
+          formBaseline = { ...submitted, editingId: saved.id };
+        }
+      }
       await refresh();
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrent(scope)) error = (e as Error).message;
     } finally {
-      saving = false;
+      if (isCurrent(scope)) saving = false;
     }
   }
 
   async function remove(r: Recipient) {
+    const scope = captureScope();
+    if (!scope || !editable || saving || busy || removingID || !recipients.some((recipient) => recipient.id === r.id)) return;
     if (!confirm(`Remove ${r.name} <${r.email}> from this document?`)) return;
     error = null;
+    removingID = r.id;
     try {
-      await deleteRecipient(documentID, r.id);
+      await deleteRecipient(scope.id, r.id);
+      if (!isCurrent(scope)) return;
+      onRecipientsChange?.();
       await refresh();
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrent(scope)) error = (e as Error).message;
+    } finally {
+      if (isCurrent(scope)) removingID = null;
     }
   }
 
   async function send() {
+    const scope = captureScope();
+    if (!scope || !editable || busy || saving || savingLocale || removingID) return;
+    if (recipientDraftChanged()) {
+      error = 'Save or cancel the recipient changes before sending this document.';
+      return;
+    }
+    if (!hasParticipant || missingRoles.length) return;
+    const basis = lawfulBasis;
+    const statusChanged = onStatusChange;
     busy = 'send';
     error = null;
     sendErr = null;
     try {
-		if (!lawfulBasis) {
+		if (!basis) {
 			error = 'Select and confirm the controller\'s GDPR Article 6 lawful basis before sending.';
 			return;
 		}
-		const res = await sendDocument(documentID, lawfulBasis);
+		const res = await sendDocument(scope.id, basis);
+      if (!isCurrent(scope)) return;
       links = res.links;
-      onStatusChange?.(res.status || 'sent');
+      lawfulBasis = '';
+      closeForm(true);
+      statusChanged?.(res.status || 'sent');
       await refresh();
     } catch (e) {
+      if (!isCurrent(scope)) return;
       if (e instanceof SendError) {
         sendErr = e;
       } else {
         error = (e as Error).message;
       }
     } finally {
-      busy = null;
+      if (isCurrent(scope)) busy = null;
     }
   }
 
   async function remind() {
+    const scope = captureScope();
+    if (!scope || !isLive || busy) return;
     busy = 'remind';
     error = null;
     try {
-      const res = await remindDocument(documentID);
+      const res = await remindDocument(scope.id);
+      if (!isCurrent(scope)) return;
       remindedFlash = res.reminded;
-      setTimeout(() => (remindedFlash = null), 4000);
+      if (reminderTimer) clearTimeout(reminderTimer);
+      reminderTimer = setTimeout(() => { if (isCurrent(scope)) remindedFlash = null; }, 4000);
       await refresh();
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrent(scope)) error = (e as Error).message;
     } finally {
-      busy = null;
+      if (isCurrent(scope)) busy = null;
     }
   }
 
   async function voidDoc() {
+    const scope = captureScope();
+    if (!scope || !isLive || busy) return;
     const reason = prompt('Reason for voiding this document (recorded in the audit trail):');
     if (reason === null) return;
+    const statusChanged = onStatusChange;
     busy = 'void';
     error = null;
     try {
-      await voidDocument(documentID, reason.trim() || undefined);
+      await voidDocument(scope.id, reason.trim() || undefined);
+      if (!isCurrent(scope)) return;
       links = null;
-      onStatusChange?.('voided');
+      statusChanged?.('voided');
       await refresh();
     } catch (e) {
-      error = (e as Error).message;
+      if (isCurrent(scope)) error = (e as Error).message;
     } finally {
-      busy = null;
+      if (isCurrent(scope)) busy = null;
     }
   }
 
   async function copyLink(l: SignerLink) {
+    const scope = captureScope();
+    if (!scope || !links?.some((link) => link.recipient_id === l.recipient_id && link.url === l.url)) return;
     try {
       await navigator.clipboard.writeText(l.url);
+      if (!isCurrent(scope)) return;
       copiedID = l.recipient_id;
-      setTimeout(() => (copiedID = null), 2000);
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { if (isCurrent(scope)) copiedID = null; }, 2000);
     } catch {
       /* clipboard blocked; the link is still visible to select manually */
     }
@@ -299,13 +475,19 @@
   }
 </script>
 
-<section class="card p-5 mb-6">
+<section class="card p-5 mb-6" aria-label="Recipients and sending">
+  {#if documentChanged}
+    <div role="alert" class="mb-4 text-danger">
+      <p>The current document differs from this retained recipient draft. Sending and recipient changes are blocked.</p>
+      <button type="button" class="btn btn-secondary" onclick={discardRetainedDraft}>Discard retained draft and open current document</button>
+    </div>
+  {/if}
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
       <Users class="size-4" /> {modeCopy.sectionTitle}
     </h2>
     {#if editable}
-      <button class="btn btn-secondary text-xs" onclick={openAdd}>
+      <button class="btn btn-secondary text-xs" onclick={openAdd} disabled={documentChanged || saving || !!busy}>
         <Plus class="size-3" /> Add recipient
       </button>
     {/if}
@@ -320,7 +502,8 @@
         <select
           bind:value={docLocale}
           onchange={changeDocLocale}
-          disabled={savingLocale}
+          disabled={documentChanged || savingLocale || !!busy || saving}
+          aria-label="Default email language"
           class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm"
         >
           {#each LOCALES as l (l.code)}
@@ -366,8 +549,14 @@
   {/if}
 
   {#if error}
-    <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
+    <div role="alert" class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
       {error}
+    </div>
+  {/if}
+  {#if recipientRefreshError}
+    <div role="alert" class="mb-4 text-danger">
+      <p>Recipients could not be refreshed. {recipientRefreshError}</p>
+      <button type="button" class="btn btn-secondary" disabled={loading || documentChanged} onclick={refresh}>Retry recipient refresh</button>
     </div>
   {/if}
 
@@ -470,15 +659,15 @@
         </div>
       </div>
       <div class="flex gap-2">
-        <button class="btn btn-primary" onclick={submitForm} disabled={saving}>
+        <button class="btn btn-primary" onclick={submitForm} disabled={documentChanged || saving || !!busy || savingLocale}>
           {saving ? 'Saving...' : editingId ? 'Save changes' : 'Add recipient'}
         </button>
-        <button class="btn btn-secondary" onclick={closeForm}>Cancel</button>
+        <button class="btn btn-secondary" onclick={() => closeForm()} disabled={saving}>Cancel</button>
       </div>
     </div>
   {/if}
 
-  {#if loading}
+  {#if loading && !recipients.length}
     <p class="text-text-muted text-sm">Loading...</p>
   {:else if recipients.length === 0}
     <p class="text-text-muted text-sm mb-4">
@@ -498,7 +687,7 @@
       </thead>
       <tbody class="divide-y divide-border-light">
         {#each recipients as r (r.id)}
-          <tr>
+          <tr data-recipient-id={r.id}>
             <td class="py-2">
               <div class="font-medium">{r.name}</div>
               <div class="text-xs text-text-muted">{r.email}</div>
@@ -522,10 +711,10 @@
             </td>
             {#if editable}
               <td class="text-right whitespace-nowrap">
-                <button class="btn btn-secondary text-xs" onclick={() => openEdit(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={`Edit ${r.name}`} disabled={documentChanged || saving || !!busy} onclick={() => openEdit(r)}>
                   <Pencil class="size-3" />
                 </button>
-                <button class="btn btn-secondary text-xs" onclick={() => remove(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={`Remove ${r.name}`} disabled={documentChanged || saving || !!busy || !!removingID} onclick={() => remove(r)}>
                   <Trash2 class="size-3" />
                 </button>
               </td>
@@ -544,6 +733,7 @@
 				<select
 					id="lawful-basis"
 					bind:value={lawfulBasis}
+					disabled={documentChanged || !!busy}
 					class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg text-sm"
 					required
 				>
@@ -560,7 +750,7 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={busy === 'send' || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
       {#if !hasParticipant}
@@ -569,10 +759,10 @@
         <span class="text-xs text-warning">Add a recipient for: {missingRoles.join(', ')}.</span>
       {/if}
     {:else if isLive}
-      <button class="btn btn-secondary" onclick={remind} disabled={busy === 'remind'}>
+      <button class="btn btn-secondary" onclick={remind} disabled={documentChanged || !!busy}>
         <Bell class="size-4" /> {busy === 'remind' ? 'Sending...' : 'Send reminder'}
       </button>
-      <button class="btn btn-secondary" onclick={voidDoc} disabled={busy === 'void'}>
+      <button class="btn btn-secondary" onclick={voidDoc} disabled={documentChanged || !!busy}>
         <Ban class="size-4" /> {busy === 'void' ? 'Voiding...' : 'Void document'}
       </button>
       {#if remindedFlash !== null}

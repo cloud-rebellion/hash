@@ -27,6 +27,7 @@ import (
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/collab"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
@@ -163,7 +164,11 @@ func setupDSRE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queri
 	}
 	t.Cleanup(pool.Close)
 	q := generated.New(pool)
-	server := &Server{Pool: pool, Queries: q, Audit: audit.New(q, pool)}
+	cookies, err := auth.NewSignedCookie(strings.Repeat("4b", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Pool: pool, Queries: q, Audit: audit.New(q, pool), Cookies: cookies, PublicURL: "https://hash.example.test"}
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "DSR atomicity " + uuid.NewString(), Plan: "pro"})
 	if err != nil {
 		t.Fatal(err)
@@ -325,9 +330,9 @@ func sendDSRDocumentE2E(
 	return sent
 }
 
-func seedCompleteFrozenBrandingHandlerE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, documentID uuid.UUID) {
+func seedCompleteFrozenBrandingHandlerE2E(t *testing.T, ctx context.Context, db generated.DBTX, documentID uuid.UUID) {
 	t.Helper()
-	_, err := pool.Exec(ctx, `INSERT INTO document_branding_override (
+	_, err := db.Exec(ctx, `INSERT INTO document_branding_override (
 		document_id, primary_hex, accent_hex, surface_hex, text_hex, muted_hex,
 		logo_url, logo_alt, font_heading, font_body, signature_color
 	) VALUES ($1, '#0F172A', '#3B82F6', '#FFFFFF', '#0F172A', '#64748B',
@@ -449,7 +454,116 @@ func transitionDSRE2E(server *Server, orgID, userID, requestID uuid.UUID, status
 	ctx = context.WithValue(ctx, chi.RouteCtxKey, routeContext)
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dsr/"+requestID.String(), strings.NewReader(`{"status":"`+status+`"}`)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
+	payload, _ := json.Marshal(auth.SessionPayload{UserID: userID})
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: server.Cookies.Mint(payload, time.Hour)})
 	recorder := httptest.NewRecorder()
 	server.handleTransitionDSR(recorder, req)
 	return recorder
+}
+
+func TestDSRErasureSoftDeletedDraftRequiresArchiveReviewAndCanCompleteE2E(t *testing.T) {
+	ctx, pool, q, server, orgID, userID := setupDSRE2E(t)
+	var err error
+	server.Cookies, err = auth.NewSignedCookie(strings.Repeat("4b", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.PublicURL = "https://hash.example.test"
+	server.Collab = collab.NewHub(q)
+	defer server.Collab.Shutdown(ctx)
+	payload, _ := json.Marshal(auth.SessionPayload{UserID: userID})
+	cookie := server.Cookies.Mint(payload, time.Hour)
+	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
+		OrgID: orgID, SenderID: userID, Name: "soft-deleted privacy grace draft",
+		BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{
+		DocumentID: doc.ID, Role: "signer", Email: "original@example.test", Name: "Original Name", OrderIndex: 0,
+		MagicTokenHash: []byte(uuid.NewString()), MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.DeleteDraftDocument(ctx, generated.DeleteDraftDocumentParams{ID: doc.ID, OrgID: orgID}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := q.GetDocumentByID(ctx, doc.ID)
+	if err != nil || !deleted.DeletedAt.Valid {
+		t.Fatal("fixture was not soft deleted", err)
+	}
+	dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
+		OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
+		SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archiveID uuid.UUID
+	archivedReplay := []byte("opaque legacy replay: Original Name original@example.test")
+	if err = pool.QueryRow(ctx, `INSERT INTO collab_recovery_archives(document_id,observed_canonical_generation,origin,ydoc_state,recovered_by)
+SELECT document_id,generation,'persisted',$2,$3 FROM collab_document_generations WHERE document_id=$1 RETURNING id`, doc.ID, archivedReplay, userID).Scan(&archiveID); err != nil { //nolint:rawsql
+		t.Fatal(err)
+	}
+	routes := server.Routes()
+	submit := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, server.PublicURL+"/api/v1/"+path, strings.NewReader(body))
+		req.Header.Set("Origin", server.PublicURL)
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
+		res := httptest.NewRecorder()
+		routes.ServeHTTP(res, req)
+		return res
+	}
+	transition := func(status string) *httptest.ResponseRecorder {
+		return submit(http.MethodPatch, "dsr/"+dsr.ID.String(), `{"status":"`+status+`","resolution_note":"fixture privacy review"}`)
+	}
+	if res := transition("fulfilled"); res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "separate privacy review") {
+		t.Fatalf("soft-deleted archive erasure status=%d body=%s", res.Code, res.Body.String())
+	}
+	freshRecipient, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: orgID})
+	if err != nil || freshRecipient.Email != recipient.Email || freshRecipient.Name != recipient.Name {
+		t.Fatal("blocked soft-deleted erasure changed recipient identifiers", err)
+	}
+	freshRequest, err := q.GetDataSubjectRequest(ctx, generated.GetDataSubjectRequestParams{ID: dsr.ID, OrgID: orgID})
+	if err != nil || freshRequest.Status != "open" || freshRequest.SubjectEmail != recipient.Email {
+		t.Fatal("blocked soft-deleted erasure changed the request", err)
+	}
+	// Complete archive handling as a separate owner review. Temporarily close
+	// the request, remove the reviewed operational replay with acknowledgement,
+	// and reopen it before targeted erasure. This does not relax evidence checks.
+	if res := transition("denied"); res.Code != http.StatusOK {
+		t.Fatalf("archive review transition status=%d body=%s", res.Code, res.Body.String())
+	}
+	archivePath := "documents/" + doc.ID.String() + "/collab/recovery/archives/" + archiveID.String()
+	if res := submit(http.MethodDelete, archivePath, `{"acknowledged":true}`); res.Code != http.StatusNoContent {
+		t.Fatalf("reviewed soft-deleted archive removal status=%d body=%s", res.Code, res.Body.String())
+	}
+	if res := transition("in_progress"); res.Code != http.StatusOK {
+		t.Fatalf("reopen soft-deleted erasure status=%d body=%s", res.Code, res.Body.String())
+	}
+	if res := transition("fulfilled"); res.Code != http.StatusOK {
+		t.Fatalf("reviewed soft-deleted erasure status=%d body=%s", res.Code, res.Body.String())
+	}
+	freshRecipient, err = q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: orgID})
+	if err != nil || freshRecipient.Email != AnonymizedEmail(dsr.ID) || freshRecipient.Name != AnonymizationMarker {
+		t.Fatalf("targeted erasure did not anonymize recipient=%+v err=%v", freshRecipient, err)
+	}
+	freshRequest, err = q.GetDataSubjectRequest(ctx, generated.GetDataSubjectRequestParams{ID: dsr.ID, OrgID: orgID})
+	if err != nil || freshRequest.Status != "fulfilled" || freshRequest.SubjectEmail != AnonymizedEmail(dsr.ID) || freshRequest.SubjectName != AnonymizationMarker {
+		t.Fatalf("targeted erasure did not fulfill/redact request=%+v err=%v", freshRequest, err)
+	}
+	retained, err := q.GetDocumentByID(ctx, doc.ID)
+	if err != nil || !retained.DeletedAt.Time.Equal(deleted.DeletedAt.Time) || retained.Status != "draft" {
+		t.Fatal("targeted erasure changed the retained draft/grace timestamp", err)
+	}
+	var archives, terminalEvents int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM collab_recovery_archives WHERE document_id=$1`, doc.ID).Scan(&archives); err != nil || archives != 0 {
+		t.Fatalf("reviewed archives=%d err=%v", archives, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE org_id=$1 AND kind IN ('data_subject.anonymized','data_subject.fulfilled')`, orgID).Scan(&terminalEvents); err != nil || terminalEvents != 2 {
+		t.Fatalf("targeted erasure audit count=%d err=%v", terminalEvents, err)
+	}
 }

@@ -5,6 +5,7 @@ package sanitize
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -49,5 +50,46 @@ func TestPageCount(t *testing.T) {
 		if got != want {
 			t.Errorf("PageCount = %d, want %d", got, want)
 		}
+	}
+}
+
+func TestPDFPageLimitAppliesBeforeCleaning(t *testing.T) {
+	raw := buildTestPDF(t, MaxPDFPages+1)
+	for _, asset := range []string{"template-pdf", "proposal-pdf"} {
+		result, err := Clean(asset, "application/pdf", raw)
+		if !errors.Is(err, ErrTooManyPages) {
+			t.Fatalf("%s: expected page limit, got %v", asset, err)
+		}
+		if len(result.Bytes) != 0 {
+			t.Fatalf("%s: rejected PDF returned publishable output", asset)
+		}
+	}
+	result, err := Clean("template-pdf", "application/pdf", buildTestPDF(t, MaxPDFPages))
+	if err != nil || len(result.Bytes) == 0 {
+		t.Fatalf("boundary PDF rejected: %v", err)
+	}
+}
+
+func TestPDFByteLimitRejectsBeforeParsing(t *testing.T) {
+	raw := make([]byte, MaxPDFBytes+1)
+	result, err := Clean("proposal-pdf", "application/pdf", raw)
+	if !errors.Is(err, ErrPDFTooLarge) || len(result.Bytes) != 0 {
+		t.Fatalf("oversized PDF not rejected before parsing: %v", err)
+	}
+}
+
+func TestOptimizerBufferRefusesOutputAmplification(t *testing.T) {
+	var out boundedPDFBuffer
+	chunk := make([]byte, 1<<20)
+	for i := 0; i < 50; i++ {
+		if n, err := out.Write(chunk); err != nil || n != len(chunk) {
+			t.Fatalf("boundary output refused %d %v", n, err)
+		}
+	}
+	if n, err := out.Write([]byte{1}); n != 0 || !errors.Is(err, ErrPDFTooLarge) {
+		t.Fatalf("expanded output accepted %d %v", n, err)
+	}
+	if len(out.Bytes()) != MaxPDFBytes {
+		t.Fatal("rejected write changed output")
 	}
 }

@@ -27,12 +27,13 @@ import (
 type ContextKey string
 
 const (
-	UserIDKey        ContextKey = "hash.user_id"
-	OrgIDKey         ContextKey = "hash.org_id"
-	RoleKey          ContextKey = "hash.role"
-	EmailKey         ContextKey = "hash.email"
-	DocumentScopeKey ContextKey = "hash.doc_scope" // present iff a per-doc agent token authenticated this request
-	TokenScopesKey   ContextKey = "hash.token_scopes"
+	UserIDKey            ContextKey = "hash.user_id"
+	OrgIDKey             ContextKey = "hash.org_id"
+	RoleKey              ContextKey = "hash.role"
+	EmailKey             ContextKey = "hash.email"
+	SessionGenerationKey ContextKey = "hash.session_generation"
+	DocumentScopeKey     ContextKey = "hash.doc_scope" // present iff a per-doc agent token authenticated this request
+	TokenScopesKey       ContextKey = "hash.token_scopes"
 )
 
 // DocumentScopeFromContext returns the document UUID this request is

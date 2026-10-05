@@ -4,10 +4,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"io"
 	"net/http"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/sanitize"
 )
 
@@ -158,12 +161,21 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 // colours. Does NOT persist the logo; callers display the suggestion in
 // the settings UI and only PUT /branding if the user accepts.
 func (s *Server) handleExtractBrandingPalette(w http.ResponseWriter, r *http.Request) {
-	_, ok := requireSessionUser(w, r.Context())
+	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
 		return
 	}
+	release, err := importguard.Shared.Acquire(sess.OrgID)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer release()
+
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024*1024)
-	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
+	defer cleanupMultipart(r)
+	if err := r.ParseMultipartForm(multipartFileMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "expected multipart form: "+err.Error())
 		return
 	}
@@ -173,7 +185,16 @@ func (s *Server) handleExtractBrandingPalette(w http.ResponseWriter, r *http.Req
 		return
 	}
 	defer file.Close()
-	primary, accent, ok2 := branding.ExtractPaletteFromLogo(file)
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "logo read failed")
+		return
+	}
+	if err := malwarescan.ScanActive(r.Context(), raw); err != nil {
+		writeScanError(w, err)
+		return
+	}
+	primary, accent, ok2 := branding.ExtractPaletteFromLogo(bytes.NewReader(raw))
 	if !ok2 {
 		writeError(w, http.StatusBadRequest, "logo could not be decoded (expected jpeg or png)")
 		return
@@ -198,8 +219,17 @@ func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
+	release, err := importguard.Shared.Acquire(sess.OrgID)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer release()
+
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024*1024)
-	if err := r.ParseMultipartForm(4 * 1024 * 1024); err != nil {
+	defer cleanupMultipart(r)
+	if err := r.ParseMultipartForm(multipartFileMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "expected multipart form: "+err.Error())
 		return
 	}
@@ -226,8 +256,12 @@ func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request
 	// A logo uploaded straight from a phone camera typically carries
 	// the photographer's GPS coords and device serial; we don't want
 	// either embedded in every signed PDF we ship.
-	cleaned, err := sanitize.Clean("logo", ctype, raw)
+	cleaned, err := sanitize.CleanWithContext(r.Context(), "logo", ctype, raw)
 	if err != nil {
+		if errors.Is(err, malwarescan.ErrUnavailable) {
+			writeScanError(w, err)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "sanitize logo: "+err.Error())
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/bright-interaction/hash/internal/auth"
@@ -37,7 +38,10 @@ func sanitizeToolError(err error) string {
 	var pgErr *pgconn.PgError
 	var connErr *pgconn.ConnectError
 	msg := err.Error()
-	if errors.As(err, &pgErr) || errors.As(err, &connErr) ||
+	// Scoped absence is translated by the tool into its explicit not-found
+	// error. A raw no-row result from a mutation or audit insert is an internal
+	// failure and receives the same logging and generic response as SQL faults.
+	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pgErr) || errors.As(err, &connErr) ||
 		strings.Contains(msg, "dial tcp") || strings.Contains(msg, "SQLSTATE") ||
 		strings.Contains(msg, "host=") || strings.Contains(msg, "connection refused") {
 		slog.Error("mcp tool internal error", "err", err)

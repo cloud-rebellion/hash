@@ -160,6 +160,7 @@ func validateUniqueJSONObject(raw []byte) error {
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // Syntax/duplicate scan must not coerce arbitrary JSON numbers into float64.
 	token, err := dec.Token()
 	if err != nil {
 		return err

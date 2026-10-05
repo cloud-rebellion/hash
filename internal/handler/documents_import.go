@@ -6,6 +6,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"io"
 	"net/http"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/docintake"
+	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/render"
 )
 
@@ -44,6 +46,13 @@ func (s *Server) handleImportDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release, err := importguard.Shared.Acquire(u.OrgID)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	defer release()
 	if ct := r.Header.Get("Content-Type"); ct == "application/json" || ct == "application/json; charset=utf-8" {
 		s.importDocumentFromHTML(w, r, u.UserID, u.OrgID)
 		return
@@ -53,7 +62,8 @@ func (s *Server) handleImportDocument(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) importDocumentFromPDF(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxPDFUpload+(1<<20))
-	if err := r.ParseMultipartForm(maxPDFUpload); err != nil {
+	defer cleanupMultipart(r)
+	if err := r.ParseMultipartForm(multipartFileMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "could not parse upload: "+err.Error())
 		return
 	}
@@ -103,6 +113,10 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 	}
 	// Preserve the page's design; strip only the JS + remote-fetch (SSRF)
 	// surface before Chromium sees it.
+	if err := malwarescan.ScanActive(r.Context(), []byte(in.HTML)); err != nil {
+		writeScanError(w, err)
+		return
+	}
 	safe := render.SanitizeForRender(in.HTML)
 	opts := render.PDFOptions{
 		PreferCSSPageSize: true,
@@ -138,6 +152,10 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 	}
 	d, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), q, s.Storage, orgID, userID, name, data)
 	if err != nil {
+		if errors.Is(err, malwarescan.ErrUnavailable) {
+			writeScanError(w, err)
+			return
+		}
 		if errors.Is(err, docintake.ErrSanitizePDF) {
 			writeError(w, http.StatusBadRequest, "sanitize PDF: "+err.Error())
 			return

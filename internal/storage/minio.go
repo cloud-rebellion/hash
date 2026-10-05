@@ -1260,3 +1260,24 @@ func (c *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) 
 	}
 	return c.mc.PresignedGetObject(ctx, c.bucket, key, ttl, nil)
 }
+
+func (c *Client) DeleteDraftSource(ctx context.Context, key, versionID string) error {
+	if key == "" {
+		return errors.New("draft source key required")
+	}
+	if err := c.validatePinnedVersionID(versionID); err != nil {
+		return err
+	}
+	if versionID == DevelopmentVersionID {
+		return c.mc.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{})
+	}
+	err := c.mc.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{VersionID: versionID})
+	if err != nil {
+		code := minio.ToErrorResponse(err).Code
+		if code == "NoSuchKey" || code == "NoSuchVersion" {
+			return nil
+		}
+		return fmt.Errorf("delete pinned draft source %q: %w", key, err)
+	}
+	return nil
+}

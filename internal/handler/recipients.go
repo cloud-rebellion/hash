@@ -11,15 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/recipients"
-)
-
-var (
-	errRecipientNotFound       = errors.New("recipient not found")
-	errRecipientDocumentLocked = errors.New("document not editable (must be draft)")
 )
 
 type recipientResponse struct {
@@ -102,94 +96,23 @@ func (s *Server) handleCreateRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	doc, ok := s.requireDraftDocument(w, r, docID, u)
-	if !ok {
-		return
-	}
-
 	var in createRecipientInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if in.Email == "" || in.Name == "" {
-		writeError(w, http.StatusBadRequest, "email and name required")
+	actor, ok := s.recipientMutationActor(w, r, u)
+	if !ok {
 		return
 	}
-	role := in.Role
-	if role == "" {
-		role = "signer"
-	}
-	// Inherit the document's default signing language unless this recipient
-	// was given an explicit one. This is the cascade behind the sender's
-	// "send this document in Swedish" choice.
-	locale := in.Locale
-	if locale == "" {
-		locale = doc.DefaultLocale
-	}
-	if locale == "" {
-		locale = "en"
-	}
-	values, err := recipients.Normalize(recipients.Values{
-		Email: in.Email, Name: in.Name, Role: role, OrderIndex: in.OrderIndex, Locale: locale,
+	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	rec, err := engine.Create(r.Context(), actor, docID, recipients.Values{
+		Email: in.Email, Name: in.Name, Role: in.Role, OrderIndex: in.OrderIndex, Locale: in.Locale,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeRecipientMutationError(w, "create recipient", err)
 		return
 	}
-	if err := recipients.ValidateResponseRole(values.Role); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	_, hash, err := auth.MintMagicToken()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token mint failed")
-		return
-	}
-
-	rec, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Recipient, error) {
-			if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				return nil, err
-			}
-			rec, err := q.CreateRecipient(r.Context(), generated.CreateRecipientParams{
-				DocumentID:          docID,
-				Role:                values.Role,
-				Email:               values.Email,
-				Name:                values.Name,
-				OrderIndex:          values.OrderIndex,
-				Locale:              values.Locale,
-				MagicTokenHash:      hash,
-				MagicTokenExpiresAt: computeMagicTokenExpiry(doc, time.Now()),
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				return nil, err
-			}
-			return rec, nil
-		},
-		func(rec *generated.Recipient) audit.Entry {
-			return audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &rec.ID,
-				Kind:    audit.KindRecipientCreated,
-				Payload: map[string]any{"email": rec.Email, "name": rec.Name, "role": rec.Role},
-			}
-		},
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusConflict, "document not editable (must be draft)")
-		return
-	}
-	if err != nil {
-		if s.writeAuthoringQuotaError(w, err) {
-			return
-		}
-		writeInternalErrorMsg(w, "create recipient failed", err)
-		return
-	}
-
 	writeJSON(w, http.StatusCreated, toRecipientResponse(rec))
 }
 
@@ -214,68 +137,21 @@ func (s *Server) handleUpdateRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := s.requireDraftDocument(w, r, docID, u); !ok {
-		return
-	}
 	var in updateRecipientInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	rec, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Recipient, error) {
-			doc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errRecipientNotFound
-			}
-			if err != nil {
-				return nil, err
-			}
-			if doc.Status != "draft" {
-				return nil, errRecipientDocumentLocked
-			}
-			existing, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: rid, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errRecipientNotFound
-			}
-			if err != nil {
-				return nil, err
-			}
-			if existing.DocumentID != docID {
-				return nil, errRecipientNotFound
-			}
-			values, err := normalizeRecipientUpdate(existing, in)
-			if err != nil {
-				return nil, err
-			}
-			return q.UpdateRecipient(r.Context(), generated.UpdateRecipientParams{
-				ID: rid, DocumentID: docID, Email: values.Email, Name: values.Name,
-				Role: values.Role, OrderIndex: values.OrderIndex, Locale: values.Locale,
-			})
-		},
-		func(updated *generated.Recipient) audit.Entry {
-			return audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &updated.ID,
-				Kind:    audit.KindRecipientUpdated,
-				Payload: map[string]any{"email": updated.Email, "name": updated.Name, "role": updated.Role},
-			}
-		},
-	)
-	if errors.Is(err, errRecipientDocumentLocked) || errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+	actor, ok := s.recipientMutationActor(w, r, u)
+	if !ok {
 		return
 	}
-	if errors.Is(err, errRecipientNotFound) {
-		writeError(w, http.StatusNotFound, "recipient not found")
-		return
-	}
-	var validationErr *recipients.ValidationError
-	if errors.As(err, &validationErr) {
-		writeError(w, http.StatusBadRequest, validationErr.Error())
-		return
-	}
+	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	rec, err := engine.Update(r.Context(), actor, docID, rid, recipients.Patch{
+		Email: in.Email, Name: in.Name, Role: in.Role, OrderIndex: in.OrderIndex, Locale: in.Locale,
+	})
 	if err != nil {
-		writeInternalErrorMsg(w, "update recipient failed", err)
+		s.writeRecipientMutationError(w, "update recipient", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toRecipientResponse(rec))
@@ -294,84 +170,61 @@ func (s *Server) handleDeleteRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := s.requireDraftDocument(w, r, docID, u); !ok {
+	actor, ok := s.recipientMutationActor(w, r, u)
+	if !ok {
 		return
 	}
-	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Recipient, error) {
-			doc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errRecipientNotFound
-			}
-			if err != nil {
-				return nil, err
-			}
-			if doc.Status != "draft" {
-				return nil, errRecipientDocumentLocked
-			}
-			existing, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: rid, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) || (err == nil && existing.DocumentID != docID) {
-				return nil, errRecipientNotFound
-			}
-			if err != nil {
-				return nil, err
-			}
-			if _, err := q.DeleteRecipient(r.Context(), generated.DeleteRecipientParams{ID: rid, DocumentID: docID}); err != nil {
-				return nil, err
-			}
-			return existing, nil
-		},
-		func(deleted *generated.Recipient) audit.Entry {
-			return audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &deleted.ID,
-				Kind:    audit.KindRecipientDeleted,
-				Payload: map[string]any{"email": deleted.Email, "name": deleted.Name, "role": deleted.Role},
-			}
-		},
-	)
-	if errors.Is(err, errRecipientDocumentLocked) || errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusConflict, "document not editable (must be draft)")
-		return
-	}
-	if errors.Is(err, errRecipientNotFound) {
-		writeError(w, http.StatusNotFound, "recipient not found")
-		return
-	}
-	if err != nil {
-		writeInternalErrorMsg(w, "delete recipient failed", err)
+	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	if _, err := engine.Delete(r.Context(), actor, docID, rid); err != nil {
+		s.writeRecipientMutationError(w, "delete recipient", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) recipientMutationActor(w http.ResponseWriter, r *http.Request, u auth.SessionUser) (recipients.MutationActor, bool) {
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return recipients.MutationActor{}, false
+	}
+	return recipients.MutationActor{
+		OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize,
+		Via: "rest", IP: clientIP(r), UserAgent: r.UserAgent(),
+	}, true
+}
+
+func (s *Server) writeRecipientMutationError(w http.ResponseWriter, operation string, err error) {
+	var validationErr *recipients.ValidationError
+	switch {
+	case errors.Is(err, auth.ErrMutationCredentialExpired):
+		writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
+	case errors.Is(err, auth.ErrMutationPermissionRevoked):
+		writeError(w, http.StatusForbidden, "permission or credential revoked")
+	case errors.Is(err, recipients.ErrDocumentNotFound):
+		writeError(w, http.StatusNotFound, "document not found")
+	case errors.Is(err, recipients.ErrRecipientNotFound):
+		writeError(w, http.StatusNotFound, "recipient not found")
+	case errors.Is(err, recipients.ErrDocumentNotDraft):
+		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+	case errors.Is(err, recipients.ErrDocumentHasEvidence):
+		writeError(w, http.StatusConflict, "document contains retained signing evidence or sealing state; review before editing recipients")
+	case errors.Is(err, recipients.ErrPrivacyReviewChanging):
+		writeError(w, http.StatusConflict, "privacy review is changing; retry after it completes")
+	case errors.Is(err, recipients.ErrPendingPrivacyReview):
+		writeError(w, http.StatusConflict, "recipient changes await the open privacy request review")
+	case errors.As(err, &validationErr):
+		writeError(w, http.StatusBadRequest, validationErr.Error())
+	default:
+		if !s.writeAuthoringQuotaError(w, err) {
+			writeInternalErrorMsg(w, operation, err)
+		}
+	}
+}
+
 func normalizeRecipientUpdate(existing *generated.Recipient, in updateRecipientInput) (recipients.Values, error) {
-	values := recipients.Values{
-		Email: existing.Email, Name: existing.Name, Role: existing.Role,
-		OrderIndex: existing.OrderIndex, Locale: existing.Locale,
-	}
-	if in.Email != nil {
-		values.Email = *in.Email
-	}
-	if in.Name != nil {
-		values.Name = *in.Name
-	}
-	if in.Role != nil {
-		values.Role = *in.Role
-	}
-	if in.OrderIndex != nil {
-		values.OrderIndex = *in.OrderIndex
-	}
-	if in.Locale != nil {
-		values.Locale = *in.Locale
-	}
-	normalized, err := recipients.Normalize(values)
-	if err != nil {
-		return recipients.Values{}, err
-	}
-	if err := recipients.ValidateResponseRole(normalized.Role); err != nil {
-		return recipients.Values{}, err
-	}
-	return normalized, nil
+	return recipients.NormalizePatch(existing, recipients.Patch{
+		Email: in.Email, Name: in.Name, Role: in.Role, OrderIndex: in.OrderIndex, Locale: in.Locale,
+	})
 }
 
 // requireDraftDocument provides a friendly HTTP error before authoring work,

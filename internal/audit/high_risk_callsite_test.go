@@ -48,6 +48,8 @@ func TestHighRiskMutationCallsitesDoNotUseNonTransactionalAudit(t *testing.T) {
 		"internal/mcp/tools_variable_bindings.go",
 		"internal/mcp/tools_versions.go",
 		"internal/mcp/tools_workflow.go",
+		"internal/recipients/mutation.go",
+		"internal/fields/mutation.go",
 	}
 	for _, rel := range files {
 		body, err := os.ReadFile(filepath.Join(root, rel))

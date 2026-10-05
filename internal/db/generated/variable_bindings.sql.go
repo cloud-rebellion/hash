@@ -40,6 +40,9 @@ func (q *Queries) ClaimBrightCRMWebhookReceipt(ctx context.Context, arg ClaimBri
 const deleteVariableBinding = `-- name: DeleteVariableBinding :exec
 DELETE FROM document_variable_bindings
 WHERE document_id = $1 AND variable_name = $2
+  AND EXISTS (SELECT 1 FROM documents d
+      WHERE d.id = document_variable_bindings.document_id
+        AND d.status = 'draft' AND d.deleted_at IS NULL)
 `
 
 type DeleteVariableBindingParams struct {
@@ -215,9 +218,11 @@ func (q *Queries) UpdateVariableBindingResolved(ctx context.Context, arg UpdateV
 const upsertVariableBinding = `-- name: UpsertVariableBinding :one
 INSERT INTO document_variable_bindings (
     document_id, variable_name, source_kind, source_ref, source_path, fallback
-) VALUES (
-    $1, $2, $3, $4, $5, $6
 )
+SELECT d.id, $1::text, $2::text,
+       $3::text, $4::text, $5::text
+FROM documents d
+WHERE d.id = $6 AND d.status = 'draft' AND d.deleted_at IS NULL
 ON CONFLICT (document_id, variable_name) DO UPDATE SET
     source_kind = EXCLUDED.source_kind,
     source_ref  = EXCLUDED.source_ref,
@@ -228,22 +233,22 @@ RETURNING document_id, variable_name, source_kind, source_ref, source_path, fall
 `
 
 type UpsertVariableBindingParams struct {
-	DocumentID   uuid.UUID `json:"document_id"`
 	VariableName string    `json:"variable_name"`
 	SourceKind   string    `json:"source_kind"`
 	SourceRef    string    `json:"source_ref"`
 	SourcePath   string    `json:"source_path"`
 	Fallback     string    `json:"fallback"`
+	DocumentID   uuid.UUID `json:"document_id"`
 }
 
 func (q *Queries) UpsertVariableBinding(ctx context.Context, arg UpsertVariableBindingParams) (*DocumentVariableBinding, error) {
 	row := q.db.QueryRow(ctx, upsertVariableBinding,
-		arg.DocumentID,
 		arg.VariableName,
 		arg.SourceKind,
 		arg.SourceRef,
 		arg.SourcePath,
 		arg.Fallback,
+		arg.DocumentID,
 	)
 	var i DocumentVariableBinding
 	err := row.Scan(

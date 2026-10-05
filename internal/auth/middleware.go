@@ -17,14 +17,15 @@ import (
 )
 
 // SessionPayload is the JSON we sign + store in the session cookie. Only the
-// stable user reference is serialized. The other fields remain source-compatible
+// stable user reference and revocation generation are serialized. Other fields remain source-compatible
 // hints for callers/tests but are deliberately excluded so email, tenant, and
 // privilege data are neither disclosed to the browser nor trusted for auth.
 type SessionPayload struct {
-	UserID uuid.UUID `json:"u"`
-	OrgID  uuid.UUID `json:"-"`
-	Role   string    `json:"-"`
-	Email  string    `json:"-"`
+	UserID     uuid.UUID `json:"u"`
+	Generation int64     `json:"v,omitempty"`
+	OrgID      uuid.UUID `json:"-"`
+	Role       string    `json:"-"`
+	Email      string    `json:"-"`
 }
 
 // SessionUserStore is the live authorization source for cookie sessions.
@@ -78,7 +79,7 @@ func RequireSession(cookies *SignedCookie, cookieName string, users SessionUserS
 				http.Error(w, "session authorization unavailable", http.StatusServiceUnavailable)
 				return
 			}
-			if user == nil || user.ID != sp.UserID || user.OrgID == uuid.Nil || !validSessionRole(user.Role) {
+			if user == nil || user.ID != sp.UserID || user.OrgID == uuid.Nil || !validSessionRole(user.Role) || sp.Generation != user.SessionGeneration {
 				ClearSession(w, cookieName)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -88,6 +89,7 @@ func RequireSession(cookies *SignedCookie, cookieName string, users SessionUserS
 			ctx = context.WithValue(ctx, OrgIDKey, user.OrgID)
 			ctx = context.WithValue(ctx, RoleKey, user.Role)
 			ctx = context.WithValue(ctx, EmailKey, user.Email)
+			ctx = context.WithValue(ctx, SessionGenerationKey, user.SessionGeneration)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

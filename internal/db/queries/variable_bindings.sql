@@ -1,9 +1,11 @@
 -- name: UpsertVariableBinding :one
 INSERT INTO document_variable_bindings (
     document_id, variable_name, source_kind, source_ref, source_path, fallback
-) VALUES (
-    $1, $2, $3, $4, $5, $6
 )
+SELECT d.id, sqlc.arg(variable_name)::text, sqlc.arg(source_kind)::text,
+       sqlc.arg(source_ref)::text, sqlc.arg(source_path)::text, sqlc.arg(fallback)::text
+FROM documents d
+WHERE d.id = sqlc.arg(document_id) AND d.status = 'draft' AND d.deleted_at IS NULL
 ON CONFLICT (document_id, variable_name) DO UPDATE SET
     source_kind = EXCLUDED.source_kind,
     source_ref  = EXCLUDED.source_ref,
@@ -62,7 +64,10 @@ WHERE delivery_correlation = $1;
 
 -- name: DeleteVariableBinding :exec
 DELETE FROM document_variable_bindings
-WHERE document_id = $1 AND variable_name = $2;
+WHERE document_id = $1 AND variable_name = $2
+  AND EXISTS (SELECT 1 FROM documents d
+      WHERE d.id = document_variable_bindings.document_id
+        AND d.status = 'draft' AND d.deleted_at IS NULL);
 
 -- name: UpdateVariableBindingResolved :exec
 UPDATE document_variable_bindings

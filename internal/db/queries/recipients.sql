@@ -4,6 +4,7 @@ WITH draft_document AS MATERIALIZED (
   FROM documents d
   WHERE d.id = sqlc.arg(document_id)
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 INSERT INTO recipients (document_id, role, email, name, order_index, magic_token_hash, magic_token_expires_at, locale)
@@ -41,6 +42,7 @@ WITH draft_document AS MATERIALIZED (
   FROM documents d
   WHERE d.id = sqlc.arg(document_id)
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 UPDATE recipients r
@@ -124,6 +126,7 @@ WITH draft_document AS MATERIALIZED (
   FROM documents d
   WHERE d.id = sqlc.arg(document_id)
     AND d.status = 'draft'
+    AND d.deleted_at IS NULL
   FOR UPDATE
 )
 DELETE FROM recipients r

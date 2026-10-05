@@ -75,6 +75,23 @@ func (q *Queries) GetDueReminders(ctx context.Context, limit int32) ([]*Reminder
 	return items, nil
 }
 
+const getReminderForUpdate = `-- name: GetReminderForUpdate :one
+SELECT document_id, schedule_json, next_fire_at, last_fired_at, fires_remaining FROM reminders WHERE document_id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetReminderForUpdate(ctx context.Context, documentID uuid.UUID) (*Reminder, error) {
+	row := q.db.QueryRow(ctx, getReminderForUpdate, documentID)
+	var i Reminder
+	err := row.Scan(
+		&i.DocumentID,
+		&i.ScheduleJson,
+		&i.NextFireAt,
+		&i.LastFiredAt,
+		&i.FiresRemaining,
+	)
+	return &i, err
+}
+
 const resetReminderAfterManualRemind = `-- name: ResetReminderAfterManualRemind :exec
 UPDATE reminders
 SET next_fire_at = now() + interval '3 days', last_fired_at = now()

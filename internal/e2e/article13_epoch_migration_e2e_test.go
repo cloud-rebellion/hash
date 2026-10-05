@@ -105,7 +105,7 @@ func TestRecoveryInventoryDerivesExactCeremonyRetentionE2E(t *testing.T) {
 		    pdf_sha256=decode(repeat('ef',32),'hex'), pdf_storage_version_id='deleted-draft-version',
 		    evidence_version_pins_required=TRUE, deleted_at=$2
 		WHERE id=$1`, deletedDraftID, epoch)
-	must(t, err, "seed successfully cleaned soft-deleted draft row")
+	must(t, err, "seed retained soft-deleted draft row")
 	_, err = pool.Exec(ctx, `UPDATE documents
 		SET source_kind='pdf', blocks_json=NULL, pdf_storage_key='fixture/missing-deadline.pdf',
 		    pdf_sha256=decode(repeat('fa',32),'hex'), pdf_storage_version_id='missing-deadline-version',
@@ -158,8 +158,8 @@ func TestRecoveryInventoryDerivesExactCeremonyRetentionE2E(t *testing.T) {
 			t.Fatalf("recovery inventory %s = %+v/%v, want %+v", key, got, ok, want)
 		}
 	}
-	if _, present := results[`"fixture/deleted-draft.pdf"`]; present {
-		t.Fatal("successfully cleaned soft-deleted draft remained in the canonical provider inventory")
+	if got, present := results[`"fixture/deleted-draft.pdf"`]; !present || got != (result{legal: false, deadline: "-"}) {
+		t.Fatal("retained soft-deleted draft is missing or has an incorrect legal deadline in the recovery inventory")
 	}
 }
 

@@ -218,6 +218,7 @@ var docScopeSafeTools = map[string]bool{
 	"list_documents": true, "search_documents": true,
 	// authoring (all EnforceDocScope on the target doc)
 	"set_document_blocks": true, "import_html": true, "import_markdown": true,
+	"update_block": true,
 	"append_block": true, "delete_block": true, "reorder_blocks": true,
 	"add_signature_field": true, "set_variables": true, "add_recipient": true,
 	"update_recipient": true, "delete_recipient": true,

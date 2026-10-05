@@ -31,7 +31,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	fieldmutations "github.com/bright-interaction/hash/internal/fields"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -126,102 +128,46 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		writeInternalError(w, err)
-		return
-	}
-	if doc.Status != "draft" {
-		writeError(w, http.StatusConflict, "document not editable (must be draft)")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	var in addFieldInput
 	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	// PDF-source documents place their signature fields visually in the
-	// designer (there is no block tree to carry them), so 'signature' is an
-	// allowed kind there. Block-source docs derive signature fields from the
-	// block tree and must not hand-insert them.
-	if in.Type == "signature" {
-		if doc.SourceKind != "pdf" {
-			writeError(w, http.StatusBadRequest, "signature fields come from the block tree for block-source documents")
-			return
-		}
-		if in.RecipientID == "" {
-			writeError(w, http.StatusBadRequest, "signature fields must be assigned to a recipient")
-			return
-		}
-	} else if !fieldKindAllowed(in.Type) {
-		writeError(w, http.StatusBadRequest, "type must be text|date|checkbox|dropdown|initial")
-		return
-	}
-	if in.Page < 1 {
-		in.Page = 1
-	}
-	recipientID := pgtype.UUID{}
+	var recipientID *uuid.UUID
 	if in.RecipientID != "" {
 		id, err := uuid.Parse(in.RecipientID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "recipient_id must be a uuid")
 			return
 		}
-		recipientID = pgtype.UUID{Bytes: id, Valid: true}
+		recipientID = &id
 	}
 	required := true
 	if in.Required != nil {
 		required = *in.Required
 	}
-	optionsJSON := []byte(`{}`)
-	if len(in.Options) > 0 {
+	optionsJSON := json.RawMessage(`{}`)
+	if in.Options != nil {
 		raw, err := json.Marshal(in.Options)
-		if err == nil {
-			optionsJSON = raw
+		if err != nil {
+			writeInternalErrorMsg(w, "encode field options", err)
+			return
 		}
+		optionsJSON = raw
 	}
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.DocumentField, error) {
-			return q.CreateDraftField(r.Context(), generated.CreateDraftFieldParams{
-				DocumentID:  docID,
-				RecipientID: recipientID,
-				Type:        in.Type,
-				Page:        int32(in.Page),
-				XPct:        pctToNumeric(in.XPct),
-				YPct:        pctToNumeric(in.YPct),
-				WPct:        pctToNumeric(in.WPct),
-				HPct:        pctToNumeric(in.HPct),
-				Required:    required,
-				Label:       textOrNull(in.Label),
-				OptionsJson: optionsJSON,
-			})
-		},
-		func(row *generated.DocumentField) audit.Entry {
-			return audit.Entry{
-				OrgID:       sess.OrgID,
-				ActorUserID: &sess.UserID,
-				DocumentID:  &docID,
-				Kind:        "document.field_added",
-				Payload: map[string]any{
-					"field_id": row.ID.String(),
-					"type":     in.Type,
-					"page":     in.Page,
-					"required": required,
-				},
-			}
-		},
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusConflict, "document not editable or recipient does not belong to document")
+	actor, ok := s.fieldMutationActor(w, r, sess)
+	if !ok {
 		return
 	}
+	engine := fieldmutations.MutationEngine{Pool: s.Pool, Audit: s.Audit}
+	row, err := engine.Create(r.Context(), actor, docID, fieldmutations.CreateInput{
+		RecipientID: recipientID, Type: in.Type, Page: in.Page,
+		XPct: in.XPct, YPct: in.YPct, WPct: in.WPct, HPct: in.HPct,
+		Required: required, Label: in.Label, Options: optionsJSON,
+	})
 	if err != nil {
-		writeInternalErrorMsg(w, "create field", err)
+		s.writeFieldMutationError(w, "create field", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, fieldToDTO(row))
@@ -276,20 +222,57 @@ func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	if _, ok := s.requireDraftDocument(w, r, ownerDoc, sess); !ok {
+	actor, ok := s.fieldMutationActor(w, r, sess)
+	if !ok {
 		return
 	}
-	if _, err := s.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
-		ID: id, OrgID: sess.OrgID,
-	}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusConflict, "document not editable (must be draft)")
-			return
-		}
-		writeInternalError(w, err)
+	engine := fieldmutations.MutationEngine{Pool: s.Pool, Audit: s.Audit}
+	if _, err := engine.Delete(r.Context(), actor, ownerDoc, id); err != nil {
+		s.writeFieldMutationError(w, "delete field", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) fieldMutationActor(w http.ResponseWriter, r *http.Request, sess auth.SessionUser) (fieldmutations.Actor, bool) {
+	authorize, ok := s.sessionMutationAuthorization(w, r, sess)
+	if !ok {
+		return fieldmutations.Actor{}, false
+	}
+	return fieldmutations.Actor{
+		OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize,
+		Via: "rest", IP: clientIP(r), UserAgent: r.UserAgent(),
+	}, true
+}
+
+func (s *Server) writeFieldMutationError(w http.ResponseWriter, operation string, err error) {
+	var validationErr *fieldmutations.ValidationError
+	switch {
+	case errors.Is(err, auth.ErrMutationCredentialExpired):
+		writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
+	case errors.Is(err, auth.ErrMutationPermissionRevoked):
+		writeError(w, http.StatusForbidden, "permission or credential revoked")
+	case errors.Is(err, fieldmutations.ErrDocumentNotFound):
+		writeError(w, http.StatusNotFound, "document not found")
+	case errors.Is(err, fieldmutations.ErrFieldNotFound):
+		writeError(w, http.StatusNotFound, "field not found")
+	case errors.Is(err, fieldmutations.ErrRecipientNotFound):
+		writeError(w, http.StatusNotFound, "recipient not found in document")
+	case errors.Is(err, fieldmutations.ErrDocumentNotDraft):
+		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+	case errors.Is(err, fieldmutations.ErrDocumentHasEvidence):
+		writeError(w, http.StatusConflict, "document contains retained signing evidence or sealing state; review before editing fields")
+	case errors.Is(err, fieldmutations.ErrFieldLimitReached):
+		writeError(w, http.StatusConflict, "document field limit reached")
+	case errors.Is(err, fieldmutations.ErrPrivacyReviewChanging):
+		writeError(w, http.StatusConflict, "privacy review is changing; retry after it completes")
+	case errors.Is(err, fieldmutations.ErrPendingPrivacyReview):
+		writeError(w, http.StatusConflict, "field changes await the open privacy request review")
+	case errors.As(err, &validationErr):
+		writeError(w, http.StatusBadRequest, validationErr.Error())
+	default:
+		writeInternalErrorMsg(w, operation, err)
+	}
 }
 
 // GET /sign/{token}/fields

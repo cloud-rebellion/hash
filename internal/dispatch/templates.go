@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"net/url"
 	"strings"
 
 	"github.com/bright-interaction/hash/internal/i18n"
@@ -72,6 +73,11 @@ type TemplateContext struct {
 // Render returns (subject, html, text) for the given kind + ctx. Errors only
 // when the kind is unknown or templates fail to compile.
 func Render(kind string, ctx TemplateContext) (subject, html, text string, err error) {
+	for _, link := range []string{ctx.SignURL, ctx.DownloadURL, ctx.OpenURL, ctx.ApproveURL, ctx.DenyURL, ctx.UpgradeURL} {
+		if err := validateEmailLink(link); err != nil {
+			return "", "", "", err
+		}
+	}
 	if kind == KindCompletedSigner && strings.TrimSpace(ctx.DownloadExpiresAt) == "" {
 		return "", "", "", fmt.Errorf("completed recipient email requires download expiry")
 	}
@@ -88,6 +94,36 @@ func Render(kind string, ctx TemplateContext) (subject, html, text string, err e
 		return "", "", "", err
 	}
 	return subj, htmlBody, textBody, nil
+}
+
+// validateEmailLink applies the same URL policy to manually escaped localized
+// templates and html/template output. Legacy relative application links remain
+// valid; executable schemes, authority-only URLs, credentials and controls do not.
+func validateEmailLink(value string) error {
+	if value == "" {
+		return nil
+	}
+	invalid := fmt.Errorf("email template contains an invalid link")
+	if strings.TrimSpace(value) != value || strings.Contains(value, "\\") {
+		return invalid
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return invalid
+		}
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User != nil || parsed.Opaque != "" {
+		return invalid
+	}
+	if parsed.IsAbs() {
+		if (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Hostname() == "" {
+			return invalid
+		}
+	} else if parsed.Host != "" || strings.HasPrefix(value, "//") {
+		return invalid
+	}
+	return nil
 }
 
 func renderSubject(kind string, ctx TemplateContext) (string, error) {

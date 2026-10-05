@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -37,10 +38,10 @@ type OIDC struct {
 	cfg     OIDCConfig
 	cookies *SignedCookie
 
-	// mu guards the resolved-once endpoints below. Held across the discovery
-	// fetch so concurrent first logins do not stampede the IdP; after success
-	// it is only ever taken for a pointer read.
-	mu       sync.Mutex
+	// The gate serializes discovery/cache access while allowing waiting
+	// requests to leave when their context expires.
+	gateOnce sync.Once
+	gate     chan struct{}
 	verifier *oidc.IDTokenVerifier
 	oauth2   *oauth2.Config
 }
@@ -49,17 +50,25 @@ type OIDC struct {
 // and retrying on each call until it succeeds. The result is cached forever
 // once obtained.
 func (o *OIDC) resolve(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifier, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.oauth2 != nil {
-		return o.oauth2, o.verifier, nil
-	}
 	timeout := o.cfg.DiscoveryTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	o.gateOnce.Do(func() { o.gate = make(chan struct{}, 1) })
+	select {
+	case o.gate <- struct{}{}:
+		defer func() { <-o.gate }()
+	case <-discoveryCtx.Done():
+		return nil, nil, discoveryCtx.Err()
+	}
+	if err := discoveryCtx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if o.oauth2 != nil {
+		return o.oauth2, o.verifier, nil
+	}
 	provider, err := oidc.NewProvider(discoveryCtx, o.cfg.IssuerURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("oidc discovery: %w", err)
@@ -169,31 +178,55 @@ func ClearOIDCLoginCookies(w http.ResponseWriter) {
 	}
 }
 
+// singleLoginCookie rejects ambiguous or empty browser handshake values.
+func singleLoginCookie(r *http.Request, name string) (*http.Cookie, error) {
+	var found *http.Cookie
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != name {
+			continue
+		}
+		if found != nil || cookie.Value == "" {
+			return nil, errors.New("invalid login cookie")
+		}
+		found = cookie
+	}
+	if found == nil {
+		return nil, http.ErrNoCookie
+	}
+	return found, nil
+}
+
 // Callback exchanges the authorization code for an ID token and returns the
 // claims subject + email if everything checks out.
 func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name string, emailVerified bool, err error) {
-	conf, idVerifier, err := o.resolve(ctx)
-	if err != nil {
-		return "", "", "", false, fmt.Errorf("oidc unavailable: %w", err)
-	}
-	stateCookie, err := r.Cookie("hash_oauth_state")
+	stateCookie, err := singleLoginCookie(r, "hash_oauth_state")
 	if err != nil {
 		return "", "", "", false, errors.New("missing state cookie")
 	}
-	if r.URL.Query().Get("state") != stateCookie.Value {
+	query, queryErr := url.ParseQuery(r.URL.RawQuery)
+	if queryErr != nil {
+		return "", "", "", false, errors.New("invalid callback query")
+	}
+	if len(query["state"]) != 1 || query.Get("state") != stateCookie.Value {
 		return "", "", "", false, errors.New("state mismatch")
 	}
-	verifierCookie, err := r.Cookie("hash_oauth_verifier")
+	verifierCookie, err := singleLoginCookie(r, "hash_oauth_verifier")
 	if err != nil {
 		return "", "", "", false, errors.New("missing PKCE verifier cookie")
 	}
-	nonceCookie, err := r.Cookie("hash_oauth_nonce")
+	nonceCookie, err := singleLoginCookie(r, "hash_oauth_nonce")
 	if err != nil {
 		return "", "", "", false, errors.New("missing nonce cookie")
 	}
-	code := r.URL.Query().Get("code")
-	if code == "" {
+	code := query.Get("code")
+	if len(query["code"]) != 1 || code == "" {
 		return "", "", "", false, errors.New("missing code")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conf, idVerifier, err := o.resolve(ctx)
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("oidc unavailable: %w", err)
 	}
 	tok, err := conf.Exchange(ctx, code, oauth2.VerifierOption(verifierCookie.Value))
 	if err != nil {

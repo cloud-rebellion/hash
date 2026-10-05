@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -21,10 +22,11 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/docintake"
-	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/requestmeta"
@@ -33,9 +35,9 @@ import (
 )
 
 var (
-	errMCPRecipientDocumentNotFound = errors.New("document not found")
-	errMCPRecipientNotFound         = errors.New("recipient not found")
-	errMCPRecipientNotDraft         = errors.New("document not in draft state")
+	errMCPRecipientDocumentNotFound = recipients.ErrDocumentNotFound
+	errMCPRecipientNotFound         = recipients.ErrRecipientNotFound
+	errMCPRecipientNotDraft         = recipients.ErrDocumentNotDraft
 )
 
 // pgtypeUUID lifts a uuid.UUID into pgx's nullable form.
@@ -226,6 +228,12 @@ func registerAuthoringTools(s *Server, d Deps) {
 		}, []string{"name"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
+			release, err := importguard.Shared.Acquire(u.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
+
 			var p struct {
 				Name              string `json:"name"`
 				PDFBase64         string `json:"pdf_base64"`
@@ -256,6 +264,9 @@ func registerAuthoringTools(s *Server, d Deps) {
 				opts := render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"}
 				if p.Landscape {
 					opts.PaperWidth, opts.PaperHeight = 11.69, 8.27
+				}
+				if err := malwarescan.ScanActive(r.Context(), []byte(p.HTML)); err != nil {
+					return nil, err
 				}
 				rendered, rerr := d.PDF.HTMLToPDF(r.Context(), render.SanitizeForRender(p.HTML), opts)
 				if rerr != nil {
@@ -321,14 +332,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Replace the entire block tree of a draft document. Validates against the canonical schema.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"blocks_json": map[string]any{"type": "object", "description": "{version:1, blocks:[...]}"},
-		}, []string{"document_id", "blocks_json"}),
+			"document_id":         stringSchema("document uuid"),
+			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
+			"blocks_json":         map[string]any{"type": "object", "description": "{version:1, blocks:[...]}"},
+		}, []string{"expected_updated_at", "document_id", "blocks_json"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string          `json:"document_id"`
-				BlocksJSON json.RawMessage `json:"blocks_json"`
+				ExpectedUpdatedAt string          `json:"expected_updated_at"`
+				DocumentID        string          `json:"document_id"`
+				BlocksJSON        json.RawMessage `json:"blocks_json"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -347,7 +360,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "set_document_blocks", func(current *blocks.Tree) error {
 				*current = *tree
 				return nil
-			})
+			}, p.ExpectedUpdatedAt)
 		},
 	})
 
@@ -356,14 +369,21 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Replace a draft document's block tree by parsing an HTML fragment into canonical blocks.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"html":        stringSchema("HTML fragment to parse into blocks"),
-		}, []string{"document_id", "html"}),
+			"document_id":         stringSchema("document uuid"),
+			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
+			"html":                stringSchema("HTML fragment to parse into blocks"),
+		}, []string{"expected_updated_at", "document_id", "html"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
+			release, err := importguard.Shared.Acquire(u.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
 			var p struct {
-				DocumentID string `json:"document_id"`
-				HTML       string `json:"html"`
+				ExpectedUpdatedAt string `json:"expected_updated_at"`
+				DocumentID        string `json:"document_id"`
+				HTML              string `json:"html"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -375,11 +395,17 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			tree := blocks.ParseHTML(p.HTML)
+			if err := malwarescan.ScanActive(r.Context(), []byte(p.HTML)); err != nil {
+				return nil, err
+			}
+			tree, err := blocks.ParseHTMLChecked(p.HTML)
+			if err != nil {
+				return nil, err
+			}
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_html", func(current *blocks.Tree) error {
 				*current = *tree
 				return nil
-			})
+			}, p.ExpectedUpdatedAt)
 		},
 	})
 
@@ -388,14 +414,21 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Replace a draft document's block tree by parsing a markdown body into canonical blocks.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"markdown":    stringSchema("markdown source"),
-		}, []string{"document_id", "markdown"}),
+			"document_id":         stringSchema("document uuid"),
+			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
+			"markdown":            stringSchema("markdown source"),
+		}, []string{"expected_updated_at", "document_id", "markdown"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
+			release, err := importguard.Shared.Acquire(u.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
 			var p struct {
-				DocumentID string `json:"document_id"`
-				Markdown   string `json:"markdown"`
+				ExpectedUpdatedAt string `json:"expected_updated_at"`
+				DocumentID        string `json:"document_id"`
+				Markdown          string `json:"markdown"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -407,11 +440,17 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			tree := blocks.ParseMarkdown(p.Markdown)
+			if err := malwarescan.ScanActive(r.Context(), []byte(p.Markdown)); err != nil {
+				return nil, err
+			}
+			tree, err := blocks.ParseMarkdownChecked(p.Markdown)
+			if err != nil {
+				return nil, err
+			}
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_markdown", func(current *blocks.Tree) error {
 				*current = *tree
 				return nil
-			})
+			}, p.ExpectedUpdatedAt)
 		},
 	})
 
@@ -420,14 +459,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Append a block to the end of a draft document's block tree.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"block":       map[string]any{"type": "object", "description": "canonical block; see hash://schema/blocks"},
-		}, []string{"document_id", "block"}),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"document_id":         stringSchema("document uuid"),
+			"block":               map[string]any{"type": "object", "description": "canonical block; see hash://schema/blocks"},
+		}, []string{"expected_updated_at", "document_id", "block"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string          `json:"document_id"`
-				Block      json.RawMessage `json:"block"`
+				ExpectedUpdatedAt string          `json:"expected_updated_at"`
+				DocumentID        string          `json:"document_id"`
+				Block             json.RawMessage `json:"block"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -447,7 +488,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				func(t *blocks.Tree) error {
 					t.Blocks = append(t.Blocks, blk)
 					return blocks.Validate(t)
-				})
+				}, p.ExpectedUpdatedAt)
 			return doc, err
 		},
 	})
@@ -457,16 +498,18 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Replace a top-level block by id on a draft document. The replacement keeps the requested block_id.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"block_id":    stringSchema("id of the top-level block to replace"),
-			"block":       map[string]any{"type": "object", "description": "replacement canonical block; see hash://schema/blocks"},
-		}, []string{"document_id", "block_id", "block"}),
+			"document_id":         stringSchema("document uuid"),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"block_id":            stringSchema("id of the top-level block to replace"),
+			"block":               map[string]any{"type": "object", "description": "replacement canonical block; see hash://schema/blocks"},
+		}, []string{"document_id", "block_id", "block", "expected_updated_at"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string          `json:"document_id"`
-				BlockID    string          `json:"block_id"`
-				Block      json.RawMessage `json:"block"`
+				ExpectedUpdatedAt string          `json:"expected_updated_at"`
+				DocumentID        string          `json:"document_id"`
+				BlockID           string          `json:"block_id"`
+				Block             json.RawMessage `json:"block"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -488,7 +531,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "update_block",
 				func(t *blocks.Tree) error {
 					return updateTopLevelBlock(t, p.BlockID, replacement)
-				})
+				}, p.ExpectedUpdatedAt)
 		},
 	})
 
@@ -497,14 +540,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Remove a block by id from a draft document.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"block_id":    stringSchema("id of the block to remove"),
-		}, []string{"document_id", "block_id"}),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"document_id":         stringSchema("document uuid"),
+			"block_id":            stringSchema("id of the block to remove"),
+		}, []string{"expected_updated_at", "document_id", "block_id"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string `json:"document_id"`
-				BlockID    string `json:"block_id"`
+				ExpectedUpdatedAt string `json:"expected_updated_at"`
+				DocumentID        string `json:"document_id"`
+				BlockID           string `json:"block_id"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -532,7 +577,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 					}
 					t.Blocks = filtered
 					return nil
-				})
+				}, p.ExpectedUpdatedAt)
 			return doc, err
 		},
 	})
@@ -542,14 +587,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Rearrange the top-level blocks of a draft document. block_ids must be a permutation of the existing ids.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"block_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		}, []string{"document_id", "block_ids"}),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"document_id":         stringSchema("document uuid"),
+			"block_ids":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		}, []string{"expected_updated_at", "document_id", "block_ids"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string   `json:"document_id"`
-				BlockIDs   []string `json:"block_ids"`
+				ExpectedUpdatedAt string   `json:"expected_updated_at"`
+				DocumentID        string   `json:"document_id"`
+				BlockIDs          []string `json:"block_ids"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -582,7 +629,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 					}
 					t.Blocks = reordered
 					return nil
-				})
+				}, p.ExpectedUpdatedAt)
 			return doc, err
 		},
 	})
@@ -592,18 +639,20 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Convenience: append a signature_field block bound to a recipient role.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id":    stringSchema("document uuid"),
-			"recipient_role": stringSchema("role label, must match a recipient on the document (eg 'client', 'provider')"),
-			"label":          stringSchema("optional human label, eg 'Client signature'"),
-			"required":       map[string]any{"type": "boolean", "const": true, "default": true, "description": "signature fields are always required"},
-		}, []string{"document_id", "recipient_role"}),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"document_id":         stringSchema("document uuid"),
+			"recipient_role":      stringSchema("role label, must match a recipient on the document (eg 'client', 'provider')"),
+			"label":               stringSchema("optional human label, eg 'Client signature'"),
+			"required":            map[string]any{"type": "boolean", "const": true, "default": true, "description": "signature fields are always required"},
+		}, []string{"expected_updated_at", "document_id", "recipient_role"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID    string `json:"document_id"`
-				RecipientRole string `json:"recipient_role"`
-				Label         string `json:"label"`
-				Required      *bool  `json:"required"`
+				ExpectedUpdatedAt string `json:"expected_updated_at"`
+				DocumentID        string `json:"document_id"`
+				RecipientRole     string `json:"recipient_role"`
+				Label             string `json:"label"`
+				Required          *bool  `json:"required"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -631,7 +680,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				func(t *blocks.Tree) error {
 					t.Blocks = append(t.Blocks, block)
 					return blocks.Validate(t)
-				})
+				}, p.ExpectedUpdatedAt)
 		},
 	})
 
@@ -640,14 +689,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Replace a draft document's variable values.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid"),
-			"variables":   map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "name → string value map"},
-		}, []string{"document_id", "variables"}),
+			"document_id":         stringSchema("document uuid"),
+			"expected_updated_at": stringSchema("updated_at from the observed document"),
+			"variables":           map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "name → string value map"},
+		}, []string{"document_id", "variables", "expected_updated_at"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string          `json:"document_id"`
-				Variables  json.RawMessage `json:"variables"`
+				ExpectedUpdatedAt string          `json:"expected_updated_at"`
+				DocumentID        string          `json:"document_id"`
+				Variables         json.RawMessage `json:"variables"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -669,46 +720,57 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if d.Pool == nil || d.Audit == nil {
 				return nil, errors.New("atomic audit dependencies unavailable")
 			}
-			tx, err := d.Pool.Begin(r.Context())
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteAuthoring)
 			if err != nil {
 				return nil, err
 			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
+			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+			defer cancel()
+			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = authoring.Rollback(ctx, tx) }()
+			guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
+			if err != nil {
+				return nil, err
+			}
 			q := d.Queries.WithTx(tx)
-			existing, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
+			existing := guard.Document
+			if existing.SourceKind != "blocks" {
+				return nil, authoring.ErrDocumentNotDraft
 			}
-			if err != nil {
+			actorID := guard.UserID()
+			if err := checkDocumentObservation(existing, p.ExpectedUpdatedAt); err != nil {
 				return nil, err
 			}
-			if existing.Status != "draft" || existing.SourceKind != "blocks" {
-				return nil, errors.New("document not editable (must be draft + blocks-source)")
-			}
-			doc, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+			doc, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
 				ID: id, OrgID: u.OrgID, BlocksJson: existing.BlocksJson, VariablesJson: vars,
 			})
 			if err != nil {
 				return nil, err
 			}
 			if d.Versions != nil {
-				if _, err := versions.New(q).Snapshot(r.Context(), versions.SnapshotInput{
+				if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
 					DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-					BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &u.UserID,
+					BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &actorID,
 					Via: versions.ViaMCP, Summary: "set_variables",
 				}); err != nil {
 					return nil, err
 				}
 			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
+			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &actorID, DocumentID: &id,
 				Kind:    audit.KindDocumentUpdated,
 				Payload: map[string]any{"via": "mcp", "tool": "set_variables"},
 			})
 			if err != nil {
 				return nil, err
 			}
-			if err := tx.Commit(r.Context()); err != nil {
+			if err := guard.Recheck(ctx); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
 			d.Audit.Publish(pending)
@@ -748,83 +810,22 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			actor := recipients.MutationActor{
+				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "add_recipient",
+				IP: clientIP(r), UserAgent: r.UserAgent(),
+			}
 			role := p.Role
 			if role == "" {
 				role = "signer"
 			}
-			// Cross-tenant + draft check.
-			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
-			}
-			if err != nil {
-				return nil, err
-			}
-			if doc.Status != "draft" {
-				return nil, errors.New("document not in draft state")
-			}
-			// Inherit the document's default signing language unless the caller
-			// passed one. Mirrors the REST handleCreateRecipient cascade so
-			// MCP-driven sends never silently fall back to English on a
-			// Swedish document (this column was missing here before).
-			locale := p.Locale
-			if locale == "" {
-				locale = doc.DefaultLocale
-			}
-			if locale == "" {
-				locale = "en"
-			}
-			values, err := recipients.Normalize(recipients.Values{
-				Email: p.Email, Name: p.Name, Role: role, OrderIndex: p.OrderIndex, Locale: locale,
+			return engine.Create(r.Context(), actor, id, recipients.Values{
+				Email: p.Email, Name: p.Name, Role: role, OrderIndex: p.OrderIndex, Locale: p.Locale,
 			})
-			if err != nil {
-				return nil, err
-			}
-			if err := recipients.ValidateResponseRole(values.Role); err != nil {
-				return nil, err
-			}
-			_, hash, err := auth.MintMagicToken()
-			if err != nil {
-				return nil, fmt.Errorf("mint token: %w", err)
-			}
-			rec, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Recipient, error) {
-					if err := d.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-						return nil, err
-					}
-					rec, err := q.CreateRecipient(r.Context(), generated.CreateRecipientParams{
-						DocumentID:          id,
-						Role:                values.Role,
-						Email:               values.Email,
-						Name:                values.Name,
-						OrderIndex:          values.OrderIndex,
-						Locale:              values.Locale,
-						MagicTokenHash:      hash,
-						MagicTokenExpiresAt: magictoken.Expiry(doc.ExpiresAt, time.Now()),
-					})
-					if err != nil {
-						return nil, err
-					}
-					if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-						return nil, err
-					}
-					return rec, nil
-				},
-				func(rec *generated.Recipient) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id, RecipientID: &rec.ID,
-						Kind:    audit.KindRecipientCreated,
-						Payload: map[string]any{"via": "mcp", "tool": "add_recipient", "email": rec.Email, "name": rec.Name, "role": rec.Role},
-					}
-				},
-			)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not in draft state")
-			}
-			if err != nil {
-				return nil, err
-			}
-			return rec, nil
 		},
 	})
 
@@ -869,49 +870,18 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), docID); err != nil {
 				return nil, err
 			}
-			rec, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Recipient, error) {
-					doc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: u.OrgID})
-					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, errMCPRecipientDocumentNotFound
-					}
-					if err != nil {
-						return nil, err
-					}
-					if doc.Status != "draft" {
-						return nil, errMCPRecipientNotDraft
-					}
-					existing, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: rid, OrgID: u.OrgID})
-					if errors.Is(err, pgx.ErrNoRows) || (err == nil && existing.DocumentID != docID) {
-						return nil, errMCPRecipientNotFound
-					}
-					if err != nil {
-						return nil, err
-					}
-					values, err := normalizeMCPRecipientUpdate(existing, p.Email, p.Name, p.Role, p.OrderIndex, p.Locale)
-					if err != nil {
-						return nil, err
-					}
-					return q.UpdateRecipient(r.Context(), generated.UpdateRecipientParams{
-						ID: rid, DocumentID: docID, Email: values.Email, Name: values.Name,
-						Role: values.Role, OrderIndex: values.OrderIndex, Locale: values.Locale,
-					})
-				},
-				func(updated *generated.Recipient) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &rid,
-						Kind:    audit.KindRecipientUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "update_recipient", "email": updated.Email, "name": updated.Name, "role": updated.Role},
-					}
-				},
-			)
-			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errMCPRecipientNotDraft) {
-				return nil, errMCPRecipientNotDraft
-			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), docID, mcpScopeWriteAuthoring)
 			if err != nil {
 				return nil, err
 			}
-			return rec, nil
+			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			actor := recipients.MutationActor{
+				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "update_recipient",
+				IP: clientIP(r), UserAgent: r.UserAgent(),
+			}
+			return engine.Update(r.Context(), actor, docID, rid, recipients.Patch{
+				Email: p.Email, Name: p.Name, Role: p.Role, OrderIndex: p.OrderIndex, Locale: p.Locale,
+			})
 		},
 	})
 
@@ -943,101 +913,61 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), docID); err != nil {
 				return nil, err
 			}
-			_, err = audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Recipient, error) {
-					doc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: u.OrgID})
-					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, errMCPRecipientDocumentNotFound
-					}
-					if err != nil {
-						return nil, err
-					}
-					if doc.Status != "draft" {
-						return nil, errMCPRecipientNotDraft
-					}
-					existing, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: rid, OrgID: u.OrgID})
-					if errors.Is(err, pgx.ErrNoRows) || (err == nil && existing.DocumentID != docID) {
-						return nil, errMCPRecipientNotFound
-					}
-					if err != nil {
-						return nil, err
-					}
-					if _, err := q.DeleteRecipient(r.Context(), generated.DeleteRecipientParams{ID: rid, DocumentID: docID}); err != nil {
-						return nil, err
-					}
-					return existing, nil
-				},
-				func(deleted *generated.Recipient) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &rid,
-						Kind:    audit.KindRecipientDeleted,
-						Payload: map[string]any{"via": "mcp", "tool": "delete_recipient", "email": deleted.Email, "name": deleted.Name, "role": deleted.Role},
-					}
-				},
-			)
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), docID, mcpScopeWriteAuthoring)
 			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("document not in draft state or recipient not found")
-				}
 				return nil, err
 			}
-			return map[string]any{"deleted": rid.String()}, nil
+			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			actor := recipients.MutationActor{
+				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "delete_recipient",
+				IP: clientIP(r), UserAgent: r.UserAgent(),
+			}
+			deleted, err := engine.Delete(r.Context(), actor, docID, rid)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"deleted": deleted.ID.String()}, nil
 		},
 	})
 }
 
 func normalizeMCPRecipientUpdate(existing *generated.Recipient, email, name, role *string, orderIndex *int32, locale *string) (recipients.Values, error) {
-	values := recipients.Values{
-		Email: existing.Email, Name: existing.Name, Role: existing.Role,
-		OrderIndex: existing.OrderIndex, Locale: existing.Locale,
-	}
-	if email != nil {
-		values.Email = *email
-	}
-	if name != nil {
-		values.Name = *name
-	}
-	if role != nil {
-		values.Role = *role
-	}
-	if orderIndex != nil {
-		values.OrderIndex = *orderIndex
-	}
-	if locale != nil {
-		values.Locale = *locale
-	}
-	normalized, err := recipients.Normalize(values)
-	if err != nil {
-		return recipients.Values{}, err
-	}
-	if err := recipients.ValidateResponseRole(normalized.Role); err != nil {
-		return recipients.Values{}, err
-	}
-	return normalized, nil
+	return recipients.NormalizePatch(existing, recipients.Patch{
+		Email: email, Name: name, Role: role, OrderIndex: orderIndex, Locale: locale,
+	})
 }
 
 // mutateDocumentTree applies fn to the document's block tree under a draft +
 // blocks-source guard, persists the result, and emits the audit event.
-func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn func(t *blocks.Tree) error) (any, error) {
+func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn func(t *blocks.Tree) error, expected string) (any, error) {
 	if d.Pool == nil || d.Audit == nil {
 		return nil, errors.New("atomic audit dependencies unavailable")
 	}
-	tx, err := d.Pool.Begin(r.Context())
+	authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), docID, mcpScopeWriteAuthoring)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize}, docID)
+	if err != nil {
+		return nil, err
+	}
 	q := d.Queries.WithTx(tx)
-	existing, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errors.New("document not found")
+	existing := guard.Document
+	if existing.SourceKind != "blocks" {
+		return nil, authoring.ErrDocumentNotDraft
 	}
-	if err != nil {
+	actorID := guard.UserID()
+	if err := checkDocumentObservation(existing, expected); err != nil {
 		return nil, err
 	}
-	if existing.Status != "draft" || existing.SourceKind != "blocks" {
-		return nil, errors.New("document not editable (must be draft + blocks-source)")
-	}
+
 	tree, err := blocks.ParseTree(existing.BlocksJson)
 	if err != nil {
 		return nil, fmt.Errorf("existing blocks_json invalid: %w", err)
@@ -1052,30 +982,33 @@ func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID 
 	if err != nil {
 		return nil, err
 	}
-	doc, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+	doc, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
 		ID: docID, OrgID: orgID, BlocksJson: raw, VariablesJson: existing.VariablesJson,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if d.Versions != nil {
-		if _, err := versions.New(q).Snapshot(r.Context(), versions.SnapshotInput{
+		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
 			DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-			BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &userID,
+			BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &actorID,
 			Via: via, Summary: toolName,
 		}); err != nil {
 			return nil, err
 		}
 	}
-	pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID: orgID, ActorUserID: &userID, DocumentID: &docID,
+	pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: orgID, ActorUserID: &actorID, DocumentID: &docID,
 		Kind:    audit.KindDocumentUpdated,
 		Payload: map[string]any{"via": "mcp", "tool": toolName, "blocks": len(tree.Blocks)},
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := guard.Recheck(ctx); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	d.Audit.Publish(pending)
@@ -1112,4 +1045,19 @@ func cleanupMCPImportedPDF(parent context.Context, d Deps, doc *generated.Docume
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
 	defer cancel()
 	return d.Storage.DeleteVersion(ctx, doc.PdfStorageKey.String, doc.PdfStorageVersionID.String, doc.PdfSha256)
+}
+
+// Called only after authoritative document row lock acquisition.
+func checkDocumentObservation(doc *generated.Document, expected string) error {
+	if expected == "" {
+		return errors.New("expected_updated_at is required")
+	}
+	observed, err := time.Parse(time.RFC3339Nano, expected)
+	if err != nil {
+		return errors.New("expected_updated_at must be RFC3339")
+	}
+	if doc == nil || !doc.UpdatedAt.Valid || !doc.UpdatedAt.Time.Equal(observed) {
+		return errors.New("document changed since observation; fetch and review before replacing content")
+	}
+	return nil
 }

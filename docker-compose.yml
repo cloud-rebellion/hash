@@ -163,6 +163,7 @@ services:
         PUBLIC_FLARE_ENVIRONMENT: ${FLARE_ENVIRONMENT:-production}
         PUBLIC_FLARE_RELEASE: ${HASH_RELEASE:-development}
     restart: unless-stopped
+    stop_grace_period: 20s
     depends_on:
       postgres:
         condition: service_healthy

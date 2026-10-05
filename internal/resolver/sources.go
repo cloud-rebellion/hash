@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/nethard"
@@ -25,6 +27,11 @@ import (
 type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+const maxSourceResponseBytes = 256 * 1024
+
+// Shared immutable default avoids request-time writes to source configuration.
+var defaultIntegrationClient = nethard.Client(10*time.Second, nil)
 
 // HTTPSource is the shared scaffolding for crm.deal, crm.contact, and
 // scanner.finding. They all do the same thing: bearer-authed GET against a
@@ -46,11 +53,12 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	if err := validateHTTPSourceRef(ref.Source); err != nil {
 		return "", err
 	}
-	if h.Client == nil {
+	client := h.Client
+	if client == nil {
 		// Resolver calls carry an integration bearer token. Refuse private-IP
 		// destinations at dial time and never replay the credential across a
 		// redirect. Local development constructors explicitly opt out below.
-		h.Client = nethard.Client(10*time.Second, nil)
+		client = defaultIntegrationClient
 	}
 	url := strings.TrimRight(h.BaseURL, "/") + h.pathFor(ref)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -59,7 +67,7 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+h.Token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := h.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("%s fetch: %w", h.kind, err)
 	}
@@ -67,13 +75,20 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	if resp.StatusCode == http.StatusNotFound {
 		return "", ErrNotFound
 	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return "", fmt.Errorf("%s fetch: %d %s", h.kind, resp.StatusCode, strings.TrimSpace(string(body)))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Upstream bodies may contain CRM personal data or proxy credentials.
+		// Return the status without forwarding that untrusted diagnostic content.
+		return "", fmt.Errorf("%s fetch: HTTP %d", h.kind, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSourceResponseBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > maxSourceResponseBytes {
+		return "", fmt.Errorf("%s fetch: response exceeds byte limit", h.kind)
+	}
+	if err := validateSourceJSON(body); err != nil {
+		return "", fmt.Errorf("%s decode: %w", h.kind, err)
 	}
 	var doc map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -171,11 +186,16 @@ func integrationHTTPClient(allowPrivate []bool) *http.Client {
 	return nethard.Client(10*time.Second, func() bool { return allowed })
 }
 
-// OrgSettingSource reads from the local hash.orgs row plus (when 8.5
-// branding lands) the org_branding row. source_ref is unused; source_path
+// OrgSettingSource reads from the tenant-scoped orgs and org_branding
+// rows. source_ref is unused; source_path
 // names the field, e.g. "org.name", "branding.primary_hex".
+type OrgSettingStore interface {
+	GetOrg(context.Context, uuid.UUID) (*generated.Org, error)
+	GetOrgBranding(context.Context, uuid.UUID) (*generated.OrgBranding, error)
+}
+
 type OrgSettingSource struct {
-	Q *generated.Queries
+	Q OrgSettingStore
 }
 
 func (OrgSettingSource) Kind() SourceKind { return SourceOrgSetting }
@@ -203,10 +223,27 @@ func (s *OrgSettingSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 			return "", fmt.Errorf("org.setting: unknown org field %q", ref.Path)
 		}
 	}
-	// branding.* lookups will be answered by the Phase 8.5 org_branding
-	// row when it lands. Until then, return ErrNotConfigured so the UI
-	// shows "configure brand theming" rather than a 500.
-	return "", ErrNotConfigured
+	branding, err := s.Q.GetOrgBranding(ctx, ref.OrgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotConfigured
+	}
+	if err != nil {
+		return "", fmt.Errorf("org.setting: branding lookup failed")
+	}
+	if branding == nil || branding.OrgID != ref.OrgID {
+		return "", errors.New("org.setting: branding tenant mismatch")
+	}
+	values := map[string]string{
+		"branding.primary_hex": branding.PrimaryHex, "branding.accent_hex": branding.AccentHex,
+		"branding.surface_hex": branding.SurfaceHex, "branding.text_hex": branding.TextHex,
+		"branding.muted_hex": branding.MutedHex, "branding.logo_url": branding.LogoUrl,
+		"branding.logo_alt": branding.LogoAlt, "branding.font_heading": branding.FontHeading,
+		"branding.font_body": branding.FontBody, "branding.signature_color": branding.SignatureColor,
+	}
+	if value, ok := values[ref.Path]; ok {
+		return value, nil
+	}
+	return "", fmt.Errorf("org.setting: unknown branding field %q", ref.Path)
 }
 
 // AgentComputedSource is a stand-in: the agent.computed source kind has no
@@ -253,7 +290,6 @@ func jsonPathLookup(root any, path string) (any, bool) {
 }
 
 func parseArrayIndex(s string) (int, error) {
-	n := 0
 	if s == "" {
 		return 0, errors.New("empty index")
 	}
@@ -261,7 +297,10 @@ func parseArrayIndex(s string) (int, error) {
 		if ch < '0' || ch > '9' {
 			return 0, errors.New("non-numeric index")
 		}
-		n = n*10 + int(ch-'0')
 	}
-	return n, nil
+	index, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, errors.New("array index exceeds integer range")
+	}
+	return index, nil
 }

@@ -52,7 +52,7 @@ UPDATE documents
 SET blocks_json = $3,
     variables_json = $4,
     updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'draft' AND source_kind = 'blocks'
+WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL AND source_kind = 'blocks'
 RETURNING *;
 
 -- name: UpdateDocumentMetadata :one
@@ -61,7 +61,7 @@ SET name = $3,
     expires_at = $4,
     metadata = $5,
     updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'draft'
+WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
 RETURNING *;
 
 -- name: SetDocumentDefaultLocale :one
@@ -70,7 +70,7 @@ RETURNING *;
 UPDATE documents
 SET default_locale = $3,
     updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'draft'
+WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
 RETURNING *;
 
 -- name: SetDocumentStatus :one
@@ -93,7 +93,7 @@ RETURNING *;
 UPDATE documents
 SET requires_signature = $3,
     updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'draft'
+WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
 RETURNING *;
 
 -- name: DeclineDocumentIfActive :one
@@ -234,6 +234,10 @@ WITH candidates AS (
     AND documents.deleted_at < sqlc.arg(cutoff)
     AND documents.status = 'draft'
     AND documents.updated_at <= now() - interval '15 minutes'
+    AND NOT EXISTS (SELECT 1 FROM data_subject_requests r
+        WHERE r.org_id = documents.org_id
+          AND (r.document_id = documents.id OR r.document_id IS NULL)
+          AND r.status IN ('open','in_progress'))
   ORDER BY documents.deleted_at
   FOR UPDATE SKIP LOCKED
   LIMIT sqlc.arg(batch_limit)
@@ -244,17 +248,77 @@ FROM candidates
 WHERE d.id = candidates.id
 RETURNING d.*;
 
+-- name: LockClaimedSoftDeletedDocumentForPurge :one
+-- Hold this exact leased parent before privacy fences and object-store I/O.
+-- Another worker, privacy transition, or stale lease must not authorize cleanup.
+SELECT * FROM documents
+WHERE id = sqlc.arg(id) AND org_id = sqlc.arg(org_id)
+  AND deleted_at IS NOT NULL AND deleted_at < sqlc.arg(cutoff)
+  AND status = 'draft' AND updated_at = sqlc.arg(updated_at)
+FOR UPDATE SKIP LOCKED;
+
+-- name: HasPendingDocumentPrivacyRequests :one
+-- Caller holds document FOR UPDATE and the organization privacy fence.
+-- A fresh statement snapshot observes both linked and organization-wide review.
+SELECT EXISTS(SELECT 1 FROM data_subject_requests
+WHERE org_id = sqlc.arg(org_id)::uuid
+  AND (document_id = sqlc.arg(document_id)::uuid OR document_id IS NULL)
+  AND status IN ('open','in_progress')) AS pending;
+
+-- name: HasOtherDocumentSourceReferences :one
+-- Include deleted drafts and foreign organizations: object ownership must never
+-- be inferred solely from the deleting row or the caller's tenant visibility.
+SELECT EXISTS(
+  SELECT 1 FROM documents d WHERE d.id <> sqlc.arg(document_id)
+    AND sqlc.arg(object_key)::text IN (d.pdf_storage_key,d.rendered_pdf_key,d.final_pdf_key,d.audit_cert_key,d.audit_payload_key,d.audit_signature_key)
+  UNION ALL
+  SELECT 1 FROM templates t WHERE t.pdf_storage_key = sqlc.arg(object_key)::text
+  UNION ALL
+  SELECT 1 FROM document_finalization_intents i
+    WHERE sqlc.arg(object_key)::text IN (i.final_pdf_key,i.audit_cert_key,i.audit_payload_key,i.audit_signature_key)
+  UNION ALL
+  SELECT 1 FROM signatures s WHERE s.image_storage_key = sqlc.arg(object_key)::text
+) AS shared;
+
+-- name: HasRetainedDraftEvidenceForPurge :one
+-- Caller holds the parent lock. An anomalous draft can still carry signing
+-- evidence or an unfinished sealing intent; retain both the row and its source
+-- before any irreversible object operation. Match Revise's captured-data gate.
+SELECT EXISTS(
+  SELECT 1 FROM documents d
+    WHERE d.id = sqlc.arg(document_id)::uuid AND d.org_id = sqlc.arg(org_id)::uuid
+      AND (d.final_pdf_key IS NOT NULL OR d.final_pdf_sha IS NOT NULL OR d.final_pdf_version_id IS NOT NULL
+        OR d.audit_cert_key IS NOT NULL OR d.audit_cert_sha256 IS NOT NULL OR d.audit_cert_version_id IS NOT NULL
+        OR d.audit_payload_key IS NOT NULL OR d.audit_payload_sha256 IS NOT NULL OR d.audit_payload_version_id IS NOT NULL
+        OR d.audit_signature_key IS NOT NULL OR d.audit_signature_sha256 IS NOT NULL OR d.audit_signature_version_id IS NOT NULL)
+  UNION ALL
+  SELECT 1 FROM document_finalization_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM send_sealing_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM signatures WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM recipients WHERE document_id = sqlc.arg(document_id)::uuid
+    AND (status IN ('signed','accepted') OR signed_at IS NOT NULL)
+  UNION ALL
+  SELECT 1 FROM document_fields WHERE document_id = sqlc.arg(document_id)::uuid
+    AND (value IS NOT NULL OR completed_at IS NOT NULL)
+) AS retained;
+
 -- name: DeleteClaimedSoftDeletedDocument :execrows
 -- Hard-delete only the exact draft lease the worker just cleaned. If any
 -- concurrent state change touched updated_at, the CAS fails and no legal row is
 -- removed. events.document_id uses ON DELETE SET NULL, preserving the org chain.
-DELETE FROM documents
-WHERE id = $1
-  AND org_id = $2
-  AND deleted_at IS NOT NULL
-  AND deleted_at < $3
-  AND status = 'draft'
-  AND updated_at = $4;
+DELETE FROM documents d
+WHERE d.id = $1
+  AND d.org_id = $2
+  AND d.deleted_at IS NOT NULL
+  AND d.deleted_at < $3
+  AND d.status = 'draft'
+  AND d.updated_at = $4
+  AND NOT EXISTS (SELECT 1 FROM data_subject_requests r
+      WHERE r.org_id = d.org_id AND (r.document_id = d.id OR r.document_id IS NULL)
+        AND r.status IN ('open','in_progress'));
 
 -- name: SearchDocumentsByName :many
 SELECT * FROM documents
@@ -269,3 +333,11 @@ WHERE expires_at IS NOT NULL
   AND expires_at <= now()
   AND status IN ('sent','in_progress')
 LIMIT $1;
+-- name: FreezeDocumentVariables :one
+-- Source-neutral frozen values are committed only inside an authorized send
+-- transaction after the original draft observation has been checked.
+UPDATE documents
+SET variables_json = $3, updated_at = clock_timestamp()
+WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
+  AND updated_at = sqlc.arg(expected_updated_at)
+RETURNING *;

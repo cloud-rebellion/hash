@@ -14,6 +14,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/mail"
@@ -28,7 +29,7 @@ type SMTPConfig struct {
 	Port     int
 	User     string
 	Password string
-	From     string // RFC-5322 From header, e.g. `Hash <esign@brightinteraction.com>`
+	From     string // RFC-5322 From header, e.g. `Hash <tom@cloudrebellion.se>`
 }
 
 // Mailer sends transactional email. Real implementations connect to Postal
@@ -81,7 +82,7 @@ func NewSMTPMailer(cfg SMTPConfig) (*SMTPMailer, error) {
 	if (cfg.User == "") != (cfg.Password == "") {
 		return nil, errors.New("smtp user and password must either both be set or both be empty")
 	}
-	from, err := mail.ParseAddress(cfg.From)
+	from, err := parseSMTPAddress(cfg.From)
 	if err != nil || from.Address == "" {
 		return nil, errors.New("smtp from must be a valid RFC-5322 address")
 	}
@@ -93,8 +94,18 @@ func NewSMTPMailer(cfg SMTPConfig) (*SMTPMailer, error) {
 // that explicitly reserved exception.
 // AUTH PLAIN is sent only if the config has a user + password set.
 func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
-	if msg.To == "" {
-		return errors.New("smtp: message to required")
+	to, err := parseSMTPAddress(msg.To)
+	if err != nil {
+		return errors.New("smtp: message to must be a single valid address")
+	}
+	if msg.ReplyTo != "" {
+		if _, err := parseSMTPAddress(msg.ReplyTo); err != nil {
+			return errors.New("smtp: reply-to must be a single valid address")
+		}
+	}
+	body, err := buildMIME(m.cfg.From, msg)
+	if err != nil {
+		return err
 	}
 	addr := net.JoinHostPort(m.cfg.Host, fmt.Sprintf("%d", m.cfg.Port))
 
@@ -152,14 +163,10 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	if err := c.Mail(extractAddress(m.cfg.From)); err != nil {
 		return smtpOperationError(ctx, "smtp mail from", err)
 	}
-	if err := c.Rcpt(extractAddress(msg.To)); err != nil {
+	if err := c.Rcpt(to.Address); err != nil {
 		return smtpOperationError(ctx, "smtp rcpt", err)
 	}
 
-	body, err := buildMIME(m.cfg.From, msg)
-	if err != nil {
-		return err
-	}
 	wc, err := c.Data()
 	if err != nil {
 		return smtpOperationError(ctx, "smtp data open", err)
@@ -168,13 +175,30 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 		_ = wc.Close()
 		return smtpOperationError(ctx, "smtp data write", err)
 	}
-	if err := wc.Close(); err != nil {
+	return finishSMTPDelivery(ctx, c, wc)
+}
+
+func finishSMTPDelivery(ctx context.Context, c *smtp.Client, data io.WriteCloser) error {
+	if err := data.Close(); err != nil {
 		return smtpOperationError(ctx, "smtp data close", err)
 	}
-	if err := c.Quit(); err != nil {
-		return smtpOperationError(ctx, "smtp quit", err)
-	}
+	// DATA's successful final reply transfers responsibility to the server.
+	// A failed QUIT cannot revoke acceptance; returning it as a send failure
+	// would cause the durable worker to deliver the same notification again.
+	_ = c.Quit()
 	return nil
+}
+
+// parseSMTPAddress keeps envelope parsing and header validation consistent.
+func parseSMTPAddress(value string) (*mail.Address, error) {
+	if strings.ContainsAny(value, "\r\n") {
+		return nil, errors.New("invalid address")
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address == "" {
+		return nil, errors.New("invalid address")
+	}
+	return address, nil
 }
 
 // smtpContextError closes the small scheduling gap between a socket deadline
@@ -215,6 +239,24 @@ func sanitizeHeaderValue(s string) string {
 	}, s)
 }
 
+// validateExtraHeader preserves extension headers without allowing malformed
+// field names or duplicates of headers owned by the message builder.
+func validateExtraHeader(name string) error {
+	if name == "" {
+		return errors.New("smtp: empty extra header name")
+	}
+	for _, b := range []byte(name) {
+		if b < 33 || b > 126 || b == ':' {
+			return errors.New("smtp: invalid extra header name")
+		}
+	}
+	switch strings.ToLower(name) {
+	case "from", "to", "cc", "bcc", "reply-to", "subject", "mime-version", "date", "content-type", "content-transfer-encoding":
+		return errors.New("smtp: extra header conflicts with managed message headers")
+	}
+	return nil
+}
+
 // buildMIME assembles a multipart/alternative message with both HTML and
 // plaintext parts, plus any extra headers the caller specified.
 func buildMIME(from string, msg Message) (string, error) {
@@ -247,6 +289,9 @@ func buildMIME(from string, msg Message) (string, error) {
 	fmt.Fprintf(&sb, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&sb, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
 	for k, v := range msg.Headers {
+		if err := validateExtraHeader(k); err != nil {
+			return "", err
+		}
 		fmt.Fprintf(&sb, "%s: %s\r\n", sanitizeHeaderValue(k), sanitizeHeaderValue(v))
 	}
 	fmt.Fprintf(&sb, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
@@ -268,16 +313,14 @@ func buildMIME(from string, msg Message) (string, error) {
 	return sb.String(), nil
 }
 
-// extractAddress pulls `tom@brightinteraction.com` out of `Tom <tom@..>`.
+// extractAddress pulls `tom@cloudrebellion.se` out of `Tom <tom@..>`.
 // MAIL FROM and RCPT TO need the bare address, not the friendly form.
 func extractAddress(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.Index(s, "<"); i >= 0 {
-		if j := strings.Index(s[i+1:], ">"); j >= 0 {
-			return strings.TrimSpace(s[i+1 : i+1+j])
-		}
+	address, err := parseSMTPAddress(s)
+	if err != nil {
+		return ""
 	}
-	return s
+	return address.Address
 }
 
 // stripHTML is the plaintext fallback. Best-effort: collapses tags + decodes

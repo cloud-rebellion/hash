@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -177,5 +178,93 @@ func TestStringify(t *testing.T) {
 		if ok != c.ok || got != c.want {
 			t.Errorf("stringify(%v): got (%q,%v) want (%q,%v)", c.in, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+func TestHTTPSourceRejectsOversizedValidJSONPrefix(t *testing.T) {
+	prefix := `{"name":"Proposal"}`
+	for _, size := range []int{maxSourceResponseBytes, maxSourceResponseBytes + 1} {
+		src := NewCRMDealSource("https://crm.example.test", "test-token")
+		src.Client = &fakeDoer{resp: mkResp(200, prefix+strings.Repeat(" ", size-len(prefix)))}
+		got, err := src.Fetch(context.Background(), Ref{Source: "deal_1", Path: "name"})
+		if size == maxSourceResponseBytes {
+			if err != nil || got != "Proposal" {
+				t.Fatalf("boundary response rejected: %q %v", got, err)
+			}
+		} else if err == nil || got != "" {
+			t.Fatal("truncated oversized response accepted")
+		}
+	}
+}
+
+func TestHTTPSourceRefusesUnsuccessfulJSONAndRedactsBody(t *testing.T) {
+	for _, status := range []int{199, 301, 302, 307, 401, 500} {
+		src := NewCRMDealSource("https://crm.example.test", "test-token")
+		src.Client = &fakeDoer{resp: mkResp(status, `{"name":"private-upstream-diagnostic"}`)}
+		value, err := src.Fetch(context.Background(), Ref{Source: "deal_1", Path: "name"})
+		if err == nil || value != "" {
+			t.Fatalf("status%d trusted", status)
+		}
+		if strings.Contains(err.Error(), "private-upstream-diagnostic") {
+			t.Fatal("upstream error body exposed")
+		}
+	}
+}
+
+func TestHTTPSourceRejectsAmbiguousContractValues(t *testing.T) {
+	cases := []string{
+		`{"amount":"one","amount":"two"}`,
+		`{"amount":"one","\u0061mount":"two"}`,
+		`{"deal":{"amount":"one","amount":"two"}}`,
+		`{"amount":"ok","history":[{"name":"a","name":"b"}]}`,
+		"{\"amount\":\"bad\xff\"}",
+		`null`, `[]`, `{"amount":"one"} {"amount":"two"}`,
+		`{"amount":"ok","nested":` + strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66) + "}",
+	}
+	for _, raw := range cases {
+		src := NewCRMDealSource("https://crm.test", "token")
+		src.Client = &fakeDoer{resp: mkResp(200, raw)}
+		value, err := src.Fetch(context.Background(), Ref{Source: "deal_1", Path: "amount"})
+		if err == nil || value != "" {
+			t.Fatalf("ambiguous response accepted: value=%q err=%v", value, err)
+		}
+		if strings.Contains(err.Error(), "one") || strings.Contains(err.Error(), "bad") {
+			t.Fatalf("upstream text leaked: %v", err)
+		}
+	}
+}
+
+func TestCRMArrayPathOverflowCannotSelectAnotherRecord(t *testing.T) {
+	for _, path := range []string{
+		"items.18446744073709551616.name", // wraps to zero under 64-bit unchecked arithmetic
+		"items.18446744073709551617.name",
+		"items.4294967296.name", // overflow on 32-bit; out of bounds on 64-bit
+		"items." + strings.Repeat("9", 256) + ".name",
+	} {
+		src := NewCRMDealSource("https://crm.test", "token")
+		src.Client = &fakeDoer{resp: mkResp(200, `{"items":[{"name":"wrong-customer"},{"name":"other-customer"}]}`)}
+		value, err := src.Fetch(context.Background(), Ref{Source: "deal_1", Path: path})
+		if err == nil || value != "" {
+			t.Fatalf("overflow path selected CRM record: value=%q err=%v", value, err)
+		}
+	}
+}
+
+func TestConcurrentFetchDoesNotMutateClientConfiguration(t *testing.T) {
+	source := &HTTPSource{BaseURL: "://invalid", Token: "test", kind: SourceCRMDeal, pathFor: func(Ref) string { return "/deal" }}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Invalid URL stops before network I/O, after client selection.
+			if _, err := source.Fetch(context.Background(), Ref{Source: "deal_1"}); err == nil {
+				t.Error("invalid URL accepted")
+			}
+		}()
+	}
+	wg.Wait()
+	if source.Client != nil {
+		t.Fatal("Fetch mutated shared source configuration")
 	}
 }

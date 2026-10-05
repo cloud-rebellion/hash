@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/send"
@@ -54,9 +55,13 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
 	res, err := s.Send.Send(r.Context(), send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
-		LawfulBasis: in.LawfulBasis,
+		LawfulBasis: in.LawfulBasis, Authorize: authorize,
 	}, docID)
 	if err != nil {
 		s.writeSendError(w, err)
@@ -73,6 +78,10 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 // expects: 402 + upgrade_url for quota, 409 + tier detail for an eIDAS block.
 func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, auth.ErrMutationCredentialExpired):
+		writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
+	case errors.Is(err, auth.ErrMutationPermissionRevoked):
+		writeError(w, http.StatusForbidden, "permission or credential revoked")
 	case errors.Is(err, send.ErrDocumentNotFound):
 		writeError(w, http.StatusNotFound, "document not found")
 	case errors.Is(err, send.ErrNotDraft):
@@ -143,11 +152,20 @@ func (s *Server) handleVoidDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	var in voidDocumentInput
 	_ = decodeJSON(r, &in)
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
 	err := s.Send.Void(r.Context(), send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
+		Authorize: authorize,
 	}, docID, in.Reason)
 	if err != nil {
 		switch {
+		case errors.Is(err, auth.ErrMutationCredentialExpired):
+			writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
+		case errors.Is(err, auth.ErrMutationPermissionRevoked):
+			writeError(w, http.StatusForbidden, "permission or credential revoked")
 		case errors.Is(err, send.ErrDocumentNotFound):
 			writeError(w, http.StatusNotFound, "document not found")
 		case errors.Is(err, send.ErrAlreadyFinalised):

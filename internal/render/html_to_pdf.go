@@ -85,6 +85,10 @@ func (g *Gotenberg) Ping(ctx context.Context) error {
 // and returns the rendered PDF bytes. Reference:
 // https://gotenberg.dev/docs/routes#convert-with-chromium-html
 func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions) ([]byte, error) {
+	// One budget covers admission, all HTTP attempts, and retry backoff.
+	// A per-request client timeout alone would allow three full budgets.
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	if g.BaseURL == "" {
 		return nil, fmt.Errorf("gotenberg base url not configured")
 	}

@@ -4,16 +4,19 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -263,54 +266,78 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid version number")
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
+	var in struct {
+		ExpectedUpdatedAt string `json:"expected_updated_at"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid restore request")
+		return
+	}
+	if in.ExpectedUpdatedAt == "" {
+		writeError(w, http.StatusPreconditionRequired, "expected_updated_at is required")
+		return
+	}
+	expected, err := time.Parse(time.RFC3339Nano, in.ExpectedUpdatedAt)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "document not found")
-			return
-		}
+		writeError(w, http.StatusBadRequest, "expected_updated_at must be RFC3339")
+		return
+	}
+
+	authorize, ok := s.sessionMutationAuthorization(w, r, sess)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	if doc.Status != "draft" {
-		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, docID)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "restore document version failed", err)
 		return
 	}
-	if doc.SourceKind != "blocks" {
+	q := s.Queries.WithTx(tx)
+	locked := guard.Document
+	if locked.SourceKind != "blocks" {
 		writeError(w, http.StatusConflict, "restore only supported on block-source documents")
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
+	actorID := guard.UserID()
+	if !locked.UpdatedAt.Valid || !locked.UpdatedAt.Time.Equal(expected) {
+		writeError(w, http.StatusPreconditionFailed, "Document changed since observation. Fetch and review before restoring.")
+		return
+	}
+
+	// Only this scoped target lookup translates absence into a readable error.
+	// No-row mutation, version and audit writes below are internal failures.
+	target, err := q.GetDocumentVersionByNo(ctx, generated.GetDocumentVersionByNoParams{DocumentID: docID, VersionNo: int32(n64)})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "version not found")
+		return
+	}
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	q := s.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if locked.Status != "draft" || locked.SourceKind != "blocks" {
-		writeError(w, http.StatusConflict, "document not editable (must be draft + blocks-source)")
-		return
-	}
-	target, _, err := versions.New(q).Restore(r.Context(), versions.RestoreInput{
-		DocumentID:    docID,
-		TargetVersion: int32(n64),
-		OrgID:         sess.OrgID,
-		CreatedBy:     &sess.UserID,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if target.OrgID != sess.OrgID {
+		writeError(w, http.StatusNotFound, "version not found")
 		return
 	}
 	if target.SourceKind != "blocks" {
 		writeError(w, http.StatusConflict, "target version is not block-source")
 		return
 	}
-	updated, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+	if _, _, err := versions.New(q).Restore(ctx, versions.RestoreInput{
+		DocumentID: docID, TargetVersion: int32(n64), OrgID: sess.OrgID, CreatedBy: &actorID,
+	}); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	updated, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
 		ID:            docID,
 		OrgID:         sess.OrgID,
 		BlocksJson:    target.BlockTreeJson,
@@ -320,9 +347,9 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
+	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
 		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
+		ActorUserID: &actorID,
 		DocumentID:  &docID,
 		Kind:        audit.KindDocumentUpdated,
 		IP:          firstIPFromHeader(r),
@@ -338,7 +365,11 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := guard.Recheck(ctx); err != nil {
+		s.writeDraftAuthoringError(w, "restore document version failed", err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeInternalError(w, err)
 		return
 	}

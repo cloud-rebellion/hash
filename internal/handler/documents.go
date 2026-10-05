@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,10 +16,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/versions"
 )
 
 // documentResponse is the JSON shape we return.
@@ -62,7 +67,7 @@ func toDocumentResponse(d *generated.Document) documentResponse {
 		Metadata:          d.Metadata,
 		DefaultLocale:     d.DefaultLocale,
 		CreatedAt:         d.CreatedAt.Time.Format(time.RFC3339),
-		UpdatedAt:         d.UpdatedAt.Time.Format(time.RFC3339),
+		UpdatedAt:         d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
 	}
 	if d.TemplateID.Valid {
 		out.TemplateID = uuidFromBytes(d.TemplateID.Bytes).String()
@@ -384,12 +389,14 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load pdf failed")
 		return
 	}
+	setDocumentPreviewHeaders(w, false)
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", "inline")
 	_, _ = w.Write(body)
 }
 
 type updateDocumentInput struct {
+	ExpectedUpdatedAt string          `json:"expected_updated_at"`
 	Name              string          `json:"name,omitempty"`
 	BlocksJSON        json.RawMessage `json:"blocks_json,omitempty"`
 	VariablesJSON     json.RawMessage `json:"variables_json,omitempty"`
@@ -407,38 +414,67 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
 	var in updateDocumentInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	existing, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "document not found")
+	if err := validateDocumentUpdateStorage(in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if in.DefaultLocale != "" {
+		locale, err := recipients.NormalizeLocale(in.DefaultLocale)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "default_locale is not supported")
+			return
+		}
+		in.DefaultLocale = locale
+	}
+
+	if in.ExpectedUpdatedAt == "" {
+		writeError(w, http.StatusPreconditionRequired, "expected_updated_at is required; fetch the current document before editing")
+		return
+	}
+	expected, err := time.Parse(time.RFC3339Nano, in.ExpectedUpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get document failed")
+		writeError(w, http.StatusBadRequest, "expected_updated_at must be RFC3339")
 		return
 	}
-	if existing.Status != "draft" {
-		writeError(w, http.StatusConflict, "document not in draft state")
+
+	if s.Pool == nil || s.Queries == nil || s.Audit == nil {
+		writeInternalErrorMsg(w, "update document unavailable", errors.New("atomic document update dependencies unavailable"))
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
 	q := s.Queries.WithTx(tx)
-	existing, err = q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeDraftAuthoringError(w, "authorize document update", err)
 		return
 	}
-	if existing.Status != "draft" {
-		writeError(w, http.StatusConflict, "document not in draft state")
+	existing := guard.Document
+
+	if !existing.UpdatedAt.Valid || !existing.UpdatedAt.Time.Equal(expected) {
+		writeError(w, http.StatusPreconditionFailed, "Document changed since this edit began. Download your local draft, then reload and review the latest document.")
+		return
+	}
+
+	// Reject unsupported content rather than acknowledging a no-op update.
+	if existing.SourceKind != "blocks" && (len(in.BlocksJSON) > 0 || len(in.VariablesJSON) > 0) {
+		writeError(w, http.StatusBadRequest, "blocks_json and variables_json require a block-source document")
 		return
 	}
 
@@ -467,7 +503,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 			BlocksJson:    blocks,
 			VariablesJson: vars,
 		}); err != nil {
-			writeError(w, http.StatusInternalServerError, "update blocks failed")
+			writeInternalErrorMsg(w, "update blocks failed", err)
 			return
 		}
 	}
@@ -496,7 +532,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		Metadata:  existing.Metadata,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "update document failed")
+		writeInternalErrorMsg(w, "update document failed", err)
 		return
 	}
 
@@ -509,7 +545,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 			DefaultLocale: in.DefaultLocale,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "update default language failed")
+			writeInternalErrorMsg(w, "update default language failed", err)
 			return
 		}
 	}
@@ -523,17 +559,32 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 			RequiresSignature: *in.RequiresSignature,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "update signature mode failed")
+			writeInternalErrorMsg(w, "update signature mode failed", err)
 			return
 		}
 	}
 
+	actorID := guard.UserID()
+	if s.Versions != nil {
+		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
+			DocumentID: d.ID, OrgID: d.OrgID, Name: d.Name, SourceKind: d.SourceKind,
+			BlocksJSON: d.BlocksJson, VariablesJS: d.VariablesJson, CreatedBy: &actorID,
+			Via: versions.ViaHuman, Summary: "update_document",
+		}); err != nil {
+			writeInternalErrorMsg(w, "snapshot document update failed", err)
+			return
+		}
+	}
 	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
+		OrgID: u.OrgID, ActorUserID: &actorID, DocumentID: &d.ID,
 		Kind: audit.KindDocumentUpdated,
 	})
 	if err != nil {
 		writeInternalError(w, err)
+		return
+	}
+	if err := guard.Recheck(ctx); err != nil {
+		s.writeDraftAuthoringError(w, "reauthorize document update", err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
@@ -617,8 +668,29 @@ func (s *Server) resolveChangeRequest(w http.ResponseWriter, r *http.Request, ap
 	if !ok {
 		return
 	}
-	if _, err := s.Sign.ResolveChange(r.Context(), u.OrgID, id, crID, approve); err != nil {
-		writeError(w, http.StatusInternalServerError, "resolve change request failed")
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
+	if _, err := s.Sign.ResolveChangeWithAuthorization(r.Context(), u.OrgID, id, crID, u.UserID, approve, authorize); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrMutationCredentialExpired):
+			writeError(w, http.StatusUnauthorized, auth.ErrMutationCredentialExpired.Error())
+		case errors.Is(err, auth.ErrMutationPermissionRevoked):
+			writeError(w, http.StatusForbidden, "permission or session revoked")
+		case errors.Is(err, sign.ErrChangeAlreadyResolved):
+			writeError(w, http.StatusConflict, "change request is already resolved")
+		case errors.Is(err, sign.ErrChangeRequestNotFound):
+			writeError(w, http.StatusNotFound, "change request not found for this document")
+		case errors.Is(err, sign.ErrNotRevisable):
+			writeError(w, http.StatusConflict, "document is no longer awaiting revision")
+		case errors.Is(err, sign.ErrRevisionWouldDestroyEvidence):
+			writeError(w, http.StatusConflict, "change cannot be applied after legal evidence has been captured")
+		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
+			writeError(w, http.StatusConflict, "change resolution is not supported for envelopes")
+		default:
+			writeInternalErrorMsg(w, "resolve change request failed", err)
+		}
 		return
 	}
 	resolution := "denied"
@@ -675,8 +747,24 @@ func (s *Server) handleReviseDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	doc, err := s.Sign.Revise(r.Context(), u.OrgID, id)
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
+	doc, err := s.Sign.ReviseWithAuthorization(r.Context(), u.OrgID, id, u.UserID, authorize)
 	if err != nil {
+		if errors.Is(err, auth.ErrMutationCredentialExpired) {
+			writeError(w, http.StatusUnauthorized, auth.ErrMutationCredentialExpired.Error())
+			return
+		}
+		if errors.Is(err, auth.ErrMutationPermissionRevoked) || errors.Is(err, sign.ErrRevisionNotAuthorized) {
+			writeError(w, http.StatusForbidden, "permission or session revoked")
+			return
+		}
+		if errors.Is(err, sign.ErrRevisionDocumentNotFound) {
+			writeError(w, http.StatusNotFound, "document not found")
+			return
+		}
 		if errors.Is(err, sign.ErrEnvelopeTransitionUnsupported) {
 			writeError(w, http.StatusConflict, "envelope revision is not supported; void the envelope and create a new draft instead")
 			return
@@ -689,7 +777,7 @@ func (s *Server) handleReviseDocument(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "revision blocked because this ceremony already contains captured legal evidence; void and create a superseding document instead")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "revise failed")
+		writeInternalErrorMsg(w, "revise document", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
@@ -746,6 +834,11 @@ type createCommentInput struct {
 	Body string `json:"body"`
 }
 
+var (
+	errCommentSessionRevoked = errors.New("permission or session revoked")
+	errCommentSessionExpired = errors.New("session expired before transaction committed")
+)
+
 func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	u, ok := requireSessionUser(w, r.Context())
 	if !ok {
@@ -760,13 +853,35 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	name := u.Email
-	if usr, uerr := s.Queries.GetUser(r.Context(), u.UserID); uerr == nil && usr.Name != "" {
-		name = usr.Name
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
+		return
 	}
-	c, err := s.Sign.SenderComment(r.Context(), u.OrgID, id, u.UserID, name, in.Body)
+	authorize := func(ctx context.Context, user *generated.User) error {
+		if user.ID != session.UserID || user.SessionGeneration != session.Generation {
+			return errCommentSessionRevoked
+		}
+		if _, err := s.Cookies.Verify(cookie); err != nil {
+			return errCommentSessionExpired
+		}
+		return ctx.Err()
+	}
+	c, err := s.Sign.SenderCommentWithAuthorization(r.Context(), u.OrgID, id, u.UserID, u.Email, in.Body, authorize)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		switch {
+		case errors.Is(err, errCommentSessionExpired):
+			writeError(w, http.StatusUnauthorized, errCommentSessionExpired.Error())
+		case errors.Is(err, errCommentSessionRevoked), errors.Is(err, sign.ErrSenderCommentNotAuthorized):
+			writeError(w, http.StatusForbidden, "permission or session revoked")
+		case errors.Is(err, sign.ErrInvalidCommentBody):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, sign.ErrDocumentNotCommentable):
+			writeError(w, http.StatusConflict, "document is not open for comments")
+		case errors.Is(err, sign.ErrCommentDocumentNotFound):
+			writeError(w, http.StatusNotFound, "document not found")
+		default:
+			writeInternalErrorMsg(w, "post sender comment", err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, toCommentResponse(c))
@@ -781,57 +896,106 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// GetDocumentByID includes already-soft-deleted rows. That makes object
-	// cleanup retryable if PostgreSQL accepted the delete but MinIO was
-	// temporarily unavailable during the first request.
-	doc, err := s.Queries.GetDocumentByID(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && doc.OrgID != u.OrgID) {
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil || s.Cookies == nil {
+		writeError(w, http.StatusUnauthorized, "session required")
+		return
+	}
+	payload, err := s.Cookies.Verify(cookie.Value)
+	var session auth.SessionPayload
+	if err != nil || json.Unmarshal(payload, &session) != nil || session.UserID != u.UserID {
+		writeError(w, http.StatusUnauthorized, "session invalid")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	// The fresh privacy predicate must see requests committed before acquiring
+	// the parent/shared organization fence, regardless of connection defaults.
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.Queries.WithTx(tx)
+	doc, err := q.GetDocumentForPrivacyUpdate(ctx, generated.GetDocumentForPrivacyUpdateParams{DocumentID: id, OrgID: u.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get document failed")
+		writeInternalError(w, err)
 		return
 	}
 	if doc.Status != "draft" {
 		writeError(w, http.StatusConflict, "only draft documents can be deleted")
 		return
 	}
-	if !doc.DeletedAt.Valid {
-		if err := s.Queries.DeleteDraftDocument(r.Context(), generated.DeleteDraftDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
-			writeError(w, http.StatusInternalServerError, "delete document failed")
-			return
-		}
-		// DeleteDraftDocument is an :exec query and therefore reports nil even
-		// when a concurrent send changed the status and the guarded UPDATE
-		// matched zero rows. Re-read before deleting bytes so that race cannot
-		// remove the source underneath an active agreement.
-		doc, err = s.Queries.GetDocumentByID(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "verify document delete failed")
-			return
-		}
-		if !doc.DeletedAt.Valid {
-			writeError(w, http.StatusConflict, "document changed state before it could be deleted")
-			return
-		}
+	var role string
+	var generation int64
+	err = tx.QueryRow(ctx, `SELECT role,session_generation FROM users WHERE id=$1 AND org_id=$2 FOR SHARE`, u.UserID, u.OrgID).Scan(&role, &generation)
+	if err != nil || (role != string(auth.RoleSender) && role != string(auth.RoleOwner)) || session.Generation != generation {
+		writeError(w, http.StatusForbidden, "document deletion permission or session revoked")
+		return
 	}
-
-	objects, err := draftSourceObjectVersions(doc)
+	if _, err := s.Cookies.Verify(cookie.Value); err != nil {
+		writeError(w, http.StatusUnauthorized, "session expired while awaiting deletion authorization")
+		return
+	}
+	if doc.DeletedAt.Valid {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	retainedEvidence, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: id, OrgID: u.OrgID})
 	if err != nil {
-		writeInternalErrorMsg(w, "draft source lacks an exact cleanup commitment; refusing ambiguous deletion", err)
+		writeInternalError(w, err)
 		return
 	}
-	if len(objects) > 0 && s.Storage == nil {
-		writeError(w, http.StatusServiceUnavailable, "storage unavailable for document cleanup")
+	if retainedEvidence {
+		writeError(w, http.StatusConflict, "draft evidence or sealing state requires review before deletion")
 		return
 	}
-	for _, object := range objects {
-		if err := deleteObjectDetached(r.Context(), s.Storage, object); err != nil {
-			writeInternalErrorMsg(w, "delete document source failed; retry the delete", err)
-			return
-		}
+	privacyFence, err := q.TryCollabArchivePrivacyFence(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
 	}
+	if !privacyFence {
+		writeError(w, http.StatusConflict, "privacy review is changing; retry after it completes")
+		return
+	}
+	pendingPrivacy, err := q.HasPendingDocumentPrivacyRequests(ctx, generated.HasPendingDocumentPrivacyRequestsParams{DocumentID: id, OrgID: u.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if pendingPrivacy {
+		writeError(w, http.StatusConflict, "document deletion awaits the open privacy request review")
+		return
+	}
+	if err := q.DeleteDraftDocument(ctx, generated.DeleteDraftDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
+		Kind: audit.KindDocumentDeleted,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if _, err := s.Cookies.Verify(cookie.Value); err != nil {
+		writeError(w, http.StatusUnauthorized, "session expired before document deletion committed")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
+	// Retain source bytes throughout the 90-day soft-delete grace period.
+	// The worker performs privacy-fenced object cleanup before hard deletion.
 	w.WriteHeader(http.StatusNoContent)
 }
 

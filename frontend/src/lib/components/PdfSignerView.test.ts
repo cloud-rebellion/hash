@@ -9,8 +9,8 @@ describe('PDF signer field persistence', () => {
     expect(component).toContain('draftValue !== persistedValue');
     expect(component).toContain('saving[f.id]');
     expect(component).toContain('persisted[f.id] = value;');
-    expect(component).toContain('disabled={signed || !recomputeFilled()}');
-    expect(component).toContain('if (recomputeFilled()) onSignatureClick?.();');
+    expect(component).toContain('disabled={readOnly || signed || !recomputeFilled()}');
+    expect(component).toContain('if (!readOnly && recomputeFilled()) onSignatureClick?.();');
   });
 
   test('fails closed when an autosave response is unsuccessful or malformed', () => {

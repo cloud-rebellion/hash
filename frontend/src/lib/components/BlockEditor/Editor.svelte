@@ -10,6 +10,7 @@
   import { Editor } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import { onDestroy, onMount } from 'svelte';
+  import { beforeNavigate } from '$app/navigation';
   import * as Y from 'yjs';
   import { WebsocketProvider } from 'y-websocket';
   import * as decoding from 'lib0/decoding';
@@ -18,10 +19,15 @@
   import CollaborationCaret from '@tiptap/extension-collaboration-caret';
   import { Hash, FileText, Quote, Signature, Variable, Code as CodeIcon, Minus, Save, Users, Table as TableIcon, Plus, X } from 'lucide-svelte';
   import {
-    importHTML, importMarkdown, updateDocument, type BlockTree, type DocumentResponse
+    importHTML, importMarkdown, getMe, getDocument, saveCollaborativeDocument, APIError, type BlockTree, type DocumentResponse
   } from '$lib/api/client';
   import { fromProseMirror, isCanonicalSignatureRole, toProseMirror } from './transform';
+  import { bootstrapIfGranted, MESSAGE_BOOTSTRAP, readBootstrapGrant } from './bootstrap';
+  import { MESSAGE_GENERATION, observeCanonicalGeneration, readCanonicalGeneration } from './generation';
+  import { MESSAGE_SAVED, isNewerSaveReceipt, readCanonicalSaveReceipt } from './save-receipt';
+  import { CheckpointRequests, MESSAGE_CHECKPOINT, readSaveCheckpoint } from './checkpoint';
   import { BlockIDExtension, DynamicVariable, OpaqueBlock, PageBreak, SignatureField, TableBlock } from './nodes';
+  import RecoveryPanel from './RecoveryPanel.svelte';
 
   let { document: doc, onChange, userName, userColor }: {
     document: DocumentResponse;
@@ -36,6 +42,11 @@
   let dirty = $state(false);
   let error = $state<string | null>(null);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let editRevision = $state(0);
+  let saveQueued = false;
+  let saveConflict = $state(false);
+ let mayBootstrap = false;
+  let disposed = false;
 
   let showImport = $state<'none' | 'html' | 'md'>('none');
   let importText = $state('');
@@ -54,6 +65,11 @@
   let provider: WebsocketProvider | null = null;
   let peerCount = $state(1);
   let connected = $state(false);
+  let collaborationRejected = $state(false);
+  let canonicalGeneration: string | null = null;
+  const checkpointRequests = new CheckpointRequests();
+  let accessCheckPending = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Hash compaction extension: when the server's persisted log grows
   // past the configured threshold it sends a compact-request with a
@@ -72,6 +88,14 @@
     return palette[h % palette.length];
   }
 
+  function queueCollaborationReconnect(documentID: string) {
+    if (disposed || saveConflict || collaborationRejected || doc.id !== documentID || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!disposed && !saveConflict && !collaborationRejected && doc.id === documentID) provider?.connect();
+    }, 1000);
+  }
+
   onMount(() => {
     ydoc = new Y.Doc();
     // Resolve the wss/ws scheme + base from window.location so dev (http)
@@ -83,7 +107,13 @@
       // path to be the entire endpoint, so set room='' via the
       // override below. The library passes the constructor URL
       // unchanged when room is empty.
-      connect: true
+      connect: true,
+      // A fresh empty collaboration generation may only be seeded from the
+      // exact canonical document observed by this editor's initial HTTP read.
+      params: { expected_updated_at: doc.updated_at },
+      // Every replicated edit must cross the server's live authorization gate.
+      // Same-origin BroadcastChannel traffic bypasses that document/session gate.
+      disableBc: true
     });
 
     // Register our compact-request handler on the per-instance
@@ -107,12 +137,104 @@
       encoding.writeVarUint8Array(encoder, snapshot);
     };
 
+    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_CHECKPOINT] = (
+      _encoder: encoding.Encoder, decoder: decoding.Decoder
+    ) => {
+      try { checkpointRequests.receive(readSaveCheckpoint(decoder)); }
+      catch (e) { checkpointRequests.cancel(e as Error); }
+    };
+
+    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_SAVED] = (
+      _encoder: encoding.Encoder, decoder: decoding.Decoder
+    ) => {
+      try {
+        const receipt = readCanonicalSaveReceipt(decoder);
+        if (!disposed && isNewerSaveReceipt(canonicalGeneration, receipt)) {
+          canonicalGeneration = receipt.generation;
+          doc = { ...doc, updated_at: receipt.updatedAt };
+          if (provider) provider.params.expected_updated_at = receipt.updatedAt;
+        }
+      } catch (e) {
+        collaborationRejected = true;
+        error = (e as Error).message;
+        provider?.disconnect();
+      }
+    };
+
+    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_GENERATION] = (
+      _encoder: encoding.Encoder, decoder: decoding.Decoder
+    ) => {
+      try {
+        canonicalGeneration = observeCanonicalGeneration(canonicalGeneration, readCanonicalGeneration(decoder));
+      } catch (e) {
+        collaborationRejected = true;
+        connected = false;
+        error = (e as Error).message;
+        provider?.disconnect();
+      }
+    };
+
+    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_BOOTSTRAP] = (
+      _encoder: encoding.Encoder, decoder: decoding.Decoder
+    ) => {
+      mayBootstrap = readBootstrapGrant(decoder);
+      if (provider?.synced && editor && ydoc) {
+        bootstrapIfGranted(ydoc, mayBootstrap, () => {
+          editor!.commands.setContent(toProseMirror(doc.blocks_json) as never);
+        });
+      }
+    };
+
     const label = userName?.trim() || 'You';
     const colour = userColor?.trim() || colourFor(label);
 
     provider.awareness.setLocalStateField('user', { name: label, color: colour });
     provider.on('status', (evt: { status: string }) => {
       connected = evt.status === 'connected';
+    });
+    provider.on('connection-close', async (event: CloseEvent | null) => {
+      checkpointRequests.cancel();
+      if (disposed || saveConflict || collaborationRejected) return;
+      const documentID = doc.id;
+      // Pause y-websocket's reconnect timer until the HTTP observation has
+      // been checked. disconnect() here would re-enter this close callback.
+      if (provider) provider.shouldConnect = false;
+      if (event?.code !== 1008) {
+        if (accessCheckPending) return;
+        accessCheckPending = true;
+        // Browsers conceal failed-upgrade HTTP status, often exposing only
+        // 1006. Distinguish revoked membership/session from transient outages.
+        try {
+          const current = await getMe();
+          if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+          if (current.org_id === doc.org_id && (current.role === 'owner' || current.role === 'sender')) {
+            const saved = await getDocument(documentID);
+            if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+            if (saved.id === documentID && saved.org_id === doc.org_id && saved.source_kind === 'blocks'
+                && saved.status === 'draft' && saved.updated_at === doc.updated_at
+                && provider?.params.expected_updated_at === doc.updated_at) {
+              queueCollaborationReconnect(documentID);
+              return;
+            }
+            // Never adopt this GET's timestamp into the old Y.Doc or params:
+            // that could let old content seed a newly recovered empty room.
+          }
+        } catch (e) {
+          if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+          if (!(e instanceof APIError) || ![401, 403, 404].includes(e.status)) {
+            queueCollaborationReconnect(documentID);
+            return;
+          }
+        } finally {
+          accessCheckPending = false;
+        }
+      }
+      if (disposed || doc.id !== documentID) return;
+      collaborationRejected = true;
+      connected = false;
+      // Policy rejection is terminal for this connection; repeatedly retrying
+      // cannot repair authorization, document state or an oversized history.
+      provider?.disconnect();
     });
     provider.awareness.on('change', () => {
       // Awareness map includes this client; size = collaborators count
@@ -144,6 +266,7 @@
         // The Y.Doc is the source of truth; we still write the
         // canonical blocks_json to the server on a debounced timer so
         // PDF render, audit cert, evidence bundle all keep working.
+        editRevision++;
         dirty = true;
         scheduleSave();
       }
@@ -155,47 +278,143 @@
       openEditTable(d.pos, d.columns ?? [], d.rows ?? []);
     }) as EventListener);
 
-    // Seed the Y.Doc with the persisted blocks_json on first connect.
-    // If the server already has Yjs state for this doc, Collaboration
-    // will replace this seed with the merged state automatically.
+    // Only the server-selected owner may seed a document with no Yjs history.
     provider.on('sync', (isSynced: boolean) => {
       if (!isSynced || !editor || !ydoc) return;
-      const xmlFrag = ydoc.getXmlFragment('default');
-      if (xmlFrag.length === 0) {
-        // Empty Y.Doc -- bootstrap from the server's blocks_json.
-        editor.commands.setContent(toProseMirror(doc.blocks_json) as never);
-      }
+      bootstrapIfGranted(ydoc, mayBootstrap, () => {
+        editor!.commands.setContent(toProseMirror(doc.blocks_json) as never);
+      });
     });
   });
 
   onDestroy(() => {
+    disposed = true;
+    checkpointRequests.cancel(new Error('Editor closed'));
     if (saveTimer) clearTimeout(saveTimer);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     editor?.destroy();
     provider?.destroy();
     ydoc?.destroy();
   });
 
+  beforeNavigate(({ cancel, willUnload }) => {
+    if (!willUnload && dirty && !window.confirm('You have unsaved document changes. Leave this page and discard them?')) cancel();
+  });
+
+  function protectUnsavedDraft(event: BeforeUnloadEvent) {
+    if (!dirty) return;
+    event.preventDefault();
+    event.returnValue = '';
+  }
+
   function scheduleSave() {
+    if (saveConflict) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(persist, 700);
   }
 
+  function requestCheckpoint() {
+    return checkpointRequests.request((frame) => {
+      const socket = provider?.ws;
+      if (!socket || socket.readyState !== WebSocket.OPEN || !provider?.synced) {
+        throw new Error('Collaboration is not synchronized; your draft is preserved');
+      }
+      socket.send(frame);
+    });
+  }
+
   async function persist() {
-    if (!editor) return;
+    if (!editor || disposed || saveConflict) return;
+    if (saving) { saveQueued = true; return; }
+    let submittedRevision = editRevision;
+    saveQueued = false;
     saving = true;
     error = null;
     try {
-      const json = editor.getJSON() as Record<string, unknown>;
-      const tree = fromProseMirror(json);
-      const updated = await updateDocument(doc.id, { blocks_json: tree });
-      doc = updated;
-      dirty = false;
-      onChange?.(updated);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const checkpoint = await requestCheckpoint();
+          if (disposed) return;
+          // The checkpoint response follows replay of the server's captured state.
+          // Serialize that updated editor content, retaining edits made afterward.
+          submittedRevision = editRevision;
+          const json = editor.getJSON() as Record<string, unknown>;
+          const tree = fromProseMirror(json);
+          const receipt = await saveCollaborativeDocument(doc.id, {
+            peer_id: checkpoint.peerID, checkpoint: checkpoint.token, generation: checkpoint.generation,
+            expected_updated_at: doc.updated_at, blocks_json: tree
+          });
+          const updated = receipt.document;
+          if (receipt.generation !== (BigInt(checkpoint.generation) + 1n).toString() || updated.id !== doc.id || !updated.updated_at) {
+            throw new Error('Invalid canonical save receipt; your draft is preserved');
+          }
+          const currentReceipt = canonicalGeneration === null || BigInt(receipt.generation) >= BigInt(canonicalGeneration);
+          if (!disposed && currentReceipt) {
+            canonicalGeneration = receipt.generation;
+            doc = { ...doc, updated_at: updated.updated_at };
+            if (provider) provider.params.expected_updated_at = updated.updated_at;
+          }
+          if (!disposed && submittedRevision === editRevision) {
+            if (currentReceipt) doc = updated;
+            dirty = false;
+            onChange?.(doc);
+          }
+          break;
+        } catch (e) {
+          if (!disposed && e instanceof APIError && e.status === 409 && attempt < 2) {
+            // Another accepted edit/save invalidated this checkpoint. Capture
+            // again and serialize the replayed current state; never reuse a token.
+            continue;
+          }
+          throw e;
+        }
+      }
     } catch (e) {
-      error = (e as Error).message;
+      if (!disposed) {
+        error = (e as Error).message;
+        if (e instanceof APIError && e.status === 412) {
+          saveConflict = true;
+          provider?.disconnect();
+        }
+      }
     } finally {
       saving = false;
+      // Serialize writes and capture any subsequent save from current content.
+      if (!disposed && dirty && (saveQueued || submittedRevision !== editRevision)) scheduleSave();
     }
+  }
+
+  function downloadLocalDraft() {
+    if (!editor || disposed) return false;
+    const tree = fromProseMirror(editor.getJSON() as Record<string, unknown>);
+    const blob = new Blob([JSON.stringify(tree, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `hash-local-draft-${doc.id}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  }
+
+  function sharedEditingRecovered(documentID: string) {
+    if (disposed || doc.id !== documentID) return;
+    saveConflict = true;
+    collaborationRejected = true;
+    connected = false;
+    if (saveTimer) clearTimeout(saveTimer);
+    checkpointRequests.cancel();
+    provider?.disconnect();
+  }
+
+  function reloadRecoveredDocument(documentID: string, revision: number) {
+    if (disposed || doc.id !== documentID || revision !== editRevision) return;
+    if (!window.confirm('Reload the current saved document? Your downloaded local draft is kept, and the local copy in this editor will be replaced.')) return;
+    // Recheck after confirmation before permitting the unload. Recovery itself
+    // never clears dirty state or replaces content in the current Y.Doc.
+    if (disposed || doc.id !== documentID || revision !== editRevision) return;
+    dirty = false;
+    window.location.reload();
   }
 
   function manualSave() {
@@ -312,22 +531,71 @@
   }
 
   async function runImport() {
-    if (showImport === 'html') {
-      const updated = await importHTML(doc.id, importText);
+    if (saving || saveConflict || disposed || showImport === 'none') return;
+    if (saveTimer) clearTimeout(saveTimer);
+    const submittedRevision = editRevision;
+    saving = true;
+    saveQueued = false;
+    error = null;
+    try {
+      const updated = showImport === 'html'
+        ? await importHTML(doc.id, importText, doc.updated_at)
+        : await importMarkdown(doc.id, importText, doc.updated_at);
+      if (disposed) return;
+      if (submittedRevision !== editRevision) {
+        // Keep edits made during the import; the committed replacement needs
+        // review before another canonical save can safely overwrite it.
+        saveConflict = true;
+        provider?.disconnect();
+        error = 'The import was saved, but you edited while it was running. Download your local draft before reloading.';
+        return;
+      }
       doc = updated;
       editor?.commands.setContent(toProseMirror(updated.blocks_json) as never);
-    } else if (showImport === 'md') {
-      const updated = await importMarkdown(doc.id, importText);
-      doc = updated;
-      editor?.commands.setContent(toProseMirror(updated.blocks_json) as never);
+      dirty = false;
+      showImport = 'none';
+      importText = '';
+      onChange?.(doc);
+    } catch (e) {
+      if (!disposed) {
+        error = (e as Error).message;
+        if (e instanceof APIError && e.status === 412) {
+          saveConflict = true;
+          provider?.disconnect();
+        }
+      }
+    } finally {
+      saving = false;
+      if (!disposed && !saveConflict && dirty && saveQueued) scheduleSave();
     }
-    showImport = 'none';
-    importText = '';
-    onChange?.(doc);
   }
+
 </script>
 
+<svelte:window onbeforeunload={protectUnsavedDraft} />
+
 <div class="block-editor-v2">
+  {#if saveConflict}
+    <div role="alert" class="collaboration-warning">
+      <p>The document changed since your last save. Your edits have not been saved.
+        Download your local draft before reloading the current document.</p>
+      <button type="button" class="btn" onclick={downloadLocalDraft}>Download local draft</button>
+    </div>
+  {/if}
+  {#if collaborationRejected}
+    <div role="alert" class="collaboration-warning">
+      <p>Live collaboration was stopped. Other editors may not receive your changes.
+        Download your local draft before reloading, then check your access and document status.
+        If access is valid, ask an administrator to check the document’s collaboration history.</p>
+      <button type="button" class="btn" onclick={downloadLocalDraft}>Download local draft</button>
+    </div>
+  {/if}
+  {#if collaborationRejected || saveConflict}
+    {#key doc.id}
+      <RecoveryPanel documentID={doc.id} orgID={doc.org_id} {editRevision}
+        downloadDraft={downloadLocalDraft} onRecovered={sharedEditingRecovered} reloadDocument={reloadRecoveredDocument} />
+    {/key}
+  {/if}
   <div class="toolbar">
     <button type="button" class="tool" onclick={() => setHeading(1)} title="H1"><Hash class="size-3.5" /> H1</button>
     <button type="button" class="tool" onclick={() => setHeading(2)} title="H2"><Hash class="size-3.5" /> H2</button>
@@ -364,6 +632,8 @@
       </span>
       {#if saving}
         <span class="status-text">Saving…</span>
+      {:else if saveConflict}
+        <button type="button" class="tool tool-primary" onclick={downloadLocalDraft}>Download local draft</button>
       {:else if dirty}
         <button type="button" class="tool tool-primary" onclick={manualSave}>
           <Save class="size-3.5" /> Save
@@ -464,6 +734,7 @@
     flex-direction: column;
     gap: 0.5rem;
   }
+  .collaboration-warning { padding: 1rem; border: 1px solid currentColor; margin-bottom: 1rem; }
   .toolbar {
     display: flex;
     flex-wrap: wrap;

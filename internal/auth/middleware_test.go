@@ -30,6 +30,30 @@ func (s *sessionUserStoreStub) GetUser(_ context.Context, id uuid.UUID) (*genera
 	return s.user, s.err
 }
 
+func TestRevokedCopiedCookieCannotAuthorizeNewRequests(t *testing.T) {
+	cookies, err := NewSignedCookie(strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID := uuid.New()
+	store := &sessionUserStoreStub{user: &generated.User{ID: userID, OrgID: uuid.New(), Role: "sender", SessionGeneration: 2}}
+	called := false
+	h := RequireSession(cookies, "hash_session", store)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusNoContent) }))
+	for _, generation := range []int64{0, 1} {
+		called = false
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, signedSessionRequest(t, cookies, SessionPayload{UserID: userID, Generation: generation}))
+		if rr.Code != http.StatusUnauthorized || called {
+			t.Fatalf("revoked generation %d authorized: %d", generation, rr.Code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, signedSessionRequest(t, cookies, SessionPayload{UserID: userID, Generation: 2}))
+	if rr.Code != http.StatusNoContent || !called {
+		t.Fatal("current generation refused")
+	}
+}
+
 func signedSessionRequest(t *testing.T, cookies *SignedCookie, sp SessionPayload) *http.Request {
 	t.Helper()
 	payload, err := json.Marshal(sp)

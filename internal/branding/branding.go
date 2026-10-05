@@ -18,9 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/jpeg" // register JPEG decoder
-	_ "image/png"  // register PNG decoder
 	"io"
 	"net/url"
 	"regexp"
@@ -30,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/imageguard"
 )
 
 var (
@@ -478,7 +476,7 @@ func hexNibble(s string) (int, error) {
 // Returns (primary, accent, ok=true) on success, or ok=false on decode
 // failure. Caller falls back to the default palette in that case.
 func ExtractPaletteFromLogo(r io.Reader) (primaryHex, accentHex string, ok bool) {
-	img, _, err := image.Decode(r)
+	img, err := imageguard.Decode(r, "")
 	if err != nil {
 		return "", "", false
 	}

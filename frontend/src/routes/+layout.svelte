@@ -80,7 +80,7 @@
             </div>
           {/if}
           <form method="POST" action="/auth/logout" class="inline">
-            <button class="btn btn-secondary btn-sm" type="submit">Sign out</button>
+            <button class="btn btn-secondary btn-sm" type="submit">Sign out everywhere</button>
           </form>
         </div>
       </div>

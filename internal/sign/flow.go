@@ -67,6 +67,12 @@ var (
 	// ErrChangeAlreadyResolved is returned when an approve/deny action replays
 	// after another request has already resolved the same change request.
 	ErrChangeAlreadyResolved = errors.New("change request is already resolved")
+	// Only the parent/request lookup boundary may return this error. A missing
+	// row from an internal write or audit remains an unexpected failure.
+	ErrChangeRequestNotFound      = errors.New("change request not found for this document")
+	ErrInvalidCommentBody         = errors.New("invalid comment body")
+	ErrSenderCommentNotAuthorized = errors.New("sender comment permission revoked")
+	ErrCommentDocumentNotFound    = errors.New("comment document not found")
 	// ErrDocumentNotReadyToFinalize is a fail-closed defense for every finalize
 	// caller. Even if a retry-selection query regresses, terminal artifacts are
 	// never produced until every required signing role has actually signed.
@@ -81,7 +87,11 @@ var (
 	ErrEnvelopeChildFinalization = errors.New("envelope child finalization is managed by its parent")
 	// ErrNotRevisable is returned when a revise targets a document that is not
 	// paused in the changes_requested state.
-	ErrNotRevisable = errors.New("document is not awaiting revision")
+	ErrNotRevisable          = errors.New("document is not awaiting revision")
+	ErrRevisionNotAuthorized = errors.New("revision permission revoked")
+	// Only the initial parent lookup can report a missing document. No rows
+	// from a later mutation or audit is an internal transaction failure.
+	ErrRevisionDocumentNotFound = errors.New("revision document not found")
 	// ErrRevisionWouldDestroyEvidence fails closed when the current in-place
 	// revision model would have to erase a signature, acceptance, or completed
 	// field. A future superseding-document model can preserve and link both
@@ -180,13 +190,6 @@ type EvidenceStorage interface {
 	ResolveVerifiedLegacy(context.Context, string, []byte) ([]byte, storage.StoredObject, error)
 	PutEvidenceVersioned(context.Context, string, string, []byte, time.Time) (storage.StoredObject, error)
 	RetainEvidenceVersion(context.Context, string, string, []byte, time.Time) error
-}
-
-func (e *Engine) resolveBrandingCSS(ctx context.Context, doc *generated.Document) (string, error) {
-	if e.BrandingCSS == nil {
-		return "", nil
-	}
-	return e.BrandingCSS(ctx, doc)
 }
 
 // SignInput is what the signer page POSTs when they finalize.
@@ -407,6 +410,12 @@ func checkMagicLinkExpiry(row *generated.GetRecipientByTokenHashRow, doc *genera
 	return nil
 }
 
+// checkLockedMagicLinkExpiry checks fresh deadlines after acquiring the document
+// lock. Admission-time validation can become stale while waiting for that lock.
+func checkLockedMagicLinkExpiry(rec *generated.Recipient, doc *generated.Document, now time.Time) error {
+	return checkMagicLinkExpiry(&generated.GetRecipientByTokenHashRow{MagicTokenExpiresAt: rec.MagicTokenExpiresAt}, doc, now)
+}
+
 // checkActiveCeremonyAccess is the defense-in-depth state gate shared by all
 // ordinary magic-link reads and mutations. Completed-document download uses
 // LookupCompletedArtifactByToken instead; draft/terminal documents must never
@@ -541,6 +550,9 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	}
 	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
 	if err != nil {
+		return nil, err
+	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
 		return nil, err
 	}
 	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
@@ -704,6 +716,9 @@ func (e *Engine) Accept(ctx context.Context, rc *RecipientContext, evidence Part
 	}
 	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
 	if err != nil {
+		return nil, err
+	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
 		return nil, err
 	}
 	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
@@ -1269,6 +1284,9 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 	if err != nil {
 		return err
 	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+		return err
+	}
 	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
 		return ErrRecipientNotEligibleForResponse
 	}
@@ -1392,6 +1410,9 @@ func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in Ch
 	if err != nil {
 		return err
 	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+		return err
+	}
 	if freshRec.DocumentID != doc.ID || !recipientCanRequestChanges(freshRec.Role, freshRec.Status) {
 		return ErrRecipientNotEligibleForChanges
 	}
@@ -1507,29 +1528,75 @@ func rejectUnsupportedEnvelopeTransition(doc *generated.Document, transition str
 // plus a proposed replacement, the marked text is swapped in the block in place;
 // otherwise approval is recorded for the sender to apply during Revise.
 func (e *Engine) ResolveChange(ctx context.Context, orgID, docID, crID uuid.UUID, approve bool) (*generated.ChangeRequest, error) {
-	tx, err := e.Pool.Begin(ctx)
+	return e.resolveChange(ctx, orgID, docID, crID, uuid.Nil, approve, nil)
+}
+
+// ResolveChangeWithAuthorization binds a sender action to the original admitted
+// credential and retains the live member lock through the resolution commit.
+// The separate ResolveChange method serves signed email action capabilities.
+func (e *Engine) ResolveChangeWithAuthorization(ctx context.Context, orgID, docID, crID, userID uuid.UUID, approve bool, authorize auth.TransactionAuthorization) (*generated.ChangeRequest, error) {
+	if userID == uuid.Nil || authorize == nil {
+		return nil, auth.ErrMutationPermissionRevoked
+	}
+	return e.resolveChange(ctx, orgID, docID, crID, userID, approve, authorize)
+}
+
+func (e *Engine) resolveChange(ctx context.Context, orgID, docID, crID, userID uuid.UUID, approve bool, authorize auth.TransactionAuthorization) (*generated.ChangeRequest, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer rollbackCancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 	q := e.Queries.WithTx(tx)
 
 	// Lock parent first, matching Revise's UPDATE documents -> UPDATE
 	// change_requests ordering. This serializes revise versus resolve without a
 	// lock-order inversion.
 	doc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChangeRequestNotFound
+	}
 	if err != nil {
+		return nil, err
+	}
+	var actor *generated.User
+	if authorize != nil {
+		actor, err = q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: userID, OrgID: orgID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, auth.ErrMutationPermissionRevoked
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load change-resolution authorization: %w", err)
+		}
+		if actor.Role != string(auth.RoleSender) && actor.Role != string(auth.RoleOwner) {
+			return nil, auth.ErrMutationPermissionRevoked
+		}
+		fresh := *actor
+		if err := authorize(ctx, tx, &fresh); err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if doc.Status != "changes_requested" {
 		return nil, ErrNotRevisable
 	}
 	cr, err := q.GetChangeRequestForUpdate(ctx, generated.GetChangeRequestForUpdateParams{ID: crID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChangeRequestNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
 	if cr.DocumentID != docID {
-		return nil, errors.New("change request does not belong to this document")
+		return nil, ErrChangeRequestNotFound
 	}
 	if !changeRequestCanResolve(cr.Status) {
 		return nil, ErrChangeAlreadyResolved
@@ -1558,19 +1625,30 @@ func (e *Engine) ResolveChange(ctx context.Context, orgID, docID, crID uuid.UUID
 		ID: crID, DocumentID: docID, Resolution: pgtype.Text{String: resolution, Valid: true},
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrChangeAlreadyResolved
-		}
-		return nil, err
+		// The locked request was open. A suppressed UPDATE is a failed write,
+		// not a replay; keep its error internal and roll back any auto-apply.
+		return nil, fmt.Errorf("update change resolution: %w", err)
 	}
 	resolutionEvent := audit.Entry{
 		OrgID: orgID, DocumentID: &docID,
 		Kind:    audit.KindChangesRequested,
 		Payload: map[string]any{"change_request": crID.String(), "resolution": resolution},
 	}
+	if actor != nil {
+		resolutionEvent.ActorUserID = &actor.ID
+	}
 	pendingAudit, err := e.Audit.LogTx(ctx, tx, resolutionEvent)
 	if err != nil {
 		return nil, fmt.Errorf("audit change resolution: %w", err)
+	}
+	if authorize != nil {
+		fresh := *actor
+		if err := authorize(ctx, tx, &fresh); err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit change resolution: %w", err)
@@ -1664,13 +1742,16 @@ func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body s
 	if err != nil {
 		return nil, err
 	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+		return nil, err
+	}
 	if freshRec.DocumentID != lockedDoc.ID {
 		return nil, ErrDocumentNotCommentable
 	}
 	c, err := q.CreateComment(ctx, generated.CreateCommentParams{
 		DocumentID:  doc.ID,
 		RecipientID: pgtype.UUID{Bytes: rec.ID, Valid: true},
-		AuthorName:  rec.Name,
+		AuthorName:  freshRec.Name,
 		AuthorSide:  "signer",
 		Body:        body,
 	})
@@ -1687,7 +1768,7 @@ func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body s
 			DocumentName:  lockedDoc.Name,
 			SenderName:    sender.Name,
 			SenderEmail:   sender.Email,
-			RecipientName: rec.Name,
+			RecipientName: freshRec.Name,
 			OrgName:       e.OrgName,
 			DeclineReason: body,
 			OpenURL:       strings.TrimRight(e.BaseURL, "/") + "/documents/" + doc.ID.String(),
@@ -1721,21 +1802,63 @@ func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body s
 // SenderComment posts a comment from the sending org on the shared thread and
 // emails each signer recipient.
 func (e *Engine) SenderComment(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string) (*generated.DocumentComment, error) {
+	return e.senderComment(ctx, orgID, docID, userID, authorName, body, nil)
+}
+
+// SenderCommentWithAuthorization binds a transport's admitted identity to the
+// live member after lock waits and checks its expiry immediately before commit.
+// The callback must not perform response writes or external side effects.
+func (e *Engine) SenderCommentWithAuthorization(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string, authorize func(context.Context, *generated.User) error) (*generated.DocumentComment, error) {
+	if authorize == nil {
+		return nil, ErrSenderCommentNotAuthorized
+	}
+	return e.senderComment(ctx, orgID, docID, userID, authorName, body, authorize)
+}
+
+func (e *Engine) senderComment(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string, authorize func(context.Context, *generated.User) error) (*generated.DocumentComment, error) {
 	if err := validateCommentBody(body); err != nil {
 		return nil, err
 	}
-	tx, err := e.Pool.Begin(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer rollbackCancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 	q := e.Queries.WithTx(tx)
 	doc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrCommentDocumentNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("lock document for sender comment: %w", err)
 	}
 	if err := checkDocumentCommentable(doc); err != nil {
 		return nil, err
+	}
+	user, err := q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: userID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSenderCommentNotAuthorized
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load sender-comment authorization: %w", err)
+	}
+	if user.Role != string(auth.RoleSender) && user.Role != string(auth.RoleOwner) {
+		return nil, ErrSenderCommentNotAuthorized
+	}
+	if authorize != nil {
+		if err := authorize(ctx, user); err != nil {
+			return nil, err
+		}
+	}
+	authorName = user.Name
+	if authorName == "" {
+		authorName = user.Email
 	}
 	c, err := q.CreateComment(ctx, generated.CreateCommentParams{
 		DocumentID: docID,
@@ -1770,11 +1893,16 @@ func (e *Engine) SenderComment(ctx context.Context, orgID, docID, userID uuid.UU
 		}
 	}
 	pendingAudit, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: orgID, DocumentID: &docID,
+		OrgID: orgID, DocumentID: &docID, ActorUserID: &userID,
 		Kind: audit.KindCommentPosted, Payload: map[string]any{"side": "sender"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("audit sender comment: %w", err)
+	}
+	if authorize != nil {
+		if err := authorize(ctx, user); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit sender comment: %w", err)
@@ -1794,16 +1922,16 @@ const (
 // ceiling independently bounds storage for multi-byte Unicode input.
 func validateCommentBody(body string) error {
 	if !utf8.ValidString(body) {
-		return errors.New("comment must be valid UTF-8")
+		return fmt.Errorf("comment must be valid UTF-8: %w", ErrInvalidCommentBody)
 	}
 	if strings.TrimSpace(body) == "" {
-		return errors.New("comment is empty")
+		return fmt.Errorf("comment is empty: %w", ErrInvalidCommentBody)
 	}
 	if len(body) > maxCommentBodyBytes {
-		return fmt.Errorf("comment must be at most %d bytes", maxCommentBodyBytes)
+		return fmt.Errorf("comment must be at most %d bytes: %w", maxCommentBodyBytes, ErrInvalidCommentBody)
 	}
 	if utf8.RuneCountInString(body) > maxCommentBodyRunes {
-		return fmt.Errorf("comment must be at most %d characters", maxCommentBodyRunes)
+		return fmt.Errorf("comment must be at most %d characters: %w", maxCommentBodyRunes, ErrInvalidCommentBody)
 	}
 	return nil
 }
@@ -1830,16 +1958,55 @@ func checkDocumentCommentable(doc *generated.Document) error {
 // ceremony/version relation for signatures and acceptances; mutating those
 // rows in place would destroy evidence, so such revisions fail closed.
 func (e *Engine) Revise(ctx context.Context, orgID, docID uuid.UUID) (*generated.Document, error) {
-	tx, err := e.Pool.Begin(ctx)
+	return e.revise(ctx, orgID, docID, uuid.Nil, nil)
+}
+
+// ReviseWithAuthorization checks a transport's original admitted identity
+// against the live member after the document lock, then checks expiry again
+// immediately before commit. The callback must have no external side effects.
+func (e *Engine) ReviseWithAuthorization(ctx context.Context, orgID, docID, userID uuid.UUID, authorize auth.TransactionAuthorization) (*generated.Document, error) {
+	if userID == uuid.Nil || authorize == nil {
+		return nil, ErrRevisionNotAuthorized
+	}
+	return e.revise(ctx, orgID, docID, userID, authorize)
+}
+
+func (e *Engine) revise(ctx context.Context, orgID, docID, userID uuid.UUID, authorize auth.TransactionAuthorization) (*generated.Document, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer rollbackCancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 	q := e.Queries.WithTx(tx)
 
 	locked, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRevisionDocumentNotFound
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lock document for revision: %w", err)
+	}
+	var actor *generated.User
+	if authorize != nil {
+		actor, err = q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: userID, OrgID: orgID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRevisionNotAuthorized
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load revision authorization: %w", err)
+		}
+		if actor.Role != string(auth.RoleSender) && actor.Role != string(auth.RoleOwner) {
+			return nil, ErrRevisionNotAuthorized
+		}
+		if err := authorize(ctx, tx, actor); err != nil {
+			return nil, err
+		}
 	}
 	if locked.Status != "changes_requested" {
 		return nil, ErrNotRevisable
@@ -1857,10 +2024,7 @@ func (e *Engine) Revise(ctx context.Context, orgID, docID uuid.UUID) (*generated
 
 	doc, err := q.ReopenDocumentToDraft(ctx, generated.ReopenDocumentToDraftParams{ID: docID, OrgID: orgID})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotRevisable
-		}
-		return nil, err
+		return nil, fmt.Errorf("reopen document for revision: %w", err)
 	}
 	if err := q.ResolveChangeRequests(ctx, docID); err != nil {
 		return nil, err
@@ -1877,9 +2041,20 @@ func (e *Engine) Revise(ctx context.Context, orgID, docID uuid.UUID) (*generated
 		OrgID: orgID, DocumentID: &docID,
 		Kind: audit.KindDocumentRevised,
 	}
+	if actor != nil {
+		revisedEvent.ActorUserID = &actor.ID
+	}
 	pendingAudit, err := e.Audit.LogTx(ctx, tx, revisedEvent)
 	if err != nil {
 		return nil, fmt.Errorf("audit revision: %w", err)
+	}
+	if authorize != nil {
+		if err := authorize(ctx, tx, actor); err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit revise: %w", err)
@@ -2064,6 +2239,9 @@ func (e *Engine) MarkViewed(ctx context.Context, rc *RecipientContext, evidence 
 	}
 	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
 	if err != nil {
+		return err
+	}
+	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
 		return err
 	}
 	if freshRec.DocumentID != lockedDoc.ID {
@@ -3330,4 +3508,11 @@ func textOrNull(s string) pgtype.Text {
 		return pgtype.Text{}
 	}
 	return pgtype.Text{String: s, Valid: true}
+}
+
+func (e *Engine) resolveBrandingCSS(ctx context.Context, doc *generated.Document) (string, error) {
+	if e.BrandingCSS == nil {
+		return "", nil
+	}
+	return e.BrandingCSS(ctx, doc)
 }

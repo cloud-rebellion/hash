@@ -297,6 +297,101 @@ func (q *Queries) GetDataSubjectRequestForUpdate(ctx context.Context, arg GetDat
 	return &i, err
 }
 
+const getDocumentForPrivacyUpdate = `-- name: GetDocumentForPrivacyUpdate :one
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
+`
+
+type GetDocumentForPrivacyUpdateParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+// Privacy transitions remain available during the soft-delete grace period.
+// Caller locks this parent before its linked request and archive checks.
+func (q *Queries) GetDocumentForPrivacyUpdate(ctx context.Context, arg GetDocumentForPrivacyUpdateParams) (*Document, error) {
+	row := q.db.QueryRow(ctx, getDocumentForPrivacyUpdate, arg.DocumentID, arg.OrgID)
+	var i Document
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.TemplateID,
+		&i.Name,
+		&i.Status,
+		&i.RoutingMode,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.RenderedPdfKey,
+		&i.RenderedPdfSha,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.FinalPdfKey,
+		&i.FinalPdfSha,
+		&i.AuditCertKey,
+		&i.ExpiresAt,
+		&i.SentAt,
+		&i.CompletedAt,
+		&i.SenderID,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentEnvelopeID,
+		&i.EnvelopePosition,
+		&i.IsEnvelope,
+		&i.MetadataRedactionReport,
+		&i.RoutingTier,
+		&i.NegotiationEnabled,
+		&i.BilingualTargetLang,
+		&i.LawfulBasis,
+		&i.DeletedAt,
+		&i.DefaultLocale,
+		&i.RequiresSignature,
+		&i.AuditPayloadKey,
+		&i.AuditPayloadSha256,
+		&i.AuditSignatureKey,
+		&i.AuditSignatureSha256,
+		&i.PdfStorageVersionID,
+		&i.RenderedPdfVersionID,
+		&i.FinalPdfVersionID,
+		&i.AuditCertSha256,
+		&i.AuditCertVersionID,
+		&i.AuditPayloadVersionID,
+		&i.AuditSignatureVersionID,
+		&i.EvidenceVersionPinsRequired,
+		&i.CompletionEffectiveAt,
+		&i.CompletionEffectiveAtBound,
+		&i.FinalizationRetainUntil,
+		&i.Article13NoticeEpochAt,
+		&i.Article13NoticeSchema,
+		&i.Article13NoticeEpochV61Committed,
+	)
+	return &i, err
+}
+
+const hasCollabRecoveryArchivesForDSR = `-- name: HasCollabRecoveryArchivesForDSR :one
+SELECT EXISTS (
+    SELECT 1 FROM collab_recovery_archives a
+    JOIN documents d ON d.id = a.document_id
+    WHERE d.id = $1 AND d.org_id = $2
+) AS present
+`
+
+type HasCollabRecoveryArchivesForDSRParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+// Caller holds the document FOR UPDATE so recovery cannot add an archive
+// between this check and the recipient erasure transaction. Archived replay
+// is opaque and may retain replaced personal data; recipient anonymization
+// alone cannot account for it. Keep the check independently tenant-scoped.
+func (q *Queries) HasCollabRecoveryArchivesForDSR(ctx context.Context, arg HasCollabRecoveryArchivesForDSRParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasCollabRecoveryArchivesForDSR, arg.DocumentID, arg.OrgID)
+	var present bool
+	err := row.Scan(&present)
+	return present, err
+}
+
 const listDataSubjectRequestsByOrg = `-- name: ListDataSubjectRequestsByOrg :many
 SELECT id, org_id, document_id, recipient_id, subject_email, subject_name, kind, status, requested_via, requested_note, resolution_note, fulfilled_by, requested_at, fulfilled_at, due_at, payload_json FROM data_subject_requests
 WHERE org_id = $1

@@ -5,6 +5,8 @@ package collab
 
 import (
 	"context"
+	"encoding/binary"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +88,7 @@ func TestHub_BroadcastsUpdatesToOtherPeers(t *testing.T) {
 	defer h.Leave(context.Background(), docID, carol.ID())
 
 	// Alice sends a sync_update frame: [0x00 sync, 0x02 update, <bytes>]
-	updateBytes := []byte{0x11, 0x22, 0x33}
+	updateBytes := encodeTestUpdate([]byte{0x11, 0x22, 0x33})
 	frame := append([]byte{MessageSync, SyncUpdate}, updateBytes...)
 	if err := aRes.Room.HandleFrame(context.Background(), alice, frame); err != nil {
 		t.Fatalf("handle: %v", err)
@@ -121,7 +123,7 @@ func TestHub_SyncStep1RespondsWithSyncStep2(t *testing.T) {
 	res, _ := h.Join(context.Background(), docID, orgID, alice)
 
 	// Seed the room with some state by sending an update first.
-	seed := []byte{0xAA, 0xBB}
+	seed := encodeTestUpdate([]byte{0xAA, 0xBB})
 	updateFrame := append([]byte{MessageSync, SyncUpdate}, seed...)
 	_ = res.Room.HandleFrame(context.Background(), alice, updateFrame)
 
@@ -216,7 +218,7 @@ func TestHub_DedupesIdenticalTrailingUpdates(t *testing.T) {
 	alice := newFakePeer("alice")
 	res, _ := h.Join(context.Background(), docID, orgID, alice)
 
-	frame := []byte{MessageSync, SyncUpdate, 0xCA, 0xFE}
+	frame := append([]byte{MessageSync, SyncUpdate}, encodeTestUpdate([]byte{0xCA, 0xFE})...)
 	_ = res.Room.HandleFrame(context.Background(), alice, frame)
 	first := res.Room.StateLen()
 	_ = res.Room.HandleFrame(context.Background(), alice, frame)
@@ -242,7 +244,7 @@ func TestHub_TriggersCompactionAboveThreshold(t *testing.T) {
 	for i := 0; i < 80; i++ {
 		big = append(big, byte(i))
 	}
-	frame := append([]byte{MessageSync, SyncUpdate}, big...)
+	frame := append([]byte{MessageSync, SyncUpdate}, encodeTestUpdate(big)...)
 	if err := bRes.Room.HandleFrame(context.Background(), alice, frame); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -273,7 +275,7 @@ func TestHub_TriggersCompactionAboveThreshold(t *testing.T) {
 	// bytes, so keep the sample snapshot above applySnapshot's degenerate
 	// floor (>=8 bytes when the old state is >=64) while still smaller than
 	// the log it replaces, so it both passes the guard and shrinks state.
-	snapshot := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	snapshot := encodeTestUpdate([]byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08})
 	respFrame := append([]byte{MessageCompact, CompactSnapshot}, nonce[:]...)
 	respFrame = append(respFrame, snapshot...)
 	if err := bRes.Room.HandleFrame(context.Background(), alice, respFrame); err != nil {
@@ -294,7 +296,7 @@ func TestHub_RejectsCompactionWithBadNonce(t *testing.T) {
 	res, _ := h.Join(context.Background(), docID, orgID, alice)
 
 	// Cross the threshold so a compaction is requested.
-	frame := append([]byte{MessageSync, SyncUpdate}, make([]byte, 32)...)
+	frame := append([]byte{MessageSync, SyncUpdate}, encodeTestUpdate(make([]byte, 32))...)
 	_ = res.Room.HandleFrame(context.Background(), alice, frame)
 	originalLen := res.Room.StateLen()
 
@@ -304,7 +306,7 @@ func TestHub_RejectsCompactionWithBadNonce(t *testing.T) {
 		wrong[i] = 0xFF
 	}
 	bad := append([]byte{MessageCompact, CompactSnapshot}, wrong[:]...)
-	bad = append(bad, 0x01)
+	bad = append(bad, encodeTestUpdate([]byte{0x01})...)
 	if err := res.Room.HandleFrame(context.Background(), alice, bad); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -323,4 +325,49 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+func encodeTestUpdate(raw []byte) []byte {
+	return append(binary.AppendUvarint(nil, uint64(len(raw))), raw...)
+}
+
+// Opaque framed vectors exercise record boundaries; semantic Yjs convergence
+// is separately verified with real client updates.
+func TestDuplicateDetectionRequiresCompleteTrailingRecord(t *testing.T) {
+	for _, persisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persisted=%v", persisted), func(t *testing.T) {
+			short := encodeTestUpdate([]byte{0xCA, 0xFE})
+			long := encodeTestUpdate(append([]byte{0x11}, short...))
+			var h *Hub
+			if persisted {
+				h = NewHub(nil)
+				h.Queries = &failingStateStore{state: long}
+			} else {
+				h = NewHub(nil)
+			}
+			h.FlushEvery = 0
+			peer := newFakePeer("record-boundary")
+			joined, err := h.Join(context.Background(), uuid.New(), uuid.New(), peer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !persisted {
+				if err := joined.Room.HandleFrame(context.Background(), peer, append([]byte{MessageSync, SyncUpdate}, long...)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := joined.Room.HandleFrame(context.Background(), peer, append([]byte{MessageSync, SyncUpdate}, short...)); err != nil {
+				t.Fatal(err)
+			}
+			if got := joined.Room.StateLen(); got != len(long)+len(short) {
+				t.Fatalf("distinct suffix update lost: size %d", got)
+			}
+			if err := joined.Room.HandleFrame(context.Background(), peer, append([]byte{MessageSync, SyncUpdate}, short...)); err != nil {
+				t.Fatal(err)
+			}
+			if got := joined.Room.StateLen(); got != len(long)+len(short) {
+				t.Fatalf("exact retransmission appended: size %d", got)
+			}
+		})
+	}
 }

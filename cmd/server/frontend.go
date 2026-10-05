@@ -4,22 +4,19 @@
 package main
 
 import (
-	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"errors"
 	"io"
 	"io/fs"
 	"net/http"
 	"path"
-	"regexp"
 	"strings"
+
+	frontendcsp "github.com/bright-interaction/hash/internal/frontend"
 )
 
 //go:embed all:frontend/build
 var frontendFS embed.FS
-
-var inlineScriptRe = regexp.MustCompile(`(?s)<script\b([^>]*)>(.*?)</script>`)
 
 // frontendScriptCSP returns the script-src CSP additions (sha256 hashes) for the
 // SvelteKit inline bootstrap script(s) in the embedded shell. The strict
@@ -31,15 +28,7 @@ func frontendScriptCSP() string {
 	if err != nil {
 		return ""
 	}
-	var b strings.Builder
-	for _, m := range inlineScriptRe.FindAllSubmatch(data, -1) {
-		if strings.Contains(strings.ToLower(string(m[1])), "src=") {
-			continue // external script; 'self' already covers it
-		}
-		sum := sha256.Sum256(m[2]) // browsers hash the exact text content
-		b.WriteString(" 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'")
-	}
-	return b.String()
+	return frontendcsp.InlineScriptCSP(data)
 }
 
 // frontendHandler returns an http.Handler that serves the embedded

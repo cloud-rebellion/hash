@@ -16,6 +16,9 @@ import (
 // take the shared org lock and enforce from the same transaction after insert.
 // The compliance seeder is deliberately absent: its two baseline documents and
 // any recipients are explicitly excluded by the usage queries.
+// Recipient CRUD now delegates to recipients.MutationEngine, whose quota lock
+// runs before its mutation callback. Its lock-wait and quota rollback protocol
+// is verified by the recipient PostgreSQL suite, not lexical callback ordering.
 func TestCountedAuthoringCallsitesUseAtomicQuotaProtocol(t *testing.T) {
 	_, here, _, ok := runtime.Caller(0)
 	if !ok {
@@ -25,7 +28,6 @@ func TestCountedAuthoringCallsitesUseAtomicQuotaProtocol(t *testing.T) {
 	files := []string{
 		"internal/handler/documents.go",
 		"internal/handler/documents_import.go",
-		"internal/handler/recipients.go",
 		"internal/mcp/tools_authoring.go",
 		"internal/mcp/tools_envelopes.go",
 	}

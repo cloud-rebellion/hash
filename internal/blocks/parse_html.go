@@ -189,21 +189,37 @@ func tableBlock(n *html.Node) *Block {
 // trIter is a tiny generator that yields every <tr> descendant of n. Go 1.23+.
 func trIter(n *html.Node) func(yield func(*html.Node) bool) {
 	return func(yield func(*html.Node) bool) {
-		var walk func(*html.Node) bool
-		walk = func(node *html.Node) bool {
-			for c := node.FirstChild; c != nil; c = c.NextSibling {
-				if c.Type == html.ElementNode && strings.EqualFold(c.Data, "tr") {
-					if !yield(c) {
-						return false
-					}
-				}
-				if !walk(c) {
-					return false
+		for node := range walkHTML(n) {
+			if node != n && node.Type == html.ElementNode && strings.EqualFold(node.Data, "tr") {
+				if !yield(node) {
+					return
 				}
 			}
-			return true
 		}
-		walk(n)
+	}
+}
+
+// walkHTML traverses a subtree in document order using its parent links.
+// Imported HTML can be deeply nested before canonical tree validation runs;
+// traversal must not consume one Go stack frame per source element.
+func walkHTML(root *html.Node) func(yield func(*html.Node) bool) {
+	return func(yield func(*html.Node) bool) {
+		for node := root; node != nil; {
+			if !yield(node) {
+				return
+			}
+			if node.FirstChild != nil {
+				node = node.FirstChild
+				continue
+			}
+			for node != root && node.NextSibling == nil {
+				node = node.Parent
+			}
+			if node == root {
+				return
+			}
+			node = node.NextSibling
+		}
 	}
 }
 
@@ -225,27 +241,18 @@ func rowCells(tr *html.Node) (cells []string, isHeader bool) {
 
 func textContent(n *html.Node) string {
 	var sb strings.Builder
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
+	for node := range walkHTML(n) {
 		if node.Type == html.TextNode {
 			sb.WriteString(node.Data)
-			return
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
 		}
 	}
-	walk(n)
 	return strings.TrimSpace(strings.Join(strings.Fields(sb.String()), " "))
 }
 
 func findFirst(n *html.Node, tag string) *html.Node {
-	if n.Type == html.ElementNode && strings.EqualFold(n.Data, tag) {
-		return n
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if found := findFirst(c, tag); found != nil {
-			return found
+	for node := range walkHTML(n) {
+		if node.Type == html.ElementNode && strings.EqualFold(node.Data, tag) {
+			return node
 		}
 	}
 	return nil

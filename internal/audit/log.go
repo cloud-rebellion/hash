@@ -28,6 +28,7 @@ import (
 const (
 	KindDocumentCreated     = "document.created"
 	KindDocumentUpdated     = "document.updated"
+	KindDocumentDeleted     = "document.deleted"
 	KindDocumentSent        = "document.sent"
 	KindDocumentOpened      = "document.opened" // email beacon hit
 	KindDocumentViewed      = "document.viewed" // signer link click
@@ -65,6 +66,9 @@ const (
 	KindQESSessionFailed             = "qes.session_failed"
 	KindCollabPeerJoined             = "collab.peer_joined"
 	KindCollabPeerLeft               = "collab.peer_left"
+	KindCollabRecovered              = "collab.recovered"
+	KindCollabArchiveDownloaded      = "collab.archive_downloaded"
+	KindCollabArchiveDeleted         = "collab.archive_deleted"
 	KindBillingCheckoutStarted       = "billing.checkout_started"
 	KindBillingSubscriptionUpdated   = "billing.subscription_updated"
 	KindBillingSubscriptionCancelled = "billing.subscription_cancelled"

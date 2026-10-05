@@ -25,7 +25,7 @@ import (
 // register an org webhook, enumerate the org, or mint new org documents).
 func TestDocScopeSafeToolsMembership(t *testing.T) {
 	mustAllow := []string{
-		"get_document", "list_recipients", "get_document_events", "list_documents",
+		"get_document", "update_block", "list_recipients", "get_document_events", "list_documents",
 		"search_documents", "send_document", "void_document", "run_risk_analysis",
 		"resolve_document_branding", "set_document_routing_tier",
 		"list_envelope_children", "get_envelope_manifest", "download_final_pdf",

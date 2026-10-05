@@ -87,7 +87,7 @@ func TestAuthoringMutationsRejectActiveAndCompletedDocuments(t *testing.T) {
 			}); !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatalf("UpdateRecipient on %s: err=%v, want pgx.ErrNoRows", status, err)
 			}
-			if _, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID)); !errors.Is(err, pgx.ErrNoRows) {
+			if _, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID, doc.OrgID)); !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatalf("CreateDraftField on %s: err=%v, want pgx.ErrNoRows", status, err)
 			}
 			if _, err := q.DeleteFieldByID(ctx, generated.DeleteFieldByIDParams{ID: field.ID, OrgID: org.ID}); !errors.Is(err, pgx.ErrNoRows) {
@@ -241,7 +241,7 @@ func TestAuthoringMutationsAllowDraftDocuments(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateRecipient draft: %v", err)
 	}
-	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID))
+	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID, doc.OrgID))
 	if err != nil {
 		t.Fatalf("CreateDraftField draft: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestLegacyActiveEvidencePinsBeforeFinalizationAreOneWay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, recipient.ID))
+	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, recipient.ID, doc.OrgID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func seedAuthoringDraft(t *testing.T, ctx context.Context, q *generated.Queries,
 	if err != nil {
 		t.Fatal(err)
 	}
-	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID))
+	field, err := q.CreateDraftField(ctx, draftFieldParams(doc.ID, rec.ID, doc.OrgID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,10 +838,10 @@ func recipientParams(documentID uuid.UUID) generated.CreateRecipientParams {
 	}
 }
 
-func draftFieldParams(documentID, recipientID uuid.UUID) generated.CreateDraftFieldParams {
+func draftFieldParams(documentID, recipientID, orgID uuid.UUID) generated.CreateDraftFieldParams {
 	zero := pgtype.Numeric{Int: big.NewInt(0), Exp: 0, Valid: true}
 	return generated.CreateDraftFieldParams{
-		DocumentID: documentID, RecipientID: pgtype.UUID{Bytes: recipientID, Valid: true}, Type: "signature", Page: 1,
+		DocumentID: documentID, OrgID: orgID, RecipientID: pgtype.UUID{Bytes: recipientID, Valid: true}, Type: "signature", Page: 1,
 		XPct: zero, YPct: zero, WPct: zero, HPct: zero, Required: true, OptionsJson: json.RawMessage(`{}`),
 	}
 }

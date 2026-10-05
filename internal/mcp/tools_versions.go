@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -177,14 +179,16 @@ func registerVersionTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Materialize a historical version onto the live draft document. Logs a 'restore' event and snapshots a new version capturing the action. Refuses on non-draft documents.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id":    stringSchema("document uuid (must be in draft state, source_kind=blocks)"),
-			"target_version": intSchema("version_no to restore (must already exist)", 1, 100000, 0),
-		}, []string{"document_id", "target_version"}),
+			"expected_updated_at": stringSchema("updated_at from the observed live document"),
+			"document_id":         stringSchema("document uuid (must be in draft state, source_kind=blocks)"),
+			"target_version":      intSchema("version_no to restore (must already exist)", 1, 100000, 0),
+		}, []string{"document_id", "target_version", "expected_updated_at"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID    string `json:"document_id"`
-				TargetVersion int    `json:"target_version"`
+				ExpectedUpdatedAt string `json:"expected_updated_at"`
+				DocumentID        string `json:"document_id"`
+				TargetVersion     int    `json:"target_version"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -199,48 +203,52 @@ func registerVersionTools(s *Server, d Deps) {
 			if p.TargetVersion <= 0 {
 				return nil, errors.New("target_version must be >= 1")
 			}
-			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
-			}
-			if err != nil {
-				return nil, err
-			}
-			if doc.Status != "draft" {
-				return nil, fmt.Errorf("document not editable (status=%s)", doc.Status)
-			}
-			if doc.SourceKind != "blocks" {
-				return nil, errors.New("restore only supported on block-source documents")
-			}
 			if d.Pool == nil || d.Audit == nil {
 				return nil, errors.New("atomic audit dependencies unavailable")
 			}
-			tx, err := d.Pool.Begin(r.Context())
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteAuthoring)
 			if err != nil {
 				return nil, err
 			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
+			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+			defer cancel()
+			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = authoring.Rollback(ctx, tx) }()
+			guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
+			if err != nil {
+				return nil, err
+			}
 			q := d.Queries.WithTx(tx)
-			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+			locked := guard.Document
+			if locked.SourceKind != "blocks" {
+				return nil, errors.New("restore only supported on block-source documents")
+			}
+			actorID := guard.UserID()
+			if err := checkDocumentObservation(locked, p.ExpectedUpdatedAt); err != nil {
+				return nil, err
+			}
+			target, err := q.GetDocumentVersionByNo(ctx, generated.GetDocumentVersionByNoParams{DocumentID: id, VersionNo: int32(p.TargetVersion)})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("version not found")
+			}
 			if err != nil {
 				return nil, err
 			}
-			if locked.Status != "draft" || locked.SourceKind != "blocks" {
-				return nil, errors.New("document not editable (must be draft + blocks-source)")
-			}
-			target, _, err := versions.New(q).Restore(r.Context(), versions.RestoreInput{
-				DocumentID:    id,
-				TargetVersion: int32(p.TargetVersion),
-				OrgID:         u.OrgID,
-				CreatedBy:     &u.UserID,
-			})
-			if err != nil {
-				return nil, err
+			if target.OrgID != u.OrgID {
+				return nil, errors.New("version not found")
 			}
 			if target.SourceKind != "blocks" {
 				return nil, errors.New("target version is not block-source")
 			}
-			updated, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+			if _, _, err := versions.New(q).Restore(ctx, versions.RestoreInput{
+				DocumentID: id, TargetVersion: int32(p.TargetVersion), OrgID: u.OrgID, CreatedBy: &actorID,
+			}); err != nil {
+				return nil, err
+			}
+			updated, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
 				ID:            id,
 				OrgID:         u.OrgID,
 				BlocksJson:    target.BlockTreeJson,
@@ -249,9 +257,9 @@ func registerVersionTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
+			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
 				OrgID:       u.OrgID,
-				ActorUserID: &u.UserID,
+				ActorUserID: &actorID,
 				DocumentID:  &id,
 				Kind:        audit.KindDocumentUpdated,
 				Payload: map[string]any{
@@ -263,7 +271,10 @@ func registerVersionTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			if err := tx.Commit(r.Context()); err != nil {
+			if err := guard.Recheck(ctx); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
 			d.Audit.Publish(pending)

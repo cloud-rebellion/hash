@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -98,5 +99,29 @@ func TestCreatePDFSourceDocumentReportsOrphanCleanupFailure(t *testing.T) {
 	_, _, err := CreatePDFSourceDocument(context.Background(), q, st, uuid.New(), uuid.New(), "Proposal", intakeTestPDF(t))
 	if !errors.Is(err, dbErr) || !errors.Is(err, deleteErr) {
 		t.Fatalf("joined error should retain DB and cleanup causes, got %v", err)
+	}
+}
+
+func TestOversizedPDFNeverReachesStorage(t *testing.T) {
+	var definition bytes.Buffer
+	definition.WriteString(`{"pages":{`)
+	for i := 1; i <= maxIntakePages+1; i++ {
+		if i > 1 {
+			definition.WriteByte(',')
+		}
+		fmt.Fprintf(&definition, `"%d":{"content":{"text":[{"value":"proposal","anchor":"center","font":{"name":"Helvetica","size":12}}]}}`, i)
+	}
+	definition.WriteString(`}}`)
+	var raw bytes.Buffer
+	if err := pdfapi.Create(nil, bytes.NewReader(definition.Bytes()), &raw, model.NewDefaultConfiguration()); err != nil {
+		t.Fatal(err)
+	}
+	st := &intakeStoreStub{}
+	doc, _, err := CreatePDFSourceDocument(context.Background(), &intakeQueriesStub{}, st, uuid.New(), uuid.New(), "Oversized", raw.Bytes())
+	if !errors.Is(err, ErrTooManyPages) || doc != nil {
+		t.Fatalf("page limit not preserved: %v %v", doc, err)
+	}
+	if len(st.putKeys) != 0 {
+		t.Fatal("oversized document reached storage")
 	}
 }

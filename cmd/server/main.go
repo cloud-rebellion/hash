@@ -36,6 +36,7 @@ import (
 	"github.com/bright-interaction/hash/internal/evidence"
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/handler"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -89,6 +90,9 @@ func run() error {
 	flarereport.InitFlare("hash", cfg.Release, cfg.Environment)
 
 	ctx := context.Background()
+	if err := malwarescan.Configure(ctx, cfg.MalwareSocket, cfg.Environment); err != nil {
+		return err
+	}
 
 	// Pool for handlers (sqlc). Signer clarification deliberately holds one
 	// document SHARE lock while independently committing audit rows; production
@@ -526,15 +530,21 @@ func run() error {
 	}
 	slog.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+	if err := shutdownRuntime(httpServer.Shutdown, collabHub.Shutdown, 10*time.Second, 5*time.Second); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
-	// Flush every live collab room so a SIGTERM/deploy doesn't drop edits
-	// accumulated since each room's last periodic flush.
-	collabHub.Shutdown(shutdownCtx)
 	return nil
+}
+
+// Reserve a separate final-write budget even if draining HTTP times out.
+// Both phases together remain bounded by the former 15-second shutdown budget.
+func shutdownRuntime(drainHTTP, flushCollab func(context.Context) error, httpBudget, collabBudget time.Duration) error {
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpBudget)
+	httpErr := drainHTTP(httpCtx)
+	cancelHTTP()
+	collabCtx, cancelCollab := context.WithTimeout(context.Background(), collabBudget)
+	defer cancelCollab()
+	return errors.Join(httpErr, flushCollab(collabCtx))
 }
 
 func serverPoolConfig(dsn, environment string) (*pgxpool.Config, error) {

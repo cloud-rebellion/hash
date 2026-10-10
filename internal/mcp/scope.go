@@ -79,6 +79,7 @@ var mcpToolRequiredScopes = map[string]string{
 	"attach_metadata":                  mcpScopeWriteAuthoring,
 	"attach_to_envelope":               mcpScopeWriteAuthoring,
 	"bind_variable_to_crm_contact":     mcpScopeWriteAuthoring,
+	"bind_variable_to_crm_company":     mcpScopeWriteAuthoring,
 	"bind_variable_to_crm_deal":        mcpScopeWriteAuthoring,
 	"bind_variable_to_org_setting":     mcpScopeWriteAuthoring,
 	"bind_variable_to_scanner_finding": mcpScopeWriteAuthoring,

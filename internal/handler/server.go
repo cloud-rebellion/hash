@@ -33,6 +33,7 @@ import (
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/compliance"
+	"github.com/bright-interaction/hash/internal/crmconnection"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/eidas"
@@ -114,6 +115,9 @@ type Server struct {
 	Collab                 *collab.Hub
 	collabHandshakes       collabHandshakeGate
 	BrightCRMWebhookSecret string
+	CRMOrigin              string
+	CRMClient              *crmconnection.Client
+	CRMKeys                *crmconnection.Keyring
 	// WebhookSecrets encrypts new per-endpoint outbound HMAC keys before any
 	// database write. Production config always wires it; nil test/dev servers
 	// reject endpoint creation instead of falling back to plaintext.
@@ -357,6 +361,14 @@ func (s *Server) Routes() http.Handler {
 		// viewer/sender must not flip how change-request approvals behave for
 		// the whole org, e.g. to auto_apply signer-proposed text).
 		r.With(auth.RequireRole(auth.RoleOwner)).Patch("/settings/change-approval-mode", s.handleSetChangeApprovalMode)
+		r.Route("/settings/crm/connection", func(r chi.Router) {
+			r.Use(auth.RequireRole(auth.RoleOwner))
+			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Get("/", s.handleGetCRMConnection)
+			r.Put("/", s.handleSetCRMConnection)
+			r.Post("/enable", s.handleEnableCRMConnection)
+			r.Delete("/", s.handleRevokeCRMConnection)
+		})
 		r.Get("/dashboard", s.handleDashboard)
 
 		// Phase 8.4: AI runtime status (operator read).

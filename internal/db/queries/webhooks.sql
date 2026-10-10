@@ -77,6 +77,68 @@ FROM due
 WHERE d.id = due.id
 RETURNING d.*;
 
+-- name: ClaimNextDueWebhookDelivery :one
+-- The worker claims immediately before one bounded dispatch. A batch claimed
+-- before sequential HTTP calls can outlive its lease before the last send.
+WITH due AS (
+  SELECT id
+  FROM webhook_deliveries
+  WHERE status IN ('pending','retrying')
+    AND next_attempt_at <= clock_timestamp()
+  ORDER BY next_attempt_at, id
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+UPDATE webhook_deliveries d
+SET status = 'retrying',
+    next_attempt_at = clock_timestamp() + interval '5 minutes',
+    updated_at = clock_timestamp()
+FROM due
+WHERE d.id = due.id
+RETURNING d.*;
+
+-- name: MarkClaimedWebhookDeliveryDelivered :execrows
+-- A completion owns only the exact still-live claim returned above. An old
+-- worker cannot overwrite a newer retry, redrive, or completed delivery.
+UPDATE webhook_deliveries
+SET status = 'delivered',
+    last_status_code = sqlc.arg(last_status_code)::integer,
+    last_error = '',
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = sqlc.arg(id)
+  AND status = 'retrying'
+  AND attempts = sqlc.arg(expected_attempts)::integer
+  AND next_attempt_at = sqlc.arg(expected_next_attempt_at)::timestamptz
+  AND next_attempt_at > clock_timestamp();
+
+-- name: MarkClaimedWebhookDeliveryRetrying :execrows
+UPDATE webhook_deliveries
+SET status = 'retrying',
+    last_status_code = sqlc.arg(last_status_code)::integer,
+    last_error = sqlc.arg(last_error)::text,
+    next_attempt_at = sqlc.arg(next_attempt_at)::timestamptz,
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = sqlc.arg(id)
+  AND status = 'retrying'
+  AND attempts = sqlc.arg(expected_attempts)::integer
+  AND next_attempt_at = sqlc.arg(expected_next_attempt_at)::timestamptz
+  AND next_attempt_at > clock_timestamp();
+
+-- name: MarkClaimedWebhookDeliveryFailed :execrows
+UPDATE webhook_deliveries
+SET status = 'failed',
+    last_status_code = sqlc.arg(last_status_code)::integer,
+    last_error = sqlc.arg(last_error)::text,
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = sqlc.arg(id)
+  AND status = 'retrying'
+  AND attempts = sqlc.arg(expected_attempts)::integer
+  AND next_attempt_at = sqlc.arg(expected_next_attempt_at)::timestamptz
+  AND next_attempt_at > clock_timestamp();
+
 -- name: MarkDeliveryDelivered :exec
 UPDATE webhook_deliveries
 SET status = 'delivered', last_status_code = $2, attempts = attempts + 1, updated_at = now()

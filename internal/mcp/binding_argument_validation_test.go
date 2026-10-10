@@ -29,6 +29,7 @@ func TestBindingToolArgumentsRejectSuppliedNonStrings(t *testing.T) {
 	for _, tool := range []struct{ name, ref string }{
 		{"bind_variable_to_crm_deal", "deal_id"},
 		{"bind_variable_to_crm_contact", "contact_id"},
+		{"bind_variable_to_crm_company", "company_id"},
 		{"bind_variable_to_scanner_finding", "scan_id"},
 		{"bind_variable_to_org_setting", ""},
 	} {
@@ -42,6 +43,12 @@ func TestBindingToolArgumentsRejectSuppliedNonStrings(t *testing.T) {
 					args := map[string]any{"document_id": uuid.NewString(), "variable": "customer", "path": "name"}
 					if tool.ref != "" {
 						args[tool.ref] = "entity_1"
+					}
+					if tool.name == "bind_variable_to_crm_deal" {
+						args["path"] = "title"
+					}
+					if tool.name == "bind_variable_to_crm_contact" {
+						args["path"] = "full_name"
 					}
 					args[field] = malformed
 					raw, err := json.Marshal(args)
@@ -63,6 +70,7 @@ func TestBindingToolArgumentsPreserveOptionalFallbackAndOrgSettingShape(t *testi
 	for _, tool := range []struct{ name, ref string }{
 		{"bind_variable_to_crm_deal", "deal_id"},
 		{"bind_variable_to_crm_contact", "contact_id"},
+		{"bind_variable_to_crm_company", "company_id"},
 		{"bind_variable_to_scanner_finding", "scan_id"},
 		{"bind_variable_to_org_setting", ""},
 	} {
@@ -70,6 +78,12 @@ func TestBindingToolArgumentsPreserveOptionalFallbackAndOrgSettingShape(t *testi
 			args := map[string]any{"document_id": uuid.NewString(), "variable": "customer", "path": "name"}
 			if tool.ref != "" {
 				args[tool.ref] = "entity_1"
+			}
+			if tool.name == "bind_variable_to_crm_deal" {
+				args["path"] = "title"
+			}
+			if tool.name == "bind_variable_to_crm_contact" {
+				args["path"] = "full_name"
 			}
 			if supplied {
 				args["fallback"] = ""

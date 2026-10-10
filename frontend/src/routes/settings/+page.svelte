@@ -9,6 +9,7 @@
     UserSearch,
     Bot,
     Users,
+    Link2,
   } from 'lucide-svelte';
 
   const groups = [
@@ -29,6 +30,12 @@
       title: 'AI',
       items: [
         { href: '/settings/ai', label: 'AI provider', desc: 'Bring your own model + key.', icon: Bot },
+      ],
+    },
+    {
+      title: 'Integrations',
+      items: [
+        { href: '/settings/integrations/brightcrm', label: 'BrightCRM connection', desc: 'Owner-managed CRM account access.', icon: Link2 },
       ],
     },
     {

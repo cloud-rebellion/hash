@@ -30,6 +30,20 @@ import (
 // URLs that resolve to a private/loopback/link-local/unspecified address.
 // allowPrivate=true (local dev) relaxes this so e2e receivers on localhost work.
 func ValidateWebhookURL(raw string, allowPrivate bool) error {
+	return ValidateWebhookURLWithContext(context.Background(), raw, allowPrivate)
+}
+
+// ValidateWebhookURLWithContext bounds delivery-time DNS by the same context
+// as HTTP dispatch. The existing URL/private-IP policy also applies to every
+// redirect hop; a stalled DNS server cannot outlive the caller's attempt.
+func ValidateWebhookURLWithContext(ctx context.Context, raw string, allowPrivate bool) error {
+	return validateWebhookURLWithLookup(ctx, raw, allowPrivate, net.DefaultResolver.LookupIPAddr)
+}
+
+func validateWebhookURLWithLookup(ctx context.Context, raw string, allowPrivate bool, lookup func(context.Context, string) ([]net.IPAddr, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return errors.New("invalid webhook url")
@@ -44,12 +58,15 @@ func ValidateWebhookURL(raw string, allowPrivate bool) error {
 	if allowPrivate {
 		return nil
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := lookup(ctx, host)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	if err != nil || len(ips) == 0 {
 		return errors.New("webhook host does not resolve")
 	}
-	for _, ip := range ips {
-		if nethard.IsBlockedIP(ip) {
+	for _, address := range ips {
+		if address.IP.To16() == nil || nethard.IsBlockedIP(address.IP) {
 			return errors.New("webhook url resolves to a disallowed (private/loopback/link-local) address")
 		}
 	}
@@ -180,7 +197,7 @@ func NewDispatcher(secret SignaturePair) *Dispatcher {
 			if len(via) >= 3 {
 				return errors.New("too many redirects")
 			}
-			return ValidateWebhookURL(req.URL.String(), d.AllowPrivate)
+			return ValidateWebhookURLWithContext(req.Context(), req.URL.String(), d.AllowPrivate)
 		},
 	}
 	return d
@@ -216,7 +233,7 @@ func (d *Dispatcher) DispatchWithSecret(ctx context.Context, url, endpointSecret
 	}
 	// SSRF guard at delivery time (defense against DNS rebinding since the URL
 	// was also validated at create time).
-	if err := ValidateWebhookURL(url, d.AllowPrivate); err != nil {
+	if err := ValidateWebhookURLWithContext(ctx, url, d.AllowPrivate); err != nil {
 		return DispatchResult{Err: err}
 	}
 	body, err := json.Marshal(ev)

@@ -80,7 +80,13 @@ func CheckPreview(ctx context.Context, pool *pgxpool.Pool, doc *generated.Docume
 		}
 	}
 	// Natural credential expiry can occur while waiting for the binding locks.
+	if err := CheckCRMReports(ctx, q, doc.OrgID, report); err != nil {
+		return err
+	}
 	if err := authorize(ctx, tx, user); err != nil {
+		return err
+	}
+	if err := CheckCRMReportDeadlines(report, time.Now()); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

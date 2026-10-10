@@ -37,6 +37,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/crmconnection"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -47,6 +48,7 @@ const (
 	SourceStatic        SourceKind = "static"
 	SourceCRMDeal       SourceKind = "crm.deal"
 	SourceCRMContact    SourceKind = "crm.contact"
+	SourceCRMCompany    SourceKind = "crm.company"
 	SourceScannerFind   SourceKind = "scanner.finding"
 	SourceOrgSetting    SourceKind = "org.setting"
 	SourceAgentComputed SourceKind = "agent.computed"
@@ -55,7 +57,7 @@ const (
 // Valid reports whether s is one of the registered source kinds.
 func (s SourceKind) Valid() bool {
 	switch s {
-	case SourceStatic, SourceCRMDeal, SourceCRMContact, SourceScannerFind, SourceOrgSetting, SourceAgentComputed:
+	case SourceStatic, SourceCRMDeal, SourceCRMContact, SourceCRMCompany, SourceScannerFind, SourceOrgSetting, SourceAgentComputed:
 		return true
 	}
 	return false
@@ -105,6 +107,7 @@ type Resolver struct {
 	Q       BindingStore
 	Sources map[SourceKind]Source
 	Cache   *cache
+	CRM     *CRMRecords
 }
 
 type BindingStore interface {
@@ -117,6 +120,10 @@ type BindingStore interface {
 type ObservationStager interface {
 	StageVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error
 	StageVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error
+}
+
+type CRMReportStager interface {
+	StageCRMReports(context.Context, uuid.UUID, uuid.UUID, []ResolveReport) error
 }
 
 // New builds a Resolver with the given source plugins. A static source is
@@ -149,6 +156,7 @@ type ResolveOptions struct {
 	// callers cannot ask a default resolver to persist binding observations.
 	stageObservations bool
 	freshSources      bool
+	crmSnapshot       *crmconnection.Snapshot
 }
 
 // Resolve produces the final variable map for a document. The block tree's
@@ -183,6 +191,14 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 		if b == nil || b.DocumentID != doc.ID {
 			return nil, nil, errors.New("resolve: invalid binding snapshot")
 		}
+	}
+	if r.CRM != nil && !opts.FreezeMode {
+		opts.crmSnapshot, err = r.CRM.observe(ctx, doc, bindings)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, b := range bindings {
 		bindingSnapshot := *b
 		entry := ResolveReport{
 			bindingSnapshot: &bindingSnapshot,
@@ -202,6 +218,12 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 			return nil, nil, err
 		}
 		entry.ResolvedFrom = src
+		if r.CRM != nil && isCRMKind(b.SourceKind) && src == "source" {
+			_, entry.CRMObservation, entry.crmFence, err = crmValue(opts.crmSnapshot, b)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 		// Successful empty source values are authoritative, not fetch failures.
 		if src == "source" || src == "cached" || val != "" {
 			out[b.VariableName] = val
@@ -221,6 +243,12 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 	// Layer 3: agent overrides win.
 	for k, v := range opts.AgentOverrides {
 		out[k] = v
+		for i := range report {
+			if report[i].Variable == k {
+				report[i].Value, report[i].ResolvedFrom = v, "agent_override"
+				report[i].CRMObservation, report[i].crmFence = nil, nil
+			}
+		}
 	}
 	return out, report, nil
 }
@@ -237,6 +265,21 @@ func (r *Resolver) FreezeForSend(ctx context.Context, doc *generated.Document) (
 	resolved, report, err := r.Resolve(ctx, doc, ResolveOptions{stageObservations: true, freshSources: true})
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := CheckReviewedCRMValues(doc, report); err != nil {
+		return nil, nil, err
+	}
+	for _, entry := range report {
+		if entry.crmFence != nil {
+			stager, ok := r.Q.(CRMReportStager)
+			if !ok {
+				return nil, nil, ErrBindingPersistence
+			}
+			if err := stager.StageCRMReports(ctx, doc.OrgID, doc.ID, report); err != nil {
+				return nil, nil, err
+			}
+			break
+		}
 	}
 	// Keep static values that weren't bound (they're already in variables_json
 	// and resolved/report includes them). Just marshal the merged map.
@@ -282,7 +325,17 @@ func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *gen
 		}
 		return nil
 	}
-	freshRequired := opts.freshSources && (b.SourceKind == string(SourceCRMDeal) || b.SourceKind == string(SourceCRMContact))
+	if r.CRM != nil && isCRMKind(b.SourceKind) {
+		value, _, _, err := crmValue(opts.crmSnapshot, b)
+		if err != nil {
+			return "", "", err
+		}
+		if err = stage(value, false); err != nil {
+			return "", "", err
+		}
+		return value, "source", nil
+	}
+	freshRequired := opts.freshSources && isCRMKind(b.SourceKind)
 	src, ok := r.Sources[SourceKind(b.SourceKind)]
 	if !ok {
 		if err := stage(fmt.Sprintf("source kind %q not registered", b.SourceKind), true); err != nil {
@@ -327,12 +380,14 @@ func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *gen
 // each variable took.
 type ResolveReport struct {
 	bindingSnapshot *generated.DocumentVariableBinding
-	Variable        string `json:"variable"`
-	SourceKind      string `json:"source_kind"`
-	SourceRef       string `json:"source_ref,omitempty"`
-	SourcePath      string `json:"source_path,omitempty"`
-	Value           string `json:"value"`
-	ResolvedFrom    string `json:"resolved_from"` // "source" | "cached" | "fallback" | "frozen" | ""
+	crmFence        *crmReportFence
+	CRMObservation  *CRMValueObservation `json:"crm_observation,omitempty"`
+	Variable        string               `json:"variable"`
+	SourceKind      string               `json:"source_kind"`
+	SourceRef       string               `json:"source_ref,omitempty"`
+	SourcePath      string               `json:"source_path,omitempty"`
+	Value           string               `json:"value"`
+	ResolvedFrom    string               `json:"resolved_from"` // "source" | "cached" | "fallback" | "frozen" | ""
 }
 
 // stringify coerces JSON-decoded values to strings for the variable map.

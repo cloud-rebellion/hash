@@ -4,6 +4,7 @@
 package resolver
 
 import (
+	"github.com/bright-interaction/hash/internal/crmconnection"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -32,8 +33,8 @@ func ValidateBindingName(name string) error {
 }
 
 // ValidateBinding validates storage and resolver input without fetching a
-// source. Empty REST paths still select the complete entity; static and agent
-// sources can have empty references, and org.setting ignores source_ref.
+// source. CRM bindings select only reviewed source-native scalar paths; static
+// and agent sources can have empty references, and org.setting ignores source_ref.
 func ValidateBinding(name string, kind SourceKind, ref, path, fallback string) error {
 	if err := ValidateBindingName(name); err != nil {
 		return err
@@ -48,7 +49,17 @@ func ValidateBinding(name string, kind SourceKind, ref, path, fallback string) e
 		return err
 	}
 	switch kind {
-	case SourceCRMDeal, SourceCRMContact, SourceScannerFind:
+	case SourceCRMDeal, SourceCRMContact, SourceCRMCompany:
+		if err := crmconnection.ValidateRecordRef(crmconnection.RecordRef{Kind: crmconnection.RecordKind(kind), ID: ref}); err != nil {
+			return &BindingValidationError{Field: "source_ref", Reason: "must be an exact supported CRM record ID"}
+		}
+		for _, field := range crmconnection.Catalog(crmconnection.RecordKind(kind)) {
+			if field.Path == path {
+				return nil
+			}
+		}
+		return &BindingValidationError{Field: "source_path", Reason: "must name a supported CRM scalar field"}
+	case SourceScannerFind:
 		if err := validateBindingString("source_ref", ref, 256); err != nil {
 			return err
 		}

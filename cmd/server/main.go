@@ -28,6 +28,7 @@ import (
 	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/crmconnection"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
@@ -383,13 +384,24 @@ func run() error {
 	// and quota enforcement, including explicitly approved operator plans.
 	// Missing integration configuration remains an actionable binding error.
 	allowPrivateIntegrations := config.IsLocalDevelopment(cfg.PublicURL)
+	var crmClient *crmconnection.Client
+	var crmKeys *crmconnection.Keyring
+	if cfg.BrightCRMURL != "" {
+		crmClient, err = crmconnection.NewClient(cfg.BrightCRMURL, allowPrivateIntegrations && cfg.Environment == "development")
+		if err != nil {
+			return errors.New("CRM origin configuration invalid")
+		}
+		crmKeys, err = crmconnection.NewKeyring(cfg.CRMEncryptionKey, cfg.CRMEncryptionKeyPrevious)
+		if err != nil {
+			return errors.New("CRM encryption configuration invalid")
+		}
+	}
 	resolverEngine := resolver.New(queries,
-		resolver.NewCRMDealSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
-		resolver.NewCRMContactSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
 		resolver.NewScannerFindingSource(cfg.ScannerURL, cfg.ScannerToken, allowPrivateIntegrations),
 		&resolver.OrgSettingSource{Q: queries, Plans: billingEngine},
 		resolver.AgentComputedSource{},
 	)
+	resolverEngine.CRM = &resolver.CRMRecords{Store: queries, Client: crmClient, Keys: crmKeys, Origin: cfg.BrightCRMURL}
 
 	// Document lifecycle engine (send/void/remind). REST, MCP, and the worker
 	// all route through it so the magic-token TTL, variable freeze, eIDAS
@@ -462,7 +474,9 @@ func run() error {
 		BrandingResolver:           brandingResolver,
 		Envelopes:                  envelopesEngine,
 		EIDAS:                      eidasEngine,
-		BrightCRMWebhookSecret:     cfg.BrightCRMWebhookSecret,
+		CRMOrigin:                  cfg.BrightCRMURL,
+		CRMClient:                  crmClient,
+		CRMKeys:                    crmKeys,
 		WebhookSecrets:             webhookKeys,
 		EvidenceTrustedPublicKeys:  trustedEvidenceKeys,
 		EvidenceManifestPublicKeys: []string{signer.PublicKeyBase64()},

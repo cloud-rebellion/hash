@@ -76,6 +76,10 @@ func registerVariableBindingTools(s *Server, d Deps) {
 	})
 
 	bindHandler := func(name string, kind resolver.SourceKind, refField, pathField string) ToolDef {
+		pathDescription := "dotted scalar path inside the scanner entity"
+		if kind == resolver.SourceCRMDeal || kind == resolver.SourceCRMContact || kind == resolver.SourceCRMCompany {
+			pathDescription = "supported CRM scalar name: deal.value/title, contact.full_name/email, company.legal_name/orgnr (use the field name without a kind prefix)"
+		}
 		return ToolDef{
 			Name:  name,
 			Write: true, // mutates document bindings: needs the write scope + RoleSender default (parity with bind_variable_to_org_setting / unbind_variable and the REST RequireRoleForWrites gate)
@@ -86,8 +90,8 @@ func registerVariableBindingTools(s *Server, d Deps) {
 				"document_id": stringSchema("document uuid (must be in draft state)"),
 				"variable":    stringSchema("the variable name without braces (e.g. 'deal_amount')"),
 				refField:      stringSchema("source entity id"),
-				pathField:     stringSchema("dotted JSON path inside the entity (e.g. 'deal.amount')"),
-				"fallback":    stringSchema("optional literal returned when the source resolves empty"),
+				pathField:     stringSchema(pathDescription),
+				"fallback":    stringSchema("optional unverified preview fallback; CRM send requires fresh reviewed values and successful empty values remain empty"),
 			}, []string{"document_id", "variable", refField, pathField}),
 			Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 				u, _ := auth.FromContext(r.Context())
@@ -102,6 +106,7 @@ func registerVariableBindingTools(s *Server, d Deps) {
 
 	s.RegisterTool(bindHandler("bind_variable_to_crm_deal", resolver.SourceCRMDeal, "deal_id", "path"))
 	s.RegisterTool(bindHandler("bind_variable_to_crm_contact", resolver.SourceCRMContact, "contact_id", "path"))
+	s.RegisterTool(bindHandler("bind_variable_to_crm_company", resolver.SourceCRMCompany, "company_id", "path"))
 	s.RegisterTool(bindHandler("bind_variable_to_scanner_finding", resolver.SourceScannerFind, "scan_id", "path"))
 
 	s.RegisterTool(ToolDef{

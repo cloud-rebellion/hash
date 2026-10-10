@@ -31,9 +31,9 @@ func variableBindingMCPArgumentsE2E(f variableBindingAuthorizationFixture, tool 
 	args := map[string]any{"document_id": f.doc.ID, "variable": "customer"}
 	switch tool {
 	case "bind_variable_to_crm_deal":
-		args["deal_id"], args["path"], args["fallback"] = "deal_updated", "deal.name", "New fallback"
+		args["deal_id"], args["path"], args["fallback"] = "deal_updated", "title", "New fallback"
 	case "bind_variable_to_crm_contact":
-		args["contact_id"], args["path"] = "contact_fixture", "name"
+		args["contact_id"], args["path"] = "contact_fixture", "full_name"
 	case "bind_variable_to_scanner_finding":
 		args["scan_id"], args["path"] = "scan_fixture", "summary.critical_count"
 	case "bind_variable_to_org_setting":
@@ -264,7 +264,7 @@ func TestVariableBindingMCPOneUseAndCanonicalToolsE2E(t *testing.T) {
 				if err != nil || len(rows) != 1 || rows[0].VariableName != "customer" || dto["variable"] != "customer" {
 					t.Fatal("bind success did not persist its exact variable")
 				}
-				if tool == "bind_variable_to_crm_deal" && (rows[0].SourceRef != "deal_updated" || rows[0].SourcePath != "deal.name" || rows[0].Fallback != "New fallback") {
+				if tool == "bind_variable_to_crm_deal" && (rows[0].SourceRef != "deal_updated" || rows[0].SourcePath != "title" || rows[0].Fallback != "New fallback") {
 					t.Fatal("CRM source ref/path/fallback changed")
 				}
 			}
@@ -361,12 +361,36 @@ func TestVariableBindingMCPValidatesInputsBeforeMutationE2E(t *testing.T) {
 	f := setupVariableBindingMCPE2E(t)
 	before := f.snapshot(t)
 	mint, _ := mintRecipientMCPKeyE2E(t, f.lifecycleAuthorizationFixture, false, 0)
-	for _, invalid := range []map[string]any{{"variable": "1customer"}, {"variable": strings.Repeat("a", 129)}, {"deal_id": "../admin"}, {"path": "bad\x00path"}, {"path": strings.Repeat("p", 1025)}, {"fallback": "private\x00fallback"}, {"fallback": strings.Repeat("x", 16*1024+1)}} {
+	for _, invalid := range []map[string]any{{"variable": "1customer"}, {"variable": strings.Repeat("a", 129)}, {"deal_id": "../admin"}, {"path": strings.Repeat("p", 1025)}, {"fallback": strings.Repeat("x", 16*1024+1)}} {
 		args := variableBindingMCPArgumentsE2E(f, "bind_variable_to_crm_deal")
 		for key, value := range invalid {
 			args[key] = value
 		}
 		fieldMCPTextE2E(t, submitVariableBindingMCPE2E(f, context.Background(), "bind_variable_to_crm_deal", mint.Plaintext, args), true)
+		f.assertUnchanged(t, before)
+	}
+	// NUL is refused by the original JSON envelope validator before tool
+	// dispatch, so it must produce a protocol parse error rather than a tool
+	// result. The same exact no-effects inventory applies at both boundaries.
+	for _, invalid := range []map[string]any{{"path": "bad\x00path"}, {"fallback": "private\x00fallback"}} {
+		args := variableBindingMCPArgumentsE2E(f, "bind_variable_to_crm_deal")
+		for key, value := range invalid {
+			args[key] = value
+		}
+		response := submitVariableBindingMCPE2E(f, context.Background(), "bind_variable_to_crm_deal", mint.Plaintext, args)
+		var reply struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Result  json.RawMessage `json:"result"`
+			Error   *struct {
+				Code    int             `json:"code"`
+				Message string          `json:"message"`
+				Data    json.RawMessage `json:"data"`
+			} `json:"error"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &reply) != nil || reply.JSONRPC != "2.0" || len(reply.ID) != 0 || len(reply.Result) != 0 || reply.Error == nil || reply.Error.Code != -32700 || reply.Error.Message != "JSON keys and strings must not contain NUL" || len(reply.Error.Data) != 0 {
+			t.Fatal("NUL binding argument did not receive the exact pre-dispatch protocol refusal")
+		}
 		f.assertUnchanged(t, before)
 	}
 }

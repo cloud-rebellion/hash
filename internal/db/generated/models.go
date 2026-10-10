@@ -213,6 +213,20 @@ type ComplianceFlag struct {
 	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
 }
 
+type CrmConnection struct {
+	OrgID                uuid.UUID          `json:"org_id"`
+	ID                   uuid.UUID          `json:"id"`
+	Generation           int64              `json:"generation"`
+	Status               string             `json:"status"`
+	Origin               string             `json:"origin"`
+	CrmTeamID            string             `json:"crm_team_id"`
+	CrmUserID            string             `json:"crm_user_id"`
+	CredentialCiphertext []byte             `json:"credential_ciphertext"`
+	VerifiedAt           pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
 type DataSubjectRequest struct {
 	ID             uuid.UUID          `json:"id"`
 	OrgID          uuid.UUID          `json:"org_id"`

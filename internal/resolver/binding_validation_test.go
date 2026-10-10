@@ -10,7 +10,7 @@ import (
 )
 
 func TestValidateBindingPreservesResolverSemantics(t *testing.T) {
-	for _, kind := range []SourceKind{SourceStatic, SourceAgentComputed, SourceOrgSetting, SourceCRMDeal, SourceCRMContact, SourceScannerFind} {
+	for _, kind := range []SourceKind{SourceStatic, SourceAgentComputed, SourceOrgSetting, SourceScannerFind} {
 		t.Run(string(kind), func(t *testing.T) {
 			ref := ""
 			if kind == SourceCRMDeal || kind == SourceCRMContact || kind == SourceScannerFind {
@@ -21,7 +21,7 @@ func TestValidateBindingPreservesResolverSemantics(t *testing.T) {
 			}
 		})
 	}
-	if err := ValidateBinding("_amount2", SourceCRMDeal, "deal_1", "deal.items.0.line item", ""); err != nil {
+	if err := ValidateBinding("_amount2", SourceScannerFind, "finding_1", "finding.items.0.line item", ""); err != nil {
 		t.Fatalf("literal dotted lookup path refused: %v", err)
 	}
 	if err := ValidateBinding("org_name", SourceOrgSetting, "unused but preserved", "org.name", ""); err != nil {
@@ -54,7 +54,7 @@ func TestValidateBindingByteBoundaries(t *testing.T) {
 				case "fallback":
 					fallback = value
 				}
-				err := ValidateBinding(name, SourceCRMDeal, ref, path, fallback)
+				err := ValidateBinding(name, SourceScannerFind, ref, path, fallback)
 				var invalid *BindingValidationError
 				if excess == 0 && err != nil || excess > 0 && (!errors.As(err, &invalid) || invalid.Field != test.field) {
 					t.Fatalf("boundary excess=%d error=%v", excess, err)

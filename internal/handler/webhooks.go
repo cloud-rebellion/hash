@@ -251,7 +251,7 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 			entry["last_status_code"] = d.LastStatusCode.Int32
 		}
 		if d.LastError.Valid {
-			entry["last_error"] = d.LastError.String
+			entry["last_error"] = dispatch.SafeWebhookDiagnostic(d.LastError.String)
 		}
 		out = append(out, entry)
 	}

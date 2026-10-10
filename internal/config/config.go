@@ -91,11 +91,13 @@ type Config struct {
 	// "not configured" and the resolver returns ErrNotConfigured for
 	// any binding using that source kind, which the UI surfaces as a
 	// "configure integration" hint instead of a 500.
-	BrightCRMURL           string
-	BrightCRMToken         string
-	BrightCRMWebhookSecret string
-	ScannerURL             string
-	ScannerToken           string
+	BrightCRMURL             string
+	BrightCRMToken           string
+	BrightCRMWebhookSecret   string
+	CRMEncryptionKey         string
+	CRMEncryptionKeyPrevious string
+	ScannerURL               string
+	ScannerToken             string
 
 	// Phase 8.4 AI runtime. All optional; empty keys mean the
 	// corresponding provider isn't registered. ShieldKey is 64 hex
@@ -214,6 +216,8 @@ func Load() (*Config, error) {
 		BrightCRMURL:                 os.Getenv("HASH_BRIGHTCRM_URL"),
 		BrightCRMToken:               os.Getenv("HASH_BRIGHTCRM_TOKEN"),
 		BrightCRMWebhookSecret:       os.Getenv("HASH_BRIGHTCRM_WEBHOOK_SECRET"),
+		CRMEncryptionKey:             os.Getenv("HASH_CRM_ENCRYPTION_KEY"),
+		CRMEncryptionKeyPrevious:     os.Getenv("HASH_CRM_ENCRYPTION_KEY_PREVIOUS"),
 		ScannerURL:                   os.Getenv("HASH_SCANNER_URL"),
 		ScannerToken:                 os.Getenv("HASH_SCANNER_TOKEN"),
 		AIShieldKey:                  os.Getenv("HASH_AI_SHIELD_KEY"),
@@ -430,14 +434,7 @@ func Load() (*Config, error) {
 	if c.Environment != "development" && c.SMTPPort == 1025 {
 		return nil, errors.New("HASH_SMTP_PORT=1025 is reserved for plaintext local development; production/staging SMTP must use STARTTLS")
 	}
-	// A localhost public URL is not an authentication boundary: dev/e2e stacks
-	// are frequently exposed through a proxy or shared network. If BrightCRM is
-	// enabled, require its inbound HMAC key in every environment. Leaving the
-	// integration URL empty still disables it without requiring a secret.
-	if c.BrightCRMURL != "" && len(c.BrightCRMWebhookSecret) < 32 {
-		return nil, errors.New("HASH_BRIGHTCRM_WEBHOOK_SECRET must be at least 32 chars when BrightCRM integration is enabled")
-	}
-	if err := validateCredentialedIntegration("HASH_BRIGHTCRM_URL", "HASH_BRIGHTCRM_TOKEN", c.BrightCRMURL, c.BrightCRMToken, c.Environment == "development"); err != nil {
+	if err := validateCRMConfiguration(c); err != nil {
 		return nil, err
 	}
 	if err := validateCredentialedIntegration("HASH_SCANNER_URL", "HASH_SCANNER_TOKEN", c.ScannerURL, c.ScannerToken, c.Environment == "development"); err != nil {

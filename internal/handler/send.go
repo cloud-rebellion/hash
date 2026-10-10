@@ -128,6 +128,10 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
 	case errors.Is(err, resolver.ErrSourceFreshness):
 		writeError(w, http.StatusServiceUnavailable, "Current CRM information could not be verified. Check the connection and retry sending.")
+	case errors.Is(err, resolver.ErrCRMReviewRequired):
+		writeError(w, http.StatusConflict, "CRM information changed. Update the document, preview it and review the agreed content before sending.")
+	case errors.Is(err, resolver.ErrNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, "The CRM connection is unavailable. Ask the organization owner to configure it.")
 	default:
 		var guardErr *eidas.GuardError
 		if errors.As(err, &guardErr) {

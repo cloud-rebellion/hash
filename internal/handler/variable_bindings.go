@@ -270,7 +270,7 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	resolved, report, err := s.resolveVariables(ctx, doc)
 	if err != nil {
-		writeInternalError(w, err)
+		s.writePreviewError(w, err)
 		return
 	}
 	if err := resolver.CheckPreview(ctx, s.Pool, doc, report, sess.UserID, authorize); err != nil {
@@ -285,6 +285,14 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writePreviewError(w http.ResponseWriter, err error) {
+	if errors.Is(err, resolver.ErrSourceFreshness) {
+		writeError(w, http.StatusConflict, "CRM values could not be verified; refresh and review the document")
+		return
+	}
+	if errors.Is(err, resolver.ErrNotConfigured) {
+		writeError(w, http.StatusServiceUnavailable, "CRM connection is unavailable; ask the organization owner to configure it")
+		return
+	}
 	if errors.Is(err, resolver.ErrPreviewChanged) {
 		writeError(w, http.StatusConflict, err.Error())
 		return

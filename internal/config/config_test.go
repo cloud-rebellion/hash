@@ -606,19 +606,19 @@ func TestLoad_DevelopmentModeRejectsPublicURL(t *testing.T) {
 	}
 }
 
-func TestLoad_BrightCRMSecretRequiredInProd(t *testing.T) {
+func TestLoad_BrightCRMEncryptionRequiredInProd(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("HASH_PUBLIC_URL", "https://hash.brightinteraction.com")
 	t.Setenv("HASH_BRIGHTCRM_URL", "https://crm.example.com")
 	t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", "")
 	t.Setenv("HASH_EVIDENCE_OTS_ENABLED", "false")
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "BRIGHTCRM_WEBHOOK_SECRET") {
+	if err == nil || !strings.Contains(err.Error(), "HASH_CRM_ENCRYPTION_KEY") {
 		t.Fatalf("expected BrightCRM secret guard, got %v", err)
 	}
 }
 
-func TestLoad_BrightCRMSecretRequiredLocallyWhenIntegrationEnabled(t *testing.T) {
+func TestLoad_BrightCRMEncryptionRequiredLocallyWhenIntegrationEnabled(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("HASH_ENVIRONMENT", "development")
 	t.Setenv("HASH_PUBLIC_URL", "http://localhost:8090")
@@ -627,7 +627,7 @@ func TestLoad_BrightCRMSecretRequiredLocallyWhenIntegrationEnabled(t *testing.T)
 	t.Setenv("HASH_BRIGHTCRM_URL", "https://crm.example.com")
 	t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", "")
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "BRIGHTCRM_WEBHOOK_SECRET") {
+	if err == nil || !strings.Contains(err.Error(), "HASH_CRM_ENCRYPTION_KEY") {
 		t.Fatalf("enabled local integration should require a secret, got %v", err)
 	}
 }
@@ -646,11 +646,11 @@ func TestLoad_CredentialedResolverIntegrationsFailClosed(t *testing.T) {
 	tests := []struct {
 		name, urlKey, tokenKey, endpoint, token, want string
 	}{
-		{"BrightCRM URL without token", "HASH_BRIGHTCRM_URL", "HASH_BRIGHTCRM_TOKEN", "https://crm.example.test", "", "both be set"},
+		{"BrightCRM URL without encryption", "HASH_BRIGHTCRM_URL", "HASH_CRM_ENCRYPTION_KEY", "https://crm.example.test", "", "both be configured"},
 		{"scanner token without URL", "HASH_SCANNER_URL", "HASH_SCANNER_TOKEN", "", "secret", "both be set"},
-		{"plaintext BrightCRM", "HASH_BRIGHTCRM_URL", "HASH_BRIGHTCRM_TOKEN", "http://crm.example.test", "secret", "must use https"},
-		{"BrightCRM userinfo", "HASH_BRIGHTCRM_URL", "HASH_BRIGHTCRM_TOKEN", "https://user@crm.example.test", "secret", "origin only"},
-		{"BrightCRM path", "HASH_BRIGHTCRM_URL", "HASH_BRIGHTCRM_TOKEN", "https://crm.example.test/base", "secret", "origin only"},
+		{"plaintext BrightCRM", "HASH_BRIGHTCRM_URL", "HASH_CRM_ENCRYPTION_KEY", "http://crm.example.test", strings.Repeat("1234", 16), "HTTPS origin"},
+		{"BrightCRM userinfo", "HASH_BRIGHTCRM_URL", "HASH_CRM_ENCRYPTION_KEY", "https://user@crm.example.test", strings.Repeat("1234", 16), "origin only"},
+		{"BrightCRM path", "HASH_BRIGHTCRM_URL", "HASH_CRM_ENCRYPTION_KEY", "https://crm.example.test/base", strings.Repeat("1234", 16), "origin only"},
 		{"scanner query", "HASH_SCANNER_URL", "HASH_SCANNER_TOKEN", "https://scanner.example.test?target=x", "secret", "origin only"},
 	}
 	for _, tc := range tests {
@@ -658,9 +658,6 @@ func TestLoad_CredentialedResolverIntegrationsFailClosed(t *testing.T) {
 			setAllRequired(t)
 			t.Setenv(tc.urlKey, tc.endpoint)
 			t.Setenv(tc.tokenKey, tc.token)
-			if tc.urlKey == "HASH_BRIGHTCRM_URL" && tc.endpoint != "" {
-				t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", strings.Repeat("b", 32))
-			}
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("unsafe integration config accepted: %v", err)
 			}
@@ -675,8 +672,7 @@ func TestLoad_AllowsLocalHTTPResolverIntegrationOnlyInDevelopment(t *testing.T) 
 	t.Setenv("HASH_OIDC_ISSUER", "http://localhost:9999")
 	t.Setenv("HASH_OIDC_REDIRECT_URL", "http://localhost:8090/auth/callback")
 	t.Setenv("HASH_BRIGHTCRM_URL", "http://brightcrm.local:8080")
-	t.Setenv("HASH_BRIGHTCRM_TOKEN", "development-token")
-	t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", strings.Repeat("b", 32))
+	t.Setenv("HASH_CRM_ENCRYPTION_KEY", strings.Repeat("1234", 16))
 	if _, err := Load(); err != nil {
 		t.Fatalf("local development resolver rejected: %v", err)
 	}
@@ -957,6 +953,8 @@ func setAllRequired(t *testing.T) {
 	t.Setenv("HASH_BRIGHTCRM_URL", "")
 	t.Setenv("HASH_BRIGHTCRM_TOKEN", "")
 	t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", "")
+	t.Setenv("HASH_CRM_ENCRYPTION_KEY", "")
+	t.Setenv("HASH_CRM_ENCRYPTION_KEY_PREVIOUS", "")
 	t.Setenv("HASH_SCANNER_URL", "")
 	t.Setenv("HASH_SCANNER_TOKEN", "")
 	t.Setenv("HASH_COMPLIANCE_FEED_URL", "")

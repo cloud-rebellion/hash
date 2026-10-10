@@ -549,79 +549,33 @@ func (w *worker) loopWebhookRedrive(ctx context.Context) {
 }
 
 func (w *worker) runWebhookRedriveOnce(ctx context.Context) {
+	drainCtx, cancel := context.WithTimeout(ctx, webhookDrainTimeout)
+	defer cancel()
 	// The event ledger is the durable webhook outbox boundary. Reconstruct any
 	// fan-out row that was lost if the server/worker exited after committing an
 	// event but before its asynchronous audit hook ran.
-	if _, err := w.queries.ReconcileMissingWebhookDeliveries(ctx, 500); err != nil {
-		slog.Warn("webhooks: reconcile missing deliveries", "err", err)
+	reconcileCtx, cancelReconcile := context.WithTimeout(drainCtx, webhookReadTimeout)
+	_, reconcileErr := w.queries.ReconcileMissingWebhookDeliveries(reconcileCtx, 500)
+	cancelReconcile()
+	if reconcileErr != nil {
+		slog.Warn("webhooks: reconcile missing deliveries", "code", "reconciliation_unavailable", "error_type", fmt.Sprintf("%T", reconcileErr))
 		// Existing deliveries can still make progress while reconciliation is
 		// temporarily unavailable, so continue to the claim step.
 	}
 
-	pending, err := w.queries.ClaimDueWebhookDeliveries(ctx, 50)
-	if err != nil {
-		slog.Warn("webhooks: claim due", "err", err)
-		return
-	}
-	for _, d := range pending {
-		w.attemptDelivery(ctx, d)
-	}
-}
-
-func (w *worker) attemptDelivery(ctx context.Context, d *generated.WebhookDelivery) {
-	endpointURL, signingSecret, err := w.webhookSecrets.Endpoint(ctx, d.EndpointID)
-	if err != nil {
-		slog.Error("webhooks: endpoint secret unavailable", "endpoint_id", d.EndpointID, "err", err)
-		_ = w.queries.MarkDeliveryFailed(ctx, generated.MarkDeliveryFailedParams{
-			ID: d.ID, LastStatusCode: pgtype.Int4{Int32: 0, Valid: true},
-			LastError: pgtype.Text{String: "endpoint secret unavailable", Valid: true},
-		})
-		return
-	}
-	ev, err := dispatch.LoadEvent(ctx, w.queries, d.EventID)
-	if err != nil {
-		_ = w.queries.MarkDeliveryFailed(ctx, generated.MarkDeliveryFailedParams{
-			ID: d.ID, LastStatusCode: pgtype.Int4{Int32: 0, Valid: true},
-			LastError: pgtype.Text{String: "event missing: " + err.Error(), Valid: true},
-		})
-		return
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	res := w.dispatcher.DispatchWithSecret(cctx, endpointURL, signingSecret, ev)
-	cancel()
-
-	if res.Err == nil && res.Status >= 200 && res.Status < 300 {
-		_ = w.queries.MarkDeliveryDelivered(ctx, generated.MarkDeliveryDeliveredParams{
-			ID: d.ID, LastStatusCode: pgtype.Int4{Int32: int32(res.Status), Valid: true},
-		})
-		return
-	}
-
-	// Schedule next retry or mark failed.
-	// Attempts is incremented only when the failure below is persisted, so the
-	// claimed row still carries the number of prior failed sends. Passing +1
-	// skipped the documented one-minute first retry and exhausted the schedule
-	// one slot early.
-	next, ok := dispatch.Backoff(int(d.Attempts))
-	errMsg := ""
-	if res.Err != nil {
-		errMsg = res.Err.Error()
-	} else {
-		errMsg = fmt.Sprintf("status=%d body=%s", res.Status, truncate(res.Body, 200))
-	}
-	if !ok {
-		_ = w.queries.MarkDeliveryFailed(ctx, generated.MarkDeliveryFailedParams{
-			ID: d.ID, LastStatusCode: pgtype.Int4{Int32: int32(res.Status), Valid: true},
-			LastError: pgtype.Text{String: errMsg, Valid: true},
-		})
-		return
-	}
-	_ = w.queries.MarkDeliveryRetrying(ctx, generated.MarkDeliveryRetryingParams{
-		ID: d.ID, LastStatusCode: pgtype.Int4{Int32: int32(res.Status), Valid: true},
-		LastError:     pgtype.Text{String: errMsg, Valid: true},
-		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(next), Valid: true},
+	deps := w.webhookDeliveryDependencies()
+	err := drainWebhookDeliveries(drainCtx, webhookDrainLimit, w.queries.ClaimNextDueWebhookDelivery, func(attemptCtx context.Context, d *generated.WebhookDelivery) error {
+		applied, err := processClaimedWebhookDelivery(attemptCtx, d, deps)
+		if err != nil {
+			slog.Warn("webhooks: delivery checkpoint unavailable", "code", "checkpoint_unavailable", "delivery_id", d.ID, "error_type", fmt.Sprintf("%T", err))
+		} else if !applied {
+			slog.Info("webhooks: stale delivery claim", "code", "claim_superseded", "delivery_id", d.ID)
+		}
+		return err
 	})
+	if err != nil && drainCtx.Err() == nil {
+		slog.Warn("webhooks: claim drain unavailable", "code", "claim_unavailable", "error_type", fmt.Sprintf("%T", err))
+	}
 }
 
 // loopEmailDispatch drains the durable email queue, sending each message over

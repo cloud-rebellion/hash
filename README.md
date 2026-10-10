@@ -53,6 +53,12 @@ release acceptance.
 
 ## Quick start
 
+Organisation owners enroll and explicitly confirm their own BrightCRM account
+in Settings → Integrations. Credentials are encrypted with a dedicated operator
+key; fresh reads verify the remote account and selected records. Changed CRM
+values require document review before sending. See [CRM connector](docs/CRM-CONNECTOR.md)
+for setup, supported fields, migration and acceptance limits.
+
 ```bash
 cp .env.example .env
 # edit .env, then:

@@ -543,8 +543,27 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
 		return SendResult{}, err
 	}
+	var pendingCRMAudits []audit.PendingEvent
+	if bindingPreparation != nil && len(bindingPreparation.crmReports) > 0 {
+		pendingCRMAudits, err = appendAuditEntriesTx(ctx, e.Audit, tx, bindingPreparation.auditEntries(e, a))
+		if err != nil {
+			return SendResult{}, err
+		}
+		if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
+			return SendResult{}, err
+		}
+		if err := bindingPreparation.checkCRMDeadlines(e.now()); err != nil {
+			return SendResult{}, err
+		}
+	}
+	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
+		return SendResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return SendResult{}, fmt.Errorf("commit send sealing intent: %w", err)
+	}
+	for _, pending := range pendingCRMAudits {
+		e.Audit.Publish(pending)
 	}
 	cancelTransaction()
 	return e.ResumeSendSealing(requestCtx, doc.ID, doc.OrgID)
@@ -1502,6 +1521,70 @@ type sendBindingPreparation struct {
 	reader       resolver.BindingStore
 	definitions  map[uuid.UUID][]*generated.DocumentVariableBinding
 	observations []preparedBindingObservation
+	crmReports   map[uuid.UUID]preparedCRMReports
+}
+
+type preparedCRMReports struct {
+	orgID  uuid.UUID
+	report []resolver.ResolveReport
+}
+
+func (p *sendBindingPreparation) StageCRMReports(ctx context.Context, orgID, docID uuid.UUID, report []resolver.ResolveReport) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if orgID == uuid.Nil || docID == uuid.Nil {
+		return resolver.ErrSourceFreshness
+	}
+	if p.crmReports == nil {
+		p.crmReports = make(map[uuid.UUID]preparedCRMReports)
+	}
+	if _, exists := p.crmReports[docID]; exists {
+		return resolver.ErrSourceFreshness
+	}
+	copyReport := append([]resolver.ResolveReport(nil), report...)
+	for i := range copyReport {
+		if copyReport[i].CRMObservation != nil {
+			observation := *copyReport[i].CRMObservation
+			copyReport[i].CRMObservation = &observation
+		}
+	}
+	p.crmReports[docID] = preparedCRMReports{orgID: orgID, report: copyReport}
+	return nil
+}
+
+func (p *sendBindingPreparation) checkCRMDeadlines(now time.Time) error {
+	for _, prepared := range p.crmReports {
+		if err := resolver.CheckCRMReportDeadlines(prepared.report, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *sendBindingPreparation) auditEntries(e *Engine, a Actor) []audit.Entry {
+	ids := make([]uuid.UUID, 0, len(p.crmReports))
+	for id := range p.crmReports {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	out := make([]audit.Entry, 0, len(ids))
+	for _, id := range ids {
+		observations := []map[string]any{}
+		for _, report := range p.crmReports[id].report {
+			if report.CRMObservation == nil {
+				continue
+			}
+			o := report.CRMObservation
+			observations = append(observations, map[string]any{"variable": report.Variable, "source_kind": report.SourceKind,
+				"source_ref": report.SourceRef, "origin": o.Origin, "crm_team_id": o.CRMTeamID, "crm_user_id": o.CRMUserID,
+				"source_path": report.SourcePath, "connection_id": o.ConnectionID, "generation": o.Generation,
+				"record_updated_at": o.RecordUpdatedAt, "observed_at": o.ObservedAt,
+				"body_sha256": o.BodySHA256, "value_sha256": o.ValueSHA256, "transformation": o.Transformation})
+		}
+		out = append(out, e.auditEntry(a, &id, nil, "crm.variables.observed", map[string]any{"observations": observations, "assurance": "time-of-read"}))
+	}
+	return out
 }
 
 func (p *sendBindingPreparation) ListVariableBindings(ctx context.Context, documentID uuid.UUID) ([]*generated.DocumentVariableBinding, error) {
@@ -1541,6 +1624,11 @@ func (p *sendBindingPreparation) StageVariableBindingError(ctx context.Context, 
 }
 
 func (p *sendBindingPreparation) verifyAndPersist(ctx context.Context, q *generated.Queries) error {
+	for _, prepared := range p.crmReports {
+		if err := resolver.CheckCRMReports(ctx, q, prepared.orgID, prepared.report); err != nil {
+			return err
+		}
+	}
 	for documentID, prepared := range p.definitions {
 		current, err := q.ListVariableBindings(ctx, documentID)
 		if err != nil {

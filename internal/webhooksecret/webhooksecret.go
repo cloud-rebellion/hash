@@ -23,7 +23,10 @@ import (
 
 const aadDomain = "hash/webhook-endpoint-secret/v1\x00"
 
-var ErrConcurrentChange = errors.New("webhook secret: row changed concurrently")
+var (
+	ErrConcurrentChange = errors.New("webhook secret: row changed concurrently")
+	ErrEndpointInactive = errors.New("webhook secret: endpoint inactive")
+)
 
 // Keyring holds the dedicated current and optional previous webhook-encryption
 // keys. These keys are separate from session, signer-token, and AI keys.
@@ -150,6 +153,7 @@ type endpointRow struct {
 	Plaintext         string
 	Ciphertext        []byte
 	CiphertextPresent bool
+	Active            bool
 }
 
 type repository interface {
@@ -164,7 +168,7 @@ type postgresRepository struct {
 
 func (r postgresRepository) list(ctx context.Context) ([]endpointRow, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, org_id, url, secret, secret_ciphertext,
-		secret_ciphertext IS NOT NULL
+		secret_ciphertext IS NOT NULL, active
 		FROM webhook_endpoints ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("webhook secret: list endpoints for backfill: %w", err)
@@ -186,7 +190,7 @@ func (r postgresRepository) list(ctx context.Context) ([]endpointRow, error) {
 
 func (r postgresRepository) get(ctx context.Context, id uuid.UUID) (endpointRow, error) {
 	row, err := scanEndpoint(r.pool.QueryRow(ctx, `SELECT id, org_id, url, secret, secret_ciphertext,
-		secret_ciphertext IS NOT NULL
+		secret_ciphertext IS NOT NULL, active
 		FROM webhook_endpoints WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return endpointRow{}, fmt.Errorf("webhook secret: endpoint %s not found: %w", id, err)
@@ -200,7 +204,7 @@ type rowScanner interface {
 
 func scanEndpoint(row rowScanner) (endpointRow, error) {
 	var out endpointRow
-	if err := row.Scan(&out.ID, &out.OrgID, &out.URL, &out.Plaintext, &out.Ciphertext, &out.CiphertextPresent); err != nil {
+	if err := row.Scan(&out.ID, &out.OrgID, &out.URL, &out.Plaintext, &out.Ciphertext, &out.CiphertextPresent, &out.Active); err != nil {
 		return endpointRow{}, err
 	}
 	// Presence comes from SQL rather than slice nil-ness. An empty-but-present
@@ -214,8 +218,9 @@ func (r postgresRepository) replace(ctx context.Context, expected endpointRow, c
 	if expected.CiphertextPresent {
 		command, err := r.pool.Exec(ctx, `UPDATE webhook_endpoints
 			SET secret_ciphertext = $3, secret = ''
-			WHERE id = $1 AND org_id = $2 AND secret = $4 AND secret_ciphertext = $5`,
-			expected.ID, expected.OrgID, ciphertext, expected.Plaintext, expected.Ciphertext)
+			WHERE id = $1 AND org_id = $2 AND secret = $4 AND secret_ciphertext = $5
+			  AND url = $6 AND active = $7`,
+			expected.ID, expected.OrgID, ciphertext, expected.Plaintext, expected.Ciphertext, expected.URL, expected.Active)
 		if err != nil {
 			return false, fmt.Errorf("webhook secret: persist encrypted endpoint %s: %w", expected.ID, err)
 		}
@@ -223,8 +228,9 @@ func (r postgresRepository) replace(ctx context.Context, expected endpointRow, c
 	} else {
 		command, err := r.pool.Exec(ctx, `UPDATE webhook_endpoints
 			SET secret_ciphertext = $3, secret = ''
-			WHERE id = $1 AND org_id = $2 AND secret = $4 AND secret_ciphertext IS NULL`,
-			expected.ID, expected.OrgID, ciphertext, expected.Plaintext)
+			WHERE id = $1 AND org_id = $2 AND secret = $4 AND secret_ciphertext IS NULL
+			  AND url = $5 AND active = $6`,
+			expected.ID, expected.OrgID, ciphertext, expected.Plaintext, expected.URL, expected.Active)
 		if err != nil {
 			return false, fmt.Errorf("webhook secret: persist encrypted endpoint %s: %w", expected.ID, err)
 		}
@@ -333,6 +339,51 @@ func (m *Manager) Endpoint(ctx context.Context, id uuid.UUID) (string, string, e
 		return "", "", err
 	}
 	return row.URL, result.secret, nil
+}
+
+// DeliveryEndpoint retains tenant and routing identity from the same row whose
+// secret was authenticated. SigningSecret is deliberately excluded from JSON.
+type DeliveryEndpoint struct {
+	ID            uuid.UUID `json:"id"`
+	OrgID         uuid.UUID `json:"org_id"`
+	URL           string    `json:"url"`
+	SigningSecret string    `json:"-"`
+}
+
+// EndpointForDelivery admits only an active authenticated endpoint snapshot.
+// Callers must compare its OrgID with the original event before dispatch. No
+// separate tenant lookup can race the row that supplied the signing key.
+func (m *Manager) EndpointForDelivery(ctx context.Context, id uuid.UUID) (DeliveryEndpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return DeliveryEndpoint{}, err
+	}
+	if m == nil || m.repo == nil || id == uuid.Nil {
+		return DeliveryEndpoint{}, errors.New("webhook secret: delivery endpoint unavailable")
+	}
+	row, err := m.repo.get(ctx, id)
+	if err != nil {
+		return DeliveryEndpoint{}, err
+	}
+	if row.ID != id || row.OrgID == uuid.Nil {
+		return DeliveryEndpoint{}, errors.New("webhook secret: delivery endpoint identity invalid")
+	}
+	if !row.Active {
+		return DeliveryEndpoint{}, ErrEndpointInactive
+	}
+	row, result, err := m.ensure(ctx, row)
+	if err != nil {
+		return DeliveryEndpoint{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return DeliveryEndpoint{}, err
+	}
+	if row.ID != id || row.OrgID == uuid.Nil {
+		return DeliveryEndpoint{}, errors.New("webhook secret: delivery endpoint identity invalid")
+	}
+	if !row.Active {
+		return DeliveryEndpoint{}, ErrEndpointInactive
+	}
+	return DeliveryEndpoint{ID: row.ID, OrgID: row.OrgID, URL: row.URL, SigningSecret: result.secret}, nil
 }
 
 type BackfillReport struct {

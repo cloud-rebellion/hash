@@ -13,7 +13,7 @@ router and checked with `go run ./cmd/apidocgen -check`.
 | `/api/automation/v1/signature-requests` | Organization-wide API key | Dedicated sender/owner key with both `write:authoring` and `write:workflow`; stable `Idempotency-Key`. See [Automation API](AUTOMATION-API.md). |
 | `/mcp` | API key, including supported document-scoped credentials | MCP entitlement, role, tool scopes and document scope apply independently. Discover actual tools and input schemas through MCP `tools/list`. |
 | `/sign/{token}/*` | Recipient magic link | The URL token is a bearer credential bound to a recipient and ceremony. It does not grant sender or administrative access. |
-| `/webhooks/brightcrm` | Timestamped HMAC and durable delivery correlation | Cache invalidation receiver; do not send an unauthenticated CRM event. Follow the current [receiver implementation](../internal/handler/brightcrm_webhook.go). |
+| `/webhooks/brightcrm` | Legacy receiver, disabled in production wiring | Requires a reviewed tenant-bound producer protocol before activation; current BrightCRM does not emit the expected deal/contact CRUD callbacks. |
 | `/api/verify`, `/api/verify-bundle` | Anonymous through trusted production ingress | Verification does not authorize document access. Payload limits and verification rate limits apply. |
 
 Sender login starts at `GET /auth/login` and returns through
@@ -176,14 +176,19 @@ draft or binding preparation returns HTTP 409 from REST Send and the automation
 command, or a tool error from MCP; fetch and review the current draft before
 trying again.
 
-CRM deal/contact bindings require a successful fresh source response at Send;
+CRM deal/contact/company bindings require a successful fresh typed source response at Send;
 the preview cache and configured fallbacks cannot stand in for that response.
 Missing source, failed fetch or invalidation during the request refuses sending.
 REST returns503 when current CRM information cannot be verified. Prepared
 observations use document and binding revision predicates and roll back with
-the freeze transaction if any binding changed. Local synthetic acceptance
-does not verify the configured account's tenant identity, mappings or business
-data; those remain live integration gates.
+the freeze transaction if any binding changed. The per-organization connection
+and exact CRM account/record identity are rechecked; grouped record reads preserve
+exact scalar values and explicit relationship checks. A CRM value differing from
+the reviewed document returns409 for update/preview/review, with no silent Send
+replacement. Reports retain connection/account/record/time/digest provenance,
+and the final transaction retains the active connection generation and a bounded
+observation deadline. Local synthetic acceptance still does not prove actual
+configured account/business data or live integrations. See [CRM connector](CRM-CONNECTOR.md).
 
 Once Send commits an authorized sealing intent, `ResumeSendSealing` completes
 that durable intent using its persisted actor and evidence state. Worker retries
@@ -256,16 +261,14 @@ completion, or a completed downstream Reactor workflow.
 
 ## Integrations and documentation coverage
 
-Hash's direct BrightCRM resolver fetches configured deal/contact endpoints with
-a configured bearer token; live response fields and account permissions must
-match the bindings. This is separate from OIDC sender login and does not
-implement an automatic CRM OAuth authorization/refresh flow.
-
-The current HTTP connector uses one instance-level credential; it does not
-select a credential from the document's organization. Tenant-scoped cache keys
-therefore do not establish CRM credential or record isolation. A reviewed
-organization-to-CRM-account mapping, source record ownership checks and live
-read-back remain required before enabling this connector across organizations.
+The BrightCRM resolver selects an encrypted owner-confirmed connection from the
+document's Hash organization. It verifies the exact remote account before/after
+grouped deal/contact/company reads, checks record ownership and selected links,
+and accepts catalog scalars only. Global CRM tokens are retired. The owner API,
+actor witnesses, credential rotation, bounds and migration contract are in
+[CRM connector](CRM-CONNECTOR.md). This is separate from OIDC sender login;
+automatic CRM OAuth authorization/refresh is not implemented. Actual credentials,
+read scopes/expiry, source mappings and business record read-back remain live gates.
 
 For the durable automation bridge, follow
 [BrightCRM integration](../../brightcrm/docs/REACTOR-HASH-ESIGN.md) and
@@ -273,6 +276,9 @@ For the durable automation bridge, follow
 request/document IDs, verify signed callbacks, and distinguish queued ingress
 from terminal success. Customer input must not choose routing URLs, credentials,
 tenants or concrete template identities.
+The current Reactor adapter omits mandatory template version/content-SHA pins;
+its source/docs alone do not establish compatibility with the stricter Hash
+command. Upgrade/review that producer and verify actual dispatch before use.
 
 The automation contract and generated route inventory are available now. A full
 reviewed OpenAPI request/response schema for the complete browser API is still
@@ -481,10 +487,12 @@ checks. Persistence or revision failure returns no frozen result and rolls back
 all observations in that transaction. Preview reports therefore do not establish
 send-time source freshness or a durable binding observation.
 
-Successful live or cached source values remain authoritative even when empty.
+Successful source values remain authoritative even when empty.
 An empty CRM field clears the resolved variable instead of reviving a static
-value or configured fallback. Fallback applies when the source failed to resolve;
-it does not substitute content for a successful empty response.
+value or configured fallback. CRM reads bypass the generic preview cache and
+fail closed on unavailable/permission-null or invalid observations; fallback
+cannot establish a verified contract source. Other source kinds retain their
+documented preview fallback behavior.
 
 `org.setting` branding bindings now read the current tenant's stored branding.
 Supported source paths are `branding.primary_hex`, `accent_hex`, `surface_hex`,
@@ -699,8 +707,10 @@ failure or revoked authority cannot partially change the intended parties.
 Send and signing recheck both pinned identities. Recovery and finalization also
 require each party's captured signature. Already-finalizing rebuild and resume
 recheck these requirements under the document lock before source-version work,
-rendering or evidence access. Scoped pre-sign delegation and trusted
-per-organization CRM freshness/provenance remain unfinished integration work.
+rendering or evidence access. Scoped pre-sign delegation remains unfinished.
+Per-organization CRM freshness and source provenance are locally verified at
+the API/backend boundary; salesperson record-selection/mapping UI, reviewed
+rendered CRM contracts and real private-provider acceptance remain open.
 
 ### Approved automatic branded signing page
 

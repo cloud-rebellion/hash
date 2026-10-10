@@ -46,7 +46,7 @@ func setupVariableBindingAuthorizationE2E(t *testing.T, role string) variableBin
 	t.Helper()
 	f := setupLifecycleAuthorizationE2E(t, role, false, false)
 	if _, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{
-		DocumentID: f.doc.ID, VariableName: "customer", SourceKind: string(resolver.SourceCRMDeal), SourceRef: "deal_original", SourcePath: "deal.name", Fallback: "Original fallback",
+		DocumentID: f.doc.ID, VariableName: "customer", SourceKind: string(resolver.SourceCRMDeal), SourceRef: "deal_original", SourcePath: "title", Fallback: "Original fallback",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func setupVariableBindingAuthorizationE2E(t *testing.T, role string) variableBin
 }
 
 func (f variableBindingAuthorizationFixture) body() string {
-	return `{"source_kind":"crm.deal","source_ref":"deal_updated","source_path":"deal.name","fallback":"New fallback"}`
+	return `{"source_kind":"crm.deal","source_ref":"deal_updated","source_path":"title","fallback":"New fallback"}`
 }
 
 func (f variableBindingAuthorizationFixture) submit(operation, cookie string) *httptest.ResponseRecorder {
@@ -426,7 +426,7 @@ func TestVariableBindingRESTCanonicalSuccessResolverReadbackAndIdempotentDeleteE
 				tool, count := "upsert_variable_binding", 1
 				if operation == "upsert" {
 					var dto bindingDTO
-					if json.Unmarshal(response.Body.Bytes(), &dto) != nil || dto.Variable != "customer" || dto.SourceKind != "crm.deal" || dto.SourceRef != "deal_updated" || dto.SourcePath != "deal.name" || dto.Fallback != "New fallback" {
+					if json.Unmarshal(response.Body.Bytes(), &dto) != nil || dto.Variable != "customer" || dto.SourceKind != "crm.deal" || dto.SourceRef != "deal_updated" || dto.SourcePath != "title" || dto.Fallback != "New fallback" {
 						t.Fatal("binding DTO lost original source identity")
 					}
 					read := submitSessionOperationE2E(f.s, http.MethodGet, "/api/v1/documents/"+f.doc.ID.String()+"/resolve-preview", "", cookie)
@@ -438,7 +438,7 @@ func TestVariableBindingRESTCanonicalSuccessResolverReadbackAndIdempotentDeleteE
 						t.Fatalf("synthetic CRM resolve read=%d %s", read.Code, read.Body.String())
 					}
 					ref := <-f.source.refs
-					if ref.OrgID != f.org || ref.DocID != f.doc.ID || ref.Source != "deal_updated" || ref.Path != "deal.name" {
+					if ref.OrgID != f.org || ref.DocID != f.doc.ID || ref.Source != "deal_updated" || ref.Path != "title" {
 						t.Fatalf("resolver source lost binding tenant/ref/path: %+v", ref)
 					}
 				} else {
@@ -483,7 +483,7 @@ func TestVariableBindingRESTTenantScopeAndInputLimitsE2E(t *testing.T) {
 	}
 	f.assertUnchanged(t, before)
 	foreign.assertUnchanged(t, foreignBefore)
-	if response := f.submitScoped("upsert", f.doc.ID, "customer", `{"source_kind":"crm.deal","source_ref":"deal_updated","source_path":"","fallback":"Line one\nLine two"}`, cookie); response.Code != http.StatusOK {
-		t.Fatalf("compatible empty REST path/multiline fallback=%d %s", response.Code, response.Body.String())
+	if response := f.submitScoped("upsert", f.doc.ID, "customer", `{"source_kind":"crm.deal","source_ref":"deal_updated","source_path":"title","fallback":"Line one\nLine two"}`, cookie); response.Code != http.StatusOK {
+		t.Fatalf("supported scalar path/multiline fallback=%d %s", response.Code, response.Body.String())
 	}
 }

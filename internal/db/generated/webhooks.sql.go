@@ -69,6 +69,45 @@ func (q *Queries) ClaimDueWebhookDeliveries(ctx context.Context, limit int32) ([
 	return items, nil
 }
 
+const claimNextDueWebhookDelivery = `-- name: ClaimNextDueWebhookDelivery :one
+WITH due AS (
+  SELECT id
+  FROM webhook_deliveries
+  WHERE status IN ('pending','retrying')
+    AND next_attempt_at <= clock_timestamp()
+  ORDER BY next_attempt_at, id
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+UPDATE webhook_deliveries d
+SET status = 'retrying',
+    next_attempt_at = clock_timestamp() + interval '5 minutes',
+    updated_at = clock_timestamp()
+FROM due
+WHERE d.id = due.id
+RETURNING d.id, d.endpoint_id, d.event_id, d.status, d.attempts, d.last_status_code, d.last_error, d.next_attempt_at, d.created_at, d.updated_at
+`
+
+// The worker claims immediately before one bounded dispatch. A batch claimed
+// before sequential HTTP calls can outlive its lease before the last send.
+func (q *Queries) ClaimNextDueWebhookDelivery(ctx context.Context) (*WebhookDelivery, error) {
+	row := q.db.QueryRow(ctx, claimNextDueWebhookDelivery)
+	var i WebhookDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.EndpointID,
+		&i.EventID,
+		&i.Status,
+		&i.Attempts,
+		&i.LastStatusCode,
+		&i.LastError,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const createWebhookEndpoint = `-- name: CreateWebhookEndpoint :one
 INSERT INTO webhook_endpoints (
   id, org_id, url, secret_ref, secret, secret_ciphertext, events_subscribed
@@ -280,6 +319,117 @@ func (q *Queries) ListWebhookEndpointsByOrg(ctx context.Context, orgID uuid.UUID
 		return nil, err
 	}
 	return items, nil
+}
+
+const markClaimedWebhookDeliveryDelivered = `-- name: MarkClaimedWebhookDeliveryDelivered :execrows
+UPDATE webhook_deliveries
+SET status = 'delivered',
+    last_status_code = $1::integer,
+    last_error = '',
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = $2
+  AND status = 'retrying'
+  AND attempts = $3::integer
+  AND next_attempt_at = $4::timestamptz
+  AND next_attempt_at > clock_timestamp()
+`
+
+type MarkClaimedWebhookDeliveryDeliveredParams struct {
+	LastStatusCode        int32              `json:"last_status_code"`
+	ID                    uuid.UUID          `json:"id"`
+	ExpectedAttempts      int32              `json:"expected_attempts"`
+	ExpectedNextAttemptAt pgtype.Timestamptz `json:"expected_next_attempt_at"`
+}
+
+// A completion owns only the exact still-live claim returned above. An old
+// worker cannot overwrite a newer retry, redrive, or completed delivery.
+func (q *Queries) MarkClaimedWebhookDeliveryDelivered(ctx context.Context, arg MarkClaimedWebhookDeliveryDeliveredParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markClaimedWebhookDeliveryDelivered,
+		arg.LastStatusCode,
+		arg.ID,
+		arg.ExpectedAttempts,
+		arg.ExpectedNextAttemptAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markClaimedWebhookDeliveryFailed = `-- name: MarkClaimedWebhookDeliveryFailed :execrows
+UPDATE webhook_deliveries
+SET status = 'failed',
+    last_status_code = $1::integer,
+    last_error = $2::text,
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = $3
+  AND status = 'retrying'
+  AND attempts = $4::integer
+  AND next_attempt_at = $5::timestamptz
+  AND next_attempt_at > clock_timestamp()
+`
+
+type MarkClaimedWebhookDeliveryFailedParams struct {
+	LastStatusCode        int32              `json:"last_status_code"`
+	LastError             string             `json:"last_error"`
+	ID                    uuid.UUID          `json:"id"`
+	ExpectedAttempts      int32              `json:"expected_attempts"`
+	ExpectedNextAttemptAt pgtype.Timestamptz `json:"expected_next_attempt_at"`
+}
+
+func (q *Queries) MarkClaimedWebhookDeliveryFailed(ctx context.Context, arg MarkClaimedWebhookDeliveryFailedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markClaimedWebhookDeliveryFailed,
+		arg.LastStatusCode,
+		arg.LastError,
+		arg.ID,
+		arg.ExpectedAttempts,
+		arg.ExpectedNextAttemptAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markClaimedWebhookDeliveryRetrying = `-- name: MarkClaimedWebhookDeliveryRetrying :execrows
+UPDATE webhook_deliveries
+SET status = 'retrying',
+    last_status_code = $1::integer,
+    last_error = $2::text,
+    next_attempt_at = $3::timestamptz,
+    attempts = attempts + 1,
+    updated_at = clock_timestamp()
+WHERE id = $4
+  AND status = 'retrying'
+  AND attempts = $5::integer
+  AND next_attempt_at = $6::timestamptz
+  AND next_attempt_at > clock_timestamp()
+`
+
+type MarkClaimedWebhookDeliveryRetryingParams struct {
+	LastStatusCode        int32              `json:"last_status_code"`
+	LastError             string             `json:"last_error"`
+	NextAttemptAt         pgtype.Timestamptz `json:"next_attempt_at"`
+	ID                    uuid.UUID          `json:"id"`
+	ExpectedAttempts      int32              `json:"expected_attempts"`
+	ExpectedNextAttemptAt pgtype.Timestamptz `json:"expected_next_attempt_at"`
+}
+
+func (q *Queries) MarkClaimedWebhookDeliveryRetrying(ctx context.Context, arg MarkClaimedWebhookDeliveryRetryingParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markClaimedWebhookDeliveryRetrying,
+		arg.LastStatusCode,
+		arg.LastError,
+		arg.NextAttemptAt,
+		arg.ID,
+		arg.ExpectedAttempts,
+		arg.ExpectedNextAttemptAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const markDeliveryDelivered = `-- name: MarkDeliveryDelivered :exec

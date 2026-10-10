@@ -12,7 +12,7 @@ const bind = new Function('env', `with (env) { ${code}; return persist; }`);
 function fixture() {
  const calls: any[] = [];
  const env: any = {
-  disposed:false, saveConflict:false, saving:false, saveQueued:false,
+  disposed:false,externalBusy:false, saveConflict:false, saving:false, saveQueued:false,
   editRevision:1, dirty:true, error:null, APIError,
   doc:{id:'document',updated_at:'first'}, latest:{text:'one'}, canonicalGeneration:'1',
   requestCheckpoint:async()=>({peerID:'peer',token:'token',generation:env.canonicalGeneration}),
@@ -102,4 +102,11 @@ test('checkpoint conflict retry is bounded and exhaustion retains visible draft'
  await pending;
  expect(calls).toHaveLength(3);expect(env.dirty).toBe(true);expect(env.latest.text).toBe('one');
  expect(env.disconnected).toBe(0);expect(env.error).toBe('checkpoint advanced');expect(env.scheduled).toBe(0);
+});
+
+test('external CRM lock prevents checkpoint and HTTP writes, including a checkpoint resolving after lock',async()=>{
+ const locked=fixture();locked.env.externalBusy=true;await locked.persist();expect(locked.calls).toEqual([]);expect(locked.env.dirty).toBe(true);
+ const pending=fixture();let capture:any;pending.env.requestCheckpoint=()=>new Promise(r=>capture=r);
+ const save=pending.persist();pending.env.externalBusy=true;capture({peerID:'peer',token:'token',generation:'1'});await save;
+ expect(pending.calls).toEqual([]);expect(pending.env.dirty).toBe(true);expect(pending.env.scheduled).toBe(0);expect(pending.env.doc.updated_at).toBe('first');
 });

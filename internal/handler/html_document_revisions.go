@@ -204,8 +204,20 @@ func (s *Server) writeHTMLDocumentRevisionError(w http.ResponseWriter, err error
 }
 
 func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time) (result *generated.Document, revision int32, pages int, failure error) {
+	return s.reviseHTMLDocumentWithCRM(ctx, actor, id, in, expected, nil)
+}
+
+func (s *Server) reviseHTMLDocumentWithCRM(ctx context.Context, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time, admission *crmMappingAdmission) (result *generated.Document, revision int32, pages int, failure error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	if admission != nil {
+		if err := admission.checkDeadline(); err != nil {
+			return nil, 0, 0, err
+		}
+		if _, err := s.readCRMDocument(ctx, actor, id, &admission.witness); err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	doc, err := s.loadHTMLDocumentRevision(ctx, actor, id, in, expected)
 	if err != nil {
 		return nil, 0, 0, err
@@ -321,6 +333,11 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 		return nil, 0, 0, err
 	}
 	q := generated.New(tx)
+	if admission != nil {
+		if err := admission.checkLocked(commitCtx, s, tx, actor, id); err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	updated, row, err := htmlmaterialization.Append(commitCtx, q, guard.Document, &candidate, htmlmaterialization.AppendInput{SourceJSON: source, PageCount: int32(pages), PreviousPageCount: previousPages, ActorID: actor.UserID, Summary: strings.TrimSpace(in.Summary), MetadataRedactionReport: report})
 	if err != nil {
 		return nil, 0, 0, err
@@ -345,6 +362,13 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 	if _, err := versions.New(q).Snapshot(commitCtx, versions.SnapshotInput{DocumentID: id, OrgID: actor.OrgID, Name: updated.Name, SourceKind: updated.SourceKind, VariablesJS: updated.VariablesJson, HTMLSourceJSON: source, HTMLMaterializationID: updated.HtmlCurrentMaterializationID, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "HTML contract text revised"}); err != nil {
 		return nil, 0, 0, err
 	}
+	var crmPending audit.PendingEvent
+	if admission != nil {
+		crmPending, err = admission.persist(commitCtx, s, tx, actor, updated)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	pending, err := s.Audit.LogTx(commitCtx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: map[string]any{"html_materialization_revision": row.Sequence, "html_source_commitment": updated.HtmlEffectiveSourceCommitment.String, "review_required": true, "placement_reset": true, "changed_sections": rendered.ChangedSections, "contract_party_identities_updated": partiesChanged}})
 	if err != nil {
 		return nil, 0, 0, err
@@ -352,9 +376,17 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 	if err := guard.Recheck(commitCtx); err != nil {
 		return nil, 0, 0, err
 	}
+	if admission != nil {
+		if err := admission.checkDeadline(); err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	commitAttempted = true
 	if err := tx.Commit(commitCtx); err != nil {
 		return nil, 0, 0, err
+	}
+	if admission != nil {
+		s.Audit.Publish(crmPending)
 	}
 	s.Audit.Publish(pending)
 	return updated, row.Sequence, pages, nil

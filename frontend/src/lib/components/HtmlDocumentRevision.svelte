@@ -6,8 +6,9 @@
 
   type Identity = Awaited<ReturnType<typeof getMe>>;
   type Navigation = { cancel: () => void; willUnload: boolean; from: { url: URL } | null; to: { url: URL } | null };
-  let { document, onRevised, onStateChange, onSourceChange }: { document: DocumentResponse; onRevised: (updated: DocumentResponse) => boolean | void;
-    onStateChange?: (blocked: boolean) => void; onSourceChange?: (source: HTMLDocumentSource | null) => void } = $props();
+  let { document, onRevised, onStateChange, onSourceChange, onEditorStateChange, externalBusy = false }: { document: DocumentResponse; onRevised: (updated: DocumentResponse) => boolean | void;
+    onStateChange?: (blocked: boolean) => void; onSourceChange?: (source: HTMLDocumentSource | null) => void;
+    onEditorStateChange?: (clean: boolean) => void; externalBusy?: boolean } = $props();
   const sourceID = untrack(() => document.id), sourceOrg = untrack(() => document.org_id);
   let retained = $state<HTMLDocumentSource | null>(null);
   let values = $state<Record<string, string>>({}), sections = $state<Record<string, string>>({}), summary = $state('');
@@ -26,7 +27,7 @@
     && retained.document_id === document.id && retained.org_id === document.org_id && retained.template_id === document.template_id
     && retained.updated_at === document.updated_at && retained.html_source_commitment === document.html_source_commitment
     && retained.pdf_sha256 === document.pdf_sha256 && retained.materialization_revision === document.html_materialization_revision);
-  const canSave = $derived(current() && document.status === 'draft' && authority && retained?.can_edit && observationCurrent && !needsRefresh && !uncertain && !busy && !loading);
+  const canSave = $derived(current() && document.status === 'draft' && authority && retained?.can_edit && observationCurrent && !needsRefresh && !uncertain && !busy && !loading && !externalBusy);
   const valueGroups = $derived(retained ? htmlRevisionGroups(retained) : []);
   $effect(() => { reconcileObservation(); });
   $effect(() => { reportRevisionState(); });
@@ -38,9 +39,10 @@
     else needsRefresh = true;
   }
   function reportRevisionState() {
-    const blocked = dirty || busy || loading || needsRefresh || uncertain || !retained || !observationCurrent || !me;
+    const clean = !dirty && !busy && !loading && !needsRefresh && !uncertain && !!retained && observationCurrent && !!me;
+    const blocked = !clean || externalBusy;
     const verified = !blocked ? retained : null;
-    untrack(() => { onStateChange?.(blocked); onSourceChange?.(verified); });
+    untrack(() => { onStateChange?.(blocked); onSourceChange?.(verified); onEditorStateChange?.(clean); });
   }
 
   function identity(next: Identity): Identity {
@@ -62,7 +64,7 @@
     latestDocument = null; latestSource = null; acknowledgedDocument = null;
   }
   async function loadInitial() {
-    if (!current() || busy) return;
+    if (!current() || busy || externalBusy) return;
     if (retained || uncertain || dirty) { await inspectLatest(); return; }
     const selected = ++operation, observed = document;
     loading = true; error = null;
@@ -78,7 +80,7 @@
   }
   async function save(event: Event) {
     event.preventDefault();
-    if (!current() || !canSave || busy || uncertain || needsRefresh || !retained || !dirty) return;
+    if (!current() || !canSave || busy || externalBusy || uncertain || needsRefresh || !retained || !dirty) return;
     let input;
     try { input = htmlRevisionInput(retained, values, sections, summary); } catch (e) { recordError(e); return; }
     const source = retained, before = document, submitted = fingerprint(), selected = ++operation;
@@ -107,7 +109,7 @@
     } finally { if (current() && selected === operation) busy = false; }
   }
   async function inspectLatest() {
-    if (!current() || busy) return;
+    if (!current() || busy || externalBusy) return;
     const selected = ++operation;
     busy = true; error = null;
     try {
@@ -124,7 +126,7 @@
     finally { if (current() && selected === operation) busy = false; }
   }
   function adoptLatest() {
-    if (!current() || busy || !latestSource || !latestDocument) return;
+    if (!current() || busy || externalBusy || !latestSource || !latestDocument) return;
     if ((dirty || uncertain) && !window.confirm('Discard local document values, wording and summary, and load this saved revision? An uncertain request may still complete.')) return;
     const source = latestSource, doc = latestDocument;
     if (onRevised(doc) === false) { error = 'The displayed document changed. Inspect the saved revision again; your local inputs are retained.'; return; }
@@ -137,7 +139,7 @@
   function protectUnload(event: BeforeUnloadEvent) { if (dirty || busy || uncertain) { event.preventDefault(); event.returnValue = ''; } }
   beforeNavigate(protectNavigation);
   onMount(() => { void loadInitial(); window.addEventListener('beforeunload', protectUnload); return () => window.removeEventListener('beforeunload', protectUnload); });
-  onDestroy(() => { disposed = true; operation++; onStateChange?.(true); onSourceChange?.(null); });
+  onDestroy(() => { disposed = true; operation++; onStateChange?.(true); onSourceChange?.(null); onEditorStateChange?.(false); });
 </script>
 
 <section class="card p-6 mb-6 space-y-4" aria-label="Revise HTML document">
@@ -147,10 +149,10 @@
   {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
   {#if needsRefresh || uncertain}<div class="text-sm space-y-2"><p>Your local inputs are retained. Inspect the saved revision before another write.</p>
     {#if acknowledgedDocument}<p>Revision {acknowledgedDocument.html_materialization_revision} was acknowledged as saved.</p>{/if}
-    <button type="button" class="btn btn-secondary" disabled={busy} onclick={inspectLatest}>Inspect current HTML revision</button></div>
-  {:else if !me || (!retained && !loading)}<button type="button" class="btn btn-secondary" disabled={busy} onclick={loadInitial}>Reload session and source</button>{/if}
+    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy} onclick={inspectLatest}>Inspect current HTML revision</button></div>
+  {:else if !me || (!retained && !loading)}<button type="button" class="btn btn-secondary" disabled={busy || externalBusy} onclick={loadInitial}>Reload session and source</button>{/if}
   {#if latestSource && latestDocument}<div class="text-sm space-y-2"><p>Saved PDF revision {latestSource.materialization_revision} · {latestDocument.status}. Loading it replaces local document inputs.</p>
-    <button type="button" class="btn btn-secondary" disabled={busy} onclick={adoptLatest}>Load saved HTML revision</button></div>{/if}
+    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy} onclick={adoptLatest}>Load saved HTML revision</button></div>{/if}
   {#if retained}
     <p class="text-xs text-text-secondary">Retained template version {retained.template_version} · PDF revision {retained.materialization_revision}</p>
     {#if retained.contract_profile}<div class="border border-border-light rounded-md p-4 text-sm space-y-2">

@@ -33,6 +33,7 @@
   import HtmlPDFReview from '$lib/components/HtmlPDFReview.svelte';
   import HtmlDocumentRevision from '$lib/components/HtmlDocumentRevision.svelte';
   import HtmlDocumentHistory from '$lib/components/HtmlDocumentHistory.svelte';
+  import CRMDocumentPanel from '$lib/components/CRMDocumentPanel.svelte';
   import { currentHTMLSource, htmlUUID } from '$lib/htmlRevision';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
@@ -50,6 +51,9 @@
   let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
   let generatedPlacementReady = $state(false);
   let htmlRevisionBlocked = $state(true);
+  let htmlEditorClean = $state(false), blocksEditorClean = $state(false);
+  let crmBlocked = $state(true), crmBusy = $state(false), crmReviewRequired = $state(false), senderMutationBusy = $state(false);
+  let crmRefreshRevision = $state(0), crmReviewRevision = $state(0), crmEditorRevision = $state(0);
   let htmlSource = $state.raw<HTMLDocumentSource | null>(null);
   let changeRequests = $state<ChangeRequest[]>([]);
   let revising = $state(false);
@@ -70,6 +74,9 @@
   let disposed = false;
   let templateFlashTimer: ReturnType<typeof setTimeout> | null = null;
   const routeDocumentID = $derived($page.params.id);
+  const crmEditable = $derived(!!doc && doc.status === 'draft' && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)));
+  const crmEditorClean = $derived(doc?.has_html_source ? htmlEditorClean : doc?.source_kind === 'blocks' ? blocksEditorClean : false);
+  const crmOtherBusy = $derived(senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode);
 
   type DocumentScope = { id: string; routeRevision: number; documentRevision: number };
   function isCurrentRoute(id: string, revision: number): boolean {
@@ -91,10 +98,23 @@
     return true;
   }
   function receiveEditorDocument(updated: DocumentResponse, scope: DocumentScope) {
+    if (crmBusy) return;
     if (!isCurrentDocument(scope) || updated.id !== scope.id || updated.org_id !== doc?.org_id) return;
     resetPDFPlacement(updated);
     doc = updated;
     documentRevision++;
+  }
+  function receiveCRMDocument(updated: DocumentResponse, scope: DocumentScope): boolean {
+    if (!doc || !isCurrentDocument(scope, true) || !crmEditorClean || crmOtherBusy) return false;
+    const changedSource = doc.has_html_source && (updated.html_source_commitment !== doc.html_source_commitment || updated.pdf_sha256 !== doc.pdf_sha256);
+    if (!receiveDocument(updated, scope)) return false;
+    crmReviewRequired = false; crmReviewRevision++;
+    if (changedSource) { crmEditorRevision++; htmlEditorClean = false; }
+    return true;
+  }
+  function requestCRMReview(scope: DocumentScope) {
+    if (!isCurrentDocument(scope)) return;
+    crmReviewRequired = true; crmRefreshRevision++;
   }
   function resetPDFPlacement(updated: DocumentResponse) {
     if (!doc || doc.id !== updated.id || doc.pdf_sha256 !== updated.pdf_sha256
@@ -135,7 +155,7 @@
     documentRevision++;
   }
   async function changeDefaultLocale(locale: string, scope: DocumentScope) {
-    if (!doc || !isCurrentDocument(scope)) return;
+    if (!doc || crmBusy || !isCurrentDocument(scope)) return;
     const actionScope = captureDocument();
     if (!actionScope) return;
     try {
@@ -148,7 +168,7 @@
 
   async function toggleSignatureMode() {
     const scope = captureDocument();
-    if (!scope || !doc || doc.status !== 'draft' || savingMode || revising || resolvingId
+    if (!scope || !doc || crmBusy || doc.status !== 'draft' || savingMode || revising || resolvingId
         || (doc.has_html_source && (htmlRevisionBlocked || !htmlSource || htmlSource.contract_profile))) return;
     savingMode = true;
     error = null;
@@ -271,7 +291,7 @@
 
   async function saveAsTemplate() {
     const scope = captureDocument();
-    if (!scope || !doc || savingTemplate) return;
+    if (!scope || !doc || crmBusy || savingTemplate) return;
     const submittedDocument = doc;
     const name = window.prompt('Template name?', `${doc.name} (mall)`);
     if (!name) return;
@@ -346,6 +366,9 @@
     pdfSignatureFields = [];
     generatedPlacementReady = false;
     htmlRevisionBlocked = true;
+    htmlEditorClean = false; blocksEditorClean = false;
+    crmBlocked = true; crmBusy = false; crmReviewRequired = false; senderMutationBusy = false;
+    crmRefreshRevision++; crmReviewRevision++; crmEditorRevision++;
     htmlSource = null;
     changeRequests = [];
     revising = false;
@@ -423,7 +446,7 @@
             <Eye class="size-4" /> {showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview'}
           </button>
           {#if doc.source_kind === 'blocks'}
-            <button class="btn btn-secondary" disabled={savingTemplate} onclick={saveAsTemplate}>
+            <button class="btn btn-secondary" disabled={savingTemplate || crmBusy} onclick={saveAsTemplate}>
               <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template'}
             </button>
           {:else if doc.status === 'draft' && !doc.has_html_source}
@@ -444,14 +467,21 @@
       }} />
     {/if}
 
+    {#if crmEditable}
+      <CRMDocumentPanel document={doc} actor={{ org_id: doc.org_id, user_id: viewerUserID, role: viewerRole === 'owner' ? 'owner' : 'sender' }}
+        editorClean={crmEditorClean} otherBusy={crmOtherBusy} refreshRevision={crmRefreshRevision}
+        onApplied={(updated) => receiveCRMDocument(updated, documentScope)}
+        onStateChange={(blocked, busy) => { if (isCurrentDocument(documentScope)) { crmBlocked = blocked; crmBusy = busy; } }} />
+    {/if}
     {#if doc.has_html_source}
       {#if doc.status !== 'draft'}<details class="mb-6"><summary class="cursor-pointer text-sm text-text-secondary">Saved document information and intended parties</summary>
         <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       </details>{:else}
-      {#key doc.id}
+      {#key `${doc.id}:${crmEditorRevision}`}
         <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
+          externalBusy={crmBusy} onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) htmlEditorClean = clean; }}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       {/key}
@@ -477,7 +507,7 @@
               : 'Bara läsa och acceptera: mottagarna öppnar och klickar Acceptera. Ingen signatur.'}
           </p>
         </div>
-        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
+        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode || crmBusy || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
           {savingMode ? 'Sparar…' : doc.requires_signature ? 'Byt till acceptera' : 'Kräv signatur'}
         </button>
       </div>
@@ -548,7 +578,8 @@
 
     {#if doc.status === 'draft' && doc.source_kind === 'blocks'}
       <div hidden={showPreview}>
-        <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
+        <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} externalBusy={crmBusy}
+          onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) blocksEditorClean = clean; }} />
       </div>
       {#if showPreview}
         <p class="text-sm text-text-muted mb-3" role="note">Preview shows the saved document. Unsaved edits remain available when you return to editing.</p>
@@ -593,7 +624,10 @@
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
-        revisionBlocked={doc.has_html_source === true && htmlRevisionBlocked}
+        revisionBlocked={(doc.has_html_source === true && htmlRevisionBlocked) || (crmEditable && doc.source_kind === 'blocks' && !blocksEditorClean)}
+        crmBlocked={crmEditable && (crmBlocked || crmReviewRequired)} {crmBusy} {crmReviewRevision}
+        onCRMReviewRequired={() => requestCRMReview(documentScope)}
+        onMutationStateChange={(busy) => { if (isCurrentDocument(documentScope)) senderMutationBusy = busy; }}
         generatedPlacementRequired={htmlSource?.source_schema_version === 3}
         {generatedPlacementReady}
         intendedParties={htmlSource?.contract_parties ?? []}

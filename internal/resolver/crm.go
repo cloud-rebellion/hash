@@ -56,6 +56,7 @@ type CRMValueObservation struct {
 type crmReportFence struct {
 	identity    crmconnection.Identity
 	completedAt time.Time
+	observation CRMValueObservation
 }
 
 func isCRMKind(kind string) bool {
@@ -133,6 +134,12 @@ func validateCRMRelationships(s crmconnection.Snapshot) error {
 	return require(crmconnection.Contact, "company_id", crmconnection.Company)
 }
 
+// ValidateCRMSelection applies the same exact one-record-per-kind relationship
+// policy to a server-observed selection before contractual fields are mapped.
+func ValidateCRMSelection(snapshot crmconnection.Snapshot) error {
+	return validateCRMRelationships(snapshot)
+}
+
 func crmValue(snapshot *crmconnection.Snapshot, b *generated.DocumentVariableBinding) (string, *CRMValueObservation, *crmReportFence, error) {
 	if snapshot == nil {
 		return "", nil, nil, ErrSourceFreshness
@@ -153,7 +160,7 @@ func crmValue(snapshot *crmconnection.Snapshot, b *generated.DocumentVariableBin
 	if b.SourceKind == string(SourceCRMContact) && b.SourcePath == "full_name" {
 		proof.Transformation = "trim-first-and-last-name-v1"
 	}
-	return value, proof, &crmReportFence{identity: snapshot.Identity, completedAt: snapshot.CompletedAt}, nil
+	return value, proof, &crmReportFence{identity: snapshot.Identity, completedAt: snapshot.CompletedAt, observation: *proof}, nil
 }
 
 // CheckCRMReports must run under the final authorized transaction. FOR SHARE
@@ -206,6 +213,21 @@ func checkCRMReportValue(entry ResolveReport) error {
 		return ErrSourceFreshness
 	}
 	return nil
+}
+
+// ValidateFreshCRMReport requires the private resolver observation and original
+// binding snapshot. Exported JSON fields alone never attest a fresh CRM read.
+// The caller must additionally hold/recheck the active connection generation.
+func ValidateFreshCRMReport(entry ResolveReport, orgID, docID uuid.UUID, now time.Time) error {
+	b := entry.bindingSnapshot
+	if orgID == uuid.Nil || docID == uuid.Nil || b == nil || entry.crmFence == nil ||
+		b.DocumentID != docID || b.VariableName != entry.Variable || b.SourceKind != entry.SourceKind ||
+		b.SourceRef != entry.SourceRef || b.SourcePath != entry.SourcePath || !isCRMKind(b.SourceKind) ||
+		entry.crmFence.identity.OrgID != orgID || !crmObservationCurrent(entry.crmFence.completedAt, now) ||
+		entry.CRMObservation == nil || *entry.CRMObservation != entry.crmFence.observation {
+		return ErrSourceFreshness
+	}
+	return checkCRMReportValue(entry)
 }
 
 func CheckCRMReportDeadlines(report []ResolveReport, now time.Time) error {

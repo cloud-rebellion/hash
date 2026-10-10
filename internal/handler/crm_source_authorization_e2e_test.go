@@ -69,6 +69,17 @@ func newCRMSourcePeerE2E(t *testing.T) *crmSourcePeerE2E {
 				}
 			}
 			_, _ = w.Write(body)
+		case "/api/v1/deals/":
+			if r.URL.Query().Get("limit") != "20" || r.URL.Query().Get("offset") != "0" || r.URL.Query().Get("search") != "Reviewed" {
+				p.unexpected.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			p.deals.Add(1)
+			p.mu.Lock()
+			body := append(json.RawMessage(nil), p.deal...)
+			p.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []json.RawMessage{body}, "total": 1, "limit": 20, "offset": 0})
 		default:
 			p.unexpected.Add(1)
 			w.WriteHeader(http.StatusNotFound)
@@ -138,7 +149,7 @@ func setupCRMSourceAuthorizationE2E(t *testing.T) crmSourceFixtureE2E {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := f.pool.Exec(f.ctx, `UPDATE documents SET variables_json=$3,updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2 AND status='draft'`, f.doc.ID, f.org, values) //nolint:rawsql -- explicitly reviewed synthetic static draft, not an automatic CRM prose replacement
+	rows, err := f.pool.Exec(f.ctx, `UPDATE documents SET variables_json=$3,blocks_json=jsonb_set(blocks_json,'{blocks,0,text}','"Agreement for {{customer}} at {{amount}}"'::jsonb),updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2 AND status='draft'`, f.doc.ID, f.org, values) //nolint:rawsql -- explicitly reviewed synthetic static draft, not an automatic CRM prose replacement
 	if err != nil || rows.RowsAffected() != 1 {
 		t.Fatal("could not seed the reviewed static agreement", err)
 	}
@@ -149,6 +160,7 @@ func setupCRMSourceAuthorizationE2E(t *testing.T) crmSourceFixtureE2E {
 	r := resolver.New(f.q)
 	r.CRM = &resolver.CRMRecords{Store: f.q, Client: client, Keys: f.s.CRMKeys, Origin: p.server.URL}
 	f.s.Resolver, f.s.Send.Resolver = r, r
+	applyCRMSourceFixtureReviewE2E(t, f.lifecycleAuthorizationFixture, f.cookie)
 	return crmSourceFixtureE2E{f, p}
 }
 
@@ -234,7 +246,7 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 				paused.await(t)
 				assertCRMConnectionSafeResponseE2E(t, f.submit(f.ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie), http.StatusOK)
 				release()
-				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusServiceUnavailable {
+				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusConflict {
 					t.Fatalf("Send accepted revoked in-flight record: status=%d", w.Code)
 				}
 			} else {
@@ -253,7 +265,7 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 				if err := tx.Commit(f.ctx); err != nil {
 					t.Fatal(err)
 				}
-				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusServiceUnavailable {
+				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusConflict {
 					t.Fatalf("Send accepted revoked connection after parent lock wait: status=%d", w.Code)
 				}
 			}

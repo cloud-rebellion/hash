@@ -4,6 +4,8 @@ package resolver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/bright-interaction/hash/internal/crmconnection"
@@ -16,6 +18,95 @@ import (
 	"testing"
 	"time"
 )
+
+func TestValidateFreshCRMReportRequiresPrivateOriginalObservation(t *testing.T) {
+	orgID, docID := uuid.New(), uuid.New()
+	now := time.Now()
+	binding := &generated.DocumentVariableBinding{DocumentID: docID, VariableName: "customer", SourceKind: "crm.deal", SourceRef: "deal_1", SourcePath: "title"}
+	id := crmconnection.Identity{ID: uuid.New(), OrgID: orgID, Generation: 2, Origin: "https://crm.example.test", CRMTeamID: "team_1", CRMUserID: "user_1"}
+	bodySHA := sha256.Sum256([]byte("synthetic typed CRM record"))
+	snapshot := crmconnection.Snapshot{Identity: id, CompletedAt: now.Add(-time.Second), Records: []crmconnection.RecordObservation{{Kind: crmconnection.Deal, ID: "deal_1", CRMTeamID: "team_1", ObservedAt: now.Add(-2 * time.Second), RecordUpdatedAt: now.Add(-time.Minute), BodySHA256: hex.EncodeToString(bodySHA[:]), Fields: map[string]crmconnection.Scalar{"title": {Present: true, Value: "Reviewed title"}}}}}
+	value, proof, fence, err := crmValue(&snapshot, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := ResolveReport{bindingSnapshot: binding, crmFence: fence, CRMObservation: proof, Variable: binding.VariableName, SourceKind: binding.SourceKind, SourceRef: binding.SourceRef, SourcePath: binding.SourcePath, Value: value, ResolvedFrom: "source"}
+	if err := ValidateFreshCRMReport(entry, orgID, docID, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, fault := range []string{"public_fields_only", "missing_binding", "foreign_org", "foreign_doc", "variable", "source", "record", "path", "value", "origin", "body_proof", "record_time", "transformation", "stale", "future"} {
+		t.Run(fault, func(t *testing.T) {
+			e := entry
+			o := *entry.CRMObservation
+			e.CRMObservation = &o
+			org, doc, at := orgID, docID, now
+			switch fault {
+			case "public_fields_only":
+				e.crmFence = nil
+			case "missing_binding":
+				e.bindingSnapshot = nil
+			case "foreign_org":
+				org = uuid.New()
+			case "foreign_doc":
+				doc = uuid.New()
+			case "variable":
+				e.Variable = "other"
+			case "source":
+				e.SourceKind = "crm.company"
+			case "record":
+				e.SourceRef = "deal_2"
+			case "path":
+				e.SourcePath = "value"
+			case "value":
+				e.Value = "Changed agreement"
+			case "origin":
+				o.Origin = "https://different.example.test"
+			case "body_proof":
+				o.BodySHA256 = strings.Repeat("0", 64)
+			case "record_time":
+				o.RecordUpdatedAt = o.RecordUpdatedAt.Add(time.Second)
+			case "transformation":
+				o.Transformation = "invented"
+			case "stale":
+				at = now.Add(CRMObservationMaxAge + time.Second)
+			case "future":
+				at = now.Add(-time.Minute)
+			}
+			if err := ValidateFreshCRMReport(e, org, doc, at); !errors.Is(err, ErrSourceFreshness) {
+				t.Fatalf("altered/forged report accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateCRMSelectionPreservesExactRelationshipPolicy(t *testing.T) {
+	deal := crmconnection.RecordObservation{Kind: crmconnection.Deal, ID: "deal_1", Relationships: map[string]crmconnection.Scalar{"contact_id": {Present: true, Value: "contact_1"}, "company_id": {Present: true, Value: "company_1"}}}
+	contact := crmconnection.RecordObservation{Kind: crmconnection.Contact, ID: "contact_1", Relationships: map[string]crmconnection.Scalar{"company_id": {Present: true, Value: "company_1"}}}
+	company := crmconnection.RecordObservation{Kind: crmconnection.Company, ID: "company_1"}
+	if err := ValidateCRMSelection(crmconnection.Snapshot{Records: []crmconnection.RecordObservation{deal, contact, company}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, fault := range []string{"duplicate_kind", "absent_link", "null_link", "wrong_link"} {
+		t.Run(fault, func(t *testing.T) {
+			d := deal
+			d.Relationships = map[string]crmconnection.Scalar{"contact_id": {Present: true, Value: "contact_1"}, "company_id": {Present: true, Value: "company_1"}}
+			records := []crmconnection.RecordObservation{d, contact, company}
+			switch fault {
+			case "duplicate_kind":
+				records = append(records, deal)
+			case "absent_link":
+				delete(d.Relationships, "company_id")
+			case "null_link":
+				d.Relationships["company_id"] = crmconnection.Scalar{Present: true, Null: true}
+			case "wrong_link":
+				d.Relationships["company_id"] = crmconnection.Scalar{Present: true, Value: "company_2"}
+			}
+			if err := ValidateCRMSelection(crmconnection.Snapshot{Records: records}); !errors.Is(err, ErrSourceFreshness) {
+				t.Fatalf("guessed relationship accepted: %v", err)
+			}
+		})
+	}
+}
 
 type crmResolverStore struct {
 	row         *generated.CrmConnection

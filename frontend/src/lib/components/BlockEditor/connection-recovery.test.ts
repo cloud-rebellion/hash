@@ -9,7 +9,7 @@ if(start<0 || end<0)throw new Error('Production connection-close handler missing
 const code=new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start,end));
 const bind=new Function('env',`with(env){${code}}`);
 function fixture(getMe:any){
- const env:any={disposed:false,accessCheckPending:false,doc:{id:'doc',org_id:'tenant',updated_at:'observed'},saveConflict:false,collaborationRejected:false,connected:true,APIError,getMe,
+ const env:any={disposed:false,externalBusy:false,accessCheckPending:false,doc:{id:'doc',org_id:'tenant',updated_at:'observed'},saveConflict:false,collaborationRejected:false,connected:true,APIError,getMe,
  getDocument:async()=>({id:'doc',org_id:'tenant',source_kind:'blocks',status:'draft',updated_at:'observed'}),queued:[],queueCollaborationReconnect:(id:string)=>env.queued.push(id),
  canceled:0,disconnected:0,checkpointRequests:{cancel:()=>env.canceled++},provider:{shouldConnect:true,params:{expected_updated_at:'observed'},on:(_name:string,fn:any)=>env.callback=fn,disconnect:()=>env.disconnected++}};
  bind(env);return env;
@@ -72,4 +72,9 @@ test('repeated failed connections share one current access check',async()=>{
  const first=env.callback({code:1006});await env.callback({code:1006});expect(calls).toBe(1);
  resolve({org_id:'tenant',role:'sender'});await first;expect(env.accessCheckPending).toBe(false);
  const second=env.callback({code:1006});expect(calls).toBe(2);resolve({org_id:'tenant',role:'viewer'});await second;expect(env.disconnected).toBe(1);
+});
+
+test('intentional CRM pause does not trigger access reads, policy rejection or reconnect',async()=>{
+ const env=fixture(()=>{throw new Error('must not read during CRM update')});env.externalBusy=true;await env.callback({code:1006});
+ expect(env.queued).toEqual([]);expect(env.collaborationRejected).toBe(false);expect(env.disconnected).toBe(0);
 });

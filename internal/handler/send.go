@@ -11,6 +11,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/crmreview"
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -80,6 +81,8 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 // expects: 402 + upgrade_url for quota, 409 + tier detail for an eIDAS block.
 func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, crmreview.ErrReviewRequired):
+		writeError(w, http.StatusConflict, "CRM mappings or contract content changed. Refresh CRM information, apply the reviewed mappings and review the PDF before sending.")
 	case errors.Is(err, htmlsource.ErrInvalid), errors.Is(err, htmlsource.ErrReviewRequired):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, auth.ErrMutationCredentialExpired):

@@ -210,6 +210,18 @@ func automationOrgRateLimit(requestLimit int) func(http.Handler) http.Handler {
 	}))
 }
 
+// Applied after session admission, allowing colleagues behind a shared NAT
+// their own bounded discovery/review budget without retaining a bearer cookie.
+func crmDocumentRateLimit(requestLimit int) func(http.Handler) http.Handler {
+	return httprate.Limit(requestLimit, time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		user, ok := auth.FromContext(r.Context())
+		if !ok || user.OrgID == uuid.Nil || user.UserID == uuid.Nil {
+			return "", errors.New("missing admitted document user")
+		}
+		return user.OrgID.String() + ":" + user.UserID.String(), nil
+	}))
+}
+
 // Routes builds the chi router with every Hash endpoint mounted.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
@@ -539,6 +551,12 @@ func (s *Server) Routes() http.Handler {
 			r.Put("/{id}/variable-bindings/{name}", s.handleUpsertVariableBinding)
 			r.Delete("/{id}/variable-bindings/{name}", s.handleDeleteVariableBinding)
 			r.Get("/{id}/resolve-preview", s.handleResolvePreview)
+			// Discovery and review are scoped to the original document author.
+			// Mutations retain the surrounding exact-origin/session gates.
+			r.With(crmDocumentRateLimit(60)).Get("/{id}/crm/context", s.handleCRMDocumentContext)
+			r.With(crmDocumentRateLimit(30)).Post("/{id}/crm/records/search", s.handleCRMDocumentSearch)
+			r.With(crmDocumentRateLimit(30)).Post("/{id}/crm/observations", s.handleCRMDocumentObservations)
+			r.With(crmDocumentRateLimit(10)).Post("/{id}/crm/apply", s.handleCRMDocumentApply)
 
 			// Phase 8.3: signer telemetry rollup + raw timeline.
 			r.Get("/{id}/engagement", s.handleEngagement)

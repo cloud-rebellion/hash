@@ -354,6 +354,21 @@ type DocumentComment struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type DocumentCrmMappingReview struct {
+	DocumentID           uuid.UUID          `json:"document_id"`
+	HasMappings          bool               `json:"has_mappings"`
+	BindingDigest        string             `json:"binding_digest"`
+	ContentCommitment    string             `json:"content_commitment"`
+	ConnectionID         pgtype.UUID        `json:"connection_id"`
+	ConnectionGeneration pgtype.Int8        `json:"connection_generation"`
+	Origin               string             `json:"origin"`
+	CrmTeamID            string             `json:"crm_team_id"`
+	CrmUserID            string             `json:"crm_user_id"`
+	ReviewedBy           uuid.UUID          `json:"reviewed_by"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
 type DocumentEngagementSummary struct {
 	DocumentID   uuid.UUID          `json:"document_id"`
 	BlockID      string             `json:"block_id"`

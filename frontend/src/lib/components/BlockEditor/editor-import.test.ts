@@ -8,7 +8,7 @@ const code = new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start,
 const bind = new Function('env', `with(env){${code};return runImport;}`);
 function fixture() {
  const calls:any[]=[];
- const env:any={saving:false,saveConflict:false,disposed:false,showImport:'html',saveTimer:null,editRevision:1,saveQueued:false,error:null,dirty:true,importText:'input',doc:{id:'d',updated_at:'old'},APIError,clearTimeout,
+ const env:any={saving:false,saveConflict:false,disposed:false,externalBusy:false,showImport:'html',saveTimer:null,editRevision:1,saveQueued:false,error:null,dirty:true,importText:'input',doc:{id:'d',updated_at:'old'},APIError,clearTimeout,
  changes:0,contents:[],disconnected:0,scheduled:0,toProseMirror:(v:any)=>v,
  editor:{commands:{setContent:(v:any)=>env.contents.push(v)}},provider:{disconnect:()=>env.disconnected++},onChange:()=>env.changes++,scheduleSave:()=>env.scheduled++,
  importHTML:(...args:any[])=>new Promise((resolve,reject)=>calls.push({args,resolve,reject}))};
@@ -52,4 +52,10 @@ test('rejected import after disposal neither reports error nor schedules saves',
  const {env,calls,run}=fixture();const pending=run();env.disposed=true;env.saveQueued=true;
  calls[0].reject(new APIError(412,'Document changed'));await pending;
  expect(env.error).toBe(null);expect(env.disconnected).toBe(0);expect(env.scheduled).toBe(0);
+});
+
+test('external CRM lock prevents imports and late replacement adoption without discarding source input',async()=>{
+ const locked=fixture();locked.env.externalBusy=true;await locked.run();expect(locked.calls).toEqual([]);expect(locked.env.importText).toBe('input');
+ const late=fixture();const pending=late.run();late.env.externalBusy=true;late.calls[0].resolve({updated_at:'new',blocks_json:'replacement'});await pending;
+ expect(late.env.contents).toEqual([]);expect(late.env.changes).toBe(0);expect(late.env.dirty).toBe(true);expect(late.env.importText).toBe('input');
 });

@@ -285,6 +285,10 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writePreviewError(w http.ResponseWriter, err error) {
+	if errors.Is(err, resolver.ErrCRMReviewRequired) {
+		writeError(w, http.StatusConflict, "CRM information changed; apply the reviewed values before previewing the contract")
+		return
+	}
 	if errors.Is(err, resolver.ErrSourceFreshness) {
 		writeError(w, http.StatusConflict, "CRM values could not be verified; refresh and review the document")
 		return

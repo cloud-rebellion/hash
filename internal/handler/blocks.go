@@ -317,6 +317,14 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 		writeInternalErrorMsg(w, "resolve vars", err)
 		return
 	}
+	// Discovery has its own explicit observation endpoint. A contract preview
+	// must not silently depict fresh CRM text that has not been applied yet.
+	if doc.Status == "draft" {
+		if err := resolver.CheckReviewedCRMValues(doc, report); err != nil {
+			s.writePreviewError(w, err)
+			return
+		}
+	}
 	body := blocks.RenderHTML(tree, vars)
 	brand, err := s.resolveBrandingForDoc(ctx, doc)
 	if err != nil {

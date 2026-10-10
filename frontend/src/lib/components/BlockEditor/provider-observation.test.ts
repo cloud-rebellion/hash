@@ -44,7 +44,7 @@ test('verified peer save receipt updates reconnect observation without replacing
   const code = production('    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_SAVED]', '\n\n    (provider as unknown as { messageHandlers: Array<unknown> }).messageHandlers[MESSAGE_GENERATION]');
   const bind = new Function('env', `with(env){${code};return provider.messageHandlers[MESSAGE_SAVED];}`);
   const env: any = {
-    disposed: false, canonicalGeneration: '2', doc: { updated_at: 'old', blocks_json: 'local draft' },
+    disposed: false, externalBusy: false, canonicalGeneration: '2', doc: { updated_at: 'old', blocks_json: 'local draft' },
     collaborationRejected: false, dirty: true, error: null, MESSAGE_SAVED, isNewerSaveReceipt,
     receipt: { generation: '3', updatedAt: '2026-10-05T12:00:00.000003Z' },
     readCanonicalSaveReceipt: () => env.receipt,
@@ -71,7 +71,7 @@ test('bounded queued reconnect cannot revive a disposed, conflicted or changed e
     (env: any) => { env.doc.id = 'other'; }
   ]) {
     const timers: Array<{ callback: () => void; delay: number }> = [];
-    const env: any = { disposed: false, saveConflict: false, collaborationRejected: false, doc: { id: 'doc' }, reconnectTimer: null,
+    const env: any = { disposed: false, externalBusy: false, saveConflict: false, collaborationRejected: false, doc: { id: 'doc' }, reconnectTimer: null,
       connects: 0, provider: { connect: () => env.connects++ },
       setTimeout: (callback: () => void, delay: number) => { timers.push({ callback, delay }); return timers.length; }
     };

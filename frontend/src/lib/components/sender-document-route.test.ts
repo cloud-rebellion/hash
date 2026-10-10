@@ -9,7 +9,7 @@ const end = source.indexOf('  $effect(() =>', start);
 const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end));
 const bind = new Function('env', `with(env) { ${code}; return {
   loadDocument, loadComments, sendComment, loadChangeRequests, resolveCr, revise,
-  toggleSignatureMode, receiveHTMLSource, receivePlacementProof, receiveEditorDocument, receiveStatus, changeDefaultLocale, resetRouteState
+  toggleSignatureMode, receiveHTMLSource, receivePlacementProof, receiveEditorDocument, receiveCRMDocument, requestCRMReview, receiveStatus, changeDefaultLocale, resetRouteState
 }; }`);
 function document(id: string, status = 'changes_requested') {
   return { id, name: id, status, updated_at: `${id}-timestamp`, source_kind: 'blocks', requires_signature: true, blocks_json: { blocks: [{ text: `${id} content` }] } };
@@ -20,6 +20,7 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
+    crmBusy: false, crmBlocked: true, crmReviewRequired: false, crmEditorClean: true, crmOtherBusy: false, htmlEditorClean: false, blocksEditorClean: false, senderMutationBusy: false, crmRefreshRevision: 0, crmReviewRevision: 0, crmEditorRevision: 0,
     showPDFSave: false, pdfSignatureFields: [], generatedPlacementReady: false, recipientRevision: 0, htmlRevisionBlocked: true, htmlSource: null,
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
@@ -208,4 +209,33 @@ test('disposed or old child callbacks cannot replace content or status after nav
   state.env.disposed = true;
   state.actions.receiveEditorDocument(document('B', 'draft'), { ...oldScope, id: 'B', routeRevision: state.env.routeRevision });
   expect(state.env.doc.status).toBe('changes_requested');
+});
+
+test('CRM adoption requires original route revision and clean editor; accepted new source resets review and placement', () => {
+  const state = fixture(), source = signingPageSourceFixture(); state.env.doc = documentFixture(source); state.env.$page.params.id = source.document_id;
+  state.env.pdfSignatureFields = [{ role: 'provider', label: 'Old geometry' }]; state.env.generatedPlacementReady = true;
+  const scope = { id: source.document_id, routeRevision: state.env.routeRevision, documentRevision: state.env.documentRevision };
+  const updated = { ...state.env.doc, updated_at: '2026-10-10T12:03:00Z', html_source_commitment: '9'.repeat(64), pdf_sha256: '8'.repeat(64), html_materialization_revision: 2, html_review_required: true };
+  state.env.crmEditorClean = false; expect(state.actions.receiveCRMDocument(updated, scope)).toBe(false); expect(state.env.doc.pdf_sha256).toBe(source.pdf_sha256);
+  state.env.crmEditorClean = true; state.env.crmOtherBusy = true; expect(state.actions.receiveCRMDocument(updated, scope)).toBe(false);
+  state.env.crmOtherBusy = false; expect(state.actions.receiveCRMDocument(updated, { ...scope, documentRevision: 0 })).toBe(false);
+  state.env.crmReviewRequired = true; expect(state.actions.receiveCRMDocument(updated, scope)).toBe(true);
+  expect(state.env.doc).toBe(updated); expect(state.env.crmReviewRequired).toBe(false); expect(state.env.crmEditorRevision).toBe(1);
+  expect(state.env.pdfSignatureFields).toEqual([]); expect(state.env.generatedPlacementReady).toBe(false); expect(state.env.htmlRevisionBlocked).toBe(true);
+});
+test('CRM Apply lock cannot adopt a late block autosave or change document metadata', async () => {
+  const state = fixture(); state.env.doc.status = 'draft'; state.env.crmBusy = true;
+  const scope = { id: 'A', routeRevision: 1, documentRevision: 1 };
+  state.actions.receiveEditorDocument({ ...state.env.doc, updated_at: 'late save' }, scope);
+  await state.actions.toggleSignatureMode(); await state.actions.changeDefaultLocale('sv', scope);
+  expect(state.env.doc.updated_at).toBe('A-timestamp'); expect(state.calls).toEqual([]);
+});
+test('the actual Send prop blocks dirty or unsynced editable blocks and retains clean manual sending', () => {
+  const prop = source.slice(source.indexOf('<SenderPanel')).match(/revisionBlocked=\{([^\n]+)\}/)?.[1]; expect(prop).toBeDefined();
+  const blocked = new Function('doc', 'htmlRevisionBlocked', 'crmEditable', 'blocksEditorClean', `return ${prop};`);
+  const blocks = { source_kind: 'blocks', has_html_source: false };
+  expect(blocked(blocks, false, true, false)).toBe(true);
+  expect(blocked(blocks, false, true, true)).toBe(false);
+  expect(blocked(blocks, false, false, false)).toBe(false);
+  expect(blocked({ source_kind: 'pdf', has_html_source: true }, true, true, true)).toBe(true);
 });

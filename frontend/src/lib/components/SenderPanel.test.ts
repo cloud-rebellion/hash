@@ -26,7 +26,7 @@ function fixture() {
   const env: any = {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
-    requiresSignature: true, reviewRequired: false, revisionBlocked: false, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
+    requiresSignature: true, reviewRequired: false, revisionBlocked: false, crmBlocked: false, crmBusy: false, onCRMReviewRequired: undefined, onMutationStateChange: undefined, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     intendedParties: [], recipientIdentityLocked: false, sourceCommitment: '', observedSourceCommitment: '',
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
@@ -106,6 +106,27 @@ test('unsaved, pending or unreconciled HTML revision input blocks sending an old
   const state = fixture(); state.env.lawfulBasis = 'contract'; state.env.revisionBlocked = true;
   await state.actions.send(); expect(state.calls).toHaveLength(0); expect(state.env.lawfulBasis).toBe('contract');
   expect(state.env.busy).toBeNull();
+});
+
+test('CRM pending review and external Apply lock block actual Send and competing recipient writes', async () => {
+  for (const gate of ['crmBlocked', 'crmBusy']) {
+    const state = fixture(); state.env[gate] = true; state.env.lawfulBasis = 'contract';
+    await state.actions.send(); expect(state.calls).toEqual([]); expect(state.env.lawfulBasis).toBe('contract');
+    if (gate === 'crmBusy') {
+      state.actions.openAdd(); state.actions.openEdit(state.env.recipients[0]); await state.actions.remove(state.env.recipients[0]);
+      state.env.showForm = true; state.env.fName = 'New'; state.env.fEmail = 'new@example.test'; await state.actions.submitForm();
+      await state.actions.changeDocLocale({ currentTarget: { value: 'sv' } }); expect(state.calls).toEqual([]);
+    }
+  }
+});
+test('CRM review-required Send response requests fresh review without adopting status or exposing returned links', async () => {
+  const state = fixture(); state.env.lawfulBasis = 'contract'; let requested = 0;
+  state.env.onCRMReviewRequired = () => requested++;
+  const pending = state.actions.send();
+  const refusal = new state.env.SendError('CRM values changed; update and review the document before sending'); refusal.status = 409;
+  state.calls[0].reject(refusal); await pending;
+  expect(requested).toBe(1); expect(state.env.links).toBeNull(); expect(state.env.lawfulBasis).toBe('contract');
+  expect(state.calls).toHaveLength(1); expect(state.env.sendErr).toBe(refusal);
 });
 test('recipient baseline ignores untouched forms but detects changes, cancellation and replacement retain a denied draft', () => {
   const state = fixture(); state.actions.openAdd();

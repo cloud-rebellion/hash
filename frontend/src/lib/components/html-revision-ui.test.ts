@@ -29,7 +29,7 @@ function fixture() {
   const calls: any[] = [], revised: any[] = [];
   const env: any = { document: document(), retained: source(), sourceID: ID, sourceOrg: ORG, me: { user_id: USER, org_id: ORG, role: 'sender' }, disposed: false, operation: 0,
     values: { company: 'Negotiated <AB> & Co' }, sections: { scope: 'Human-proposed wording' }, summary: 'Negotiated scope', baseline: '', dirty: true, canSave: true,
-    loading: false, busy: false, error: null, needsRefresh: false, uncertain: false, acknowledgedDocument: null, latestDocument: null, latestSource: null,
+    loading: false, busy: false, externalBusy: false, onEditorStateChange: undefined, error: null, needsRefresh: false, uncertain: false, acknowledgedDocument: null, latestDocument: null, latestSource: null,
     APIError, htmlUUID, advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, revisionDraft, verifiedHTMLRevision,
     onRevised: (d: any) => revised.push(d), onSourceChange: undefined, window: { confirm: () => false } };
   env.current = () => !env.disposed && env.document.id === ID && env.document.org_id === ORG;
@@ -192,6 +192,17 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
     expect(changed).toEqual([]); expect(env.fields).toEqual([{ id: 'field', document_id: ID }]);
     await actions.onPointerUp(); await actions.remove(env.fields[0]); expect(calls).toHaveLength(1);
   }
+});
+
+test('CRM external lock blocks actual HTML save, load and adoption callbacks without losing manual wording', async () => {
+  const f = fixture(), before = f.env.fingerprint(); f.env.externalBusy = true;
+  f.env.latestDocument = document(2); f.env.latestSource = source(2); f.env.window.confirm = () => true;
+  await f.actions.save(event); await f.actions.loadInitial(); await f.actions.inspectLatest(); f.actions.adoptLatest();
+  expect(f.calls).toEqual([]); expect(f.revised).toEqual([]); expect(f.env.fingerprint()).toBe(before);
+  const clean: boolean[] = [], blocked: boolean[] = [];
+  f.env.dirty = false; f.env.observationCurrent = true; f.env.untrack = (run: () => void) => run();
+  f.env.onEditorStateChange = (value: boolean) => clean.push(value); f.env.onStateChange = (value: boolean) => blocked.push(value);
+  f.actions.reportRevisionState(); expect(clean).toEqual([true]); expect(blocked).toEqual([true]);
 });
 test('automatic or readonly placement handlers cannot dispatch add/delete even if invoked directly', async () => {
   for (const mode of ['generated', 'readonly']) {

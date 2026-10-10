@@ -40,6 +40,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/crmreview"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/eidas"
@@ -411,6 +412,19 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	if err != nil {
 		return SendResult{}, err
 	}
+	// A reviewed CRM mapping is part of the authoring contract, even if all of
+	// its bindings were subsequently deleted. Check every locked document before
+	// writing observations/frozen values; nil resolver/report wiring refuses a
+	// currently mapped document rather than silently removing its obligation.
+	for _, reviewedDoc := range append([]*generated.Document{doc}, envelopeChildren...) {
+		var reports []resolver.ResolveReport
+		if bindingPreparation != nil {
+			reports = bindingPreparation.reportsForDocument(reviewedDoc.ID)
+		}
+		if err := crmreview.CheckForSend(ctx, q, reviewedDoc, reports); err != nil {
+			return SendResult{}, err
+		}
+	}
 	if bindingPreparation != nil {
 		if err := bindingPreparation.verifyAndPersist(ctx, q); err != nil {
 			return SendResult{}, err
@@ -438,6 +452,18 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	// their reviewed printed values after resolver freezing and lock waits.
 	if err := validateResolvedSealedSnapshot(doc, envelopeChildren); err != nil {
 		return SendResult{}, err
+	}
+	// Non-CRM live bindings can also change a block's frozen values. The review
+	// must cover this actual post-freeze content, not only the draft checked
+	// above. A refusal rolls the observation/freeze writes back with this tx.
+	for _, reviewedDoc := range append([]*generated.Document{doc}, envelopeChildren...) {
+		var reports []resolver.ResolveReport
+		if bindingPreparation != nil {
+			reports = bindingPreparation.reportsForDocument(reviewedDoc.ID)
+		}
+		if err := crmreview.CheckForSend(ctx, q, reviewedDoc, reports); err != nil {
+			return SendResult{}, err
+		}
 	}
 
 	// Recipient CRUD shares this parent row lock. Re-list only after acquiring
@@ -1527,6 +1553,13 @@ type sendBindingPreparation struct {
 type preparedCRMReports struct {
 	orgID  uuid.UUID
 	report []resolver.ResolveReport
+}
+
+func (p *sendBindingPreparation) reportsForDocument(documentID uuid.UUID) []resolver.ResolveReport {
+	if p == nil {
+		return nil
+	}
+	return p.crmReports[documentID].report
 }
 
 func (p *sendBindingPreparation) StageCRMReports(ctx context.Context, orgID, docID uuid.UUID, report []resolver.ResolveReport) error {

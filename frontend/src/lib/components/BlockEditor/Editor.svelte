@@ -9,7 +9,7 @@
 <script lang="ts">
   import { Editor } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import * as Y from 'yjs';
   import { WebsocketProvider } from 'y-websocket';
@@ -29,21 +29,23 @@
   import { BlockIDExtension, DynamicVariable, OpaqueBlock, PageBreak, SignatureField, TableBlock } from './nodes';
   import RecoveryPanel from './RecoveryPanel.svelte';
 
-  let { document: doc, onChange, userName, userColor }: {
+  let { document: doc, onChange, userName, userColor, onEditorStateChange, externalBusy = false }: {
     document: DocumentResponse;
     onChange?: (d: DocumentResponse) => void;
     userName?: string;
     userColor?: string;
+    onEditorStateChange?: (clean: boolean) => void;
+    externalBusy?: boolean;
   } = $props();
 
   let editorEl: HTMLDivElement;
-  let editor: Editor | null = null;
+  let editor = $state.raw<Editor | null>(null);
   let saving = $state(false);
   let dirty = $state(false);
   let error = $state<string | null>(null);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let editRevision = $state(0);
-  let saveQueued = false;
+  let saveQueued = $state(false);
   let saveConflict = $state(false);
  let mayBootstrap = false;
   let disposed = false;
@@ -62,14 +64,42 @@
 
   // Collab state
   let ydoc: Y.Doc | null = null;
-  let provider: WebsocketProvider | null = null;
+  let provider = $state.raw<WebsocketProvider | null>(null);
   let peerCount = $state(1);
   let connected = $state(false);
   let collaborationRejected = $state(false);
-  let canonicalGeneration: string | null = null;
+  let canonicalGeneration = $state<string | null>(null);
+  let syncReady = $state(false), externalQuiesced = $state(false);
+  let wasExternallyBusy = false;
   const checkpointRequests = new CheckpointRequests();
   let accessCheckPending = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    const clean = !!editor && !dirty && !saving && !saveQueued && !saveConflict && !collaborationRejected
+      && showImport === 'none' && !showTableModal && !!canonicalGeneration
+      && ((connected && syncReady) || (externalBusy && externalQuiesced));
+    untrack(() => onEditorStateChange?.(clean));
+  });
+  $effect(() => {
+    const locked = externalBusy, currentEditor = editor, currentProvider = provider, stamp = doc.updated_at;
+    untrack(() => {
+      currentEditor?.setEditable(!locked && doc.status === 'draft' && !saveConflict && !collaborationRejected);
+      if (locked && !wasExternallyBusy) {
+        externalQuiesced = !!currentEditor && connected && syncReady && !!canonicalGeneration && !dirty && !saving && !saveQueued
+          && !saveConflict && !collaborationRejected && showImport === 'none' && !showTableModal;
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        checkpointRequests.cancel(new Error('Document information is being updated; your local draft is preserved'));
+        currentProvider?.disconnect();
+      } else if (!locked && wasExternallyBusy && !disposed && !saveConflict && !collaborationRejected) {
+        if (currentProvider) { currentProvider.params.expected_updated_at = stamp; currentProvider.connect(); }
+        if (dirty) scheduleSave();
+      }
+      if (!locked) externalQuiesced = false;
+      wasExternallyBusy = locked;
+    });
+  });
 
   // Hash compaction extension: when the server's persisted log grows
   // past the configured threshold it sends a compact-request with a
@@ -89,10 +119,10 @@
   }
 
   function queueCollaborationReconnect(documentID: string) {
-    if (disposed || saveConflict || collaborationRejected || doc.id !== documentID || reconnectTimer) return;
+    if (disposed || externalBusy || saveConflict || collaborationRejected || doc.id !== documentID || reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (!disposed && !saveConflict && !collaborationRejected && doc.id === documentID) provider?.connect();
+      if (!disposed && !externalBusy && !saveConflict && !collaborationRejected && doc.id === documentID) provider?.connect();
     }, 1000);
   }
 
@@ -128,7 +158,7 @@
       prov: WebsocketProvider
     ) => {
       const subtype = decoding.readVarUint(decoder);
-      if (subtype !== COMPACT_REQUEST) return;
+      if (subtype !== COMPACT_REQUEST || externalBusy) return;
       const nonce = decoding.readUint8Array(decoder, 16);
       const snapshot = Y.encodeStateAsUpdate(prov.doc);
       encoding.writeVarUint(encoder, MESSAGE_COMPACT);
@@ -178,7 +208,7 @@
       _encoder: encoding.Encoder, decoder: decoding.Decoder
     ) => {
       mayBootstrap = readBootstrapGrant(decoder);
-      if (provider?.synced && editor && ydoc) {
+      if (!externalBusy && provider?.synced && editor && ydoc) {
         bootstrapIfGranted(ydoc, mayBootstrap, () => {
           editor!.commands.setContent(toProseMirror(doc.blocks_json) as never);
         });
@@ -191,10 +221,11 @@
     provider.awareness.setLocalStateField('user', { name: label, color: colour });
     provider.on('status', (evt: { status: string }) => {
       connected = evt.status === 'connected';
+      if (!connected) syncReady = false;
     });
     provider.on('connection-close', async (event: CloseEvent | null) => {
       checkpointRequests.cancel();
-      if (disposed || saveConflict || collaborationRejected) return;
+      if (disposed || externalBusy || saveConflict || collaborationRejected) return;
       const documentID = doc.id;
       // Pause y-websocket's reconnect timer until the HTTP observation has
       // been checked. disconnect() here would re-enter this close callback.
@@ -206,10 +237,10 @@
         // 1006. Distinguish revoked membership/session from transient outages.
         try {
           const current = await getMe();
-          if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+          if (disposed || externalBusy || doc.id !== documentID || saveConflict || collaborationRejected) return;
           if (current.org_id === doc.org_id && (current.role === 'owner' || current.role === 'sender')) {
             const saved = await getDocument(documentID);
-            if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+            if (disposed || externalBusy || doc.id !== documentID || saveConflict || collaborationRejected) return;
             if (saved.id === documentID && saved.org_id === doc.org_id && saved.source_kind === 'blocks'
                 && saved.status === 'draft' && saved.updated_at === doc.updated_at
                 && provider?.params.expected_updated_at === doc.updated_at) {
@@ -220,7 +251,7 @@
             // that could let old content seed a newly recovered empty room.
           }
         } catch (e) {
-          if (disposed || doc.id !== documentID || saveConflict || collaborationRejected) return;
+          if (disposed || externalBusy || doc.id !== documentID || saveConflict || collaborationRejected) return;
           if (!(e instanceof APIError) || ![401, 403, 404].includes(e.status)) {
             queueCollaborationReconnect(documentID);
             return;
@@ -229,7 +260,7 @@
           accessCheckPending = false;
         }
       }
-      if (disposed || doc.id !== documentID) return;
+      if (disposed || externalBusy || doc.id !== documentID) return;
       collaborationRejected = true;
       connected = false;
       // Policy rejection is terminal for this connection; repeatedly retrying
@@ -243,6 +274,7 @@
 
     editor = new Editor({
       element: editorEl,
+      editable: doc.status === 'draft' && !externalBusy,
       extensions: [
         // Collab replaces the default history (undo/redo) so disable
         // the StarterKit history extension to avoid duplicate stacks.
@@ -280,7 +312,8 @@
 
     // Only the server-selected owner may seed a document with no Yjs history.
     provider.on('sync', (isSynced: boolean) => {
-      if (!isSynced || !editor || !ydoc) return;
+      syncReady = isSynced;
+      if (externalBusy || !isSynced || !editor || !ydoc) return;
       bootstrapIfGranted(ydoc, mayBootstrap, () => {
         editor!.commands.setContent(toProseMirror(doc.blocks_json) as never);
       });
@@ -295,6 +328,7 @@
     editor?.destroy();
     provider?.destroy();
     ydoc?.destroy();
+    onEditorStateChange?.(false);
   });
 
   beforeNavigate(({ cancel, willUnload }) => {
@@ -308,15 +342,16 @@
   }
 
   function scheduleSave() {
-    if (saveConflict) return;
+    if (saveConflict || externalBusy) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(persist, 700);
   }
 
   function requestCheckpoint() {
+    if (externalBusy || disposed || saveConflict) throw new Error('Document information is being updated; your local draft is preserved');
     return checkpointRequests.request((frame) => {
       const socket = provider?.ws;
-      if (!socket || socket.readyState !== WebSocket.OPEN || !provider?.synced) {
+      if (externalBusy || !socket || socket.readyState !== WebSocket.OPEN || !provider?.synced) {
         throw new Error('Collaboration is not synchronized; your draft is preserved');
       }
       socket.send(frame);
@@ -324,7 +359,7 @@
   }
 
   async function persist() {
-    if (!editor || disposed || saveConflict) return;
+    if (!editor || disposed || saveConflict || externalBusy) return;
     if (saving) { saveQueued = true; return; }
     let submittedRevision = editRevision;
     saveQueued = false;
@@ -334,7 +369,7 @@
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const checkpoint = await requestCheckpoint();
-          if (disposed) return;
+          if (disposed || externalBusy) return;
           // The checkpoint response follows replay of the server's captured state.
           // Serialize that updated editor content, retaining edits made afterward.
           submittedRevision = editRevision;
@@ -361,7 +396,7 @@
           }
           break;
         } catch (e) {
-          if (!disposed && e instanceof APIError && e.status === 409 && attempt < 2) {
+          if (!disposed && !externalBusy && e instanceof APIError && e.status === 409 && attempt < 2) {
             // Another accepted edit/save invalidated this checkpoint. Capture
             // again and serialize the replayed current state; never reuse a token.
             continue;
@@ -380,7 +415,7 @@
     } finally {
       saving = false;
       // Serialize writes and capture any subsequent save from current content.
-      if (!disposed && dirty && (saveQueued || submittedRevision !== editRevision)) scheduleSave();
+      if (!disposed && !externalBusy && dirty && (saveQueued || submittedRevision !== editRevision)) scheduleSave();
     }
   }
 
@@ -418,29 +453,37 @@
   }
 
   function manualSave() {
+    if (externalBusy) return;
     if (saveTimer) clearTimeout(saveTimer);
     void persist();
   }
 
   function setHeading(level: 1 | 2) {
+    if (externalBusy) return;
     editor?.chain().focus().toggleHeading({ level }).run();
   }
   function setParagraph() {
+    if (externalBusy) return;
     editor?.chain().focus().setParagraph().run();
   }
   function toggleBullet() {
+    if (externalBusy) return;
     editor?.chain().focus().toggleBulletList().run();
   }
   function toggleQuote() {
+    if (externalBusy) return;
     editor?.chain().focus().toggleBlockquote().run();
   }
   function toggleCode() {
+    if (externalBusy) return;
     editor?.chain().focus().toggleCodeBlock().run();
   }
   function insertHR() {
+    if (externalBusy) return;
     editor?.chain().focus().setHorizontalRule().run();
   }
   function insertSignatureField() {
+    if (externalBusy) return;
     const input = window.prompt(
       'Recipient role (lowercase letters, numbers, "_" or "-"; e.g. client, provider)?',
       'signer'
@@ -464,6 +507,7 @@
       .run();
   }
   function insertVariable() {
+    if (externalBusy) return;
     if (!varName.trim()) return;
     editor
       ?.chain()
@@ -477,11 +521,13 @@
     varDefault = '';
   }
   function insertPageBreak() {
+    if (externalBusy) return;
     editor?.chain().focus().insertContent({ type: 'pageBreak', attrs: { blockId: '' } }).run();
   }
 
   // ── Table authoring ──────────────────────────────────────────────────────
   function openNewTable() {
+    if (externalBusy) return;
     editingTable = 'new';
     // Sensible starter: a services line-item grid the user can reshape.
     tCols = ['Tjänst', 'Beskrivning', 'Pris (kr ex moms)'];
@@ -489,6 +535,7 @@
     showTableModal = true;
   }
   function openEditTable(pos: number, columns: string[], rows: string[][]) {
+    if (externalBusy) return;
     editingTable = pos;
     tCols = columns.length ? [...columns] : ['Kolumn 1'];
     tRows = rows.map((r) => [...r]);
@@ -514,7 +561,7 @@
     tRows = tRows.filter((_, idx) => idx !== i);
   }
   function saveTable() {
-    if (!editor) return;
+    if (!editor || externalBusy) return;
     // Keep rows rectangular against the columns (Go validation requires it).
     const columns = tCols.map((c) => c.trim() || ' ');
     const rows = tRows.map((r) => {
@@ -531,7 +578,7 @@
   }
 
   async function runImport() {
-    if (saving || saveConflict || disposed || showImport === 'none') return;
+    if (saving || saveConflict || externalBusy || disposed || showImport === 'none') return;
     if (saveTimer) clearTimeout(saveTimer);
     const submittedRevision = editRevision;
     saving = true;
@@ -541,7 +588,7 @@
       const updated = showImport === 'html'
         ? await importHTML(doc.id, importText, doc.updated_at)
         : await importMarkdown(doc.id, importText, doc.updated_at);
-      if (disposed) return;
+      if (disposed || externalBusy) return;
       if (submittedRevision !== editRevision) {
         // Keep edits made during the import; the committed replacement needs
         // review before another canonical save can safely overwrite it.
@@ -566,7 +613,7 @@
       }
     } finally {
       saving = false;
-      if (!disposed && !saveConflict && dirty && saveQueued) scheduleSave();
+      if (!disposed && !externalBusy && !saveConflict && dirty && saveQueued) scheduleSave();
     }
   }
 
@@ -596,6 +643,8 @@
         downloadDraft={downloadLocalDraft} onRecovered={sharedEditingRecovered} reloadDocument={reloadRecoveredDocument} />
     {/key}
   {/if}
+  <fieldset disabled={externalBusy} class="min-w-0 border-0 p-0 m-0">
+  {#if externalBusy}<p class="text-sm text-text-muted" role="status">Document information is being updated. Your local wording is retained.</p>{/if}
   <div class="toolbar">
     <button type="button" class="tool" onclick={() => setHeading(1)} title="H1"><Hash class="size-3.5" /> H1</button>
     <button type="button" class="tool" onclick={() => setHeading(2)} title="H2"><Hash class="size-3.5" /> H2</button>
@@ -666,11 +715,13 @@
   {/if}
 
   <div bind:this={editorEl} class="prose-host"></div>
+  </fieldset>
 </div>
 
 {#if showTableModal}
   <div class="tbl-backdrop" role="dialog" aria-modal="true">
     <div class="tbl-modal">
+      <fieldset disabled={externalBusy} class="min-w-0 border-0 p-0 m-0">
       <div class="tbl-modal-head">
         <h3>{editingTable === 'new' ? 'Insert table' : 'Edit table'}</h3>
         <button type="button" class="tbl-x" onclick={closeTableModal} aria-label="Close"><X class="size-4" /></button>
@@ -724,6 +775,7 @@
           {editingTable === 'new' ? 'Insert table' : 'Save table'}
         </button>
       </div>
+      </fieldset>
     </div>
   </div>
 {/if}

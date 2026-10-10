@@ -108,6 +108,67 @@ need human review; these engineering observations do not certify legal validity.
 This is a bounded **time-of-read observation**, not an atomic snapshot of the
 remote CRM or proof that a record cannot change after the read.
 
+## Document review API
+
+All four routes require an original session belonging to the document sender or
+an owner. Writes require the exact application origin. Responses use `no-store`.
+Limits are process-local per admitted organization/user: context 60/minute,
+search and observations 30/minute each, Apply 10/minute. They do not establish
+provider concurrency or production capacity.
+
+| Method | Document-relative path | Purpose |
+|---|---|---|
+| GET | `/crm/context` | Saved declared fields, redacted binding definitions, catalog and review/account witnesses |
+| POST | `/crm/records/search` | Typed discovery; `kind`, canonical `query`, `offset` in 20-record steps |
+| POST | `/crm/observations` | Read-only comparison of the complete desired `mappings` |
+| POST | `/crm/apply` | Fresh confirmed Apply; same mappings, `reviewed_digest`, `confirmed: true` |
+
+The prefix is `/api/v1/documents/{id}`. Every POST includes `expected_org_id`,
+`expected_user_id`, exact `expected_updated_at`, `expected_html_source_commitment`
+(empty for blocks), `expected_binding_fingerprint`, `expected_connection_id` and
+canonical decimal-string `expected_connection_generation`. With no connection,
+use empty ID and generation `"0"`. Context/readback returns these current pins
+as `org_id`, `user_id`, `document_id`, `updated_at`, `html_source_commitment`,
+`binding_fingerprint` and a safe `connection` object. Binding fingerprints cover
+all rows and precise revisions; binding mutations alone need not change the
+legacy document timestamp.
+
+A mapping is `{variable,source_kind,source_ref,source_path}`. It must target a
+declared field, use the catalog and select at most one record per kind. Omitted
+existing CRM mappings are removed only on reviewed Apply; other source bindings
+are preserved unless that same variable is explicitly selected. An explicit
+empty array reviews unlinking and keeps saved text even without a working CRM.
+
+Observations return canonical mappings, items with saved/fresh exact strings
+and typed time-of-read provenance, `review_digest`, `can_apply`, `content_changed`
+and `observed_at`. Null/absent or oversized scalars remain unavailable. Optional
+`contract_issues` contains bounded readiness issues for candidate contract party
+or commercial inputs; it disables Apply. It does not certify signing authority.
+The review digest binds the original account/document/ledger and exact selected
+values; a fresh equal-value observation may have new body/timestamp provenance.
+Apply audits its independently fresh provenance, not a client-provided proof.
+
+Apply returns the updated document and witnesses. A changed HTML result also
+returns `materialization_revision`, `page_count`, `review_required: true` and
+`placement_reset: true`. A mapping-only equal-value Apply retains the exact
+PDF/source/review, while advancing the document edit witness. Expired original
+sessions return401, revoked permissions403, stale witnesses/reviews409, invalid
+input400, render capacity429 and unavailable dependencies503. Errors are redacted.
+After an uncertain write or a remote document change, explicitly inspect and
+adopt the saved document before another write; dirty local wording is preserved.
+
+Migration78 adds current mapping-review state bound to CRM membership/removals,
+content, actual reviewer and active account generation. Send checks the parent
+and every envelope child before observation writes and after the final variable
+freeze. Generic REST/MCP binding edits cannot silently delete the freshness gate.
+Legacy CRM drafts need explicit review and Apply. Ordinary no-CRM manual drafts
+retain their existing behavior, including larger non-CRM ledgers. Reviewed CRM
+ledgers are bounded to128 rows. The audit retains historical application lineage;
+this current-state row does not alter signed bytes or source schema1/2/3 domains.
+The reviewer FK prevents deleting a retained reviewer, with deferred validation
+allowing an organization cascade through documents/reviews and users. Down
+refuses any retained review row, including reviewed unlinking.
+
 ## Migration and delivery caveats
 
 Apply migration 77 with the coordinated current schema/app/worker rollout and
@@ -126,10 +187,22 @@ its general callback envelope lacks the mandatory tenant-bound routing contract.
 Real invalidation callbacks remain a separate producer/protocol acceptance gate.
 Direct fresh reads provide the current bounded correctness path.
 
-The settings page covers owner connection management. Selecting CRM records,
-mapping declared template variables and showing their observations in the
-salesperson's document review UI remain a separate completion task. API/MCP
-binding support alone does not establish that complete user journey.
+The document draft now has a scoped CRM panel for the document's original sender
+or an organization owner. It searches the selected record type, maps catalog
+scalars to declared fields, compares saved and fresh values, and requires explicit
+confirmation before Apply. Apply independently fetches again; changed values or
+actor/document/source/binding/account witnesses return 409 without committing.
+Manual sections and unmapped static values are retained. An HTML change appends
+an immutable PDF/source revision and requires a fresh PDF review and placement;
+blocks update their saved values and history. Dirty/unsynced editors block Apply
+and Send. The built salesperson browser and visibly rendered mapped-PDF journey
+remain pending; source/UI checks alone do not establish that acceptance.
+
+Initial template population before a document UUID exists is a separate extension.
+Uploaded PDF text cannot be changed through this connector. An optional HTML field
+that has never been materialized cannot be bound to an empty upstream string in
+this unit: it reports `empty_value_not_materialized` and disables Apply, preserving
+historical equal-content digest rules. Existing present-empty values are supported.
 
 Hash outbound delivery now claims one job immediately before dispatch, retries
 temporary endpoint/key/event dependency failures with bounded existing backoff,

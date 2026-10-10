@@ -180,7 +180,8 @@ export function checkedCRMDocument(v: unknown): DocumentResponse {
       || (d.source_kind === 'blocks' && (!d.blocks_json || d.blocks_json.version !== 1 || !Array.isArray(d.blocks_json.blocks) || d.blocks_json.blocks.length > 10000))
       || (d.has_html_source !== undefined && typeof d.has_html_source !== 'boolean')) throw new Error(invalid);
   if (d.has_html_source ? d.source_kind !== 'pdf' || !sha(d.pdf_sha256) || !sha(d.html_source_commitment)
-      || !Number.isInteger(d.html_materialization_revision) || d.html_materialization_revision! < 1 || typeof d.html_review_required !== 'boolean'
+      || !Number.isInteger(d.html_materialization_revision) || d.html_materialization_revision! < 1
+      || (d.html_review_required !== undefined && typeof d.html_review_required !== 'boolean')
     : d.source_kind !== 'blocks' || !!d.html_source_commitment) throw new Error(invalid);
   return d;
 }
@@ -328,7 +329,8 @@ export class CRMDocumentController {
       if (JSON.stringify(r.connection) !== JSON.stringify(c.connection) || r.document.source_kind !== before.source_kind || r.document.sender_id !== before.sender_id
           || r.document.has_html_source !== before.has_html_source || r.content_changed !== o.content_changed) throw new Error(invalid);
       if (before.has_html_source && (r.content_changed ? r.document.pdf_sha256 === before.pdf_sha256 || r.document.html_source_commitment === before.html_source_commitment
-          : r.document.pdf_sha256 !== before.pdf_sha256 || r.document.html_source_commitment !== before.html_source_commitment || r.document.html_materialization_revision !== before.html_materialization_revision || r.document.html_review_required !== before.html_review_required)) throw new Error(invalid);
+          : r.document.pdf_sha256 !== before.pdf_sha256 || r.document.html_source_commitment !== before.html_source_commitment || r.document.html_materialization_revision !== before.html_materialization_revision
+            || (r.document.html_review_required === true) !== (before.html_review_required === true))) throw new Error(invalid);
       if (r.document.has_html_source) {
         const source = currentHTMLSource(await this.transport.source(before.id, op.signal), r.document);
         if (source.values.some((v) => v.text !== (Object.hasOwn(expectedValues, v.name) ? expectedValues[v.name] : ''))) throw new Error(invalid);

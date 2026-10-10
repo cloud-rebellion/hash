@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { APIError, type DocumentResponse } from './api/client';
-import { CRMDocumentController, checkedCRMApply, checkedCRMContext, checkedCRMObservation, checkedCRMSearch, crmExpected, crmMappingKey,
+import { CRMDocumentController, checkedCRMApply, checkedCRMContext, checkedCRMDocument, checkedCRMObservation, checkedCRMSearch, crmExpected, crmMappingKey,
   validCRMSearch, type CRMDocumentActor, type CRMDocumentContext, type CRMDocumentTransport, type CRMObservation } from './crmDocument';
 
 export const CRM_ACTOR: CRMDocumentActor = { org_id: '22222222-2222-4222-8222-222222222222', user_id: '11111111-1111-4111-8111-111111111111', role: 'sender' };
@@ -206,10 +206,10 @@ test('contract design readiness issues are bounded and prevent Apply even when s
   f.controller.confirm('d'.repeat(64), true); expect(f.controller.canApply()).toBe(false); await f.controller.apply(); expect(f.adopted).toEqual([]);
 });
 
-test('HTML Apply verifies exact new retained source and fresh review; mapping-only Apply retains the old PDF and wording', async () => {
-  for (const changed of [false, true]) {
+test('HTML Apply requires fresh review on changed content; no-op retains reviewed PDF when false is omitted on the wire', async () => {
+  for (const [changed, omitBefore, omitAfter] of [[false, false, false], [false, false, true], [false, true, true], [true, false, false]] as const) {
     let doc = { ...crmDocumentFixture(), source_kind: 'pdf' as const, has_html_source: true,
-      template_id: '66666666-6666-4666-8666-666666666666', html_source_commitment: '1'.repeat(64), pdf_sha256: '2'.repeat(64), html_materialization_revision: 1, html_review_required: false };
+      template_id: '66666666-6666-4666-8666-666666666666', html_source_commitment: '1'.repeat(64), pdf_sha256: '2'.repeat(64), html_materialization_revision: 1, html_review_required: omitBefore ? undefined : false };
     const before = doc; let context = crmContextFixture(doc); const adopted: DocumentResponse[] = [];
     const value = changed ? '12345678901234567890.012300' : doc.variables_json.amount;
     const source = () => ({ document_id: doc.id, org_id: doc.org_id, template_id: doc.template_id, template_version: 1,
@@ -221,7 +221,8 @@ test('HTML Apply verifies exact new retained source and fresh review; mapping-on
       search: async () => { throw new Error('not used'); }, observe: async () => crmObservationFixture(context, value),
       apply: async (_id, input) => {
         doc = { ...doc, updated_at: '2026-10-10T12:03:00Z', variables_json: { amount: value },
-          ...(changed ? { html_source_commitment: '4'.repeat(64), pdf_sha256: '5'.repeat(64), html_materialization_revision: 2, html_review_required: true } : {}) };
+          ...(changed ? { html_source_commitment: '4'.repeat(64), pdf_sha256: '5'.repeat(64), html_materialization_revision: 2, html_review_required: true }
+            : omitAfter ? { html_review_required: undefined } : {}) };
         context = { ...crmContextFixture(doc), binding_fingerprint: 'e'.repeat(64), bindings: input.mappings.map((m) => ({ ...m, updated_at: doc.updated_at })) };
         return { ...contextWitness(context), document: doc, content_changed: changed, mapping_review_required: false,
           ...(changed ? { materialization_revision: 2, page_count: 2, review_required: true, placement_reset: true } : {}) };
@@ -231,6 +232,43 @@ test('HTML Apply verifies exact new retained source and fresh review; mapping-on
     controller.map('amount', { kind: 'crm.deal', path: 'value' }); await controller.observe(); controller.confirm('d'.repeat(64), true); await controller.apply();
     expect(adopted).toHaveLength(1); expect(controller.state.needsReadback).toBe(false); expect(source().sections[0].text).toBe('Human reviewed negotiated wording');
     expect(doc.pdf_sha256 === before.pdf_sha256).toBe(!changed); expect(doc.html_source_commitment === before.html_source_commitment).toBe(!changed);
-    expect(doc.html_review_required).toBe(changed);
+    expect(doc.html_review_required === true).toBe(changed);
   }
+});
+
+test('uncertain HTML Apply recovers an explicitly inspected reviewed document with omitted false, preserving its source and wording', async () => {
+  let doc = { ...crmDocumentFixture(), source_kind: 'pdf' as const, has_html_source: true,
+    template_id: '66666666-6666-4666-8666-666666666666', html_source_commitment: '1'.repeat(64), pdf_sha256: '2'.repeat(64),
+    html_materialization_revision: 1, html_review_required: undefined as boolean | undefined };
+  let context = crmContextFixture(doc); const adopted: DocumentResponse[] = [], before = { ...doc };
+  const source = () => ({ document_id: doc.id, org_id: doc.org_id, template_id: doc.template_id, template_version: 1,
+    template_content_sha256: '3'.repeat(64), updated_at: doc.updated_at, html_source_commitment: doc.html_source_commitment,
+    pdf_sha256: doc.pdf_sha256, materialization_revision: doc.html_materialization_revision, page_count: 2, can_edit: true,
+    values: [{ name: 'amount', required: true, max_chars: 8192, text: doc.variables_json.amount }],
+    sections: [{ name: 'scope', max_chars: 32768, text: 'Human reviewed wording', default_text: 'Approved wording' }], changed_sections: ['scope'] });
+  const transport: CRMDocumentTransport = { identity: async () => CRM_ACTOR, context: async () => context, document: async () => doc, source: async () => source(),
+    search: async () => { throw new Error('not used'); }, observe: async () => crmObservationFixture(context, doc.variables_json.amount),
+    apply: async (_id, input) => {
+      doc = { ...doc, updated_at: '2026-10-10T12:03:00Z' };
+      context = { ...crmContextFixture(doc), binding_fingerprint: 'e'.repeat(64), bindings: input.mappings.map((m) => ({ ...m, updated_at: doc.updated_at })) };
+      throw new TypeError('The committed response was lost');
+    } };
+  const controller = new CRMDocumentController(doc, CRM_ACTOR, transport, () => {}, () => true, (d) => { adopted.push(d); return true; }, () => Date.parse('2026-10-10T12:02:01Z'));
+  await controller.refresh(); controller.select({ kind: 'crm.deal', id: CRM_MAPPING.source_ref, label: 'Deal', secondary: '', record_updated_at: '2026-10-10T12:00:00Z' });
+  controller.map('amount', { kind: 'crm.deal', path: 'value' }); await controller.observe(); controller.confirm('d'.repeat(64), true); await controller.apply();
+  expect(controller.state.needsReadback).toBe(true); expect(adopted).toEqual([]); await controller.inspectReadback(); expect(adopted).toEqual([]);
+  expect(controller.state.readback?.document.updated_at).toBe(doc.updated_at); controller.adoptReadback(); expect(adopted).toHaveLength(1);
+  expect(controller.state.needsReadback).toBe(false); expect(controller.sendBlocked()).toBe(false);
+  expect(adopted[0].pdf_sha256).toBe(before.pdf_sha256); expect(adopted[0].html_source_commitment).toBe(before.html_source_commitment);
+  expect(adopted[0].html_review_required).toBeUndefined(); expect(source().sections[0].text).toBe('Human reviewed wording');
+});
+
+test('optional review flag accepts only absent or boolean, and changed HTML Apply still requires explicit true', () => {
+  const doc = { ...crmDocumentFixture(), source_kind: 'pdf' as const, has_html_source: true,
+    html_source_commitment: '1'.repeat(64), pdf_sha256: '2'.repeat(64), html_materialization_revision: 1 };
+  for (const flag of [undefined, false, true]) expect(checkedCRMDocument({ ...doc, html_review_required: flag }).id).toBe(doc.id);
+  for (const flag of [null, 'false', 'true', 0, 1, [], {}]) expect(() => checkedCRMDocument({ ...doc, html_review_required: flag })).toThrow();
+  const c = crmContextFixture(doc);
+  for (const flag of [undefined, false]) expect(() => checkedCRMApply({ ...contextWitness(c), document: { ...doc, html_review_required: flag },
+    content_changed: true, mapping_review_required: false, materialization_revision: 1, page_count: 2, review_required: true, placement_reset: true })).toThrow();
 });

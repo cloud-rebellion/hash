@@ -195,8 +195,17 @@ actor/document/source/binding/account witnesses return 409 without committing.
 Manual sections and unmapped static values are retained. An HTML change appends
 an immutable PDF/source revision and requires a fresh PDF review and placement;
 blocks update their saved values and history. Dirty/unsynced editors block Apply
-and Send. The built salesperson browser and visibly rendered mapped-PDF journey
-remain pending; source/UI checks alone do not establish that acceptance.
+and Send. The local built salesperson journey now passes against actual
+PostgreSQL/Chromium and the isolated PDF worker with protected synthetic CRM/S3
+peers. It verifies changed values in the exact PDF, manual/static text preservation,
+foreign-actor and fresh-value refusals, explicit unlink after provider revocation
+and recovery by inspection/adoption after a committed response is lost. Three
+two-page PDFs pass byte/source/variable/section reconciliation and all-page visual
+review. Updated frontend checks pass 303 tests and the production build. Reviewed
+HTML responses may omit the false review flag; invalid types are refused and
+changed content still requires explicit true. Mobile CRM/PDF review fits 390px;
+mobile field placement and recipient controls remain separate acceptance work.
+No real provider, Send/signing or production acceptance follows from this fixture.
 
 Initial template population before a document UUID exists is a separate extension.
 Uploaded PDF text cannot be changed through this connector. An optional HTML field

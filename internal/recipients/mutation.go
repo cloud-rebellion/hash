@@ -226,7 +226,7 @@ func (e *MutationEngine) mutate(ctx context.Context, actor MutationActor, docID 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	retained, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: doc.ID, OrgID: actor.OrgID})
+	retained, err := q.HasRetainedDraftSigningEvidence(ctx, generated.HasRetainedDraftSigningEvidenceParams{DocumentID: doc.ID, OrgID: actor.OrgID})
 	if err != nil {
 		return nil, fmt.Errorf("inspect recipient authoring evidence: %w", err)
 	}

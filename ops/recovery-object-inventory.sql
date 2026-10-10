@@ -108,6 +108,29 @@ branding_objects AS (
       ) AS m(parts)
 ),
 object_references(reference_class, owner_type, owner_id, org_id, object_key, expected_sha256, expected_version_id, version_pin_required, legacy_version_lookup_allowed, legal_evidence, expected_retain_until) AS (
+	SELECT 'html_materialization_pdf', 'html_materialization', m.id::text, m.org_id,
+	       m.pdf_key, encode(m.pdf_sha256, 'hex'), m.pdf_version_id, true, false,
+	       (history.retain_until IS NOT NULL OR (d.html_current_materialization_id = m.id AND retention.legal_evidence)),
+	       GREATEST(history.retain_until, CASE WHEN d.html_current_materialization_id = m.id THEN retention.expected_retain_until ELSE NULL END)
+	  FROM html_document_materializations m
+	  JOIN documents d ON d.id = m.document_id AND d.org_id = m.org_id
+	  JOIN document_retention retention ON retention.document_id = d.id
+	  LEFT JOIN LATERAL (
+	      SELECT max(h.retain_until) AS retain_until FROM html_document_materialization_snapshots h
+	      WHERE h.document_id = m.document_id AND h.org_id = m.org_id
+	        AND h.pdf_key = m.pdf_key AND h.pdf_version_id = m.pdf_version_id
+	  ) history ON true
+	UNION ALL
+	SELECT 'html_materialization_snapshot_pdf', 'html_materialization_snapshot', h.id::text, h.org_id,
+	       h.pdf_key, encode(h.pdf_sha256, 'hex'), h.pdf_version_id, true, false,
+	       h.retain_until IS NOT NULL, h.retain_until
+	  FROM html_document_materialization_snapshots h
+	UNION ALL
+	SELECT 'html_materialization_snapshot_rendered_pdf', 'html_materialization_snapshot', h.id::text, h.org_id,
+	       h.rendered_pdf_key, encode(h.rendered_pdf_sha256, 'hex'), h.rendered_pdf_version_id, true, false,
+	       h.retain_until IS NOT NULL, h.retain_until
+	  FROM html_document_materialization_snapshots h WHERE h.rendered_pdf_key IS NOT NULL
+	UNION ALL
 	SELECT 'document_rendered_pdf', 'document', d.id::text, d.org_id,
 	       d.rendered_pdf_key, encode(d.rendered_pdf_sha, 'hex'), d.rendered_pdf_version_id,
 	       d.evidence_version_pins_required,

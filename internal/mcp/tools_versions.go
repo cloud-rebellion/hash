@@ -83,7 +83,7 @@ func registerVersionTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "diff_document_versions",
-		Description: "Block-level diff between two versions. 'to' defaults to the latest, 'from' to to-1. Returns Added/Removed/Modified/Moved entries keyed by stable block_id, plus aggregate counts.",
+		Description: "Block-level diff between two versions. HTML-derived PDFs use declared-source and exact-PDF history instead and are refused. 'to' defaults to the latest, 'from' to to-1. Returns Added/Removed/Modified/Moved entries keyed by stable block_id, plus aggregate counts.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 			"from":        intSchema("source version_no (defaults to to-1)", 1, 100000, 0),
@@ -106,10 +106,14 @@ func registerVersionTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
+			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, errors.New("document not found")
 				}
+				return nil, err
+			}
+			if err := requireDocumentBlockDiff(doc); err != nil {
 				return nil, err
 			}
 			maxNo, err := d.Queries.GetLatestDocumentVersionNo(r.Context(), id)
@@ -286,6 +290,19 @@ func registerVersionTools(s *Server, d Deps) {
 			}, nil
 		},
 	})
+}
+
+// HTML text/PDF changes cannot be represented by an empty block tree. Refuse
+// before choosing latest/self/no-history shortcuts that could claim zero
+// changes for different immutable materializations.
+func requireDocumentBlockDiff(doc *generated.Document) error {
+	if doc == nil {
+		return errors.New("document not found")
+	}
+	if len(doc.HtmlSourceJson) != 0 || len(doc.HtmlCurrentSourceJson) != 0 || doc.HtmlCurrentMaterializationID.Valid {
+		return errors.New("HTML revisions use declared-source and exact-PDF history; block-tree diff is unavailable")
+	}
+	return nil
 }
 
 // versionToMap shapes a generated.DocumentVersion for the MCP wire. Block tree

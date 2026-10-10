@@ -16,6 +16,8 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 )
 
 // registerReadTools mounts the safe, read-only tools. These are the same
@@ -107,25 +109,25 @@ func registerReadTools(s *Server, d Deps) {
 				if err != nil {
 					return map[string]any{"documents": []any{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{doc}, "count": 1}, nil
+				return map[string]any{"documents": []*generated.Document{documentReadProjection(doc)}, "count": 1}, nil
 			}
 			limit := int32(50)
 			if p.Limit > 0 && p.Limit <= 200 {
 				limit = int32(p.Limit)
 			}
-			rows, err := d.Queries.ListDocuments(r.Context(), generated.ListDocumentsParams{
+			rows, err := d.Queries.ListDocumentsForMCP(r.Context(), generated.ListDocumentsForMCPParams{
 				OrgID: u.OrgID, Column2: p.Status, Limit: limit, Offset: int32(p.Offset),
 			})
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"documents": rows, "count": len(rows)}, nil
+			return map[string]any{"documents": documentMCPListQueryProjection(rows), "count": len(rows)}, nil
 		},
 	})
 
 	s.RegisterTool(ToolDef{
 		Name:        "get_document",
-		Description: "Fetch a single document by id, including blocks_json and metadata.",
+		Description: "Fetch a single document by id, including blocks_json and metadata. HTML documents omit embedded design/assets and expose expected_pdf_sha256 and expected_html_source_commitment for exact current field mutations.",
 		InputSchema: schemaObject(map[string]any{
 			"id": stringSchema("document id (uuid)"),
 		}, []string{"id"}),
@@ -153,6 +155,16 @@ func registerReadTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
+			if len(doc.HtmlSourceJson) != 0 {
+				if _, err := htmlmaterialization.Current(r.Context(), d.Queries, doc); err != nil {
+					return nil, errors.New("HTML document artifact is inconsistent")
+				}
+				commitment, err := htmlsource.Commitment(doc)
+				if err != nil {
+					return nil, err
+				}
+				return htmlDocumentReadProjection(doc, commitment), nil
+			}
 			return doc, nil
 		},
 	})
@@ -178,9 +190,9 @@ func registerReadTools(s *Server, d Deps) {
 				if derr != nil || !strings.Contains(strings.ToLower(doc.Name), strings.ToLower(p.Query)) {
 					return map[string]any{"documents": []*generated.Document{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{doc}, "count": 1}, nil
+				return map[string]any{"documents": []*generated.Document{documentReadProjection(doc)}, "count": 1}, nil
 			}
-			rows, err := d.Queries.SearchDocumentsByName(r.Context(), generated.SearchDocumentsByNameParams{
+			rows, err := d.Queries.SearchDocumentsByNameForMCP(r.Context(), generated.SearchDocumentsByNameForMCPParams{
 				OrgID:   u.OrgID,
 				Column2: pgtype.Text{String: p.Query, Valid: true},
 				Limit:   50,
@@ -188,7 +200,7 @@ func registerReadTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"documents": rows, "count": len(rows)}, nil
+			return map[string]any{"documents": documentMCPSearchQueryProjection(rows), "count": len(rows)}, nil
 		},
 	})
 

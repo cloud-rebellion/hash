@@ -55,13 +55,13 @@ func registerResources(s *Server, d Deps) {
 		MimeType:    "application/json",
 		Loader: func(r *http.Request) (any, error) {
 			u, _ := auth.FromContext(r.Context())
-			rows, err := d.Queries.ListDocuments(r.Context(), generated.ListDocumentsParams{
+			rows, err := d.Queries.ListDocumentsForMCP(r.Context(), generated.ListDocumentsForMCPParams{
 				OrgID: u.OrgID, Column2: nil, Limit: 50, Offset: 0,
 			})
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"documents": rows}, nil
+			return map[string]any{"documents": documentMCPListQueryProjection(rows)}, nil
 		},
 	})
 

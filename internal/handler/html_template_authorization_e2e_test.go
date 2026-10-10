@@ -719,7 +719,18 @@ func htmlMigrationPartsE2E(t *testing.T) (string, string) {
 	if len(parts) != 2 {
 		t.Fatal("HTML migration must contain explicit Up and Down")
 	}
-	return parts[0], parts[1]
+	// Migration74 depends on73's columns and has its own independent history
+	// refusal fence. Remove that empty dependent state first; never bypass its
+	// retention guards or alter73's production migration bytes.
+	dependent, err := os.ReadFile("../db/migrations/00074_html_document_materializations.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependentParts := strings.SplitN(string(dependent), "-- +goose Down", 2)
+	if len(dependentParts) != 2 {
+		t.Fatal("HTML materialization migration requires Up/Down")
+	}
+	return parts[0] + "\n" + dependentParts[0], dependentParts[1] + "\n" + parts[1]
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
@@ -791,6 +802,12 @@ func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+			}
+			// Flush deferred FK/ceremony guard events created by this same
+			// transaction's synthetic witness. Otherwise ALTER TABLE can stop
+			// with 55006 before reaching the migration's retained-state refusal.
+			if _, err := tx.Exec(f.ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil { //nolint:rawsql -- exercise the real rollback fence, not pending-trigger setup
+				t.Fatal(err)
 			}
 			_, err = tx.Exec(f.ctx, down) //nolint:rawsql -- exact destructive migration must refuse retained state
 			var pgerr *pgconn.PgError

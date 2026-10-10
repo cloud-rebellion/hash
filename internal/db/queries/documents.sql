@@ -41,6 +41,32 @@ WHERE org_id = $1
 ORDER BY updated_at DESC
 LIMIT $3 OFFSET $4;
 
+-- name: ListDocumentsForMCP :many
+-- Preserve ordinary document data and cheap current-source pins without copying
+-- either embedded approved master/assets into each MCP list row.
+SELECT d.id, d.org_id, d.template_id, d.name,
+    d.status, d.routing_mode, d.source_kind, d.blocks_json,
+    d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key,
+    d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key,
+    d.expires_at, d.sent_at, d.completed_at, d.sender_id,
+    d.metadata, d.created_at, d.updated_at, d.parent_envelope_id,
+    d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier,
+    d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at,
+    d.default_locale, d.requires_signature, d.audit_payload_key, d.audit_payload_sha256,
+    d.audit_signature_key, d.audit_signature_sha256, d.pdf_storage_version_id, d.rendered_pdf_version_id,
+    d.final_pdf_version_id, d.audit_cert_sha256, d.audit_cert_version_id, d.audit_payload_version_id,
+    d.audit_signature_version_id, d.evidence_version_pins_required, d.completion_effective_at, d.completion_effective_at_bound,
+    d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
+    NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
+    d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+FROM documents d
+WHERE d.org_id = $1
+  AND d.deleted_at IS NULL
+  AND ($2::TEXT[] IS NULL OR d.status = ANY($2::TEXT[]))
+ORDER BY d.updated_at DESC
+LIMIT $3 OFFSET $4;
+
 -- name: CountDocuments :one
 SELECT COUNT(*) FROM documents
 WHERE org_id = $1
@@ -87,6 +113,7 @@ UPDATE documents d
 SET html_reviewed_pdf_sha256 = sqlc.arg(expected_pdf_sha256)::bytea,
     html_reviewed_by = sqlc.arg(reviewed_by)::uuid,
     html_reviewed_at = clock_timestamp(),
+    html_reviewed_materialization_id = d.html_current_materialization_id,
     updated_at = clock_timestamp()
 WHERE d.id = sqlc.arg(id)::uuid AND d.org_id = sqlc.arg(org_id)::uuid
   AND d.status = 'draft' AND d.deleted_at IS NULL AND d.source_kind = 'pdf'
@@ -312,7 +339,38 @@ SELECT EXISTS(
     WHERE sqlc.arg(object_key)::text IN (i.final_pdf_key,i.audit_cert_key,i.audit_payload_key,i.audit_signature_key)
   UNION ALL
   SELECT 1 FROM signatures s WHERE s.image_storage_key = sqlc.arg(object_key)::text
+  UNION ALL
+  SELECT 1 FROM html_document_materializations m WHERE m.pdf_key = sqlc.arg(object_key)::text
+  UNION ALL
+  SELECT 1 FROM html_document_materialization_snapshots h
+    WHERE sqlc.arg(object_key)::text IN (h.pdf_key, h.rendered_pdf_key)
 ) AS shared;
+
+-- name: HasRetainedDraftSigningEvidence :one
+-- Caller holds the parent lock. An anomalous draft can still carry signing
+-- evidence or an unfinished sealing intent; retain both the row and its source
+-- before any draft mutation. Historical HTML rows do not forbid reversible
+-- editing; destructive purge adds its independent retained-history fence.
+SELECT EXISTS(
+  SELECT 1 FROM documents d
+    WHERE d.id = sqlc.arg(document_id)::uuid AND d.org_id = sqlc.arg(org_id)::uuid
+      AND (d.final_pdf_key IS NOT NULL OR d.final_pdf_sha IS NOT NULL OR d.final_pdf_version_id IS NOT NULL
+        OR d.audit_cert_key IS NOT NULL OR d.audit_cert_sha256 IS NOT NULL OR d.audit_cert_version_id IS NOT NULL
+        OR d.audit_payload_key IS NOT NULL OR d.audit_payload_sha256 IS NOT NULL OR d.audit_payload_version_id IS NOT NULL
+        OR d.audit_signature_key IS NOT NULL OR d.audit_signature_sha256 IS NOT NULL OR d.audit_signature_version_id IS NOT NULL)
+  UNION ALL
+  SELECT 1 FROM document_finalization_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM send_sealing_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM signatures WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM recipients WHERE document_id = sqlc.arg(document_id)::uuid
+    AND (status IN ('signed','accepted') OR signed_at IS NOT NULL)
+  UNION ALL
+  SELECT 1 FROM document_fields WHERE document_id = sqlc.arg(document_id)::uuid
+    AND (value IS NOT NULL OR completed_at IS NOT NULL)
+) AS retained;
 
 -- name: HasRetainedDraftEvidenceForPurge :one
 -- Caller holds the parent lock. An anomalous draft can still carry signing
@@ -329,6 +387,10 @@ SELECT EXISTS(
   SELECT 1 FROM document_finalization_intents WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
   SELECT 1 FROM send_sealing_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM html_document_materializations WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM html_document_materialization_snapshots WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
   SELECT 1 FROM signatures WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
@@ -358,6 +420,29 @@ WHERE d.id = $1
 SELECT * FROM documents
 WHERE org_id = $1 AND deleted_at IS NULL AND name ILIKE '%' || $2 || '%'
 ORDER BY updated_at DESC
+LIMIT $3;
+
+-- name: SearchDocumentsByNameForMCP :many
+-- The same bounded projection as MCP lists; no full JSON row materialization.
+SELECT d.id, d.org_id, d.template_id, d.name,
+    d.status, d.routing_mode, d.source_kind, d.blocks_json,
+    d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key,
+    d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key,
+    d.expires_at, d.sent_at, d.completed_at, d.sender_id,
+    d.metadata, d.created_at, d.updated_at, d.parent_envelope_id,
+    d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier,
+    d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at,
+    d.default_locale, d.requires_signature, d.audit_payload_key, d.audit_payload_sha256,
+    d.audit_signature_key, d.audit_signature_sha256, d.pdf_storage_version_id, d.rendered_pdf_version_id,
+    d.final_pdf_version_id, d.audit_cert_sha256, d.audit_cert_version_id, d.audit_payload_version_id,
+    d.audit_signature_version_id, d.evidence_version_pins_required, d.completion_effective_at, d.completion_effective_at_bound,
+    d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
+    NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
+    d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+FROM documents d
+WHERE d.org_id = $1 AND d.deleted_at IS NULL AND d.name ILIKE '%' || $2 || '%'
+ORDER BY d.updated_at DESC
 LIMIT $3;
 
 -- name: GetExpirableDocuments :many

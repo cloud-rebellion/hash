@@ -30,6 +30,9 @@
   import PdfFieldDesigner from '$lib/components/PdfFieldDesigner.svelte';
   import SavePDFTemplate from '$lib/components/SavePDFTemplate.svelte';
   import HtmlPDFReview from '$lib/components/HtmlPDFReview.svelte';
+  import HtmlDocumentRevision from '$lib/components/HtmlDocumentRevision.svelte';
+  import HtmlDocumentHistory from '$lib/components/HtmlDocumentHistory.svelte';
+  import { htmlUUID } from '$lib/htmlRevision';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
   let doc = $state<DocumentResponse | null>(null);
@@ -44,6 +47,7 @@
   let savedTemplateFlash = $state(false);
   let showPDFSave = $state(false);
   let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
+  let htmlRevisionBlocked = $state(true);
   let changeRequests = $state<ChangeRequest[]>([]);
   let revising = $state(false);
   let approvalMode = $state<'accept' | 'auto_apply'>('accept');
@@ -77,15 +81,26 @@
       && (!unchanged || scope.documentRevision === documentRevision);
   }
   function receiveDocument(updated: DocumentResponse, scope: DocumentScope): boolean {
-    if (!isCurrentDocument(scope, true) || updated.id !== scope.id) return false;
+    if (!isCurrentDocument(scope, true) || updated.id !== scope.id || updated.org_id !== doc?.org_id) return false;
+    resetPDFPlacement(updated);
     doc = updated;
     documentRevision++;
     return true;
   }
   function receiveEditorDocument(updated: DocumentResponse, scope: DocumentScope) {
-    if (!isCurrentDocument(scope) || updated.id !== scope.id) return;
+    if (!isCurrentDocument(scope) || updated.id !== scope.id || updated.org_id !== doc?.org_id) return;
+    resetPDFPlacement(updated);
     doc = updated;
     documentRevision++;
+  }
+  function resetPDFPlacement(updated: DocumentResponse) {
+    if (!doc || doc.id !== updated.id || doc.pdf_sha256 !== updated.pdf_sha256
+        || doc.html_source_commitment !== updated.html_source_commitment || doc.html_materialization_revision !== updated.html_materialization_revision) {
+      pdfSignatureFields = [];
+      htmlRevisionBlocked = true;
+      recipientRevision++;
+      showPDFSave = false;
+    }
   }
   async function refreshHTMLDocument() {
     const scope = captureDocument();
@@ -268,17 +283,18 @@
       const [d, me] = await Promise.all([getDocument(id), getMe().catch(() => null)]);
       if (!isCurrentRoute(id, revision)) return;
       if (d.id !== id) throw new Error('The server returned a different document.');
-      doc = d;
+      resetPDFPlacement(d); doc = d;
       documentRevision++;
-      viewerRole = me?.org_id === d.org_id ? me.role : '';
-      viewerUserID = me?.org_id === d.org_id ? me.user_id : '';
+      const verifiedIdentity = me && htmlUUID(me.org_id) && htmlUUID(me.user_id) && me.org_id === d.org_id && ['owner', 'sender', 'viewer'].includes(me.role);
+      viewerRole = verifiedIdentity ? me.role : '';
+      viewerUserID = verifiedIdentity ? me.user_id : '';
       // A draft opens in the editor; anything already sent opens read-only so
       // the sender reviews the frozen content rather than appearing to edit it.
       showPreview = d.status !== 'draft';
       if (d.status === 'changes_requested') {
         void loadChangeRequests(d.id);
       }
-      if (d.status !== 'draft') {
+      if (d.status !== 'draft' || d.has_html_source) {
         void loadComments(d.id);
       }
       if (me?.email) {
@@ -306,6 +322,7 @@
     savedTemplateFlash = false;
     showPDFSave = false;
     pdfSignatureFields = [];
+    htmlRevisionBlocked = true;
     changeRequests = [];
     revising = false;
     approvalMode = 'accept';
@@ -404,12 +421,17 @@
     {/if}
 
     {#if doc.status === 'draft' && doc.has_html_source}
-      {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}`}
-        <HtmlPDFReview document={doc}
+      {#key doc.id}
+        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
+          onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }} />
+      {/key}
+      {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}:${doc.html_source_commitment}`}
+        <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked}
           canReview={viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)}
           onReviewed={(updated) => receiveDocument(updated, documentScope)} onRefresh={refreshHTMLDocument} />
       {/key}
     {/if}
+    {#if doc.has_html_source}{#key doc.id}<HtmlDocumentHistory document={doc} />{/key}{/if}
 
     {#if doc.status === 'draft'}
       <div class="card p-4 mb-6 flex items-center justify-between gap-4">
@@ -434,7 +456,7 @@
           En part har begärt ändringar. Signering är pausad. Revidera dokumentet,
           gör ändringarna och skicka det för signering igen.
         </p>
-        <div class="flex flex-wrap items-center gap-2 mb-4 text-xs">
+        {#if !doc.has_html_source}<div class="flex flex-wrap items-center gap-2 mb-4 text-xs">
           <span class="uppercase tracking-widest text-text-muted font-mono">Vid godkännande</span>
           <button
             class="px-2 py-1 rounded-md border {approvalMode === 'accept' ? 'border-accent text-accent' : 'border-border-light text-text-muted'}"
@@ -447,7 +469,7 @@
             disabled={savingApprovalMode}
           >Tillämpa föreslagen text automatiskt</button>
           <span class="text-text-muted">(global inställning)</span>
-        </div>
+        </div>{:else}<p class="text-sm text-text-secondary mb-4">Approving a request records your decision. It does not apply proposed wording. Reopen the document, update its declared values or wording, and review the newly rendered PDF before sending again.</p>{/if}
 
         {#if changeRequestRefreshError}
           <div role="alert" class="text-danger mb-4">
@@ -499,9 +521,10 @@
       {/if}
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
-        <PdfFieldDesigner documentID={doc.id} {recipientRevision} onSignatureFieldsChange={(fields) => {
+        {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
+          hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} onSignatureFieldsChange={(fields) => {
           if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
-        }} />
+        }} />{/key}
       </div>
       {#if showPreview}
         <iframe title="preview" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
@@ -516,9 +539,10 @@
     {:else if doc.source_kind === 'blocks'}
       <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
-      <PdfFieldDesigner documentID={doc.id} {recipientRevision} onSignatureFieldsChange={(fields) => {
+      {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
+        hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} onSignatureFieldsChange={(fields) => {
         if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
-      }} />
+      }} />{/key}
     {/if}
 
     <div class="mt-8">
@@ -527,13 +551,14 @@
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
+        revisionBlocked={doc.has_html_source === true && htmlRevisionBlocked}
         defaultLocale={doc.default_locale}
         signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : pdfSignatureFields}
         onStatusChange={(next) => receiveStatus(next, documentScope)}
         onRecipientsChange={() => { if (isCurrentDocument(documentScope)) recipientRevision++; }}
         onDefaultLocaleChange={(locale) => changeDefaultLocale(locale, documentScope)}
       />
-      {#if doc.status !== 'draft'}
+      {#if doc.status !== 'draft' || doc.has_html_source}
         <section class="card p-5 mb-6">
           <h2 class="font-display font-extralight text-lg mb-1">Kommentarer</h2>
           <p class="text-sm text-text-secondary mb-4 leading-relaxed">

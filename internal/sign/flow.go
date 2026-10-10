@@ -38,6 +38,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/i18n"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
@@ -1313,11 +1314,11 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 	if err := rejectUnsupportedEnvelopeTransition(lockedDoc, "decline"); err != nil {
 		return err
 	}
-	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
+	freshRec, err := q.GetRecipientForShare(ctx, generated.GetRecipientForShareParams{ID: rec.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID})
 	if err != nil {
 		return err
 	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
 		return err
 	}
 	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
@@ -1381,6 +1382,15 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 	if err != nil {
 		return fmt.Errorf("audit decline: %w", err)
 	}
+	// Validate the retained pre-response credential. This transaction expires
+	// links as part of declining; that deliberate expiry must not replace the
+	// original admission deadline or hide expiry during the audit wait.
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
+		return err
+	}
+	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit decline: %w", err)
 	}
@@ -1439,11 +1449,11 @@ func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in Ch
 	if err := rejectUnsupportedEnvelopeTransition(lockedDoc, "request changes"); err != nil {
 		return err
 	}
-	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
+	freshRec, err := q.GetRecipientForShare(ctx, generated.GetRecipientForShareParams{ID: rec.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID})
 	if err != nil {
 		return err
 	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
 		return err
 	}
 	if freshRec.DocumentID != doc.ID || !recipientCanRequestChanges(freshRec.Role, freshRec.Status) {
@@ -1528,6 +1538,15 @@ func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in Ch
 	pendingAudit, err := e.Audit.LogTx(ctx, tx, changeEvent)
 	if err != nil {
 		return fmt.Errorf("audit change request: %w", err)
+	}
+	// Neither the original admission nor a retained deadline may expire while
+	// waiting for the audit chain. The recipient SHARE lock prevents a token
+	// rotation from authorizing this request under a replacement credential.
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
+		return err
+	}
+	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, in.Notice); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit change request: %w", err)
@@ -1696,6 +1715,11 @@ func changeRequestCanResolve(status string) bool { return status == "open" }
 // row-locked document. Its write shares ResolveChange's transaction, so an
 // apply error rolls back both the block mutation and the request resolution.
 func applyChangeToLockedDocument(ctx context.Context, q *generated.Queries, doc *generated.Document, cr *generated.ChangeRequest) error {
+	// PDF/HTML requests approve the negotiation request only. Declared HTML
+	// prose changes require a separate staff revision and exact PDF review.
+	if doc.SourceKind != "blocks" {
+		return nil
+	}
 	if cr.BlockID == "" || cr.Quote == "" || cr.Proposed == "" {
 		return nil
 	}
@@ -1771,11 +1795,11 @@ func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body s
 	if err := checkDocumentCommentable(lockedDoc); err != nil {
 		return nil, err
 	}
-	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
+	freshRec, err := q.GetRecipientForShare(ctx, generated.GetRecipientForShareParams{ID: rec.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID})
 	if err != nil {
 		return nil, err
 	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
 		return nil, err
 	}
 	if freshRec.DocumentID != lockedDoc.ID {
@@ -1823,6 +1847,12 @@ func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body s
 	})
 	if err != nil {
 		return nil, fmt.Errorf("audit signer comment: %w", err)
+	}
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
+		return nil, err
+	}
+	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit signer comment: %w", err)
@@ -2053,6 +2083,9 @@ func (e *Engine) revise(ctx context.Context, orgID, docID, userID uuid.UUID, aut
 	}
 	if captured {
 		return nil, ErrRevisionWouldDestroyEvidence
+	}
+	if err := htmlmaterialization.CaptureRetiredCeremony(ctx, q, locked, userID); err != nil {
+		return nil, fmt.Errorf("archive retired HTML ceremony: %w", err)
 	}
 
 	doc, err := q.ReopenDocumentToDraft(ctx, generated.ReopenDocumentToDraftParams{ID: docID, OrgID: orgID})

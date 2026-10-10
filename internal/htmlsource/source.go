@@ -149,10 +149,45 @@ func validatedSource(doc *generated.Document, requireReview bool) (source, error
 		return source{}, invalid("missing document")
 	}
 	if len(doc.HtmlSourceJson) == 0 {
+		if doc.HtmlCurrentMaterializationID.Valid || len(doc.HtmlCurrentSourceJson) != 0 || doc.HtmlCurrentPageCount.Valid || doc.HtmlCurrentMaterializationSequence.Valid || doc.HtmlReviewedMaterializationID.Valid {
+			return source{}, invalid("current materialization has no immutable origin")
+		}
 		return source{}, nil
 	}
+	raw := doc.HtmlSourceJson
+	if !doc.HtmlCurrentMaterializationID.Valid {
+		if len(doc.HtmlCurrentSourceJson) != 0 || doc.HtmlCurrentPageCount.Valid || doc.HtmlCurrentMaterializationSequence.Valid || doc.HtmlReviewedMaterializationID.Valid {
+			return source{}, invalid("orphan current materialization projection")
+		}
+	} else {
+		if uuid.UUID(doc.HtmlCurrentMaterializationID.Bytes) == uuid.Nil || len(doc.HtmlCurrentSourceJson) == 0 ||
+			!doc.HtmlCurrentPageCount.Valid || doc.HtmlCurrentPageCount.Int32 < 1 || doc.HtmlCurrentPageCount.Int32 > 500 ||
+			!doc.HtmlCurrentMaterializationSequence.Valid || doc.HtmlCurrentMaterializationSequence.Int32 < 1 {
+			return source{}, invalid("incomplete current materialization projection")
+		}
+		origin, err := validatedOrigin(doc)
+		if err != nil {
+			return source{}, err
+		}
+		current, err := validatedRecord(doc, doc.HtmlCurrentSourceJson, false)
+		if err != nil {
+			return source{}, err
+		}
+		if !sameApprovedOrigin(origin, current) ||
+			(doc.HtmlCurrentMaterializationSequence.Int32 == 1 && current.Commitment != origin.Commitment) {
+			return source{}, invalid("current materialization changed its immutable approved origin")
+		}
+		raw = doc.HtmlCurrentSourceJson
+		if requireReview && (!doc.HtmlReviewedMaterializationID.Valid || doc.HtmlReviewedMaterializationID.Bytes != doc.HtmlCurrentMaterializationID.Bytes) {
+			return source{}, ErrReviewRequired
+		}
+	}
+	return validatedRecord(doc, raw, requireReview)
+}
+
+func validatedRecord(doc *generated.Document, raw []byte, requireReview bool) (source, error) {
 	var s source
-	if err := decodeSource(doc.HtmlSourceJson, &s); err != nil {
+	if err := decodeSource(raw, &s); err != nil {
 		return source{}, err
 	}
 	if err := validateIdentity(s, doc); err != nil {
@@ -180,6 +215,91 @@ func validatedSource(doc *generated.Document, requireReview bool) (source, error
 		return source{}, ErrReviewRequired
 	}
 	return s, nil
+}
+
+// EffectiveJSON returns a defensive copy of the validated current source. The
+// first-set JSON remains the origin; a broken explicit projection never falls
+// back to that old materialization.
+func EffectiveJSON(doc *generated.Document) (json.RawMessage, error) {
+	if _, err := validatedSource(doc, false); err != nil {
+		return nil, err
+	}
+	if doc.HtmlCurrentMaterializationID.Valid {
+		return bytes.Clone(doc.HtmlCurrentSourceJson), nil
+	}
+	return bytes.Clone(doc.HtmlSourceJson), nil
+}
+
+// InputForCurrent recovers only the frozen design/approval and current printed
+// inputs. Callers merge declared overrides here, never against a latest template.
+func InputForCurrent(doc *generated.Document) (Input, error) {
+	s, err := validatedSource(doc, false)
+	if err != nil || s.Commitment == "" {
+		return Input{}, invalid("missing or invalid current HTML source")
+	}
+	return Input{TemplateID: s.TemplateID, TemplateVersion: s.TemplateVersion, TemplateContentSHA256: s.TemplateContentSHA256,
+		MasterJSON: bytes.Clone(s.MasterJSON), DefaultVarsJSON: bytes.Clone(s.DefaultVarsJSON), Values: maps.Clone(s.Values), Sections: maps.Clone(s.Sections),
+		TemplateApprovedBy: s.TemplateApprovedBy, TemplateApprovedAt: s.TemplateApprovedAt}, nil
+}
+
+// OriginCommitment validates the immutable first materialization independently
+// of the current PDF projection and returns its stable typed chain anchor.
+func OriginCommitment(doc *generated.Document) (string, error) {
+	s, err := validatedOrigin(doc)
+	if err != nil {
+		return "", err
+	}
+	return s.Commitment, nil
+}
+
+// ChangedSections reports exact differences from the approved master text.
+func ChangedSections(doc *generated.Document) ([]string, error) {
+	s, err := validatedSource(doc, false)
+	if err != nil || s.Commitment == "" {
+		return nil, invalid("missing or invalid current HTML source")
+	}
+	_, result, err := materialize(s)
+	return append([]string{}, result.ChangedSections...), err
+}
+
+func MaterializationDigest(doc *generated.Document) (string, error) {
+	s, err := validatedSource(doc, false)
+	if err != nil || s.Commitment == "" {
+		return "", invalid("missing or invalid current HTML source")
+	}
+	return s.ContentDigest, nil
+}
+
+func validatedOrigin(doc *generated.Document) (source, error) {
+	if doc == nil || len(doc.HtmlSourceJson) == 0 {
+		return source{}, invalid("missing immutable HTML origin")
+	}
+	var s source
+	if err := decodeSource(doc.HtmlSourceJson, &s); err != nil {
+		return source{}, err
+	}
+	digest, err := hex.DecodeString(s.PDFSHA256)
+	if err != nil {
+		return source{}, invalid("origin PDF digest")
+	}
+	variables, err := json.Marshal(s.Values)
+	if err != nil {
+		return source{}, invalid("origin printed inputs")
+	}
+	// Document has no synchronization fields. The copy is used only to validate
+	// the retained original tuple, never to project it onto a live database row.
+	origin := *doc
+	origin.PdfStorageKey = pgtype.Text{String: s.PDFKey, Valid: true}
+	origin.PdfSha256 = digest
+	origin.PdfStorageVersionID = pgtype.Text{String: s.PDFVersionID, Valid: true}
+	origin.VariablesJson = variables
+	return validatedRecord(&origin, doc.HtmlSourceJson, false)
+}
+
+func sameApprovedOrigin(a, b source) bool {
+	return a.SchemaVersion == b.SchemaVersion && a.DocumentID == b.DocumentID && a.OrgID == b.OrgID &&
+		a.TemplateID == b.TemplateID && a.TemplateVersion == b.TemplateVersion && a.TemplateContentSHA256 == b.TemplateContentSHA256 &&
+		a.TemplateApprovedBy == b.TemplateApprovedBy && a.TemplateApprovedAt.Equal(b.TemplateApprovedAt) && a.MasterDigest == b.MasterDigest
 }
 
 func materialize(s source) (htmlmaster.TemplateCommitment, htmlmaster.Result, error) {

@@ -2112,6 +2112,12 @@ func verifyPreparedSendDocument(prepared, locked *generated.Document) error {
 		!bytes.Equal(prepared.VariablesJson, locked.VariablesJson) ||
 		!bytes.Equal(prepared.Metadata, locked.Metadata) ||
 		!bytes.Equal(prepared.HtmlSourceJson, locked.HtmlSourceJson) ||
+		!bytes.Equal(prepared.HtmlCurrentSourceJson, locked.HtmlCurrentSourceJson) ||
+		prepared.HtmlCurrentMaterializationID != locked.HtmlCurrentMaterializationID ||
+		prepared.HtmlCurrentMaterializationSequence != locked.HtmlCurrentMaterializationSequence ||
+		prepared.HtmlCurrentPageCount != locked.HtmlCurrentPageCount ||
+		prepared.HtmlEffectiveSourceCommitment != locked.HtmlEffectiveSourceCommitment ||
+		prepared.HtmlReviewedMaterializationID != locked.HtmlReviewedMaterializationID ||
 		!bytes.Equal(prepared.HtmlReviewedPdfSha256, locked.HtmlReviewedPdfSha256) ||
 		prepared.HtmlReviewedBy != locked.HtmlReviewedBy ||
 		prepared.HtmlReviewedAt.Valid != locked.HtmlReviewedAt.Valid ||

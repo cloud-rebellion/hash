@@ -99,9 +99,13 @@ jobs:
           wait_for minio curl -sf http://localhost:9000/minio/health/ready
           wait_for gotenberg curl -sf http://localhost:3000/health
 
+      - name: Build isolated PDF worker for E2E
+        run: go build -o "$RUNNER_TEMP/hash-pdf-worker" ./cmd/pdfworker
+
       - name: Run module-wide E2E
         env:
           HASH_E2E_DB_URL: postgres://hash:e2e@localhost:5432/hash?sslmode=disable
+          HASH_E2E_PDF_WORKER_PATH: ${{ runner.temp }}/hash-pdf-worker
           HASH_E2E_S3_ENDPOINT: localhost:9000
           HASH_E2E_S3_ACCESS_KEY: minioadmin
           HASH_E2E_S3_SECRET_KEY: minioadmin

@@ -23,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
@@ -229,6 +230,10 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	if err != nil {
 		return nil, 0, err
 	}
+	doc, _, err = htmlmaterialization.RegisterOrigin(ctx, q, doc, int32(pages), actor.UserID)
+	if err != nil {
+		return nil, 0, err
+	}
 	sourceCommitment, err := htmlsource.Commitment(doc)
 	if err != nil {
 		return nil, 0, err
@@ -236,7 +241,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	if err := s.Billing.EnforceDocumentQuotaMutation(ctx, q, actor.OrgID); err != nil {
 		return nil, 0, err
 	}
-	if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind, VariablesJS: doc.VariablesJson, HTMLSourceJSON: doc.HtmlSourceJson, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "Created from approved HTML design"}); err != nil {
+	if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind, VariablesJS: doc.VariablesJson, HTMLSourceJSON: doc.HtmlSourceJson, HTMLMaterializationID: doc.HtmlCurrentMaterializationID, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "Created from approved HTML design"}); err != nil {
 		return nil, 0, err
 	}
 	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: audit.KindDocumentCreated,
@@ -257,8 +262,9 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 }
 
 type htmlDocumentReviewInput struct {
-	ExpectedUpdatedAt string `json:"expected_updated_at"`
-	ExpectedPDFSHA256 string `json:"expected_pdf_sha256"`
+	ExpectedUpdatedAt            string `json:"expected_updated_at"`
+	ExpectedPDFSHA256            string `json:"expected_pdf_sha256"`
+	ExpectedHTMLSourceCommitment string `json:"expected_html_source_commitment,omitempty"`
 }
 
 func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request) {
@@ -311,6 +317,15 @@ func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request
 	sourceCommitment, err := htmlsource.Commitment(guard.Document)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if _, err := htmlmaterialization.Current(ctx, q, guard.Document); err != nil {
+		writeError(w, http.StatusConflict, "document source or history is inconsistent; review unavailable")
+		return
+	}
+	if (guard.Document.HtmlCurrentMaterializationID.Valid && in.ExpectedHTMLSourceCommitment == "") ||
+		(in.ExpectedHTMLSourceCommitment != "" && in.ExpectedHTMLSourceCommitment != sourceCommitment) {
+		writeError(w, http.StatusConflict, "document source changed; preview and review its current PDF again")
 		return
 	}
 	doc, err := q.MarkDocumentHTMLReviewed(ctx, generated.MarkDocumentHTMLReviewedParams{ID: id, OrgID: u.OrgID, ExpectedUpdatedAt: pgtype.Timestamptz{Time: expected, Valid: true}, ExpectedPdfSha256: digest, ReviewedBy: u.UserID})

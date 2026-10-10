@@ -102,16 +102,18 @@ func fieldKindAllowed(kind string) bool {
 }
 
 type addFieldInput struct {
-	RecipientID string         `json:"recipient_id"`
-	Type        string         `json:"type"`
-	Page        int            `json:"page"`
-	XPct        float64        `json:"x_pct"`
-	YPct        float64        `json:"y_pct"`
-	WPct        float64        `json:"w_pct"`
-	HPct        float64        `json:"h_pct"`
-	Required    *bool          `json:"required"`
-	Label       string         `json:"label"`
-	Options     map[string]any `json:"options"`
+	ExpectedPDFSHA256            string         `json:"expected_pdf_sha256,omitempty"`
+	ExpectedHTMLSourceCommitment string         `json:"expected_html_source_commitment,omitempty"`
+	RecipientID                  string         `json:"recipient_id"`
+	Type                         string         `json:"type"`
+	Page                         int            `json:"page"`
+	XPct                         float64        `json:"x_pct"`
+	YPct                         float64        `json:"y_pct"`
+	WPct                         float64        `json:"w_pct"`
+	HPct                         float64        `json:"h_pct"`
+	Required                     *bool          `json:"required"`
+	Label                        string         `json:"label"`
+	Options                      map[string]any `json:"options"`
 }
 
 // POST /api/v1/documents/{id}/fields
@@ -161,6 +163,8 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	actor.ExpectedPDFSHA256 = in.ExpectedPDFSHA256
+	actor.ExpectedHTMLSourceCommitment = in.ExpectedHTMLSourceCommitment
 	engine := fieldmutations.MutationEngine{Pool: s.Pool, Audit: s.Audit}
 	row, err := engine.Create(r.Context(), actor, docID, fieldmutations.CreateInput{
 		RecipientID: recipientID, Type: in.Type, Page: in.Page,
@@ -223,10 +227,23 @@ func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
+	var in struct {
+		ExpectedPDFSHA256            string `json:"expected_pdf_sha256,omitempty"`
+		ExpectedHTMLSourceCommitment string `json:"expected_html_source_commitment,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+		if err := decodeSignerJSON(r, &in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid field deletion proof: "+err.Error())
+			return
+		}
+	}
 	actor, ok := s.fieldMutationActor(w, r, sess)
 	if !ok {
 		return
 	}
+	actor.ExpectedPDFSHA256 = in.ExpectedPDFSHA256
+	actor.ExpectedHTMLSourceCommitment = in.ExpectedHTMLSourceCommitment
 	engine := fieldmutations.MutationEngine{Pool: s.Pool, Audit: s.Audit}
 	if _, err := engine.Delete(r.Context(), actor, ownerDoc, id); err != nil {
 		s.writeFieldMutationError(w, "delete field", err)
@@ -261,6 +278,8 @@ func (s *Server) writeFieldMutationError(w http.ResponseWriter, operation string
 		writeError(w, http.StatusNotFound, "recipient not found in document")
 	case errors.Is(err, fieldmutations.ErrDocumentNotDraft):
 		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+	case errors.Is(err, fieldmutations.ErrHTMLArtifactChanged):
+		writeError(w, http.StatusConflict, fieldmutations.ErrHTMLArtifactChanged.Error())
 	case errors.Is(err, fieldmutations.ErrDocumentHasEvidence):
 		writeError(w, http.StatusConflict, "document contains retained signing evidence or sealing state; review before editing fields")
 	case errors.Is(err, fieldmutations.ErrFieldLimitReached):

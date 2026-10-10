@@ -152,12 +152,17 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID}); err != nil {
+	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
 		writeInternalError(w, err)
+		return
+	}
+	if len(doc.HtmlSourceJson) != 0 {
+		writeError(w, http.StatusConflict, "HTML revisions use declared-source and exact-PDF history; block-tree diff is unavailable")
 		return
 	}
 	maxNo, err := s.Queries.GetLatestDocumentVersionNo(r.Context(), docID)

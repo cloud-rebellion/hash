@@ -449,9 +449,10 @@ sent documents use their frozen variables.
 ## HTML design draft API
 
 This source draft adds reusable HTML designs separately from the PDF bytes used
-for signing. It is not a deployed release. HTML document
-negotiation and rerendering, contract-completeness profiles, signature-page
-binding, visual acceptance and approved privacy disposal remain pending.
+for signing. It is not a deployed release. Declared-text document revision and
+retained PDF history are described below. Contract-completeness profiles,
+automatic signature-page binding, real-renderer visual acceptance and approved
+privacy disposal remain pending.
 
 Sender sessions can create `POST /api/v1/templates/html` and edit
 `PATCH /api/v1/templates/{id}/html`. Editing requires `expected_version`; every
@@ -547,13 +548,19 @@ The response includes `document`, `page_count` and `review_required:true`.
 HTML-derived document responses include `has_html_source:true` throughout their
 lifetime, even after `html_review_required` becomes false and is omitted. Their
 `source_kind` remains `pdf`. Use this provenance flag to preserve the static-PDF
-template export restriction after review.
+template export restriction after review. Document responses also include
+`html_source_commitment` and `html_materialization_revision` for the current
+materialization. The source commitment changes when declared text changes even
+if a renderer returns identical PDF bytes.
 
 The original sender or an owner must inspect `/api/v1/documents/{id}/pdf` and
 explicitly review its current bytes with
 `POST /api/v1/documents/{id}/html/review`, supplying the observed
-`expected_updated_at` and `expected_pdf_sha256`. This records review of that
-exact PDF; it does not validate contract terms or signature geometry. Sending
+`expected_updated_at`, `expected_pdf_sha256` and
+`expected_html_source_commitment`. The source pin is required for registered
+materializations; legacy unregistered documents retain their original review
+compatibility. This records review of that exact materialization and PDF; it
+does not validate contract terms or signature geometry. Sending
 refuses absent review, altered provenance, or resolved variables that differ
 from the printed values. New prose always needs this human review. Existing
 field-design and recipient setup still apply; static PDF template export of an
@@ -567,6 +574,83 @@ Template and version lists omit the large inline master. Explicit template and
 version reads return it under the existing tenant/session authorization. Metadata
 snapshots preserve the immutable document source. Source and completed template
 approvals cannot be rewritten; migration rollback refuses retained HTML data.
+
+### Revising declared document text
+
+`GET /api/v1/documents/{id}/html/source` returns the current declared values and
+plain-text sections, source commitment, PDF digest, page count and materialization
+revision. It includes `can_edit`, computed from the live draft and original
+sender/owner authority. It omits the HTML/CSS master, inline assets and storage
+identifiers. Viewing source does not register a legacy materialization or write
+history.
+
+The original sender or an owner can call
+`POST /api/v1/documents/{id}/html/revisions` for a draft:
+
+```json
+{
+  "expected_updated_at": "<current document timestamp>",
+  "expected_html_source_commitment": "<current source SHA-256>",
+  "values": {"customer": "Updated customer"},
+  "sections": {"scope": "Human-proposed wording for review"},
+  "summary": "Updated customer and scope"
+}
+```
+
+Omitted maps and entries preserve the current text. Explicit null, duplicate or
+unknown keys, invalid Unicode and undeclared values/sections are refused. At
+least one declared text change is required. Identical text or summary-only
+requests return 409 without a revision, object or audit write. Values and sections remain escaped
+plain text; the request cannot replace the frozen master, defaults, approved
+template revision or assets. The request is capped at 1 MiB; each declared
+limit also applies. The optional summary is limited to 500 characters.
+
+Rendering, scanning, isolated PDF sanitation/page counting and versioned object
+storage run outside database locks. The original credential, live author and
+observed document/source are rechecked before committing. Successful revisions
+append immutable history, archive the prior review, layout and party context,
+switch the current materialization and clear unsigned fields and review. Old
+coordinates are not reused. Captured signature, acceptance or field evidence,
+unfinished sealing and pending privacy work refuse a revision. A changed source
+requires fresh human review and fresh signature placement, including when the
+new PDF digest is identical. Success is 201 with `document`,
+`materialization_revision`, `page_count`, `review_required:true` and
+`placement_reset:true`. No invitation is sent by this operation.
+
+Missing or malformed observations return 428. Invalid text returns 400, changed
+observations or forbidden state 409, import
+capacity 429 with `Retry-After`, and unavailable processing dependencies 503.
+401/403 apply to expired or revoked authority. A failed precommit write removes
+only the newly owned object version. An ambiguous commit retains it for
+canonical reconciliation; refresh history before retrying.
+
+### Retained materialization history
+
+`GET /api/v1/documents/{id}/html/history` returns the latest 200 immutable
+materialization descriptors in `{revisions:[...]}`. Each entry identifies its
+sequence, source/PDF commitments and whether it is current.
+`GET /api/v1/documents/{id}/html/revisions/{sequence}/source` returns the retained
+declared text with `can_edit:false`.
+`GET /api/v1/documents/{id}/html/revisions/{sequence}/pdf` verifies the exact
+retained storage version, digest and page count. It never falls back to the
+latest object. Successful PDF responses are `no-store` and include
+`X-Hash-Document-Id`, `X-Hash-Materialization-Revision`,
+`X-Hash-HTML-Source-Commitment`, `X-Hash-PDF-SHA256` and `X-Hash-PDF-Pages`.
+Authority and the document observation are rechecked after storage/worker waits.
+Missing history returns 404; a missing or altered pinned object is an integrity
+failure. Worker capacity/unavailability retains its 429/503 response.
+
+HTML documents do not support block-version Diff or Restore; these operations
+refuse rather than implying that different rendered documents contain zero
+changes. Approving a negotiation change request on a PDF/HTML document records
+acceptance of the request without automatically rewriting prose. The sender
+must revise the declared text and review the fresh materialization.
+
+Reopening an unsigned ceremony archives the original invitation epoch, notice,
+review, layout, parties and persisted retention deadline before invalidating
+links. Reopening does not extend the archived retention clock. Historical
+objects remain protected by inventory, purge and privacy safeguards; disposal
+still requires an approved retention/export workflow.
 
 Recipient redaction and recipient-only exports cannot account for personal data
 in retained HTML designs, defaults and source history. When any such inventory

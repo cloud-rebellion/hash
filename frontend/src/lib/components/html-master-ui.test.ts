@@ -154,8 +154,8 @@ test('late design read or creation cannot affect a new selection or disposed rou
 function reviewFixture() {
   const calls: any[] = [], reviewed: any[] = [];
   const env: any = { document: { id: 'doc', org_id: 'org', source_kind: 'pdf', has_html_source: true, html_review_required: true,
-      updated_at: 'observed', pdf_sha256: 'a'.repeat(64), status: 'draft' }, sourceID: 'doc', sourceStamp: 'observed', sourceSHA: 'a'.repeat(64),
-    disposed: false, canReview: true, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, acknowledged: true,
+      updated_at: 'observed', pdf_sha256: 'a'.repeat(64), status: 'draft' }, sourceID: 'doc', sourceStamp: 'observed', sourceSHA: 'a'.repeat(64), sourceCommitment: '',
+    disposed: false, canReview: true, revisionBlocked: false, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, acknowledged: true,
     current: () => !env.disposed && env.document.id === env.sourceID && env.document.updated_at === env.sourceStamp && env.document.pdf_sha256 === env.sourceSHA,
     reviewHTMLDocument: (...args: any[]) => new Promise((resolve, reject) => calls.push({ args, resolve, reject })),
     onReviewed: (doc: any) => reviewed.push(doc) };

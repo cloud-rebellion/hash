@@ -28,7 +28,7 @@ func (q *Queries) CountDocumentVersions(ctx context.Context, documentID uuid.UUI
 }
 
 const getDocumentVersion = `-- name: GetDocumentVersion :one
-SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json FROM document_versions WHERE id = $1
+SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json, html_materialization_id FROM document_versions WHERE id = $1
 `
 
 func (q *Queries) GetDocumentVersion(ctx context.Context, id uuid.UUID) (*DocumentVersion, error) {
@@ -50,12 +50,13 @@ func (q *Queries) GetDocumentVersion(ctx context.Context, id uuid.UUID) (*Docume
 		&i.ParentID,
 		&i.SchemaVersion,
 		&i.HtmlSourceJson,
+		&i.HtmlMaterializationID,
 	)
 	return &i, err
 }
 
 const getDocumentVersionByNo = `-- name: GetDocumentVersionByNo :one
-SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json FROM document_versions
+SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json, html_materialization_id FROM document_versions
 WHERE document_id = $1 AND version_no = $2
 `
 
@@ -83,12 +84,13 @@ func (q *Queries) GetDocumentVersionByNo(ctx context.Context, arg GetDocumentVer
 		&i.ParentID,
 		&i.SchemaVersion,
 		&i.HtmlSourceJson,
+		&i.HtmlMaterializationID,
 	)
 	return &i, err
 }
 
 const getLatestDocumentVersion = `-- name: GetLatestDocumentVersion :one
-SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json FROM document_versions
+SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json, html_materialization_id FROM document_versions
 WHERE document_id = $1
 ORDER BY version_no DESC
 LIMIT 1
@@ -113,6 +115,7 @@ func (q *Queries) GetLatestDocumentVersion(ctx context.Context, documentID uuid.
 		&i.ParentID,
 		&i.SchemaVersion,
 		&i.HtmlSourceJson,
+		&i.HtmlMaterializationID,
 	)
 	return &i, err
 }
@@ -135,29 +138,30 @@ INSERT INTO document_versions (
     document_id, org_id, version_no,
     block_tree_json, variables_json, name, source_kind,
     summary, created_by, created_via, parent_id, schema_version,
-    html_source_json
+    html_source_json, html_materialization_id
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6, $7,
     $8, $9, $10, $11, $12,
-    $13::jsonb
-) RETURNING id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json
+    $13::jsonb, $14::uuid
+) RETURNING id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json, html_materialization_id
 `
 
 type InsertDocumentVersionParams struct {
-	DocumentID     uuid.UUID       `json:"document_id"`
-	OrgID          uuid.UUID       `json:"org_id"`
-	VersionNo      int32           `json:"version_no"`
-	BlockTreeJson  json.RawMessage `json:"block_tree_json"`
-	VariablesJson  json.RawMessage `json:"variables_json"`
-	Name           string          `json:"name"`
-	SourceKind     string          `json:"source_kind"`
-	Summary        string          `json:"summary"`
-	CreatedBy      pgtype.UUID     `json:"created_by"`
-	CreatedVia     string          `json:"created_via"`
-	ParentID       pgtype.UUID     `json:"parent_id"`
-	SchemaVersion  int32           `json:"schema_version"`
-	HtmlSourceJson []byte          `json:"html_source_json"`
+	DocumentID            uuid.UUID       `json:"document_id"`
+	OrgID                 uuid.UUID       `json:"org_id"`
+	VersionNo             int32           `json:"version_no"`
+	BlockTreeJson         json.RawMessage `json:"block_tree_json"`
+	VariablesJson         json.RawMessage `json:"variables_json"`
+	Name                  string          `json:"name"`
+	SourceKind            string          `json:"source_kind"`
+	Summary               string          `json:"summary"`
+	CreatedBy             pgtype.UUID     `json:"created_by"`
+	CreatedVia            string          `json:"created_via"`
+	ParentID              pgtype.UUID     `json:"parent_id"`
+	SchemaVersion         int32           `json:"schema_version"`
+	HtmlSourceJson        []byte          `json:"html_source_json"`
+	HtmlMaterializationID pgtype.UUID     `json:"html_materialization_id"`
 }
 
 func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) (*DocumentVersion, error) {
@@ -175,6 +179,7 @@ func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentV
 		arg.ParentID,
 		arg.SchemaVersion,
 		arg.HtmlSourceJson,
+		arg.HtmlMaterializationID,
 	)
 	var i DocumentVersion
 	err := row.Scan(
@@ -193,6 +198,7 @@ func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentV
 		&i.ParentID,
 		&i.SchemaVersion,
 		&i.HtmlSourceJson,
+		&i.HtmlMaterializationID,
 	)
 	return &i, err
 }
@@ -200,7 +206,7 @@ func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentV
 const listDocumentVersions = `-- name: ListDocumentVersions :many
 SELECT id, document_id, org_id, version_no, block_tree_json, variables_json,
        name, source_kind, summary, created_by, created_via, created_at,
-       parent_id, schema_version, NULL::jsonb AS html_source_json
+       parent_id, schema_version, NULL::jsonb AS html_source_json, html_materialization_id
 FROM document_versions
 WHERE document_id = $1
 ORDER BY version_no DESC
@@ -213,21 +219,22 @@ type ListDocumentVersionsParams struct {
 }
 
 type ListDocumentVersionsRow struct {
-	ID             uuid.UUID          `json:"id"`
-	DocumentID     uuid.UUID          `json:"document_id"`
-	OrgID          uuid.UUID          `json:"org_id"`
-	VersionNo      int32              `json:"version_no"`
-	BlockTreeJson  json.RawMessage    `json:"block_tree_json"`
-	VariablesJson  json.RawMessage    `json:"variables_json"`
-	Name           string             `json:"name"`
-	SourceKind     string             `json:"source_kind"`
-	Summary        string             `json:"summary"`
-	CreatedBy      pgtype.UUID        `json:"created_by"`
-	CreatedVia     string             `json:"created_via"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	ParentID       pgtype.UUID        `json:"parent_id"`
-	SchemaVersion  int32              `json:"schema_version"`
-	HtmlSourceJson []byte             `json:"html_source_json"`
+	ID                    uuid.UUID          `json:"id"`
+	DocumentID            uuid.UUID          `json:"document_id"`
+	OrgID                 uuid.UUID          `json:"org_id"`
+	VersionNo             int32              `json:"version_no"`
+	BlockTreeJson         json.RawMessage    `json:"block_tree_json"`
+	VariablesJson         json.RawMessage    `json:"variables_json"`
+	Name                  string             `json:"name"`
+	SourceKind            string             `json:"source_kind"`
+	Summary               string             `json:"summary"`
+	CreatedBy             pgtype.UUID        `json:"created_by"`
+	CreatedVia            string             `json:"created_via"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ParentID              pgtype.UUID        `json:"parent_id"`
+	SchemaVersion         int32              `json:"schema_version"`
+	HtmlSourceJson        []byte             `json:"html_source_json"`
+	HtmlMaterializationID pgtype.UUID        `json:"html_materialization_id"`
 }
 
 // Inline master assets are available only through an explicit version read.
@@ -257,6 +264,7 @@ func (q *Queries) ListDocumentVersions(ctx context.Context, arg ListDocumentVers
 			&i.ParentID,
 			&i.SchemaVersion,
 			&i.HtmlSourceJson,
+			&i.HtmlMaterializationID,
 		); err != nil {
 			return nil, err
 		}

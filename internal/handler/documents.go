@@ -21,6 +21,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -31,50 +32,62 @@ import (
 
 // documentResponse is the JSON shape we return.
 type documentResponse struct {
-	ID                 uuid.UUID       `json:"id"`
-	OrgID              uuid.UUID       `json:"org_id"`
-	TemplateID         string          `json:"template_id,omitempty"`
-	Name               string          `json:"name"`
-	Status             string          `json:"status"`
-	RoutingMode        string          `json:"routing_mode"`
-	SourceKind         string          `json:"source_kind"`
-	RequiresSignature  bool            `json:"requires_signature"`
-	BlocksJSON         json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON      json.RawMessage `json:"variables_json"`
-	PDFStorageKey      string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256          string          `json:"pdf_sha256,omitempty"`
-	FinalPDFKey        string          `json:"final_pdf_key,omitempty"`
-	AuditCertKey       string          `json:"audit_cert_key,omitempty"`
-	ExpiresAt          string          `json:"expires_at,omitempty"`
-	SentAt             string          `json:"sent_at,omitempty"`
-	CompletedAt        string          `json:"completed_at,omitempty"`
-	SenderID           uuid.UUID       `json:"sender_id"`
-	Metadata           json.RawMessage `json:"metadata"`
-	DefaultLocale      string          `json:"default_locale"`
-	CreatedAt          string          `json:"created_at"`
-	UpdatedAt          string          `json:"updated_at"`
-	HTMLReviewRequired bool            `json:"html_review_required,omitempty"`
-	HasHTMLSource      bool            `json:"has_html_source,omitempty"`
+	ID                          uuid.UUID       `json:"id"`
+	OrgID                       uuid.UUID       `json:"org_id"`
+	TemplateID                  string          `json:"template_id,omitempty"`
+	Name                        string          `json:"name"`
+	Status                      string          `json:"status"`
+	RoutingMode                 string          `json:"routing_mode"`
+	SourceKind                  string          `json:"source_kind"`
+	RequiresSignature           bool            `json:"requires_signature"`
+	BlocksJSON                  json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON               json.RawMessage `json:"variables_json"`
+	PDFStorageKey               string          `json:"pdf_storage_key,omitempty"`
+	PDFSHA256                   string          `json:"pdf_sha256,omitempty"`
+	FinalPDFKey                 string          `json:"final_pdf_key,omitempty"`
+	AuditCertKey                string          `json:"audit_cert_key,omitempty"`
+	ExpiresAt                   string          `json:"expires_at,omitempty"`
+	SentAt                      string          `json:"sent_at,omitempty"`
+	CompletedAt                 string          `json:"completed_at,omitempty"`
+	SenderID                    uuid.UUID       `json:"sender_id"`
+	Metadata                    json.RawMessage `json:"metadata"`
+	DefaultLocale               string          `json:"default_locale"`
+	CreatedAt                   string          `json:"created_at"`
+	UpdatedAt                   string          `json:"updated_at"`
+	HTMLReviewRequired          bool            `json:"html_review_required,omitempty"`
+	HasHTMLSource               bool            `json:"has_html_source,omitempty"`
+	HTMLSourceCommitment        string          `json:"html_source_commitment,omitempty"`
+	HTMLMaterializationRevision int32           `json:"html_materialization_revision,omitempty"`
 }
 
 func toDocumentResponse(d *generated.Document) documentResponse {
 	out := documentResponse{
-		ID:                 d.ID,
-		OrgID:              d.OrgID,
-		Name:               d.Name,
-		Status:             d.Status,
-		RoutingMode:        d.RoutingMode,
-		SourceKind:         d.SourceKind,
-		RequiresSignature:  d.RequiresSignature,
-		BlocksJSON:         d.BlocksJson,
-		VariablesJSON:      d.VariablesJson,
-		SenderID:           d.SenderID,
-		Metadata:           d.Metadata,
-		DefaultLocale:      d.DefaultLocale,
-		CreatedAt:          d.CreatedAt.Time.Format(time.RFC3339),
-		UpdatedAt:          d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
-		HTMLReviewRequired: len(d.HtmlSourceJson) > 0 && (!d.HtmlReviewedBy.Valid || !d.HtmlReviewedAt.Valid || len(d.PdfSha256) != 32 || !bytes.Equal(d.HtmlReviewedPdfSha256, d.PdfSha256)),
-		HasHTMLSource:      len(d.HtmlSourceJson) > 0,
+		ID:                d.ID,
+		OrgID:             d.OrgID,
+		Name:              d.Name,
+		Status:            d.Status,
+		RoutingMode:       d.RoutingMode,
+		SourceKind:        d.SourceKind,
+		RequiresSignature: d.RequiresSignature,
+		BlocksJSON:        d.BlocksJson,
+		VariablesJSON:     d.VariablesJson,
+		SenderID:          d.SenderID,
+		Metadata:          d.Metadata,
+		DefaultLocale:     d.DefaultLocale,
+		CreatedAt:         d.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt:         d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
+		HTMLReviewRequired: len(d.HtmlSourceJson) > 0 && (!d.HtmlReviewedBy.Valid || !d.HtmlReviewedAt.Valid || len(d.PdfSha256) != 32 || !bytes.Equal(d.HtmlReviewedPdfSha256, d.PdfSha256) ||
+			(d.HtmlCurrentMaterializationID.Valid && (!d.HtmlReviewedMaterializationID.Valid || d.HtmlReviewedMaterializationID != d.HtmlCurrentMaterializationID))),
+		HasHTMLSource: len(d.HtmlSourceJson) > 0,
+	}
+	if out.HasHTMLSource {
+		// These bounded stored projections keep ordinary lists from compiling
+		// every multi-megabyte HTML master. Mutations validate the full source.
+		out.HTMLSourceCommitment = d.HtmlEffectiveSourceCommitment.String
+		out.HTMLMaterializationRevision = 1
+		if d.HtmlCurrentMaterializationSequence.Valid {
+			out.HTMLMaterializationRevision = d.HtmlCurrentMaterializationSequence.Int32
+		}
 	}
 	if d.TemplateID.Valid {
 		out.TemplateID = uuidFromBytes(d.TemplateID.Bytes).String()
@@ -591,9 +604,17 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 
 	actorID := guard.UserID()
 	if s.Versions != nil {
+		sourceJSON := d.HtmlSourceJson
+		if len(sourceJSON) > 0 {
+			sourceJSON, err = htmlsource.EffectiveJSON(d)
+			if err != nil {
+				writeError(w, http.StatusConflict, "document source is inconsistent; inspect its current revision before editing")
+				return
+			}
+		}
 		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
 			DocumentID: d.ID, OrgID: d.OrgID, Name: d.Name, SourceKind: d.SourceKind,
-			BlocksJSON: d.BlocksJson, VariablesJS: d.VariablesJson, HTMLSourceJSON: d.HtmlSourceJson, CreatedBy: &actorID,
+			BlocksJSON: d.BlocksJson, VariablesJS: d.VariablesJson, HTMLSourceJSON: sourceJSON, HTMLMaterializationID: d.HtmlCurrentMaterializationID, CreatedBy: &actorID,
 			Via: versions.ViaHuman, Summary: "update_document",
 		}); err != nil {
 			writeInternalErrorMsg(w, "snapshot document update failed", err)
@@ -985,7 +1006,7 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	retainedEvidence, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: id, OrgID: u.OrgID})
+	retainedEvidence, err := q.HasRetainedDraftSigningEvidence(ctx, generated.HasRetainedDraftSigningEvidenceParams{DocumentID: id, OrgID: u.OrgID})
 	if err != nil {
 		writeInternalError(w, err)
 		return

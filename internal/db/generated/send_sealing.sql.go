@@ -57,7 +57,7 @@ const beginDocumentSendSealing = `-- name: BeginDocumentSendSealing :one
 UPDATE documents
 SET status = 'sealing', updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
 `
 
 type BeginDocumentSendSealingParams struct {
@@ -125,6 +125,12 @@ func (q *Queries) BeginDocumentSendSealing(ctx context.Context, arg BeginDocumen
 		&i.HtmlReviewedPdfSha256,
 		&i.HtmlReviewedBy,
 		&i.HtmlReviewedAt,
+		&i.HtmlCurrentMaterializationID,
+		&i.HtmlCurrentSourceJson,
+		&i.HtmlCurrentPageCount,
+		&i.HtmlCurrentMaterializationSequence,
+		&i.HtmlReviewedMaterializationID,
+		&i.HtmlEffectiveSourceCommitment,
 	)
 	return &i, err
 }
@@ -136,7 +142,7 @@ WHERE parent_envelope_id = $1
   AND org_id = $2
   AND status = 'draft'
   AND deleted_at IS NULL
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
 `
 
 type BeginEnvelopeChildrenSendSealingParams struct {
@@ -210,6 +216,12 @@ func (q *Queries) BeginEnvelopeChildrenSendSealing(ctx context.Context, arg Begi
 			&i.HtmlReviewedPdfSha256,
 			&i.HtmlReviewedBy,
 			&i.HtmlReviewedAt,
+			&i.HtmlCurrentMaterializationID,
+			&i.HtmlCurrentSourceJson,
+			&i.HtmlCurrentPageCount,
+			&i.HtmlCurrentMaterializationSequence,
+			&i.HtmlReviewedMaterializationID,
+			&i.HtmlEffectiveSourceCommitment,
 		); err != nil {
 			return nil, err
 		}
@@ -247,7 +259,7 @@ WHERE documents.id = $1 AND documents.org_id = $2
       documents.article13_notice_epoch_at IS NULL
       OR ceremony_epoch.value > documents.article13_notice_epoch_at
   )
-RETURNING documents.id, documents.org_id, documents.template_id, documents.name, documents.status, documents.routing_mode, documents.source_kind, documents.blocks_json, documents.variables_json, documents.rendered_pdf_key, documents.rendered_pdf_sha, documents.pdf_storage_key, documents.pdf_sha256, documents.final_pdf_key, documents.final_pdf_sha, documents.audit_cert_key, documents.expires_at, documents.sent_at, documents.completed_at, documents.sender_id, documents.metadata, documents.created_at, documents.updated_at, documents.parent_envelope_id, documents.envelope_position, documents.is_envelope, documents.metadata_redaction_report, documents.routing_tier, documents.negotiation_enabled, documents.bilingual_target_lang, documents.lawful_basis, documents.deleted_at, documents.default_locale, documents.requires_signature, documents.audit_payload_key, documents.audit_payload_sha256, documents.audit_signature_key, documents.audit_signature_sha256, documents.pdf_storage_version_id, documents.rendered_pdf_version_id, documents.final_pdf_version_id, documents.audit_cert_sha256, documents.audit_cert_version_id, documents.audit_payload_version_id, documents.audit_signature_version_id, documents.evidence_version_pins_required, documents.completion_effective_at, documents.completion_effective_at_bound, documents.finalization_retain_until, documents.article13_notice_epoch_at, documents.article13_notice_schema, documents.article13_notice_epoch_v61_committed, documents.html_source_json, documents.html_reviewed_pdf_sha256, documents.html_reviewed_by, documents.html_reviewed_at
+RETURNING documents.id, documents.org_id, documents.template_id, documents.name, documents.status, documents.routing_mode, documents.source_kind, documents.blocks_json, documents.variables_json, documents.rendered_pdf_key, documents.rendered_pdf_sha, documents.pdf_storage_key, documents.pdf_sha256, documents.final_pdf_key, documents.final_pdf_sha, documents.audit_cert_key, documents.expires_at, documents.sent_at, documents.completed_at, documents.sender_id, documents.metadata, documents.created_at, documents.updated_at, documents.parent_envelope_id, documents.envelope_position, documents.is_envelope, documents.metadata_redaction_report, documents.routing_tier, documents.negotiation_enabled, documents.bilingual_target_lang, documents.lawful_basis, documents.deleted_at, documents.default_locale, documents.requires_signature, documents.audit_payload_key, documents.audit_payload_sha256, documents.audit_signature_key, documents.audit_signature_sha256, documents.pdf_storage_version_id, documents.rendered_pdf_version_id, documents.final_pdf_version_id, documents.audit_cert_sha256, documents.audit_cert_version_id, documents.audit_payload_version_id, documents.audit_signature_version_id, documents.evidence_version_pins_required, documents.completion_effective_at, documents.completion_effective_at_bound, documents.finalization_retain_until, documents.article13_notice_epoch_at, documents.article13_notice_schema, documents.article13_notice_epoch_v61_committed, documents.html_source_json, documents.html_reviewed_pdf_sha256, documents.html_reviewed_by, documents.html_reviewed_at, documents.html_current_materialization_id, documents.html_current_source_json, documents.html_current_page_count, documents.html_current_materialization_sequence, documents.html_reviewed_materialization_id, documents.html_effective_source_commitment
 `
 
 type CompleteDocumentSendSealingParams struct {
@@ -316,6 +328,12 @@ func (q *Queries) CompleteDocumentSendSealing(ctx context.Context, arg CompleteD
 		&i.HtmlReviewedPdfSha256,
 		&i.HtmlReviewedBy,
 		&i.HtmlReviewedAt,
+		&i.HtmlCurrentMaterializationID,
+		&i.HtmlCurrentSourceJson,
+		&i.HtmlCurrentPageCount,
+		&i.HtmlCurrentMaterializationSequence,
+		&i.HtmlReviewedMaterializationID,
+		&i.HtmlEffectiveSourceCommitment,
 	)
 	return &i, err
 }
@@ -355,7 +373,7 @@ WHERE documents.parent_envelope_id = $1
         AND i.retention_completed_at IS NOT NULL
         AND i.retain_until = hash_evidence_retain_until(i.article13_notice_epoch_at, 7)
   )
-RETURNING documents.id, documents.org_id, documents.template_id, documents.name, documents.status, documents.routing_mode, documents.source_kind, documents.blocks_json, documents.variables_json, documents.rendered_pdf_key, documents.rendered_pdf_sha, documents.pdf_storage_key, documents.pdf_sha256, documents.final_pdf_key, documents.final_pdf_sha, documents.audit_cert_key, documents.expires_at, documents.sent_at, documents.completed_at, documents.sender_id, documents.metadata, documents.created_at, documents.updated_at, documents.parent_envelope_id, documents.envelope_position, documents.is_envelope, documents.metadata_redaction_report, documents.routing_tier, documents.negotiation_enabled, documents.bilingual_target_lang, documents.lawful_basis, documents.deleted_at, documents.default_locale, documents.requires_signature, documents.audit_payload_key, documents.audit_payload_sha256, documents.audit_signature_key, documents.audit_signature_sha256, documents.pdf_storage_version_id, documents.rendered_pdf_version_id, documents.final_pdf_version_id, documents.audit_cert_sha256, documents.audit_cert_version_id, documents.audit_payload_version_id, documents.audit_signature_version_id, documents.evidence_version_pins_required, documents.completion_effective_at, documents.completion_effective_at_bound, documents.finalization_retain_until, documents.article13_notice_epoch_at, documents.article13_notice_schema, documents.article13_notice_epoch_v61_committed, documents.html_source_json, documents.html_reviewed_pdf_sha256, documents.html_reviewed_by, documents.html_reviewed_at
+RETURNING documents.id, documents.org_id, documents.template_id, documents.name, documents.status, documents.routing_mode, documents.source_kind, documents.blocks_json, documents.variables_json, documents.rendered_pdf_key, documents.rendered_pdf_sha, documents.pdf_storage_key, documents.pdf_sha256, documents.final_pdf_key, documents.final_pdf_sha, documents.audit_cert_key, documents.expires_at, documents.sent_at, documents.completed_at, documents.sender_id, documents.metadata, documents.created_at, documents.updated_at, documents.parent_envelope_id, documents.envelope_position, documents.is_envelope, documents.metadata_redaction_report, documents.routing_tier, documents.negotiation_enabled, documents.bilingual_target_lang, documents.lawful_basis, documents.deleted_at, documents.default_locale, documents.requires_signature, documents.audit_payload_key, documents.audit_payload_sha256, documents.audit_signature_key, documents.audit_signature_sha256, documents.pdf_storage_version_id, documents.rendered_pdf_version_id, documents.final_pdf_version_id, documents.audit_cert_sha256, documents.audit_cert_version_id, documents.audit_payload_version_id, documents.audit_signature_version_id, documents.evidence_version_pins_required, documents.completion_effective_at, documents.completion_effective_at_bound, documents.finalization_retain_until, documents.article13_notice_epoch_at, documents.article13_notice_schema, documents.article13_notice_epoch_v61_committed, documents.html_source_json, documents.html_reviewed_pdf_sha256, documents.html_reviewed_by, documents.html_reviewed_at, documents.html_current_materialization_id, documents.html_current_source_json, documents.html_current_page_count, documents.html_current_materialization_sequence, documents.html_reviewed_materialization_id, documents.html_effective_source_commitment
 `
 
 type CompleteEnvelopeChildrenSendSealingParams struct {
@@ -429,6 +447,12 @@ func (q *Queries) CompleteEnvelopeChildrenSendSealing(ctx context.Context, arg C
 			&i.HtmlReviewedPdfSha256,
 			&i.HtmlReviewedBy,
 			&i.HtmlReviewedAt,
+			&i.HtmlCurrentMaterializationID,
+			&i.HtmlCurrentSourceJson,
+			&i.HtmlCurrentPageCount,
+			&i.HtmlCurrentMaterializationSequence,
+			&i.HtmlReviewedMaterializationID,
+			&i.HtmlEffectiveSourceCommitment,
 		); err != nil {
 			return nil, err
 		}
@@ -763,7 +787,7 @@ WHERE id = $3
       AND (rendered_pdf_version_id IS NULL OR rendered_pdf_version_id = $2::text)
     )
   )
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
 `
 
 type PinDocumentSendEvidenceVersionsParams struct {
@@ -843,6 +867,12 @@ func (q *Queries) PinDocumentSendEvidenceVersions(ctx context.Context, arg PinDo
 		&i.HtmlReviewedPdfSha256,
 		&i.HtmlReviewedBy,
 		&i.HtmlReviewedAt,
+		&i.HtmlCurrentMaterializationID,
+		&i.HtmlCurrentSourceJson,
+		&i.HtmlCurrentPageCount,
+		&i.HtmlCurrentMaterializationSequence,
+		&i.HtmlReviewedMaterializationID,
+		&i.HtmlEffectiveSourceCommitment,
 	)
 	return &i, err
 }

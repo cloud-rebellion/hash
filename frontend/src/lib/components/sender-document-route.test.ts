@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { htmlUUID } from '../htmlRevision';
 
 const source = readFileSync(new URL('../../routes/documents/[id]/+page.svelte', import.meta.url), 'utf8');
 const start = source.indexOf('  type DocumentScope');
@@ -18,12 +19,12 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
-    showPDFSave: false, pdfSignatureFields: [],
+    showPDFSave: false, pdfSignatureFields: [], recipientRevision: 0, htmlRevisionBlocked: true,
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
     postingComment: false, commentLoadRevision: 0, commentRefreshError: null, savingMode: false,
     changeRequestRefreshError: null, refreshingChanges: false, savingApprovalMode: false, changeRequestLoadRevision: 0,
-    templateFlashTimer: null, getMe: async () => ({ email: 'owner@example.test', change_approval_mode: 'accept' }),
+    templateFlashTimer: null, htmlUUID, getMe: async () => ({ email: 'owner@example.test', change_approval_mode: 'accept' }),
     getDocument: pending('getDocument'), listComments: pending('listComments'), postComment: pending('postComment'),
     listChangeRequests: pending('listChangeRequests'), approveChangeRequest: pending('approve'), denyChangeRequest: pending('deny'),
     reviseDocument: pending('revise'), updateDocument: pending('update'), createBlocksTemplate: pending('template'),

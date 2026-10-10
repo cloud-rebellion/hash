@@ -224,7 +224,7 @@ from the current document response. Missing observation returns 428, malformed
 RFC3339 timestamps 400, and stale observations 412. Input errors return400,
 expired credentials401, revoked authority403 and absent/foreign/deleted
 parents404. Non-draft state, retained evidence/sealing state or pending/contested
-privacy review return409. Database/audit failures return generic500. MCP reports
+privacy review return 409. Database/audit failures return generic500. MCP reports
 refusals as tool errors and sanitizes unexpected database errors. Refused edits
 preserve document content, metadata, versions/history and audit state.
 
@@ -413,7 +413,7 @@ target against the credential's document boundary.
 | --- | --- | --- |
 | `POST /api/v1/documents/{id}/fields` | `type`, positive `w_pct`/`h_pct`; optional recipient, page, position, required, label and options | 201 with field |
 | `GET /api/v1/documents/{id}/fields` | No body | 200 with `{fields, count}` |
-| `DELETE /api/v1/fields/{id}` | No body | 204 |
+| `DELETE /api/v1/fields/{id}` | Empty for ordinary documents; HTML artifact pins below | 204 |
 
 MCP provides `add_document_field`, `list_document_fields` and
 `delete_document_field`. Creation takes `document_id`; deletion takes `field_id`.
@@ -422,6 +422,15 @@ REST coordinates use **0..100 percent**. MCP creation coordinates use integer
 DTOs return percentages, including `x_pct`, `y_pct`, `w_pct` and `h_pct`.
 Coordinates must be finite and within the page, with positive width/height and a
 rectangle that fits wholly inside it. Stored percentages use four decimal places.
+
+HTML-derived documents require `expected_pdf_sha256` and
+`expected_html_source_commitment` on both create and delete. REST accepts them
+in the JSON body, including DELETE; MCP accepts the same named arguments.
+Copy the current digest and source commitment from the document/source read.
+MCP `get_document` provides both `expected_*` pins explicitly. Missing or stale
+pins return 409/tool refusal without changing fields. Registered HTML pages must
+also fall within the current materialization's verified page count. Revision
+clears prior unsigned fields, so fresh placement uses the newly reviewed PDF.
 
 Omitted MCP position defaults to `(0, 0)`, width to `1500` (15%), height to `400`
 (4%), and page to 1. Explicit zero width/height is invalid. An explicit MCP page
@@ -603,7 +612,8 @@ reads and save receipts across document navigation and verifies current-document
 create/edit calls, canceled discard, preview and URL draft retention with no
 browser exceptions. Its receipt is
 `/private/tmp/hash-browser-sender-panel-receipt.json`; it performs no send or SMTP
-operation. The frontend suite has 126 passing tests and a clean check/build.
+operation. That earlier frontend checkpoint passed 126 tests and check/build;
+later source-unit results are recorded in [completion status](COMPLETION-STATUS.md).
 Real OIDC, SMTP inbox receipt, CRM/Reactor integration, ClamAV scanning, storage
 retention/restore, deployment, workload capacity and broader signing acceptance
 remain separate gates. These results are not compliance certification.

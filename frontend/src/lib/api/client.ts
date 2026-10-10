@@ -32,6 +32,8 @@ export interface DocumentResponse {
   pdf_sha256?: string;
   has_html_source?: boolean;
   html_review_required?: boolean;
+  html_source_commitment?: string;
+  html_materialization_revision?: number;
   requires_signature?: boolean;
   blocks_json?: BlockTree;
   variables_json: Record<string, string>;
@@ -194,11 +196,64 @@ export async function createHTMLTemplateDocument(templateID: string, input: HTML
   });
 }
 
-export async function reviewHTMLDocument(documentID: string, expectedUpdatedAt: string, expectedPDFSHA256: string): Promise<DocumentResponse> {
+export async function reviewHTMLDocument(documentID: string, expectedUpdatedAt: string, expectedPDFSHA256: string, expectedHTMLSourceCommitment?: string): Promise<DocumentResponse> {
   return request('POST', `/api/v1/documents/${encodeURIComponent(documentID)}/html/review`, {
     expected_updated_at: expectedUpdatedAt,
     expected_pdf_sha256: expectedPDFSHA256,
+    ...(expectedHTMLSourceCommitment ? { expected_html_source_commitment: expectedHTMLSourceCommitment } : {}),
   });
+}
+
+export interface HTMLDocumentSource {
+  document_id: string; org_id: string; updated_at: string;
+  html_source_commitment: string; materialization_revision: number;
+  pdf_sha256: string; page_count: number;
+  template_id: string; template_version: number; template_content_sha256: string;
+  values: { name: string; required: boolean; max_chars: number; text: string }[];
+  sections: { name: string; max_chars: number; text: string; default_text: string }[];
+  changed_sections: string[]; can_edit: boolean;
+}
+export interface HTMLDocumentRevisionInput {
+  expected_updated_at: string; expected_html_source_commitment: string;
+  values: Record<string, string>; sections: Record<string, string>; summary: string;
+}
+export interface HTMLDocumentRevisionResult {
+  document: DocumentResponse; materialization_revision: number; page_count: number;
+  review_required: true; placement_reset: true;
+}
+export interface HTMLHistoryEntry {
+  sequence: number; id: string; source_commitment: string; pdf_sha256: string; page_count: number;
+  created_by: string; created_at: string; summary: string; current: boolean;
+}
+export async function getHTMLDocumentSource(documentID: string): Promise<HTMLDocumentSource> {
+  return request('GET', `/api/v1/documents/${encodeURIComponent(documentID)}/html/source`);
+}
+export async function reviseHTMLDocument(documentID: string, input: HTMLDocumentRevisionInput): Promise<HTMLDocumentRevisionResult> {
+  return request('POST', `/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions`, input);
+}
+export async function getHTMLDocumentHistory(documentID: string): Promise<{ revisions: HTMLHistoryEntry[] }> {
+  return request('GET', `/api/v1/documents/${encodeURIComponent(documentID)}/html/history`);
+}
+export async function getHTMLRevisionSource(documentID: string, sequence: number): Promise<HTMLDocumentSource> {
+  if (!Number.isInteger(sequence) || sequence < 1) throw new Error('Select a valid immutable revision.');
+  return request('GET', `/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${sequence}/source`);
+}
+export async function fetchVerifiedHTMLRevisionPDF(documentID: string, revision: HTMLDocumentSource, signal: AbortSignal): Promise<Uint8Array> {
+  if (!revision || revision.document_id !== documentID || !Number.isInteger(revision.materialization_revision) || revision.materialization_revision < 1) {
+    throw new Error('Select a valid immutable revision for this document.');
+  }
+  const res = await fetch(`/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${revision.materialization_revision}/pdf`, {
+    credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
+  });
+  if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  if (res.headers.get('X-Hash-Document-Id') !== documentID || res.headers.get('X-Hash-Materialization-Revision') !== String(revision.materialization_revision)
+      || res.headers.get('X-Hash-HTML-Source-Commitment') !== revision.html_source_commitment || !/^[a-f0-9]{64}$/.test(revision.html_source_commitment)
+      || res.headers.get('X-Hash-PDF-SHA256') !== revision.pdf_sha256 || !/^[a-f0-9]{64}$/.test(revision.pdf_sha256)
+      || res.headers.get('X-Hash-PDF-Pages') !== String(revision.page_count) || !Number.isInteger(revision.page_count) || revision.page_count < 1 || revision.page_count > 500) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error('The historical PDF does not match this immutable revision. Refresh history before opening it.');
+  }
+  return readVerifiedPDF(res, revision.pdf_sha256);
 }
 
 // Preview only bytes matching the observed artifact, before PDF parsing or a
@@ -1037,6 +1092,8 @@ export interface FieldInput {
   required?: boolean;
   label?: string;
   options?: Record<string, unknown>;
+  expected_pdf_sha256?: string;
+  expected_html_source_commitment?: string;
 }
 
 export async function listFields(docID: string): Promise<DocumentField[]> {
@@ -1051,8 +1108,8 @@ export async function addField(docID: string, input: FieldInput): Promise<Docume
   return request('POST', `/api/v1/documents/${docID}/fields`, input);
 }
 
-export async function deleteField(fieldID: string): Promise<void> {
-  await request('DELETE', `/api/v1/fields/${fieldID}`);
+export async function deleteField(fieldID: string, pins?: { expected_pdf_sha256: string; expected_html_source_commitment: string }): Promise<void> {
+  await request('DELETE', `/api/v1/fields/${fieldID}`, pins);
 }
 
 export function documentPdfURL(docID: string): string {

@@ -481,6 +481,11 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/{id}/recipients", s.handleCreateRecipient)
 			r.Post("/{id}/pdf-template", s.handleSavePDFTemplate)
 			r.Post("/{id}/html/review", s.handleReviewHTMLDocument)
+			r.Get("/{id}/html/source", s.handleGetHTMLDocumentSource)
+			r.Post("/{id}/html/revisions", s.handleReviseHTMLDocument)
+			r.Get("/{id}/html/history", s.handleGetHTMLDocumentHistory)
+			r.Get("/{id}/html/revisions/{sequence}/source", s.handleGetHTMLDocumentRevisionSource)
+			r.Get("/{id}/html/revisions/{sequence}/pdf", s.handleGetHTMLDocumentRevisionPDF)
 			r.Patch("/{id}/recipients/{rid}", s.handleUpdateRecipient)
 			r.Delete("/{id}/recipients/{rid}", s.handleDeleteRecipient)
 

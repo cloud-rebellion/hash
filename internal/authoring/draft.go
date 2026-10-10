@@ -82,7 +82,7 @@ func LockDraft(ctx context.Context, tx pgx.Tx, actor Actor, docID uuid.UUID) (*D
 	if err := guard.Recheck(ctx); err != nil {
 		return nil, err
 	}
-	retained, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: doc.ID, OrgID: actor.OrgID})
+	retained, err := q.HasRetainedDraftSigningEvidence(ctx, generated.HasRetainedDraftSigningEvidenceParams{DocumentID: doc.ID, OrgID: actor.OrgID})
 	if err != nil {
 		return nil, fmt.Errorf("inspect draft evidence: %w", err)
 	}

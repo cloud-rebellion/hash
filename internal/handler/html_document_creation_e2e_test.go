@@ -290,7 +290,11 @@ func assertHTMLCreatedDocumentReviewE2E(t *testing.T, f lifecycleAuthorizationFi
 	if peer.requests.Load() != storageRequests {
 		t.Fatal("static PDF export read or mutated storage before HTML refusal")
 	}
-	input := htmlDocumentReviewInput{ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256)}
+	commitment, err := htmlsource.Commitment(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := htmlDocumentReviewInput{ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256), ExpectedHTMLSourceCommitment: commitment}
 	submit := func(in htmlDocumentReviewInput) *httptest.ResponseRecorder {
 		body, err := json.Marshal(in)
 		if err != nil {
@@ -298,12 +302,16 @@ func assertHTMLCreatedDocumentReviewE2E(t *testing.T, f lifecycleAuthorizationFi
 		}
 		return submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/html/review", string(body), cookie)
 	}
-	for _, change := range []string{"PDF digest", "timestamp"} {
+	for _, change := range []string{"PDF digest", "timestamp", "source commitment", "missing source commitment"} {
 		stale := input
 		if change == "PDF digest" {
 			stale.ExpectedPDFSHA256 = strings.Repeat("0", 64)
-		} else {
+		} else if change == "timestamp" {
 			stale.ExpectedUpdatedAt = doc.UpdatedAt.Time.Add(-time.Second).UTC().Format(time.RFC3339Nano)
+		} else if change == "source commitment" {
+			stale.ExpectedHTMLSourceCommitment = strings.Repeat("0", 64)
+		} else {
+			stale.ExpectedHTMLSourceCommitment = ""
 		}
 		if w := submit(stale); w.Code != http.StatusConflict {
 			t.Fatalf("stale %s review=%d %s", change, w.Code, w.Body.String())

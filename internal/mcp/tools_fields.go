@@ -27,16 +27,18 @@ func registerFieldTools(s *Server, d Deps) {
 		Description: "Add a field overlay to a draft document. Type is one of text|date|checkbox|dropdown|initial, or 'signature' on a pdf-source document (signature requires recipient_id). " +
 			"MCP coordinates are integer basis points of the rendered page: 2500 means 25 percent. Omitted width/height default to 1500/400 (15/4 percent); explicit zero dimensions are invalid. recipient_id is optional for fillable fields; empty = any recipient may fill. Dropdown requires options.choices.",
 		InputSchema: schemaObject(map[string]any{
-			"document_id":  stringSchema("document uuid"),
-			"recipient_id": stringSchema("optional recipient uuid; empty = any signer"),
-			"type":         stringSchema("text|date|checkbox|dropdown|initial|signature; signature is PDF-only and requires recipient_id"),
-			"page":         intSchema("1-indexed PDF page", 1, 1000, 1),
-			"x_pct":        intSchema("left edge as 0..10000 (basis points of page width)", 0, 10000, 0),
-			"y_pct":        intSchema("top edge as 0..10000", 0, 10000, 0),
-			"w_pct":        intSchema("width as 0..10000", 0, 10000, 1500),
-			"h_pct":        intSchema("height as 0..10000", 0, 10000, 400),
-			"required":     stringSchema("'true' or 'false' (default true)"),
-			"label":        stringSchema("display label shown above the input"),
+			"expected_pdf_sha256":             stringSchema("current lowercase PDF SHA-256, required for HTML documents"),
+			"expected_html_source_commitment": stringSchema("current HTML source commitment, required for HTML documents"),
+			"document_id":                     stringSchema("document uuid"),
+			"recipient_id":                    stringSchema("optional recipient uuid; empty = any signer"),
+			"type":                            stringSchema("text|date|checkbox|dropdown|initial|signature; signature is PDF-only and requires recipient_id"),
+			"page":                            intSchema("1-indexed PDF page", 1, 1000, 1),
+			"x_pct":                           intSchema("left edge as 0..10000 (basis points of page width)", 0, 10000, 0),
+			"y_pct":                           intSchema("top edge as 0..10000", 0, 10000, 0),
+			"w_pct":                           intSchema("width as 0..10000", 0, 10000, 1500),
+			"h_pct":                           intSchema("height as 0..10000", 0, 10000, 400),
+			"required":                        stringSchema("'true' or 'false' (default true)"),
+			"label":                           stringSchema("display label shown above the input"),
 			"options": map[string]any{"type": "object", "description": "dropdown configuration; choices must contain the permitted signer values", "properties": map[string]any{
 				"choices": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}},
@@ -44,17 +46,19 @@ func registerFieldTools(s *Server, d Deps) {
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID  string          `json:"document_id"`
-				RecipientID string          `json:"recipient_id"`
-				Type        string          `json:"type"`
-				Page        *int            `json:"page"`
-				XPct        *int            `json:"x_pct"`
-				YPct        *int            `json:"y_pct"`
-				WPct        *int            `json:"w_pct"`
-				HPct        *int            `json:"h_pct"`
-				Required    string          `json:"required"`
-				Label       string          `json:"label"`
-				Options     json.RawMessage `json:"options"`
+				ExpectedPDFSHA256            string          `json:"expected_pdf_sha256"`
+				ExpectedHTMLSourceCommitment string          `json:"expected_html_source_commitment"`
+				DocumentID                   string          `json:"document_id"`
+				RecipientID                  string          `json:"recipient_id"`
+				Type                         string          `json:"type"`
+				Page                         *int            `json:"page"`
+				XPct                         *int            `json:"x_pct"`
+				YPct                         *int            `json:"y_pct"`
+				WPct                         *int            `json:"w_pct"`
+				HPct                         *int            `json:"h_pct"`
+				Required                     string          `json:"required"`
+				Label                        string          `json:"label"`
+				Options                      json.RawMessage `json:"options"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -92,6 +96,7 @@ func registerFieldTools(s *Server, d Deps) {
 			engine := fields.MutationEngine{Pool: d.Pool, Audit: d.Audit}
 			actor := fields.Actor{
 				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "add_document_field",
+				ExpectedPDFSHA256: p.ExpectedPDFSHA256, ExpectedHTMLSourceCommitment: p.ExpectedHTMLSourceCommitment,
 				IP: clientIP(r), UserAgent: r.UserAgent(),
 			}
 			row, err := engine.Create(r.Context(), actor, docID, fields.CreateInput{
@@ -151,12 +156,16 @@ func registerFieldTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Remove an unfilled field from an editable draft document. Retained signing evidence and open privacy reviews prevent field authoring.",
 		InputSchema: schemaObject(map[string]any{
-			"field_id": stringSchema("uuid of the field to delete"),
+			"expected_pdf_sha256":             stringSchema("current lowercase PDF SHA-256, required for HTML documents"),
+			"expected_html_source_commitment": stringSchema("current HTML source commitment, required for HTML documents"),
+			"field_id":                        stringSchema("uuid of the field to delete"),
 		}, []string{"field_id"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				FieldID string `json:"field_id"`
+				FieldID                      string `json:"field_id"`
+				ExpectedPDFSHA256            string `json:"expected_pdf_sha256"`
+				ExpectedHTMLSourceCommitment string `json:"expected_html_source_commitment"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -184,6 +193,7 @@ func registerFieldTools(s *Server, d Deps) {
 			engine := fields.MutationEngine{Pool: d.Pool, Audit: d.Audit}
 			actor := fields.Actor{
 				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "delete_document_field",
+				ExpectedPDFSHA256: p.ExpectedPDFSHA256, ExpectedHTMLSourceCommitment: p.ExpectedHTMLSourceCommitment,
 				IP: clientIP(r), UserAgent: r.UserAgent(),
 			}
 			deleted, err := engine.Delete(r.Context(), actor, ownerDoc, id)

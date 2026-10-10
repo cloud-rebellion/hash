@@ -298,7 +298,7 @@ func (q *Queries) GetDataSubjectRequestForUpdate(ctx context.Context, arg GetDat
 }
 
 const getDocumentForPrivacyUpdate = `-- name: GetDocumentForPrivacyUpdate :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
 `
 
 type GetDocumentForPrivacyUpdateParams struct {
@@ -368,6 +368,12 @@ func (q *Queries) GetDocumentForPrivacyUpdate(ctx context.Context, arg GetDocume
 		&i.HtmlReviewedPdfSha256,
 		&i.HtmlReviewedBy,
 		&i.HtmlReviewedAt,
+		&i.HtmlCurrentMaterializationID,
+		&i.HtmlCurrentSourceJson,
+		&i.HtmlCurrentPageCount,
+		&i.HtmlCurrentMaterializationSequence,
+		&i.HtmlReviewedMaterializationID,
+		&i.HtmlEffectiveSourceCommitment,
 	)
 	return &i, err
 }
@@ -408,6 +414,10 @@ SELECT EXISTS (
     UNION ALL
     SELECT 1 FROM document_versions v WHERE v.org_id = $1::uuid
         AND v.html_source_json IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM html_document_materializations m WHERE m.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM html_document_materialization_snapshots h WHERE h.org_id = $1::uuid
 ) AS present
 `
 

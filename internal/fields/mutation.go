@@ -7,6 +7,7 @@ package fields
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -35,6 +38,7 @@ var (
 	ErrPrivacyReviewChanging = errors.New("privacy review is changing; retry after it completes")
 	ErrPendingPrivacyReview  = errors.New("field changes await the open privacy request review")
 	ErrFieldLimitReached     = errors.New("document field limit reached (maximum 1000)")
+	ErrHTMLArtifactChanged   = errors.New("HTML document source or PDF changed; reload before changing fields")
 )
 
 const MaxFieldsPerDocument = 1000
@@ -49,9 +53,11 @@ type MutationEngine struct {
 }
 
 type Actor struct {
-	OrgID, UserID            uuid.UUID
-	Authorize                auth.TransactionAuthorization
-	Via, Tool, IP, UserAgent string
+	OrgID, UserID                uuid.UUID
+	Authorize                    auth.TransactionAuthorization
+	Via, Tool, IP, UserAgent     string
+	ExpectedPDFSHA256            string
+	ExpectedHTMLSourceCommitment string
 }
 
 // CreateInput uses percentages for geometry. MCP converts basis points at its
@@ -172,10 +178,20 @@ func (e *MutationEngine) mutate(ctx context.Context, actor Actor, docID uuid.UUI
 	if err := actor.Authorize(ctx, tx, user); err != nil {
 		return nil, err
 	}
+	if len(doc.HtmlSourceJson) != 0 {
+		if _, err := htmlmaterialization.Current(ctx, q, doc); err != nil {
+			return nil, ErrHTMLArtifactChanged
+		}
+		commitment, err := htmlsource.Commitment(doc)
+		if err != nil || actor.ExpectedHTMLSourceCommitment == "" || actor.ExpectedHTMLSourceCommitment != commitment ||
+			actor.ExpectedPDFSHA256 == "" || actor.ExpectedPDFSHA256 != hex.EncodeToString(doc.PdfSha256) {
+			return nil, ErrHTMLArtifactChanged
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	retained, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: doc.ID, OrgID: actor.OrgID})
+	retained, err := q.HasRetainedDraftSigningEvidence(ctx, generated.HasRetainedDraftSigningEvidenceParams{DocumentID: doc.ID, OrgID: actor.OrgID})
 	if err != nil {
 		return nil, fmt.Errorf("inspect field evidence: %w", err)
 	}
@@ -256,6 +272,9 @@ func normalizeCreateInput(input CreateInput, doc *generated.Document) (CreateInp
 	}
 	if input.Page > 1000 {
 		return invalid("page", "must be between 1 and 1000")
+	}
+	if doc != nil && len(doc.HtmlSourceJson) != 0 && doc.HtmlCurrentPageCount.Valid && int32(input.Page) > doc.HtmlCurrentPageCount.Int32 {
+		return invalid("page", "must exist in the current HTML materialization PDF")
 	}
 	for _, item := range []struct {
 		name  string

@@ -45,6 +45,7 @@
     status: string;
     requiresSignature?: boolean;
     reviewRequired?: boolean;
+    revisionBlocked?: boolean;
     defaultLocale?: string;
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
@@ -57,6 +58,7 @@
     status,
     requiresSignature = true,
     reviewRequired = false,
+    revisionBlocked = false,
     defaultLocale = 'en',
     signatureFields = [],
     onStatusChange,
@@ -362,7 +364,7 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired) return;
+    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
       return;
@@ -755,10 +757,12 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={reviewRequired || documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={revisionBlocked || reviewRequired || documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
-      {#if reviewRequired}
+      {#if revisionBlocked}
+        <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>
+      {:else if reviewRequired}
         <span class="text-xs text-warning">Review the generated PDF above before sending.</span>
       {:else if !hasParticipant}
         <span class="text-xs text-text-muted">{modeCopy.missingParticipant}</span>

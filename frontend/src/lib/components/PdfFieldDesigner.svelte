@@ -7,13 +7,17 @@
     deleteField,
     listRecipients,
     documentPdfURL,
+    fetchVerifiedDocumentPDF,
     type DocumentField,
     type Recipient,
   } from '$lib/api/client';
   import { PenLine, Type, Calendar, CheckSquare, Trash2, Signature } from 'lucide-svelte';
+  import { htmlPlacementPins } from '$lib/htmlRevision';
 
-  type Props = { documentID: string; recipientRevision?: number; onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void };
-  let { documentID, recipientRevision = 0, onSignatureFieldsChange }: Props = $props();
+  type Props = { documentID: string; recipientRevision?: number; hasHTMLSource?: boolean; pdfSHA256?: string; htmlSourceCommitment?: string;
+    onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void };
+  let { documentID, recipientRevision = 0, hasHTMLSource = false, pdfSHA256, htmlSourceCommitment, onSignatureFieldsChange }: Props = $props();
+  const sourceHTML = untrack(() => hasHTMLSource), sourceSHA = untrack(() => pdfSHA256), sourceCommitment = untrack(() => htmlSourceCommitment);
 
   type PageInfo = { num: number; w: number; h: number; scale: number };
 
@@ -26,10 +30,12 @@
   let refreshingRecipients = $state(false);
   let recipientRefreshError = $state<string | null>(null);
   let appliedRecipientRevision = $state(untrack(() => recipientRevision));
-  const placementUnavailable = $derived(saving || loading || refreshingRecipients || recipientRefreshError !== null);
+  const placementUnavailable = $derived(saving || loading || refreshingRecipients || recipientRefreshError !== null || pages.length === 0);
   let disposed = false;
   let activePdf: PdfDoc | null = null;
-  const current = (target: string) => !disposed && documentID === target;
+  const current = (target: string) => !disposed && documentID === target && hasHTMLSource === sourceHTML
+    && (!sourceHTML || (pdfSHA256 === sourceSHA && htmlSourceCommitment === sourceCommitment));
+  const abort = new AbortController();
 
   function emitSignatureFields() {
     onSignatureFieldsChange?.(fields.filter((f) => f.type === 'signature' && f.required).map((f) => ({
@@ -68,7 +74,7 @@
   });
 
   async function refreshPlacementContext(revision: number) {
-    if (disposed || loading || saving || refreshingRecipients) return;
+    if (!current(documentID) || loading || saving || refreshingRecipients) return;
     const target = documentID;
     refreshingRecipients = true;
     recipientRefreshError = null;
@@ -99,18 +105,21 @@
     const target = documentID;
     let initializationFailed = false;
     try {
+      htmlPlacementPins(sourceHTML, sourceSHA, sourceCommitment);
       const pdf = await import('$lib/pdf');
       if (!current(target)) return;
       const [recs, fs, doc] = await Promise.all([
         listRecipients(target),
         listFields(target),
-        pdf.loadPdf(documentPdfURL(target)).then((loaded) => {
+        (sourceHTML ? fetchVerifiedDocumentPDF(target, sourceSHA!, abort.signal).then((bytes) => pdf.loadPdfData(bytes))
+          : pdf.loadPdf(documentPdfURL(target))).then((loaded) => {
           if (!current(target) || initializationFailed) void loaded.loadingTask.destroy().catch(() => {});
           else activePdf = loaded;
           return loaded;
         }),
       ]);
       if (!current(target)) return;
+      if (doc.numPages < 1 || doc.numPages > 500) throw new Error('This PDF exceeds the field-placement page limit.');
       if (!recs.every((r) => r.document_id === target) || !fs.every((f) => f.document_id === target)) {
         throw new Error('The server returned field assignments for a different document.');
       }
@@ -153,6 +162,7 @@
 
   onDestroy(() => {
     disposed = true;
+    abort.abort();
     dragStart = null;
     draft = null;
     if (activePdf) void activePdf.loadingTask.destroy().catch(() => {});
@@ -173,7 +183,7 @@
   }
 
   function onPointerDown(e: PointerEvent, page: number, layer: HTMLElement) {
-    if (e.button !== 0 || placementUnavailable || disposed || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
+    if (e.button !== 0 || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
     if (tool === 'signature' && !recipientID) {
       error = 'Pick a recipient before placing a signature field.';
       return;
@@ -201,7 +211,7 @@
     const d = draft;
     dragStart = null;
     draft = null;
-    if (!d || placementUnavailable || disposed) return;
+    if (!d || placementUnavailable || !current(documentID)) return;
     // A click (no real drag) drops a sensibly sized default box.
     if (d.w < 1.5 || d.h < 1) {
       d.w = tool === 'signature' ? 26 : 18;
@@ -215,12 +225,16 @@
       w_pct: round(d.w), h_pct: round(d.h), required,
       recipient_id: recipientID || undefined,
       label: TOOLS.find((t) => t.type === tool)?.label,
+      ...htmlPlacementPins(sourceHTML, sourceSHA, sourceCommitment),
     };
     saving = true;
     error = null;
     try {
       const created = await addField(target, input);
-      if (current(target)) { fields = [...fields, created]; emitSignatureFields(); }
+      if (current(target)) {
+        if (created.document_id !== target) throw new Error('The server returned a field for a different document.');
+        fields = [...fields, created]; emitSignatureFields();
+      }
     } catch (e) {
       if (current(target)) error = (e as Error).message;
     } finally {
@@ -233,12 +247,13 @@
   }
 
   async function remove(f: DocumentField) {
-    if (placementUnavailable || disposed) return;
+    if (placementUnavailable || !current(documentID) || f.document_id !== documentID) return;
     const target = documentID;
     saving = true;
     error = null;
     try {
-      await deleteField(f.id);
+      const pins = htmlPlacementPins(sourceHTML, sourceSHA, sourceCommitment);
+      if (pins) await deleteField(f.id, pins); else await deleteField(f.id);
       if (current(target)) { fields = fields.filter((x) => x.id !== f.id); emitSignatureFields(); }
     } catch (e) {
       if (current(target)) error = (e as Error).message;

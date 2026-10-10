@@ -26,7 +26,7 @@ function fixture() {
   const env: any = {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
-    requiresSignature: true, reviewRequired: false, signerRoles: [], missingRoles: [], hasParticipant: true,
+    requiresSignature: true, reviewRequired: false, revisionBlocked: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
     recipients: [{ id: 'original', document_id: 'A', name: 'Original', email: 'original@example.test', role: 'signer', locale: 'en', order_index: 0 }],
@@ -50,6 +50,11 @@ function move(state: ReturnType<typeof fixture>) {
   state.env.error = 'Current B error'; state.env.recipientRefreshError = 'Current B refresh';
   state.env.recipients = [{ id: 'B', document_id: 'B' }]; state.env.loading = true; state.env.saving = true; state.env.busy = 'send';
 }
+test('unsaved, pending or unreconciled HTML revision input blocks sending an older reviewed PDF', async () => {
+  const state = fixture(); state.env.lawfulBasis = 'contract'; state.env.revisionBlocked = true;
+  await state.actions.send(); expect(state.calls).toHaveLength(0); expect(state.env.lawfulBasis).toBe('contract');
+  expect(state.env.busy).toBeNull();
+});
 test('recipient baseline ignores untouched forms but detects changes, cancellation and replacement retain a denied draft', () => {
   const state = fixture(); state.actions.openAdd();
   expect(state.actions.hasMeaningfulDraft()).toBe(false);

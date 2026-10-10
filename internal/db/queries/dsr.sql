@@ -44,6 +44,10 @@ SELECT EXISTS (
     UNION ALL
     SELECT 1 FROM document_versions v WHERE v.org_id = sqlc.arg(org_id)::uuid
         AND v.html_source_json IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM html_document_materializations m WHERE m.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM html_document_materialization_snapshots h WHERE h.org_id = sqlc.arg(org_id)::uuid
 ) AS present;
 
 -- name: GetDataSubjectRequestForUpdate :one

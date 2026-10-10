@@ -46,14 +46,16 @@ type htmlUITemplateTransportE2E struct {
 }
 
 type htmlUIDocumentTransportE2E struct {
-	ID                 uuid.UUID `json:"id"`
-	OrgID              uuid.UUID `json:"org_id"`
-	SenderID           uuid.UUID `json:"sender_id"`
-	SourceKind         string    `json:"source_kind"`
-	PDFSHA256          string    `json:"pdf_sha256"`
-	UpdatedAt          string    `json:"updated_at"`
-	HasHTMLSource      bool      `json:"has_html_source"`
-	HTMLReviewRequired bool      `json:"html_review_required"`
+	ID                          uuid.UUID `json:"id"`
+	OrgID                       uuid.UUID `json:"org_id"`
+	SenderID                    uuid.UUID `json:"sender_id"`
+	SourceKind                  string    `json:"source_kind"`
+	PDFSHA256                   string    `json:"pdf_sha256"`
+	HTMLSourceCommitment        string    `json:"html_source_commitment"`
+	HTMLMaterializationRevision int32     `json:"html_materialization_revision"`
+	UpdatedAt                   string    `json:"updated_at"`
+	HasHTMLSource               bool      `json:"has_html_source"`
+	HTMLReviewRequired          bool      `json:"html_review_required"`
 }
 
 func htmlUIObjectTransportE2E(t *testing.T, raw []byte) map[string]json.RawMessage {
@@ -174,6 +176,10 @@ func htmlUIDocumentResponseE2E(t *testing.T, raw []byte, expected *generated.Doc
 	if _, present := fields["has_html_source"]; !present {
 		t.Fatal("document transport omitted persistent authoring origin")
 	}
+	if response.HTMLSourceCommitment != expected.HtmlEffectiveSourceCommitment.String || len(response.HTMLSourceCommitment) != 64 ||
+		response.HTMLMaterializationRevision != expected.HtmlCurrentMaterializationSequence.Int32 {
+		t.Fatal("document transport lost exact current materialization/source identity")
+	}
 	_, present := fields["html_review_required"]
 	if present != reviewRequired {
 		t.Fatal("review-required transport was not cleared independently of HTML origin")
@@ -183,7 +189,7 @@ func htmlUIDocumentResponseE2E(t *testing.T, raw []byte, expected *generated.Doc
 
 func htmlUIReviewDocumentE2E(t *testing.T, f lifecycleAuthorizationFixture, response htmlUIDocumentTransportE2E, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(htmlDocumentReviewInput{ExpectedUpdatedAt: response.UpdatedAt, ExpectedPDFSHA256: response.PDFSHA256})
+	body, err := json.Marshal(htmlDocumentReviewInput{ExpectedUpdatedAt: response.UpdatedAt, ExpectedPDFSHA256: response.PDFSHA256, ExpectedHTMLSourceCommitment: response.HTMLSourceCommitment})
 	if err != nil {
 		t.Fatal(err)
 	}

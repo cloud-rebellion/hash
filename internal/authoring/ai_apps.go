@@ -167,7 +167,7 @@ func lockAIApp(ctx context.Context, tx pgx.Tx, actor Actor, id uuid.UUID, shared
 			return nil, ErrAIAppDocumentClosed
 		}
 		if parent.Status == "draft" {
-			retained, err := q.HasRetainedDraftEvidenceForPurge(ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: parent.ID, OrgID: actor.OrgID})
+			retained, err := q.HasRetainedDraftSigningEvidence(ctx, generated.HasRetainedDraftSigningEvidenceParams{DocumentID: parent.ID, OrgID: actor.OrgID})
 			if err != nil {
 				return nil, err
 			}

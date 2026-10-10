@@ -449,7 +449,7 @@ sent documents use their frozen variables.
 ## HTML design draft API
 
 This source draft adds reusable HTML designs separately from the PDF bytes used
-for signing. It is not a completed sales UI or a deployed release. HTML document
+for signing. It is not a deployed release. HTML document
 negotiation and rerendering, contract-completeness profiles, signature-page
 binding, visual acceptance and approved privacy disposal remain pending.
 
@@ -480,10 +480,52 @@ master JSON is capped at 12 MiB, HTML at 256 KiB, CSS at 128 KiB and 16 assets
 totaling 8 MiB.
 An organization import slot bounds concurrent scanner/render work.
 
-An owner approves the exact current design using
-`POST /api/v1/templates/{id}/html/approve` with `expected_version` and
-`expected_content_sha256` from the template response. The digest includes the
-canonical master and its defaults. Approval cannot carry over to a new revision.
+Preview a saved revision with `POST /api/v1/templates/{id}/html/preview`:
+
+```json
+{
+  "expected_version": 1,
+  "expected_content_sha256": "<saved revision SHA-256>",
+  "values": {"customer": "Example customer"}
+}
+```
+
+Sender and owner sessions can preview. Declared sample values fill required
+placeholders without changing saved defaults or creating a document. Sections
+use their saved defaults. Unsaved HTML is not accepted by this endpoint. The
+renderer output is scanned, sanitized and page-counted before disclosure, with
+the shared import admission limit, a 15-second processing deadline, a 50 MiB PDF limit and
+500-page limit. Rendering and worker calls occur outside database locks. The
+original session, live author and exact current/retained revision are rechecked
+before PDF bytes and a receipt are returned. A changed revision returns 409;
+expired or revoked access returns 401/403.
+
+The binary PDF response includes `X-Hash-Template-Id`,
+`X-Hash-Template-Version`, `X-Hash-Template-Content-SHA256`,
+`X-Hash-Materialization-SHA256`, `X-Hash-PDF-SHA256`, `X-Hash-PDF-Pages`,
+`X-Hash-Preview-Receipt` and `X-Hash-Preview-Expires-At` headers. The PDF digest
+commits to the final sanitized response bytes. The server-authenticated receipt
+expires after ten minutes and binds the tenant, reviewer, original signed
+session, saved revision/defaults, sample materialization, PDF digest and pages.
+It is a separate purpose proof and cannot authenticate a login.
+
+In Hash's editor, approval is enabled after every preview page renders and is
+visited and the owner acknowledges the review. An owner approves the exact
+current design using `POST /api/v1/templates/{id}/html/approve` with
+`expected_version`, `expected_content_sha256`, `preview_receipt` and
+`expected_preview_pdf_sha256`. Missing receipt/PDF pins return 400; an invalid,
+expired or mismatched receipt returns 409 and requires a new preview. Another
+reviewer or different signed session cannot reuse that receipt. The digest includes
+the canonical master and its defaults. The original credential and receipt
+deadline are checked again after the audit append, so expiry during a lock wait
+rolls back approval and audit together. The chained audit records the preview
+ID, materialization/PDF digests, pages and reviewer/time; it omits the receipt,
+session fingerprint and sample text. Approval cannot carry over to a new
+revision. The receipt authenticates the preview commitments and the owner
+approval records intent; it does not prove that a person read or understood the
+terms. Preview PDFs and sample text are not retained as contract artifacts.
+Each derived contract still needs review of its own stored rendered PDF and
+signing fields.
 
 For HTML designs, `GET /api/v1/templates/{id}` includes `html_approval` with
 `version` and `content_sha256` for that exact returned master and defaults.

@@ -154,6 +154,7 @@
   <div class="mb-8 space-y-2">
     <p class="page-eyebrow">Library</p>
     <h1 class="page-title">Templates</h1>
+    <a href="/templates/html/new" class="btn btn-secondary">Create HTML design</a>
   </div>
 
   {#if error}<p role="alert" class="card p-4 mb-6 text-danger">{error}</p>{/if}
@@ -249,7 +250,7 @@
     <div class="card p-12 text-center">
       <FileText class="size-8 mx-auto text-text-muted mb-3" />
       <p class="font-display text-xl font-extralight">No templates yet</p>
-      <p class="text-text-secondary text-sm mt-2">Upload your first PDF above.</p>
+      <p class="text-text-secondary text-sm mt-2">Create an HTML design or upload your first PDF above.</p>
     </div>
   {:else}
     <div class="card overflow-x-auto">
@@ -271,6 +272,7 @@
               <td class="px-4 py-3 text-text-muted">v{t.version}</td>
               <td class="hidden sm:table-cell px-4 py-3 text-text-muted">{new Date(t.updated_at).toLocaleString()}</td>
               <td class="px-4 py-3 text-right">
+                {#if t.source_kind === 'html'}<a href={`/templates/${t.id}/html`} class="btn btn-secondary text-xs mr-2">Open design</a>{/if}
                 <button
                   class="btn btn-secondary text-xs"
                   disabled={creatingId !== null}

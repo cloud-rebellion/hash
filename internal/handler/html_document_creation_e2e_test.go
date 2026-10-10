@@ -166,7 +166,8 @@ func setupHTMLDocumentCreationE2E(t *testing.T, renderer *htmlCreationRendererE2
 func approveHTMLCreationTemplateE2E(t *testing.T, f lifecycleAuthorizationFixture, template *generated.Template) {
 	t.Helper()
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, htmlApprovalInputE2E(template), cookie); w.Code != http.StatusOK {
+	in := previewApprovalInputE2E(t, f, template, cookie)
+	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, in, cookie); w.Code != http.StatusOK {
 		t.Fatalf("approve instantiation master=%d %s", w.Code, w.Body.String())
 	}
 }

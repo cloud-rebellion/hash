@@ -10,13 +10,19 @@ export interface HTMLSectionDefinition {
   default_text: string;
   max_chars: number;
 }
+export interface HTMLAsset {
+  name: string;
+  media_type: 'image/png' | 'image/jpeg' | 'font/woff' | 'font/woff2';
+  data_base64: string;
+  sha256: string;
+}
 export interface HTMLMaster {
   schema_version: 1;
   html: string;
   css: string;
   values?: HTMLValueDefinition[];
   sections?: HTMLSectionDefinition[];
-  assets?: unknown[];
+  assets?: HTMLAsset[];
 }
 export interface HTMLFormField extends HTMLValueDefinition { defaultValue: string; label: string }
 

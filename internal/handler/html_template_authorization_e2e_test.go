@@ -183,7 +183,8 @@ func TestHTMLTemplateLifecycleApprovalAndRevisionE2E(t *testing.T) {
 	if err != nil || len(listed) != 1 || len(listed[0].HtmlMasterJson) != 0 || !bytes.Equal(listed[0].HtmlContentSha256, template.HtmlContentSha256) {
 		t.Fatalf("metadata list must omit asset master and preserve cached digest: len=%d err=%v", len(listed), err)
 	}
-	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, htmlApprovalInputE2E(template), cookie); w.Code != http.StatusOK {
+	firstApproval := previewApprovalInputE2E(t, f, template, cookie)
+	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, firstApproval, cookie); w.Code != http.StatusOK {
 		t.Fatalf("owner approval=%d %s", w.Code, w.Body.String())
 	}
 	approved, err := f.q.GetHTMLTemplateRevision(f.ctx, generated.GetHTMLTemplateRevisionParams{TemplateID: template.ID, OrgID: f.org, Version: 1})
@@ -205,13 +206,16 @@ func TestHTMLTemplateLifecycleApprovalAndRevisionE2E(t *testing.T) {
 	if err != nil || !bytes.Equal(old.HtmlMasterJson, approved.HtmlMasterJson) || !bytes.Equal(old.ContentSha256, approved.ContentSha256) || old.ApprovedBy != approved.ApprovedBy || !old.ApprovedAt.Time.Equal(approved.ApprovedAt.Time) {
 		t.Fatal("updating current template rewrote approved historical revision")
 	}
+	currentApproval := previewApprovalInputE2E(t, f, current, cookie)
+	wrongDigest := currentApproval
+	wrongDigest.ExpectedContentSHA256 = strings.Repeat("0", 64)
 	for _, tc := range []struct {
 		name, operation string
 		input           any
 	}{
 		{"stale edit", "update", htmlTemplateInputE2E(t, 1, "Lost edit")},
-		{"stale approval", "approve", htmlApprovalInputE2E(template)},
-		{"wrong digest", "approve", htmlTemplateApprovalInput{ExpectedVersion: 2, ExpectedContentSHA256: strings.Repeat("0", 64)}},
+		{"stale approval", "approve", firstApproval},
+		{"wrong digest", "approve", wrongDigest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := htmlTemplateSnapshotE2E(t, f)
@@ -221,7 +225,7 @@ func TestHTMLTemplateLifecycleApprovalAndRevisionE2E(t *testing.T) {
 			assertHTMLTemplateUnchangedE2E(t, f, before)
 		})
 	}
-	if w := submitHTMLTemplateE2E(t, f, "approve", current.ID, htmlApprovalInputE2E(current), cookie); w.Code != http.StatusOK {
+	if w := submitHTMLTemplateE2E(t, f, "approve", current.ID, currentApproval, cookie); w.Code != http.StatusOK {
 		t.Fatalf("approve current revision=%d %s", w.Code, w.Body.String())
 	}
 	history, err := f.q.ListApprovedHTMLTemplateRevisions(f.ctx, generated.ListApprovedHTMLTemplateRevisionsParams{TemplateID: template.ID, OrgID: f.org, ResultLimit: 10})
@@ -243,6 +247,8 @@ func TestHTMLTemplateTenantAndOwnerRefusalsE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ownerCookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	approval := previewApprovalInputE2E(t, f, template, ownerCookie)
 	for _, tc := range []struct {
 		name, operation string
 		actor           lifecycleAuthorizationFixture
@@ -259,7 +265,7 @@ func TestHTMLTemplateTenantAndOwnerRefusalsE2E(t *testing.T) {
 			before, foreignBefore := htmlTemplateSnapshotE2E(t, f), htmlTemplateSnapshotE2E(t, foreign)
 			var input any = htmlTemplateInputE2E(t, template.Version, "Refused")
 			if tc.operation == "approve" {
-				input = htmlApprovalInputE2E(template)
+				input = approval
 			} else if tc.operation == "create" {
 				input = htmlTemplateInputE2E(t, 0, "Refused")
 			}
@@ -327,6 +333,17 @@ func TestHTMLTemplateOriginalAuthorityAfterLocksE2E(t *testing.T) {
 				f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 				_ = seedSessionOwnerE2E(t, f.ctx, f.q, f.org)
 				template := createHTMLTemplateE2E(t, f)
+				ttl := time.Hour
+				if change == "expiry" {
+					ttl = 2 * time.Second
+				}
+				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
+				var input any = htmlTemplateInputE2E(t, 1, "Late mutation")
+				if operation == "create" {
+					input = htmlTemplateInputE2E(t, 0, "Late creation")
+				} else if operation == "approve" {
+					input = previewApprovalInputE2E(t, f, template, cookie)
+				}
 				hold, err := f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
@@ -345,17 +362,6 @@ func TestHTMLTemplateOriginalAuthorityAfterLocksE2E(t *testing.T) {
 				}
 				if err != nil {
 					t.Fatal(err)
-				}
-				ttl := time.Hour
-				if change == "expiry" {
-					ttl = time.Second
-				}
-				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-				var input any = htmlTemplateInputE2E(t, 1, "Late mutation")
-				if operation == "create" {
-					input = htmlTemplateInputE2E(t, 0, "Late creation")
-				} else if operation == "approve" {
-					input = htmlApprovalInputE2E(template)
 				}
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- submitHTMLTemplateE2E(t, f, operation, template.ID, input, cookie) }()
@@ -400,6 +406,13 @@ func TestHTMLTemplateAuditWaitExpiryRollsBackE2E(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 			template := createHTMLTemplateE2E(t, f)
+			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, 2*time.Second)
+			var input any = htmlTemplateInputE2E(t, 1, "Audit delayed")
+			if operation == "create" {
+				input = htmlTemplateInputE2E(t, 0, "Audit delayed")
+			} else if operation == "approve" {
+				input = previewApprovalInputE2E(t, f, template, cookie)
+			}
 			before := htmlTemplateSnapshotE2E(t, f)
 			hold, err := f.pool.Begin(f.ctx)
 			if err != nil {
@@ -409,13 +422,6 @@ func TestHTMLTemplateAuditWaitExpiryRollsBackE2E(t *testing.T) {
 			if err := f.q.WithTx(hold).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
-			var input any = htmlTemplateInputE2E(t, 1, "Audit delayed")
-			if operation == "create" {
-				input = htmlTemplateInputE2E(t, 0, "Audit delayed")
-			} else if operation == "approve" {
-				input = htmlApprovalInputE2E(template)
-			}
-			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
 			result := make(chan *httptest.ResponseRecorder, 1)
 			go func() { result <- submitHTMLTemplateE2E(t, f, operation, template.ID, input, cookie) }()
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
@@ -457,7 +463,9 @@ func TestHTMLTemplateSchemaImmutabilityAndDocumentReviewE2E(t *testing.T) {
 		assertHTMLSchemaRefusalE2E(t, f, statement, template.ID)
 	}
 	assertHTMLSchemaRefusalE2E(t, f, `UPDATE html_template_revisions SET approved_by=$2 WHERE template_id=$1`, template.ID, f.user.ID)
-	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, htmlApprovalInputE2E(template), dsrSessionCookieE2E(t, f.s, f.user.ID, 0, time.Hour)); w.Code != http.StatusOK {
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	approval := previewApprovalInputE2E(t, f, template, cookie)
+	if w := submitHTMLTemplateE2E(t, f, "approve", template.ID, approval, cookie); w.Code != http.StatusOK {
 		t.Fatalf("schema fixture approve=%d %s", w.Code, w.Body.String())
 	}
 	assertHTMLSchemaRefusalE2E(t, f, `UPDATE html_template_revisions SET approved_at=approved_at+interval '1 second' WHERE template_id=$1`, template.ID)

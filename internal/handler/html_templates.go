@@ -206,8 +206,10 @@ func (s *Server) handleUpdateHTMLTemplate(w http.ResponseWriter, r *http.Request
 }
 
 type htmlTemplateApprovalInput struct {
-	ExpectedVersion       int32  `json:"expected_version"`
-	ExpectedContentSHA256 string `json:"expected_content_sha256"`
+	ExpectedVersion          int32  `json:"expected_version"`
+	ExpectedContentSHA256    string `json:"expected_content_sha256"`
+	PreviewReceipt           string `json:"preview_receipt"`
+	ExpectedPreviewPDFSHA256 string `json:"expected_preview_pdf_sha256"`
 }
 
 func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Request) {
@@ -229,11 +231,26 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "expected_version and lowercase content SHA-256 are required")
 		return
 	}
+	pdfDigest, err := hex.DecodeString(in.ExpectedPreviewPDFSHA256)
+	if err != nil || len(pdfDigest) != 32 || in.ExpectedPreviewPDFSHA256 != strings.ToLower(in.ExpectedPreviewPDFSHA256) ||
+		in.PreviewReceipt == "" || len(in.PreviewReceipt) > 8192 {
+		writeError(w, http.StatusBadRequest, "a saved-design preview receipt and lowercase preview PDF SHA-256 are required")
+		return
+	}
 	actor, err := s.sessionOwnerActor(r, u)
 	if err != nil {
 		s.writeDraftAuthoringError(w, "authorize HTML template approval", err)
 		return
 	}
+	preview, err := s.validateHTMLTemplatePreviewReceipt(r, u, id, in.ExpectedVersion, in.ExpectedContentSHA256, in.ExpectedPreviewPDFSHA256, in.PreviewReceipt)
+	if err != nil {
+		s.writeHTMLTemplateError(w, "verify HTML template preview", err)
+		return
+	}
+	// The same proof deadline is checked when retaining the live owner and after
+	// the chained audit append. Expiry during an audit lock wait rolls back the
+	// approval and audit together.
+	actor.Authorize = htmlTemplatePreviewReceiptAuthorization(actor.Authorize, preview)
 	revision, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
 		func(ctx context.Context, q *generated.Queries) (*generated.HtmlTemplateRevision, error) {
 			t, err := q.GetHTMLTemplateForUpdate(ctx, generated.GetHTMLTemplateForUpdateParams{ID: id, OrgID: u.OrgID})
@@ -247,8 +264,7 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 			if err != nil {
 				return nil, err
 			}
-			content, err := htmlmaster.CanonicalTemplate(current.HtmlMasterJson, current.VariablesJson)
-			if err != nil || content.SHA256 != in.ExpectedContentSHA256 || !bytes.Equal(current.ContentSha256, digest) {
+			if _, err := toHTMLTemplateDetailResponse(t, current); err != nil {
 				return nil, errHTMLTemplateConflict
 			}
 			if current.ApprovedBy.Valid && current.ApprovedAt.Valid {
@@ -259,7 +275,13 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 			})
 		}, func(revision *generated.HtmlTemplateRevision) audit.Entry {
 			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindTemplateUpdated,
-				Payload: map[string]any{"template_id": id, "source_kind": "html", "version": revision.Version, "content_sha256": in.ExpectedContentSHA256, "approved": true}}
+				Payload: map[string]any{
+					"template_id": id, "source_kind": "html", "version": revision.Version,
+					"content_sha256": in.ExpectedContentSHA256, "approved": true,
+					"preview_id": preview.PreviewID, "preview_pdf_sha256": preview.PDFSHA256,
+					"preview_materialization_sha256": preview.MaterializationSHA256, "preview_page_count": preview.PageCount,
+					"previewed_by": preview.ReviewerID, "previewed_at": preview.IssuedAt,
+				}}
 		})
 	if err != nil {
 		s.writeHTMLTemplateError(w, "approve HTML template", err)
@@ -272,6 +294,10 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) writeHTMLTemplateError(w http.ResponseWriter, operation string, err error) {
+	if errors.Is(err, errHTMLTemplatePreviewReceipt) {
+		writeError(w, http.StatusConflict, "saved-design preview is invalid, changed or expired; preview and review it again")
+		return
+	}
 	if errors.Is(err, errHTMLTemplateConflict) || errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "HTML template revision changed or is unavailable; refresh and review it again")
 		return

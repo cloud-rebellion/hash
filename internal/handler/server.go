@@ -455,6 +455,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/starter", s.handleCreateStarterTemplate)
 			r.Post("/html", s.handleCreateHTMLTemplate)
 			r.Patch("/{id}/html", s.handleUpdateHTMLTemplate)
+			r.Post("/{id}/html/preview", s.handlePreviewHTMLTemplate)
 			r.With(auth.RequireRole(auth.RoleOwner)).Post("/{id}/html/approve", s.handleApproveHTMLTemplate)
 			r.Post("/{id}/html/documents", s.handleInstantiateHTMLTemplate)
 			r.Get("/{id}", s.handleGetTemplate)

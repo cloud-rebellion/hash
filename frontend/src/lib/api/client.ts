@@ -123,6 +123,61 @@ export async function getTemplate(id: string): Promise<TemplateResponse> {
   return request('GET', `/api/v1/templates/${encodeURIComponent(id)}`);
 }
 
+export interface HTMLTemplateInput {
+  name: string;
+  html_master_json: HTMLMaster;
+  variables_json: Record<string, string>;
+}
+export async function createHTMLTemplate(input: HTMLTemplateInput): Promise<TemplateResponse> {
+  return request('POST', '/api/v1/templates/html', input);
+}
+export async function updateHTMLTemplate(id: string, expectedVersion: number, input: HTMLTemplateInput): Promise<TemplateResponse> {
+  return request('PATCH', `/api/v1/templates/${encodeURIComponent(id)}/html`, { ...input, expected_version: expectedVersion });
+}
+export interface HTMLTemplatePreview {
+  bytes: Uint8Array;
+  templateID: string;
+  version: number;
+  contentSHA256: string;
+  materializationSHA256: string;
+  pdfSHA256: string;
+  pages: number;
+  receipt: string;
+  expiresAt: string;
+}
+export async function previewHTMLTemplate(id: string, version: number, contentSHA256: string, values: Record<string, string>, signal: AbortSignal): Promise<HTMLTemplatePreview> {
+  const res = await fetch(`/api/v1/templates/${encodeURIComponent(id)}/html/preview`, {
+    method: 'POST', credentials: 'include', cache: 'no-store', signal,
+    headers: { Accept: 'application/pdf', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_version: version, expected_content_sha256: contentSHA256, values }),
+  });
+  if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  const returnedVersion = res.headers.get('X-Hash-Template-Version');
+  const materializationSHA256 = res.headers.get('X-Hash-Materialization-SHA256') ?? '';
+  const pdfSHA256 = res.headers.get('X-Hash-PDF-SHA256') ?? '';
+  const pageHeader = res.headers.get('X-Hash-PDF-Pages') ?? '';
+  const pages = Number(pageHeader);
+  const receipt = res.headers.get('X-Hash-Preview-Receipt') ?? '';
+  const expiresAt = res.headers.get('X-Hash-Preview-Expires-At') ?? '';
+  if (res.headers.get('X-Hash-Template-Id') !== id || returnedVersion !== String(version)
+      || res.headers.get('X-Hash-Template-Content-SHA256') !== contentSHA256 || !/^[a-f0-9]{64}$/.test(contentSHA256)
+      || !/^[a-f0-9]{64}$/.test(materializationSHA256) || !/^[a-f0-9]{64}$/.test(pdfSHA256)
+      || !/^[1-9][0-9]{0,2}$/.test(pageHeader) || pages > 500 || !receipt || receipt.length > 8192
+      || /[\s\x00-\x1f\x7f]/.test(receipt) || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error('The preview does not match this saved revision or has expired. Refresh the design before reviewing it.');
+  }
+  const bytes = await readVerifiedPDF(res, pdfSHA256);
+  if (Date.parse(expiresAt) <= Date.now()) throw new Error('The preview expired while loading. Generate a new preview.');
+  return { bytes, templateID: id, version, contentSHA256, materializationSHA256, pdfSHA256, pages, receipt, expiresAt };
+}
+export async function approveHTMLTemplate(id: string, version: number, contentSHA256: string, preview: HTMLTemplatePreview): Promise<{ template_id: string; version: number; content_sha256: string; approved_by: string; approved_at: string }> {
+  return request('POST', `/api/v1/templates/${encodeURIComponent(id)}/html/approve`, {
+    expected_version: version, expected_content_sha256: contentSHA256,
+    preview_receipt: preview.receipt, expected_preview_pdf_sha256: preview.pdfSHA256,
+  });
+}
+
 export interface HTMLDocumentInput {
   name: string;
   expected_template_version: number;
@@ -154,6 +209,11 @@ export async function fetchVerifiedDocumentPDF(documentID: string, expectedSHA25
     credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
   });
   if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  return readVerifiedPDF(res, expectedSHA256);
+}
+
+// Shared bounded byte/digest policy for document and saved-design previews.
+async function readVerifiedPDF(res: Response, expectedSHA256: string): Promise<Uint8Array> {
   if (res.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/pdf' || !res.body) {
     throw new Error('The server did not return a PDF. Refresh this document before reviewing it.');
   }

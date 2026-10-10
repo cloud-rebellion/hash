@@ -872,6 +872,9 @@ func (e *Engine) loadSealedSendSnapshot(ctx context.Context, docID, orgID uuid.U
 	if err := htmlsource.Validate(doc, true); err != nil {
 		return nil, fmt.Errorf("resume send sealing: HTML source: %w", err)
 	}
+	if err := htmlsource.ValidateSigningPageState(ctx, e.Queries, doc, 0); err != nil {
+		return nil, err
+	}
 	// Validate signer-visible disclosure before resolving source versions or
 	// touching the durable retention-start marker. A pre-cutover reversible
 	// sealing intent can therefore return safely to draft on invalid authoring

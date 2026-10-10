@@ -9,15 +9,19 @@
     documentPdfURL,
     fetchVerifiedDocumentPDF,
     type DocumentField,
+    type HTMLDocumentSource,
     type Recipient,
   } from '$lib/api/client';
   import { PenLine, Type, Calendar, CheckSquare, Trash2, Signature } from 'lucide-svelte';
-  import { htmlPlacementPins } from '$lib/htmlRevision';
+  import { htmlPlacementPins, validateHTMLSource, verifiedHTMLGeneratedFields } from '$lib/htmlRevision';
 
   type Props = { documentID: string; recipientRevision?: number; hasHTMLSource?: boolean; pdfSHA256?: string; htmlSourceCommitment?: string;
+    htmlSource?: HTMLDocumentSource | null; readonly?: boolean;
+    onPlacementProof?: (proof: { documentID: string; pdfSHA256: string; htmlSourceCommitment: string; ready: boolean }) => void;
     onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void };
-  let { documentID, recipientRevision = 0, hasHTMLSource = false, pdfSHA256, htmlSourceCommitment, onSignatureFieldsChange }: Props = $props();
+  let { documentID, recipientRevision = 0, hasHTMLSource = false, pdfSHA256, htmlSourceCommitment, htmlSource = null, readonly = false, onPlacementProof, onSignatureFieldsChange }: Props = $props();
   const sourceHTML = untrack(() => hasHTMLSource), sourceSHA = untrack(() => pdfSHA256), sourceCommitment = untrack(() => htmlSourceCommitment);
+  const retainedSource = untrack(() => htmlSource), generated = untrack(() => htmlSource?.source_schema_version === 3);
 
   type PageInfo = { num: number; w: number; h: number; scale: number };
 
@@ -30,11 +34,14 @@
   let refreshingRecipients = $state(false);
   let recipientRefreshError = $state<string | null>(null);
   let appliedRecipientRevision = $state(untrack(() => recipientRevision));
-  const placementUnavailable = $derived(saving || loading || refreshingRecipients || recipientRefreshError !== null || pages.length === 0);
+  let rendered = $state(false);
+  const placementUnavailable = $derived(readonly || generated || saving || loading || !rendered || refreshingRecipients || recipientRefreshError !== null || error !== null || pages.length === 0);
   let disposed = false;
   let activePdf: PdfDoc | null = null;
   const current = (target: string) => !disposed && documentID === target && hasHTMLSource === sourceHTML
-    && (!sourceHTML || (pdfSHA256 === sourceSHA && htmlSourceCommitment === sourceCommitment));
+    && (!sourceHTML || (pdfSHA256 === sourceSHA && htmlSourceCommitment === sourceCommitment
+      && (!retainedSource || (htmlSource?.html_source_commitment === retainedSource.html_source_commitment
+        && htmlSource.pdf_sha256 === retainedSource.pdf_sha256 && htmlSource.source_schema_version === retainedSource.source_schema_version))));
   const abort = new AbortController();
 
   function emitSignatureFields() {
@@ -42,6 +49,15 @@
       role: recipients.find((r) => r.id === f.recipient_id)?.role ?? 'unassigned',
       label: f.label ?? 'Signature',
     })));
+  }
+  function emitProof(ready: boolean) {
+    onPlacementProof?.({ documentID, pdfSHA256: sourceSHA ?? '', htmlSourceCommitment: sourceCommitment ?? '', ready });
+  }
+  function verifyAssignments(recs: Recipient[], fs: DocumentField[]) {
+    if (!Array.isArray(recs) || !Array.isArray(fs) || !recs.every((r) => r.document_id === documentID) || !fs.every((f) => f.document_id === documentID)) {
+      throw new Error('The server returned field assignments for a different document.');
+    }
+    if (generated && retainedSource) verifiedHTMLGeneratedFields(retainedSource, fs, recs);
   }
 
   // Tool palette.
@@ -77,18 +93,18 @@
     if (!current(documentID) || loading || saving || refreshingRecipients) return;
     const target = documentID;
     refreshingRecipients = true;
+    emitProof(false);
     recipientRefreshError = null;
     dragStart = null;
     draft = null;
     try {
       const [recs, fs] = await Promise.all([listRecipients(target), listFields(target)]);
       if (!current(target) || revision !== recipientRevision) return;
-      if (!recs.every((r) => r.document_id === target) || !fs.every((f) => f.document_id === target)) {
-        throw new Error('The server returned field assignments for a different document.');
-      }
+      verifyAssignments(recs, fs);
       recipients = recs;
       fields = fs;
       emitSignatureFields();
+      emitProof(rendered);
       if (!recs.some((r) => r.id === recipientID)) recipientID = recs[0]?.id ?? '';
       appliedRecipientRevision = revision;
     } catch (e) {
@@ -105,7 +121,12 @@
     const target = documentID;
     let initializationFailed = false;
     try {
+      emitProof(false);
       htmlPlacementPins(sourceHTML, sourceSHA, sourceCommitment);
+      if (retainedSource) {
+        validateHTMLSource(retainedSource, target, retainedSource.org_id);
+        if (retainedSource.pdf_sha256 !== sourceSHA || retainedSource.html_source_commitment !== sourceCommitment) throw new Error('The saved signing locations belong to another PDF. Refresh this document.');
+      } else if (sourceHTML && !readonly) throw new Error('Load and verify this document’s retained source before placing signature fields.');
       const pdf = await import('$lib/pdf');
       if (!current(target)) return;
       const [recs, fs, doc] = await Promise.all([
@@ -120,12 +141,10 @@
       ]);
       if (!current(target)) return;
       if (doc.numPages < 1 || doc.numPages > 500) throw new Error('This PDF exceeds the field-placement page limit.');
-      if (!recs.every((r) => r.document_id === target) || !fs.every((f) => f.document_id === target)) {
-        throw new Error('The server returned field assignments for a different document.');
-      }
+      if (retainedSource && doc.numPages !== retainedSource.page_count) throw new Error('The PDF page count differs from its saved source. Refresh this document.');
+      verifyAssignments(recs, fs);
       recipients = recs;
       fields = fs;
-      emitSignatureFields();
       if (recs.length) recipientID = recs[0].id;
 
       const infos: PageInfo[] = [];
@@ -144,23 +163,28 @@
       // Render each page into its bound canvas, recording the rendered size.
       for (const p of pages) {
         const el = canvasEls[p.num];
-        if (!el) continue;
+        if (!el) throw new Error(`PDF page ${p.num} could not be displayed. Refresh this document.`);
         const dim = await pdf.renderPage(doc, p.num, el, p.scale);
         if (!current(target)) return;
+        if (!Number.isFinite(dim.width) || !Number.isFinite(dim.height) || dim.width <= 0 || dim.height <= 0) throw new Error(`PDF page ${p.num} rendered with invalid dimensions.`);
         p.w = dim.width;
         p.h = dim.height;
       }
       pages = [...pages];
+      rendered = true;
+      emitSignatureFields();
+      emitProof(true);
     } catch (e) {
       initializationFailed = true;
       if (activePdf) { void activePdf.loadingTask.destroy().catch(() => {}); activePdf = null; }
-      if (current(target)) error = (e as Error).message;
+      if (current(target)) { error = (e as Error).message; rendered = false; emitProof(false); }
     } finally {
       if (current(target)) loading = false;
     }
   });
 
   onDestroy(() => {
+    emitProof(false);
     disposed = true;
     abort.abort();
     dragStart = null;
@@ -183,7 +207,7 @@
   }
 
   function onPointerDown(e: PointerEvent, page: number, layer: HTMLElement) {
-    if (e.button !== 0 || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
+    if (e.button !== 0 || readonly || generated || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
     if (tool === 'signature' && !recipientID) {
       error = 'Pick a recipient before placing a signature field.';
       return;
@@ -211,7 +235,7 @@
     const d = draft;
     dragStart = null;
     draft = null;
-    if (!d || placementUnavailable || !current(documentID)) return;
+    if (!d || readonly || generated || placementUnavailable || !current(documentID)) return;
     // A click (no real drag) drops a sensibly sized default box.
     if (d.w < 1.5 || d.h < 1) {
       d.w = tool === 'signature' ? 26 : 18;
@@ -247,7 +271,7 @@
   }
 
   async function remove(f: DocumentField) {
-    if (placementUnavailable || !current(documentID) || f.document_id !== documentID) return;
+    if (readonly || generated || placementUnavailable || !current(documentID) || f.document_id !== documentID) return;
     const target = documentID;
     saving = true;
     error = null;
@@ -273,20 +297,22 @@
   }
 </script>
 
-<section class="card p-5 mb-6">
+<section class="card p-5 mb-6" aria-label="PDF signature locations" data-generated-signatures={generated} data-placement-ready={rendered && !error && !recipientRefreshError && !refreshingRecipients}>
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <Signature class="size-4" /> Field designer
+      <Signature class="size-4" /> {generated || readonly ? 'Signature locations' : 'Field designer'}
     </h2>
   </div>
-  <p class="text-sm text-text-secondary mb-4 leading-relaxed">
+  {#if generated}<p class="text-sm text-text-secondary mb-4 leading-relaxed">Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties. Change document values or wording above to create a new PDF; Hash regenerates its locations for fresh review.</p>
+  {:else if readonly}<p class="text-sm text-text-secondary mb-4 leading-relaxed">The saved field positions are shown for viewing.</p>
+  {:else}<p class="text-sm text-text-secondary mb-4 leading-relaxed">
     Pick a field type, then click (or drag a box) on the page to place it. Each
     signer fills their fields and signs where you drop a signature field; the
     values stamp onto the final PDF at exactly these positions.
-  </p>
+  </p>{/if}
 
   <!-- Toolbar -->
-  <div class="flex flex-wrap items-end gap-3 mb-4 pb-4 border-b border-border-light">
+  {#if !generated && !readonly}<div class="flex flex-wrap items-end gap-3 mb-4 pb-4 border-b border-border-light">
     <div class="flex flex-wrap gap-1">
       {#each TOOLS as t}
         <button
@@ -317,7 +343,7 @@
     <label class="flex items-center gap-2 text-sm pb-2">
       <input type="checkbox" bind:checked={required} disabled={placementUnavailable} /> Required
     </label>
-  </div>
+  </div>{/if}
 
   {#if error}
     <div role="alert" class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">{error}</div>
@@ -344,10 +370,10 @@
     <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label="PDF field placement pages" tabindex="0">
       {#each pages as p (p.num)}
         <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px">
-          <canvas bind:this={canvasEls[p.num]} class="block"></canvas>
+          <canvas bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block"></canvas>
           <!-- Field overlay layer (same pixel box as the canvas) -->
           <div
-            class="absolute inset-0 cursor-crosshair"
+            class="absolute inset-0 {generated || readonly ? '' : 'cursor-crosshair'}"
             role="application"
             tabindex="-1"
             aria-label="Field placement layer for page {p.num}"
@@ -359,11 +385,12 @@
             {#each fieldsOnPage(p.num) as f (f.id)}
               <div
                 data-field-id={f.id}
+                data-recipient-id={f.recipient_id}
                 class="absolute border-2 rounded flex items-center justify-between gap-1 px-1 text-[10px] font-mono {boxClass(f.type)}"
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
               >
                 <span class="truncate">{f.type === 'signature' ? recipientName(f.recipient_id) : f.label || f.type}</span>
-                <button
+                {#if !generated && !readonly}<button
                   type="button"
                   class="shrink-0 hover:text-danger"
                   aria-label="Remove field"
@@ -372,7 +399,7 @@
                   onclick={() => remove(f)}
                 >
                   <Trash2 class="size-3" />
-                </button>
+                </button>{/if}
               </div>
             {/each}
             {#if draft && draft.page === p.num}

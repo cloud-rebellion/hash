@@ -1,5 +1,5 @@
 // Hash frontend API client.
-import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot } from '../htmlTemplate';
+import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot, HTMLSigningPage } from '../htmlTemplate';
 
 export interface TemplateResponse {
   id: string;
@@ -147,11 +147,11 @@ export interface HTMLTemplatePreview {
   receipt: string;
   expiresAt: string;
 }
-export async function previewHTMLTemplate(id: string, version: number, contentSHA256: string, values: Record<string, string>, signal: AbortSignal): Promise<HTMLTemplatePreview> {
+export async function previewHTMLTemplate(id: string, version: number, contentSHA256: string, values: Record<string, string>, signal: AbortSignal, sections?: Record<string, string>): Promise<HTMLTemplatePreview> {
   const res = await fetch(`/api/v1/templates/${encodeURIComponent(id)}/html/preview`, {
     method: 'POST', credentials: 'include', cache: 'no-store', signal,
     headers: { Accept: 'application/pdf', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expected_version: version, expected_content_sha256: contentSHA256, values }),
+    body: JSON.stringify({ expected_version: version, expected_content_sha256: contentSHA256, values, ...(sections === undefined ? {} : { sections }) }),
   });
   if (!res.ok) throw new APIError(res.status, await friendlyError(res));
   const returnedVersion = res.headers.get('X-Hash-Template-Version');
@@ -217,6 +217,25 @@ export interface HTMLDocumentSource {
   contract_profile?: HTMLContractProfile;
   contract_profile_digest?: string;
   contract_parties?: HTMLDocumentParty[];
+  source_schema_version?: 1 | 2 | 3;
+  signing_page?: HTMLSigningPage;
+  signing_artifact?: HTMLSigningArtifact;
+}
+export interface HTMLSigningArtifactField {
+  slot: HTMLPartySlot; page: number; x: number; y: number; w: number; h: number;
+}
+export interface HTMLSigningArtifact {
+  version: 1;
+  policy: 'hash-branded-signing-page-a4-v1';
+  plan_sha256: string;
+  composition: {
+    schema_version: 1; policy: 'hash-pdf-signing-page-a4-v1';
+    body_sha256: string; signing_page_sha256: string; merged_sha256: string;
+    merged_bytes: number; output_sha256: string; body_pages: number; final_pages: number;
+    body_geometry_sha256: string; geometry_sha256: string;
+    signing_page: { boxes_milli_points: [number, number, number, number][]; rotation: number; user_unit_milli: number };
+  };
+  fields: HTMLSigningArtifactField[];
 }
 export interface HTMLDocumentParty {
   slot: HTMLPartySlot; role: HTMLPartySlot; recipient_id: string;

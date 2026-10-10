@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { assetByteLength, blankHTMLAuthorDraft, blankHTMLContractProfile, draftFromHTMLTemplate, htmlAssetFromFile, htmlAuthorFingerprint, htmlAuthorInput } from './htmlAuthor';
 import type { HTMLAsset } from './htmlTemplate';
-import { contractTemplateFixture } from './htmlTemplate.test';
+import { contractTemplateFixture, signingPageTemplateFixture } from './htmlTemplate.test';
 
 function draft() {
   return { ...blankHTMLAuthorDraft(), name: 'Reusable design', html: '<p><span data-hash-value="company"></span></p><div data-hash-section="scope"></div>',
@@ -77,6 +77,29 @@ test('author refuses incomplete profile, schema downgrade or loss of printed req
   const checked = draftFromHTMLTemplate(contractTemplateFixture());
   checked.values[0].required = false;
   expect(() => htmlAuthorInput(checked)).toThrow('required printed value');
+});
+
+test('version 3 saves explicit no-logo branding and deep-copies policy without inheriting live organisation state', () => {
+  const template = signingPageTemplateFixture(), author = draftFromHTMLTemplate(template), baseline = htmlAuthorFingerprint(author);
+  author.signing_page = new Proxy(author.signing_page!, {});
+  const input = htmlAuthorInput(author);
+  expect(input.html_master_json.schema_version).toBe(3);
+  expect(input.html_master_json.signing_page).toEqual(template.html_master_json!.signing_page);
+  expect(input.html_master_json.signing_page!.branding.logo_url).toBe('');
+  expect(input.html_master_json.signing_page!.logo_asset).toBe('');
+  input.html_master_json.signing_page!.branding.primary_hex = '#123456';
+  expect(author.signing_page!.branding.primary_hex).toBe('#0F172A');
+  author.signing_page!.branding.primary_hex = '#334455';
+  expect(htmlAuthorFingerprint(author)).not.toBe(baseline);
+  expect(template.html_master_json!.signing_page!.branding.primary_hex).toBe('#0F172A');
+  const changed = htmlAuthorInput(author), recovered = draftFromHTMLTemplate({ ...template, ...changed });
+  expect(recovered.signing_page!.branding.primary_hex).toBe('#334455');
+  author.schema_version = 2;
+  expect(() => htmlAuthorInput(author)).toThrow('version 3');
+  author.signing_page = null;
+  const legacy = htmlAuthorInput(author);
+  expect(legacy.html_master_json.schema_version).toBe(2);
+  expect(Object.hasOwn(legacy.html_master_json, 'signing_page')).toBe(false);
 });
 
 test('base64 validation is linear at the actual 2 MiB boundary and refuses malformed/canonical padding', () => {

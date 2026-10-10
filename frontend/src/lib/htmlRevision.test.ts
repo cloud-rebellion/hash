@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { advanceCleanHTMLObservation, currentHTMLSource, htmlPlacementPins, htmlRevisionGroups, htmlRevisionInput, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLRevision } from './htmlRevision';
-import type { DocumentResponse, HTMLDocumentSource } from './api/client';
+import { advanceCleanHTMLObservation, currentHTMLSource, htmlPlacementPins, htmlRevisionGroups, htmlRevisionInput, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLGeneratedFields, verifiedHTMLRevision } from './htmlRevision';
+import type { DocumentField, DocumentResponse, HTMLDocumentSource, Recipient } from './api/client';
+import { blankHTMLSigningPage } from './htmlAuthor';
 import { contractTemplateFixture } from './htmlTemplate.test';
 
 export const documentID = '10000000-0000-4000-8000-000000000001', orgID = '20000000-0000-4000-8000-000000000002';
@@ -20,6 +21,84 @@ export function contractSourceFixture(): HTMLDocumentSource {
       name: values[party.representative_name], email: values[party.representative_email], company_name: values[party.company_name],
       company_id: values[party.company_id], representative_authority: values[party.representative_authority] })) };
 }
+export function signingPageSourceFixture(): HTMLDocumentSource {
+  const source = contractSourceFixture();
+  source.source_schema_version = 3; source.signing_page = blankHTMLSigningPage();
+  source.signing_artifact = { version: 1, policy: 'hash-branded-signing-page-a4-v1', plan_sha256: '7'.repeat(64), composition: {
+    schema_version: 1, policy: 'hash-pdf-signing-page-a4-v1', body_sha256: '8'.repeat(64), signing_page_sha256: '9'.repeat(64),
+    merged_sha256: 'd'.repeat(64), merged_bytes: 1000, output_sha256: source.pdf_sha256, body_pages: 1, final_pages: source.page_count,
+    body_geometry_sha256: 'e'.repeat(64), geometry_sha256: 'f'.repeat(64),
+    signing_page: { boxes_milli_points: Array.from({ length: 5 }, () => [0, 0, 594960, 841920]), rotation: 0, user_unit_milli: 1000 },
+  }, fields: [
+    { slot: 'customer', page: source.page_count, x: 100000, y: 420000, w: 800000, h: 70000 },
+    { slot: 'provider', page: source.page_count, x: 100000, y: 790000, w: 800000, h: 70000 },
+  ] };
+  return source;
+}
+export function generatedAssignmentFixture(source = signingPageSourceFixture()) {
+  const recipients = source.contract_parties!.map((party, index) => ({ id: party.recipient_id, document_id: source.document_id,
+    role: party.role, name: party.name, email: party.email, order_index: index, locale: 'en', status: 'pending', created_at: source.updated_at })) as Recipient[];
+  const fields = source.signing_artifact!.fields.map((slot, index) => ({ id: `${index + 7}0000000-0000-4000-8000-00000000000${index + 7}`,
+    document_id: source.document_id, recipient_id: source.contract_parties!.find((party) => party.slot === slot.slot)!.recipient_id,
+    type: 'signature', required: true, page: slot.page, x_pct: slot.x / 10000, y_pct: slot.y / 10000, w_pct: slot.w / 10000, h_pct: slot.h / 10000 })) as DocumentField[];
+  return { source, recipients, fields };
+}
+
+test('source3 keeps the exact automatic page while legacy descriptors cannot infer or downgrade page policy', () => {
+  const source = signingPageSourceFixture();
+  expect(validateHTMLSource(source, documentID, orgID)).toBe(source);
+  for (const original of [sourceFixture(), contractSourceFixture()]) {
+    const before = JSON.stringify(original);
+    expect(validateHTMLSource(original, documentID, orgID)).toBe(original);
+    expect(JSON.stringify(original)).toBe(before);
+  }
+  const changes: ((source: HTMLDocumentSource) => void)[] = [
+    (source) => { delete source.source_schema_version; }, (source) => { source.source_schema_version = 2; },
+    (source) => { delete source.signing_page; }, (source) => { delete source.signing_artifact; },
+    (source) => { source.signing_artifact!.composition.output_sha256 = 'a'.repeat(64); },
+    (source) => { source.signing_artifact!.composition.final_pages++; },
+    (source) => { source.signing_artifact!.composition.body_pages = 0; },
+    (source) => { source.signing_artifact!.composition.signing_page.boxes_milli_points[1][2]++; },
+    (source) => { source.signing_artifact!.composition.signing_page.rotation = 90; },
+    (source) => { source.signing_artifact!.composition.signing_page.user_unit_milli = 2000; },
+    (source) => { source.signing_artifact!.fields.reverse(); },
+    (source) => { source.signing_artifact!.fields[0].y++; },
+    (source) => { (source.signing_artifact!.composition as any).unapproved = true; },
+    (source) => { delete (source.signing_artifact!.composition as any).geometry_sha256; },
+  ];
+  for (const change of changes) { const altered = structuredClone(source); change(altered); expect(() => validateHTMLSource(altered, documentID, orgID)).toThrow(); }
+});
+
+test('automatic generated field readback verifies both exact parties, complete cardinality and every pinned rectangle', () => {
+  const fixture = generatedAssignmentFixture();
+  expect(verifiedHTMLGeneratedFields(fixture.source, fixture.fields, fixture.recipients)).toBe(fixture.fields);
+  const changes: ((fixture: ReturnType<typeof generatedAssignmentFixture>) => void)[] = [
+    (fixture) => { fixture.fields.pop(); }, (fixture) => { fixture.fields.push({ ...fixture.fields[0] }); },
+    (fixture) => { fixture.fields[0].id = fixture.fields[1].id; },
+    (fixture) => { fixture.fields[0].recipient_id = fixture.fields[1].recipient_id; },
+    (fixture) => { fixture.fields[0].type = 'text'; }, (fixture) => { fixture.fields[0].required = false; },
+    (fixture) => { fixture.fields[0].page--; }, (fixture) => { fixture.fields[0].x_pct += 0.0001; },
+    (fixture) => { fixture.fields[0].w_pct = 79.9999; },
+    (fixture) => { fixture.fields[0].document_id = orgID; }, (fixture) => { fixture.fields[0].h_pct = Number.NaN; },
+    (fixture) => { fixture.recipients.pop(); }, (fixture) => { fixture.recipients[0].name = 'Different representative'; },
+    (fixture) => { fixture.recipients[0].email = fixture.recipients[0].email.toUpperCase(); },
+    (fixture) => { fixture.recipients[0].role = 'signer'; },
+  ];
+  for (const change of changes) { const altered = generatedAssignmentFixture(); change(altered); expect(() => verifiedHTMLGeneratedFields(altered.source, altered.fields, altered.recipients)).toThrow(); }
+});
+
+test('new body page count regenerates final-page fields while old source and party assertions remain read-only exact', () => {
+  const old = generatedAssignmentFixture(), next = generatedAssignmentFixture(structuredClone(old.source));
+  next.source.materialization_revision++; next.source.html_source_commitment = '4'.repeat(64); next.source.pdf_sha256 = '5'.repeat(64);
+  next.source.page_count = 4; next.source.signing_artifact!.composition.body_pages = 3; next.source.signing_artifact!.composition.final_pages = 4;
+  next.source.signing_artifact!.composition.output_sha256 = next.source.pdf_sha256;
+  next.source.signing_artifact!.fields.forEach((field) => field.page = 4);
+  expect(() => verifiedHTMLGeneratedFields(next.source, old.fields, next.recipients)).toThrow();
+  next.fields.forEach((field, index) => { field.page = 4; field.id = `${index + 1}0000000-0000-4000-8000-00000000000${index + 1}`; });
+  expect(verifiedHTMLGeneratedFields(next.source, next.fields, next.recipients)).toBe(next.fields);
+  expect(old.source.page_count).toBe(2); expect(old.source.signing_artifact!.fields[0].page).toBe(2);
+  expect(old.source.contract_parties).toEqual(next.source.contract_parties);
+});
 export function documentFixture(source = sourceFixture()): DocumentResponse {
   return { id: documentID, org_id: orgID, sender_id: senderID, template_id: templateID, source_kind: 'pdf', status: 'draft', has_html_source: true,
     html_review_required: true, html_source_commitment: source.html_source_commitment, html_materialization_revision: source.materialization_revision,

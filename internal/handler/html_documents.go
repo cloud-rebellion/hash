@@ -28,6 +28,7 @@ import (
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -198,7 +199,23 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	if err := guard.Recheck(ctx); err != nil {
 		return nil, 0, err
 	}
-	doc, pages, owned, err := docintake.CreatePDFTemplateDocument(ctx, q, s.Storage, actor.OrgID, actor.UserID, in.Name, templateID, expires, pdf)
+	var composed *sanitize.PDFCompositionResult
+	input := htmlmaster.Input{Values: values, Sections: in.Sections}
+	if compiled.SigningPagePolicy() != nil {
+		artifact, composeErr := s.composeHTMLSigningPage(ctx, compiled, input, pdf)
+		if composeErr != nil {
+			return nil, 0, composeErr
+		}
+		composed = &artifact
+	}
+	var doc *generated.Document
+	var pages int
+	var owned docintake.OwnedPDFSource
+	if composed != nil {
+		doc, pages, owned, err = docintake.CreateComposedPDFTemplateDocument(ctx, q, s.Storage, actor.OrgID, actor.UserID, in.Name, templateID, expires, *composed)
+	} else {
+		doc, pages, owned, err = docintake.CreatePDFTemplateDocument(ctx, q, s.Storage, actor.OrgID, actor.UserID, in.Name, templateID, expires, pdf)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -224,10 +241,17 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	if err != nil {
 		return nil, 0, err
 	}
-	provenance, err := htmlsource.New(htmlsource.Input{TemplateID: templateID, TemplateVersion: revision.Version,
+	sourceInput := htmlsource.Input{TemplateID: templateID, TemplateVersion: revision.Version,
 		TemplateContentSHA256: content.SHA256, MasterJSON: content.MasterJSON, DefaultVarsJSON: content.DefaultsJSON,
 		Values: values, Sections: in.Sections, TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time,
-		PartyBindings: bindings}, doc)
+		PartyBindings: bindings}
+	if composed != nil {
+		sourceInput.SigningArtifact, err = htmlsource.NewSigningArtifact(compiled, input, bindings, composed.Composition)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	provenance, err := htmlsource.New(sourceInput, doc)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -237,6 +261,9 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	}
 	doc, _, err = htmlmaterialization.RegisterOrigin(ctx, q, doc, int32(pages), actor.UserID)
 	if err != nil {
+		return nil, 0, err
+	}
+	if err := createHTMLSigningFields(ctx, q, doc); err != nil {
 		return nil, 0, err
 	}
 	sourceCommitment, err := htmlsource.Commitment(doc)

@@ -197,10 +197,11 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 		}
 	}
 	master.HTML = strings.Replace(master.HTML, `<p><span data-hash-value="scope"></span></p>`, `<section class="scope"><span data-hash-value="scope"></span></section>`, 1)
-	// This explicitly approved fixture-owned page is not automatic branded-page
-	// support. Fields below are placed manually against the exact resulting PDF.
-	master.HTML += `<section class="manual-signatures"><h2>Reviewed manual signing positions</h2><p>Both named parties sign this exact synthetic document.</p><p>Customer signature</p><p>Provider signature</p></section>`
-	master.CSS = `@page{size:A4;margin:20mm}body{font-family:Inter,sans-serif;font-size:12pt;color:#102038}p{line-height:1.35}.scope{white-space:pre-wrap;line-height:1.5}.manual-signatures{break-before:page}`
+	// Explicit schema3 requires a fresh full-page approval and creates both
+	// server-owned fields. The master cannot style the app-owned suffix.
+	master.SchemaVersion = htmlmaster.SigningPageSchemaVersion
+	master.SigningPage = testfixture.BrandedSigningPolicy()
+	master.CSS = `@page{size:A4;margin:20mm}body{font-family:Inter,sans-serif;font-size:12pt;color:#102038}p{line-height:1.35}.scope{white-space:pre-wrap;line-height:1.5}`
 	compiled, err := htmlmaster.Compile(master)
 	if err != nil {
 		t.Fatalf("synthetic real-rendered design preflight: %v", err)
@@ -249,20 +250,15 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 		t.Fatal("fresh two-party UUID binding missing")
 	}
 	fieldByRecipient := map[uuid.UUID]uuid.UUID{}
-	for i, row := range rows {
-		required := true
-		body, _ := json.Marshal(addFieldInput{RecipientID: row.ID.String(), Type: "signature", Page: pages, XPct: 12, YPct: float64(32 + i*22), WPct: 65, HPct: 12, Required: &required, Label: row.Role + " signature", ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256), ExpectedHTMLSourceCommitment: commitment})
-		response := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/fields", string(body), cookie)
-		if response.Code != http.StatusCreated {
-			t.Fatalf("manual source-pinned signature placement status=%d", response.Code)
-		}
-		var field struct {
-			ID uuid.UUID `json:"id"`
-		}
-		if json.Unmarshal(response.Body.Bytes(), &field) != nil || field.ID == uuid.Nil {
-			t.Fatal("manual signature field identity missing")
-		}
-		fieldByRecipient[row.ID] = field.ID
+	automaticFields, err := f.q.ListFieldsByDocument(ctx, doc.ID)
+	if err != nil || htmlsource.ValidateSigningFields(doc, automaticFields, pages) != nil {
+		t.Fatal("automatic intended-party fields missing")
+	}
+	for _, field := range automaticFields {
+		fieldByRecipient[uuid.UUID(field.RecipientID.Bytes)] = field.ID
+	}
+	if err := htmlsource.ValidateSigningPageState(ctx, f.q, doc, pages); err != nil {
+		t.Fatal("automatic page state inconsistent", err)
 	}
 	doc, err = f.q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
 	if err != nil {
@@ -342,7 +338,7 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 	server.Config.Handler = f.s.Routes()
 	server.StartTLS()
 	defer server.Close()
-	packet, _ := json.Marshal(map[string]any{"base": base.String(), "documentID": doc.ID, "pdfSHA256": hex.EncodeToString(doc.PdfSha256), "sourceCommitment": commitment, "pageCount": pages, "materializationRevision": 1, "parties": parties, "rendererVersion": strings.TrimSpace(string(version)), "legacy": map[string]any{"documentID": legacy.ID, "token": strings.TrimPrefix(legacyURL.Path, "/sign/"), "recipientID": legacyParty.ID, "name": legacyParty.Name, "textFieldID": text.ID, "signatureFieldID": legacySignature.ID}})
+	packet, _ := json.Marshal(map[string]any{"base": base.String(), "documentID": doc.ID, "pdfSHA256": hex.EncodeToString(doc.PdfSha256), "sourceCommitment": commitment, "pageCount": pages, "materializationRevision": 1, "parties": parties, "rendererVersion": strings.TrimSpace(string(version)), "ownerCookie": SessionCookieName + "=" + cookie, "legacy": map[string]any{"documentID": legacy.ID, "token": strings.TrimPrefix(legacyURL.Path, "/sign/"), "recipientID": legacyParty.ID, "name": legacyParty.Name, "textFieldID": text.ID, "signatureFieldID": legacySignature.ID}})
 	if err := os.WriteFile(inputPath, packet, 0600); err != nil {
 		t.Fatal("write private signer browser packet")
 	}
@@ -386,7 +382,7 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 	}
 	for _, signature := range signatures {
 		if signature.FieldID != fieldByRecipient[signature.RecipientID] {
-			t.Fatal("completed signature changed its own manual field")
+			t.Fatal("completed signature changed its own automatic field")
 		}
 		if _, err := evidence.GetVerifiedVersion(ctx, signature.ImageStorageKey, signature.ImageVersionID.String, signature.ImageSha256); err != nil {
 			t.Fatal("signature exact evidence version invalid")
@@ -433,9 +429,11 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 		sum := sha256.Sum256(body)
 		artifactHashes[output.name] = hex.EncodeToString(sum[:])
 	}
-	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "scope": "Actual Go HTTPS/PostgreSQL/source worker, exact Chromium renderer and built browser signing. Participants, S3/retention, certificate key and delivery outbox are synthetic; no SMTP/provider/production/legal acceptance.", "document_id": doc.ID, "source_commitment": commitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "page_count": pages, "signature_count": len(signatures), "autosave_confirmed": true, "manual_signature_fields": true, "automatic_branded_page_support": false, "renderer_version": strings.TrimSpace(string(version)), "artifact_sha256": artifactHashes, "sanitization_report": current.MetadataRedactionReport}, "", "  ")
+	_, signingArtifact, err := htmlsource.SigningPage(current)
+    if err!=nil || signingArtifact==nil {t.Fatal("completed signing artifact missing",err)}
+	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "scope": "Actual Go HTTPS/PostgreSQL/source worker, exact Chromium renderer and built browser signing. Participants, S3/retention, certificate key and delivery outbox are synthetic; no SMTP/provider/production/legal acceptance.", "document_id": doc.ID, "source_commitment": commitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "page_count": pages, "signature_count": len(signatures), "autosave_confirmed": true, "manual_signature_fields": false, "automatic_branded_page_support": true, "signing_artifact": signingArtifact, "renderer_version": strings.TrimSpace(string(version)), "artifact_sha256": artifactHashes, "sanitization_report": current.MetadataRedactionReport}, "", "  ")
 	if err := os.WriteFile(filepath.Join(artifacts, "backend-receipt.json"), append(receipt, '\n'), 0600); err != nil {
 		t.Fatal("write safe signer browser backend receipt")
 	}
-	t.Log("actual renderer/HTTPS/PG/worker built-browser both-party signing and legacy autosave accepted; synthetic storage retention/outbox/key; manual fields, branded automation pending")
+	t.Log("actual renderer/HTTPS/PG/worker built-browser both-party signing and legacy autosave accepted; synthetic storage retention/outbox/key; approved automatic branded page and exact locked fields accepted")
 }

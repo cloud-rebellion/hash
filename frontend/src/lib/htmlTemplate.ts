@@ -33,14 +33,36 @@ export interface HTMLContractProfile {
   parties: HTMLContractParty[];
   terms: HTMLContractTerm[];
 }
+export const htmlSigningPagePolicy = 'hash-branded-signing-page-a4-v1' as const;
+export const htmlSigningPageFontSHA256 = '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62' as const;
+export interface HTMLSigningPageBranding {
+  primary_hex: string; accent_hex: string; surface_hex: string; text_hex: string; muted_hex: string;
+  logo_url: string; logo_alt: string; font_heading: string; font_body: string; signature_color: string;
+}
+export interface HTMLSigningPage {
+  version: 1;
+  policy: typeof htmlSigningPagePolicy;
+  font_sha256: typeof htmlSigningPageFontSHA256;
+  branding: HTMLSigningPageBranding;
+  logo_asset: string;
+  logo_sha256: string;
+  logo_alt: string;
+}
+export const htmlSigningPageColours = ['primary_hex', 'accent_hex', 'surface_hex', 'text_hex', 'muted_hex', 'signature_color'] as const;
+export const htmlSigningPagePartyLimits = { company_name: 80, company_id: 40, representative_name: 80, representative_email: 128, representative_authority: 80 } as const;
+export const htmlSigningPageColourLabels: Record<typeof htmlSigningPageColours[number], string> = {
+  primary_hex: 'Primary colour', accent_hex: 'Accent colour', surface_hex: 'Page background',
+  text_hex: 'Text colour', muted_hex: 'Secondary text colour', signature_color: 'Signature colour',
+};
 export interface HTMLMaster {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   html: string;
   css: string;
   values?: HTMLValueDefinition[];
   sections?: HTMLSectionDefinition[];
   assets?: HTMLAsset[];
   contract_profile?: HTMLContractProfile;
+  signing_page?: HTMLSigningPage;
 }
 export interface HTMLFormField extends HTMLValueDefinition { defaultValue: string; label: string }
 
@@ -56,16 +78,91 @@ export function requiredHTMLContractTerms(kind: HTMLContractProfile['kind']): st
 }
 function onlyKeys(object: object, keys: string[]): boolean { return Object.keys(object).every((key) => keys.includes(key)); }
 
+export function htmlSigningPagePlainText(text: unknown, limit: number): text is string {
+  if (typeof text !== 'string' || !text || text !== text.trim()) return false;
+  const characters = Array.from(text);
+  if (characters.length > limit || /^\p{M}/u.test(text) || !/^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]+$/u.test(text)
+      || characters.some((character) => !htmlSigningPageFontCovers(character.codePointAt(0)!))) return false;
+  const units = characters.reduce((sum, character) => sum + (/\p{M}/u.test(character) ? 0 : character.codePointAt(0)! <= 0x024f ? 1 : 2), 0);
+  return units <= limit;
+}
+// Exact Unicode cmap ranges of the SHA-pinned bundled Inter Latin subset.
+// Invisible mapped characters are still refused by the plain-text checks.
+export function htmlSigningPageFontCovers(point: number): boolean {
+  return [[0, 0], [0x20, 0x7e], [0xa0, 0xac], [0xae, 0xff], [0x131, 0x131], [0x152, 0x153],
+    [0x2bb, 0x2bc], [0x2c6, 0x2c6], [0x2da, 0x2da], [0x2dc, 0x2dc], [0x300, 0x301], [0x303, 0x304],
+    [0x308, 0x309], [0x323, 0x323], [0x2002, 0x2002], [0x2009, 0x2009], [0x200b, 0x200b],
+    [0x2013, 0x2014], [0x2018, 0x201a], [0x201c, 0x201e], [0x2022, 0x2022], [0x2026, 0x2026],
+    [0x2032, 0x2033], [0x2039, 0x203a], [0x2044, 0x2044], [0x20ac, 0x20ac], [0x2122, 0x2122],
+    [0x2191, 0x2191], [0x2193, 0x2193], [0x2212, 0x2212], [0xfeff, 0xfeff]]
+    .some(([first, last]) => point >= first && point <= last);
+}
+export function htmlSigningPageIssues(profile: HTMLContractProfile, values: Record<string, string>): string[] {
+  return profile.parties.flatMap((party) => htmlPartyBindings.flatMap((binding) => {
+    const limit = htmlSigningPagePartyLimits[binding];
+    return htmlSigningPagePlainText(values[party[binding]], limit) ? []
+      : [`Keep ${party.slot} ${htmlPartyLabels[binding].toLowerCase()} to one printable line in the bundled Latin font, within ${limit} characters and display units, without surrounding spaces. Wide supported characters use two units.`];
+  }));
+}
+export function htmlSigningPageContrast(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const channels = [1, 3, 5].map((start) => parseInt(hex.slice(start, start + 2), 16) / 255)
+      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const a = luminance(foreground), b = luminance(background);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+export function validateHTMLSigningPage(page: HTMLSigningPage): HTMLSigningPage {
+  const branding = page?.branding;
+  if (!page || typeof page !== 'object' || Array.isArray(page)
+      || !onlyKeys(page, ['version', 'policy', 'font_sha256', 'branding', 'logo_asset', 'logo_sha256', 'logo_alt'])
+      || page.version !== 1 || page.policy !== htmlSigningPagePolicy || page.font_sha256 !== htmlSigningPageFontSHA256 || !branding || typeof branding !== 'object' || Array.isArray(branding)
+      || !onlyKeys(branding, [...htmlSigningPageColours, 'logo_url', 'logo_alt', 'font_heading', 'font_body'])
+      || htmlSigningPageColours.some((key) => typeof branding[key] !== 'string' || !/^#[a-f0-9]{6}$/i.test(branding[key]))
+      || branding.logo_url !== '' || branding.logo_alt !== '' || branding.font_heading !== 'Inter' || branding.font_body !== 'Inter'
+      || typeof page.logo_asset !== 'string' || typeof page.logo_sha256 !== 'string' || typeof page.logo_alt !== 'string'
+      || (page.logo_asset === '' ? page.logo_sha256 !== '' || page.logo_alt !== ''
+        : !namePattern.test(page.logo_asset) || !/^[a-f0-9]{64}$/.test(page.logo_sha256) || !htmlSigningPagePlainText(page.logo_alt, 80))) {
+    throw new Error('The signing page needs its approved policy, complete saved colours, Inter fonts and an explicit no-logo or local-image choice.');
+  }
+  if (htmlSigningPageContrast(branding.text_hex, branding.surface_hex) < 4.5 || htmlSigningPageContrast(branding.muted_hex, branding.surface_hex) < 4.5
+      || htmlSigningPageContrast(branding.primary_hex, branding.surface_hex) < 3 || htmlSigningPageContrast(branding.signature_color, branding.surface_hex) < 3) {
+    throw new Error('Choose readable signing-page colours: text and secondary text need at least 4.5:1 contrast with the background; headings and signatures need 3:1.');
+  }
+  return { version: 1, policy: htmlSigningPagePolicy, font_sha256: htmlSigningPageFontSHA256, branding: {
+    primary_hex: branding.primary_hex, accent_hex: branding.accent_hex, surface_hex: branding.surface_hex,
+    text_hex: branding.text_hex, muted_hex: branding.muted_hex, logo_url: '', logo_alt: '',
+    font_heading: 'Inter', font_body: 'Inter', signature_color: branding.signature_color,
+  }, logo_asset: page.logo_asset, logo_sha256: page.logo_sha256, logo_alt: page.logo_alt };
+}
+export function htmlSigningPage(master: HTMLMaster): HTMLSigningPage | null {
+  if (master.schema_version !== 3) {
+    if (master.signing_page !== undefined) throw new Error('An appended signing page requires an explicitly approved version 3 design.');
+    return null;
+  }
+  const page = validateHTMLSigningPage(master.signing_page!);
+  if (page.logo_asset) {
+    const asset = master.assets?.find((candidate) => candidate.name === page.logo_asset);
+    if (!asset || !['image/png', 'image/jpeg'].includes(asset.media_type) || asset.sha256 !== page.logo_sha256) {
+      throw new Error('The signing-page logo must match an image asset saved in this exact design. Choose that local asset again.');
+    }
+  }
+  return page;
+}
+
 // These are explicit owner-reviewed engineering checks. They do not establish
 // legal sufficiency, independent identity verification or representative authority.
 export function htmlContractProfile(master: HTMLMaster): HTMLContractProfile | null {
+  htmlSigningPage(master);
   const profile = master.contract_profile;
   if (master.schema_version === 1 && profile === undefined) return null;
-  if (master.schema_version !== 2 || !profile || typeof profile !== 'object' || Array.isArray(profile)
+  if (![2, 3].includes(master.schema_version) || !profile || typeof profile !== 'object' || Array.isArray(profile)
       || !onlyKeys(profile, ['id', 'version', 'kind', 'parties', 'terms']) || typeof profile.id !== 'string' || !namePattern.test(profile.id)
       || !Number.isSafeInteger(profile.version) || profile.version < 1 || profile.version > 1_000_000 || !['proposal', 'b2b_services'].includes(profile.kind)
       || !Array.isArray(profile.parties) || profile.parties.length !== 2 || !Array.isArray(profile.terms) || profile.terms.length > 16) {
-    throw new Error('A version 2 design needs a valid reviewed contract profile with both parties. Version 1 designs cannot contain a contract profile.');
+    throw new Error('A version 2 or 3 design needs a valid reviewed contract profile with both parties. Version 1 designs cannot contain a contract profile.');
   }
   const declarations = new Map((master.values ?? []).map((field) => [field.name, field]));
   const sections = new Map((master.sections ?? []).map((section) => [section.name, section]));
@@ -145,6 +242,18 @@ export function htmlProfileSectionValues(master: HTMLMaster, sections: Record<st
   }
   return Object.keys(result).length ? result : undefined;
 }
+export function htmlPreviewSections(master: HTMLMaster, sections: Record<string, string>): Record<string, string> {
+  const definitions = master.sections ?? [], result: Record<string, string> = {};
+  if (Object.keys(sections).some((name) => !definitions.some((section) => section.name === name))) throw new Error('Preview only declared wording sections.');
+  for (const definition of definitions) {
+    const text = sections[definition.name];
+    if (typeof text !== 'string' || Array.from(text).length > definition.max_chars
+        || /[\uD800-\uDFFF\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(text)) throw new Error(`Keep preview ${definition.name.replaceAll('_', ' ')} within ${definition.max_chars} characters.`);
+    result[definition.name] = text;
+  }
+  htmlProfileSectionValues(master, result);
+  return result;
+}
 export function htmlProfileIssues(profile: HTMLContractProfile, values: Record<string, string>, sections: Record<string, string> = {}): string[] {
   const issues: string[] = [], emails = new Set<string>(), encoder = new TextEncoder();
   for (const party of profile.parties) {
@@ -167,7 +276,7 @@ export function htmlProfileIssues(profile: HTMLContractProfile, values: Record<s
 
 export function htmlTemplateFields(template: TemplateResponse): HTMLFormField[] {
   const master = template.html_master_json;
-  if (template.source_kind !== 'html' || !master || ![1, 2].includes(master.schema_version) || !Number.isInteger(template.version)
+  if (template.source_kind !== 'html' || !master || ![1, 2, 3].includes(master.schema_version) || !Number.isInteger(template.version)
       || template.version < 1 || !/^[a-f0-9]{64}$/.test(template.content_sha256 ?? '')) {
     throw new Error('This design is unavailable. Refresh the library before using it.');
   }

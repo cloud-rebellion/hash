@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
-import { blankHTMLAuthorDraft, draftFromHTMLTemplate, htmlAuthorFingerprint, htmlAuthorInput, htmlAssetFromFile } from '../htmlAuthor';
-import { htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '../htmlTemplate';
+import { blankHTMLAuthorDraft, blankHTMLSigningPage, draftFromHTMLTemplate, htmlAuthorFingerprint, htmlAuthorInput, htmlAssetFromFile } from '../htmlAuthor';
+import { htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '../htmlTemplate';
+import { signingPageTemplateFixture } from '../htmlTemplate.test';
 
 // Execute the actual production callbacks without a second implementation of
 // the protocol. Rendering and Svelte reactivity are separately browser-tested.
@@ -38,17 +39,17 @@ function fixture(existing = true) {
   const env: any = { templateID: existing ? templateID : null, sourceID: existing ? templateID : null, disposed: false,
     knownID: existing ? templateID : null, orgScope: orgID, me: { ...owner }, saved: existing ? initial : null, latest: null,
     draft: local, baseline: htmlAuthorFingerprint(existing ? local : blankHTMLAuthorDraft()),
-    samples: { company: 'Preview sample' }, sampleBaseline: '{"company":"Approved default"}',
+    samples: { company: 'Preview sample' }, sectionSamples: {}, sampleBaseline: '{"values":{"company":"Approved default"},"sections":{}}',
     loading: false, busy: null, error: null, operation: 0, rowKey: 1, needsRefresh: false, writeUncertain: false, acknowledgedSave: null,
     preview: null, previewAbort: null, previewSamples: '', previewActor: '', previewSequence: 0, allPagesSeen: false, acknowledged: false, now: Date.now(),
     assetName: '', pendingAssetFile: null, assetFile: { value: '' },
-    APIError, htmlAuthorInput, htmlAuthorFingerprint, draftFromHTMLTemplate, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, htmlAssetFromFile,
+    APIError, htmlAuthorInput, htmlAuthorFingerprint, draftFromHTMLTemplate, htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, htmlAssetFromFile, blankHTMLSigningPage,
     window: { confirm: () => false },
   };
   env.current = () => !env.disposed && env.templateID === env.sourceID;
   Object.defineProperties(env, {
     dirty: { get: () => htmlAuthorFingerprint(env.draft) !== env.baseline },
-    sampleDirty: { get: () => JSON.stringify(env.samples) !== env.sampleBaseline },
+    sampleDirty: { get: () => JSON.stringify({ values: env.samples, sections: env.sectionSamples }) !== env.sampleBaseline },
     assetDraftDirty: { get: () => !!env.assetName || !!env.pendingAssetFile },
     canWrite: { get: () => !!env.me && env.me.org_id === env.orgScope && (!env.sourceID || env.saved !== null) && ['owner', 'sender'].includes(env.me.role) },
     canApprove: { get: () => env.canWrite && env.me.role === 'owner' },
@@ -56,14 +57,14 @@ function fixture(existing = true) {
     previewKey: { get: () => `preview-${env.previewSequence}` },
     previewValid: { get: () => !!env.preview && !!env.saved && !env.dirty && !env.assetDraftDirty && !env.needsRefresh && !env.writeUncertain
       && env.preview.templateID === env.saved.id && env.preview.version === env.saved.version && env.preview.contentSHA256 === env.saved.content_sha256
-      && env.previewActor === env.me?.user_id && env.previewSamples === JSON.stringify(env.samples) && env.now < Date.parse(env.preview.expiresAt) },
+      && env.previewActor === env.me?.user_id && env.previewSamples === JSON.stringify({ values: env.samples, sections: env.sectionSamples }) && env.now < Date.parse(env.preview.expiresAt) },
   });
   for (const [name, kind] of [['getMe', 'me'], ['getTemplate', 'detail'], ['createHTMLTemplate', 'create'], ['updateHTMLTemplate', 'update'],
     ['previewHTMLTemplate', 'preview'], ['approveHTMLTemplate', 'approve']]) {
     env[name] = (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind, args, resolve, reject }));
   }
   const names = ['invalidatePreview', 'detail', 'samePin', 'adopt', 'recordError', 'checkedIdentity', 'loadInitial', 'save', 'readLatest', 'adoptLatest',
-    'addAsset', 'generatePreview', 'receiveProof', 'approve', 'protectNavigation', 'protectUnload'];
+    'addAsset', 'changeSigningPage', 'changeSigningLogo', 'generatePreview', 'receiveProof', 'approve', 'protectNavigation', 'protectUnload'];
   const source = readFileSync(new URL('./HtmlTemplateEditor.svelte', import.meta.url), 'utf8');
   const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(names.map((name) => callback(source, name)).join('\n'));
   const actions = new Function('env', `with(env) { ${code}; return { ${names.join(',')} }; }`)(env);
@@ -71,7 +72,7 @@ function fixture(existing = true) {
 }
 async function step() { await Promise.resolve(); await Promise.resolve(); }
 function installPreview(state: ReturnType<typeof fixture>) {
-  state.env.preview = preview(); state.env.previewActor = userID; state.env.previewSamples = JSON.stringify(state.env.samples);
+  state.env.preview = preview(); state.env.previewActor = userID; state.env.previewSamples = JSON.stringify({ values: state.env.samples, sections: state.env.sectionSamples });
   state.env.previewSequence = 1; state.env.allPagesSeen = true; state.env.acknowledged = true;
 }
 
@@ -138,11 +139,51 @@ test('preview dispatch uses only saved revision and explicit samples; sender may
   state.env.allPagesSeen = true; state.env.acknowledged = true; await state.actions.approve(); expect(state.calls).toHaveLength(1);
   expect(state.env.draft.values[0].default_value).toBe('Approved default');
 });
+test('page opt-in and local-logo callbacks create a new reviewable draft and never silently alter saved schema2 design', () => {
+  const state = fixture(), template = signingPageTemplateFixture();
+  template.id = templateID; template.org_id = orgID;
+  template.html_master_json!.schema_version = 2; delete template.html_master_json!.signing_page;
+  state.actions.adopt(template);
+  state.actions.changeSigningPage({ currentTarget: { checked: true } });
+  expect(state.env.draft.schema_version).toBe(3); expect(state.env.draft.signing_page).toEqual(blankHTMLSigningPage());
+  expect(state.env.dirty).toBe(true); expect(state.env.saved.html_master_json.schema_version).toBe(2);
+  state.env.draft.assets.push({ name: 'company_logo', media_type: 'image/png', sha256: 'f'.repeat(64), data_base64: 'AA==' });
+  state.actions.changeSigningLogo({ currentTarget: { value: 'company_logo' } });
+  expect(state.env.draft.signing_page.logo_sha256).toBe('f'.repeat(64));
+  state.actions.changeSigningLogo({ currentTarget: { value: '' } });
+  expect([state.env.draft.signing_page.logo_asset, state.env.draft.signing_page.logo_sha256, state.env.draft.signing_page.logo_alt]).toEqual(['', '', '']);
+  const toggle = { currentTarget: { checked: false } }; state.actions.changeSigningPage(toggle);
+  expect(toggle.currentTarget.checked).toBe(true); expect(state.env.draft.schema_version).toBe(3);
+  state.env.window.confirm = () => true; state.actions.changeSigningPage({ currentTarget: { checked: false } });
+  expect(state.env.draft.schema_version).toBe(2); expect(state.env.draft.signing_page).toBeNull();
+});
+test('combined page preview can sample a blank essential section without editing the approved default and still needs every page', async () => {
+  const state = fixture(), template = signingPageTemplateFixture(); template.id = templateID; template.org_id = orgID;
+  template.html_approval = { version: template.version, content_sha256: template.content_sha256! };
+  template.html_master_json!.sections![0].default_text = '';
+  state.actions.adopt(template);
+  await state.actions.generatePreview(); expect(state.calls).toEqual([]); expect(state.env.error).toContain('scope');
+  state.env.sectionSamples.scope_text = 'Synthetic owner-preview scope only';
+  const pending = state.actions.generatePreview();
+  expect(state.calls[0].args[5]).toEqual({ scope_text: 'Synthetic owner-preview scope only' });
+  expect(state.env.saved.html_master_json.sections[0].default_text).toBe('');
+  state.calls[0].resolve(preview()); await pending;
+  state.actions.receiveProof({ key: state.env.previewKey, allPagesSeen: false }); state.env.acknowledged = true;
+  await state.actions.approve(); expect(state.calls).toHaveLength(1);
+  state.actions.receiveProof({ key: state.env.previewKey, allPagesSeen: true }); state.env.acknowledged = true;
+  const approving = state.actions.approve();
+  expect(state.calls[1].kind).toBe('approve');
+  const approved = { ...template, html_approval: { ...template.html_approval, approved_by: userID, approved_at: new Date().toISOString() } };
+  state.calls[1].resolve({ template_id: templateID, version: template.version, content_sha256: template.content_sha256, approved_by: userID, approved_at: approved.html_approval.approved_at });
+  await step(); state.calls[2].resolve(approved); await approving;
+  expect(state.env.approved).toBe(true); expect(state.env.saved.html_master_json.sections[0].default_text).toBe('');
+});
 test('late preview is discarded on source/sample/file/actor/pin/navigation change', async () => {
-  for (const mode of ['source', 'sample', 'file', 'actor', 'pin', 'route', 'abort']) {
+  for (const mode of ['source', 'sample', 'section', 'file', 'actor', 'pin', 'route', 'abort']) {
     const state = fixture(), pending = state.actions.generatePreview();
     if (mode === 'source') state.env.draft.name = 'Unsaved';
     if (mode === 'sample') state.env.samples.company = 'Different sample';
+    if (mode === 'section') state.env.sectionSamples.scope = 'Different preview wording';
     if (mode === 'file') state.env.pendingAssetFile = new File(['x'], 'pending.png');
     if (mode === 'actor') state.env.me = { ...owner, user_id: '55555555-5555-4555-8555-555555555555' };
     if (mode === 'pin') state.env.saved = design(4);
@@ -185,7 +226,7 @@ test('approval readback failure blocks blind retry and mismatched page proof nev
 test('pending local file/name prevents save/preview and participates in navigation/unload/adoption prompts', async () => {
   for (const mode of ['name', 'file']) {
     const state = fixture(); if (mode === 'name') state.env.assetName = 'pending_logo'; else state.env.pendingAssetFile = new File(['x'], 'pending.png');
-    state.env.sampleBaseline = JSON.stringify(state.env.samples);
+    state.env.sampleBaseline = JSON.stringify({ values: state.env.samples, sections: state.env.sectionSamples });
     await state.actions.save(event); await state.actions.generatePreview(); expect(state.calls).toEqual([]);
     let canceled = 0;
     state.actions.protectNavigation({ cancel() { canceled++; }, willUnload: false,

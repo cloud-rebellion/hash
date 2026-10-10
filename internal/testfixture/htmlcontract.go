@@ -9,6 +9,7 @@ package testfixture
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -100,6 +102,83 @@ func ContractSignatureFields(doc *generated.Document, rows []*generated.Recipien
 	for i, row := range rows {
 		fields = append(fields, &generated.DocumentField{ID: uuid.New(), DocumentID: doc.ID, RecipientID: pgtype.UUID{Bytes: row.ID, Valid: true},
 			Type: "signature", Required: true, Page: 1, XPct: number(10), YPct: number(20 + int64(i)*20), WPct: number(25), HPct: number(8)})
+	}
+	return fields
+}
+
+func BrandedSigningPolicy() *htmlmaster.SigningPagePolicy {
+	return &htmlmaster.SigningPagePolicy{Version: 1, Policy: htmlmaster.SigningPagePolicyName, FontSHA256: htmlmaster.SigningPageFontSHA256,
+		Branding: htmlmaster.SigningPageBranding{PrimaryHex: "#102038", AccentHex: "#2458A6", SurfaceHex: "#FFFFFF", TextHex: "#102038", MutedHex: "#526176",
+			LogoURL: "", LogoAlt: "", FontHeading: "Inter", FontBody: "Inter", SignatureColor: "#102038"}, LogoAsset: "", LogoSHA256: "", LogoAlt: ""}
+}
+
+// BrandedHTMLContract has synthetic manifest hashes and no rendered proof. It
+// is suitable for pure canonicalization and state-guard tests only.
+func BrandedHTMLContract(t testing.TB) (htmlsource.Input, *generated.Document, []*generated.Recipient) {
+	t.Helper()
+	input, doc, rows := HTMLContract(t)
+	master, err := htmlmaster.Decode(input.MasterJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	master.SchemaVersion = htmlmaster.SigningPageSchemaVersion
+	master.SigningPage = BrandedSigningPolicy()
+	raw, err := json.Marshal(master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := htmlmaster.CanonicalTemplate(raw, input.DefaultVarsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.MasterJSON = canonical.MasterJSON
+	input.DefaultVarsJSON = canonical.DefaultsJSON
+	input.TemplateContentSHA256 = canonical.SHA256
+	compiled, err := htmlmaster.Compile(master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	geometry := sanitize.PDFPageGeometry{UserUnitMilli: 1000}
+	for i := range geometry.BoxesMilliPoints {
+		geometry.BoxesMilliPoints[i] = [4]int64{0, 0, 594960, 841920}
+	}
+	composition := sanitize.PDFCompositionManifest{SchemaVersion: 1, Policy: sanitize.PDFSigningPagePolicy, BodySHA256: strings.Repeat("a", 64), SigningPageSHA256: strings.Repeat("b", 64),
+		MergedSHA256: strings.Repeat("c", 64), MergedBytes: 1000, OutputSHA256: hex.EncodeToString(doc.PdfSha256), BodyPages: 1, FinalPages: 2, BodyGeometrySHA256: strings.Repeat("d", 64), GeometrySHA256: strings.Repeat("e", 64), SigningPage: geometry}
+	input.SigningArtifact, err = htmlsource.NewSigningArtifact(compiled, htmlmaster.Input{Values: input.Values, Sections: input.Sections}, input.PartyBindings, composition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.HtmlSourceJson, err = htmlsource.New(input, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input, doc, rows
+}
+
+func BrandedSignatureFields(t testing.TB, doc *generated.Document) []*generated.DocumentField {
+	t.Helper()
+	_, artifact, err := htmlsource.SigningPage(doc)
+	if err != nil || artifact == nil {
+		t.Fatal("missing synthetic branded artifact", err)
+	}
+	parties, err := htmlsource.ContractParties(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySlot := map[string]htmlsource.ContractParty{}
+	for _, party := range parties {
+		bySlot[party.Slot] = party
+	}
+	number := func(n int64) pgtype.Numeric { return pgtype.Numeric{Int: big.NewInt(n), Exp: -4, Valid: true} }
+	fields := make([]*generated.DocumentField, 0, 2)
+	for _, r := range artifact.Fields {
+		options, err := htmlsource.SigningFieldOptions(doc, r.Slot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields = append(fields, &generated.DocumentField{ID: uuid.New(), DocumentID: doc.ID, RecipientID: pgtype.UUID{Bytes: bySlot[r.Slot].RecipientID, Valid: true},
+			Type: "signature", Page: r.Page, XPct: number(r.X), YPct: number(r.Y), WPct: number(r.W), HPct: number(r.H), Required: true,
+			Label: pgtype.Text{String: strings.ToUpper(r.Slot[:1]) + r.Slot[1:] + " signature", Valid: true}, OptionsJson: options})
 	}
 	return fields
 }

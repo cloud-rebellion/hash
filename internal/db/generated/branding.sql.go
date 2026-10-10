@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getDocumentBrandingOverride = `-- name: GetDocumentBrandingOverride :one
@@ -59,6 +60,68 @@ func (q *Queries) GetOrgBranding(ctx context.Context, orgID uuid.UUID) (*OrgBran
 		&i.SignatureColor,
 		&i.SchemaVersion,
 		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
+const upsertDocumentBrandingOverride = `-- name: UpsertDocumentBrandingOverride :one
+INSERT INTO document_branding_override (
+    document_id, primary_hex, accent_hex, surface_hex, text_hex, muted_hex,
+    logo_url, logo_alt, font_heading, font_body, signature_color
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+ON CONFLICT (document_id) DO UPDATE SET
+    primary_hex=EXCLUDED.primary_hex, accent_hex=EXCLUDED.accent_hex,
+    surface_hex=EXCLUDED.surface_hex, text_hex=EXCLUDED.text_hex,
+    muted_hex=EXCLUDED.muted_hex, logo_url=EXCLUDED.logo_url,
+    logo_alt=EXCLUDED.logo_alt, font_heading=EXCLUDED.font_heading,
+    font_body=EXCLUDED.font_body, signature_color=EXCLUDED.signature_color,
+    updated_at=now()
+RETURNING document_id, primary_hex, accent_hex, surface_hex, text_hex, muted_hex, logo_url, logo_alt, font_heading, font_body, signature_color, updated_at
+`
+
+type UpsertDocumentBrandingOverrideParams struct {
+	DocumentID     uuid.UUID   `json:"document_id"`
+	PrimaryHex     pgtype.Text `json:"primary_hex"`
+	AccentHex      pgtype.Text `json:"accent_hex"`
+	SurfaceHex     pgtype.Text `json:"surface_hex"`
+	TextHex        pgtype.Text `json:"text_hex"`
+	MutedHex       pgtype.Text `json:"muted_hex"`
+	LogoUrl        pgtype.Text `json:"logo_url"`
+	LogoAlt        pgtype.Text `json:"logo_alt"`
+	FontHeading    pgtype.Text `json:"font_heading"`
+	FontBody       pgtype.Text `json:"font_body"`
+	SignatureColor pgtype.Text `json:"signature_color"`
+}
+
+// Complete owner-reviewed page policy, including an explicit empty logo.
+func (q *Queries) UpsertDocumentBrandingOverride(ctx context.Context, arg UpsertDocumentBrandingOverrideParams) (*DocumentBrandingOverride, error) {
+	row := q.db.QueryRow(ctx, upsertDocumentBrandingOverride,
+		arg.DocumentID,
+		arg.PrimaryHex,
+		arg.AccentHex,
+		arg.SurfaceHex,
+		arg.TextHex,
+		arg.MutedHex,
+		arg.LogoUrl,
+		arg.LogoAlt,
+		arg.FontHeading,
+		arg.FontBody,
+		arg.SignatureColor,
+	)
+	var i DocumentBrandingOverride
+	err := row.Scan(
+		&i.DocumentID,
+		&i.PrimaryHex,
+		&i.AccentHex,
+		&i.SurfaceHex,
+		&i.TextHex,
+		&i.MutedHex,
+		&i.LogoUrl,
+		&i.LogoAlt,
+		&i.FontHeading,
+		&i.FontBody,
+		&i.SignatureColor,
 		&i.UpdatedAt,
 	)
 	return &i, err

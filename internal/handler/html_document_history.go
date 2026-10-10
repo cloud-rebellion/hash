@@ -66,6 +66,9 @@ type htmlDocumentSourceResponse struct {
 	ContractProfile         *htmlmaster.ContractProfile   `json:"contract_profile,omitempty"`
 	ContractProfileDigest   string                        `json:"contract_profile_digest,omitempty"`
 	ContractParties         []htmlsource.ContractParty    `json:"contract_parties,omitempty"`
+	SourceSchemaVersion     int                           `json:"source_schema_version,omitempty"`
+	SigningPage             *htmlmaster.SigningPagePolicy `json:"signing_page,omitempty"`
+	SigningArtifact         *htmlsource.SigningArtifact   `json:"signing_artifact,omitempty"`
 }
 
 type htmlDocumentHistoryResponse struct {
@@ -158,6 +161,13 @@ func htmlDocumentSourceDescriptor(doc *generated.Document, pages int32) (htmlDoc
 	if err != nil {
 		return out, err
 	}
+	policy, artifact, err := htmlsource.SigningPage(doc)
+	if err != nil {
+		return out, err
+	}
+	if artifact != nil && artifact.Composition.FinalPages != int(pages) {
+		return out, htmlsource.ErrInvalid
+	}
 	out = htmlDocumentSourceResponse{
 		DocumentID: doc.ID, OrgID: doc.OrgID, UpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
 		HTMLSourceCommitment: commitment, MaterializationRevision: 1,
@@ -166,6 +176,7 @@ func htmlDocumentSourceDescriptor(doc *generated.Document, pages int32) (htmlDoc
 		Values:   make([]htmlDocumentValueResponse, 0, len(master.Values)),
 		Sections: make([]htmlDocumentSectionResponse, 0, len(master.Sections)), ChangedSections: []string{},
 		ContractProfile: compiled.ContractProfile(), ContractProfileDigest: compiled.ProfileDigest(), ContractParties: parties,
+		SourceSchemaVersion: master.SchemaVersion, SigningPage: policy, SigningArtifact: artifact,
 	}
 	if doc.HtmlCurrentMaterializationSequence.Valid {
 		out.MaterializationRevision = doc.HtmlCurrentMaterializationSequence.Int32

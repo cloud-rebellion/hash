@@ -12,6 +12,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 )
 
 const freezeDocumentBrandingSQL = `
@@ -25,8 +26,10 @@ SELECT d.id,
        COALESCE(NULLIF(existing.surface_hex, ''), NULLIF(org.surface_hex, ''), $5),
        COALESCE(NULLIF(existing.text_hex, ''), NULLIF(org.text_hex, ''), $6),
        COALESCE(NULLIF(existing.muted_hex, ''), NULLIF(org.muted_hex, ''), $7),
-       COALESCE(NULLIF(existing.logo_url, ''), NULLIF(org.logo_url, ''), $8),
-       COALESCE(NULLIF(existing.logo_alt, ''), NULLIF(org.logo_alt, ''), $9),
+       CASE WHEN COALESCE(d.html_current_source_json,d.html_source_json)->>'schema_version'='3'
+            THEN existing.logo_url ELSE COALESCE(NULLIF(existing.logo_url, ''), NULLIF(org.logo_url, ''), $8) END,
+       CASE WHEN COALESCE(d.html_current_source_json,d.html_source_json)->>'schema_version'='3'
+            THEN existing.logo_alt ELSE COALESCE(NULLIF(existing.logo_alt, ''), NULLIF(org.logo_alt, ''), $9) END,
        COALESCE(NULLIF(existing.font_heading, ''), NULLIF(org.font_heading, ''), $10),
        COALESCE(NULLIF(existing.font_body, ''), NULLIF(org.font_body, ''), $11),
        COALESCE(NULLIF(existing.signature_color, ''), NULLIF(org.signature_color, ''), $12)
@@ -81,6 +84,9 @@ func freezeDocumentBranding(ctx context.Context, tx brandingSnapshotQuerier, doc
 	}
 	if err := branding.ValidateFrozenSnapshot(doc.ID, &snapshot); err != nil {
 		return "", fmt.Errorf("freeze document branding: validate complete snapshot: %w", err)
+	}
+	if err := htmlsource.ValidateSigningBranding(doc, &snapshot); err != nil {
+		return "", err
 	}
 	return snapshot.LogoUrl.String, nil
 }

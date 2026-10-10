@@ -31,6 +31,9 @@ func RequiredRoles(doc *generated.Document, rows []*generated.Recipient, fields 
 	if err := htmlsource.ValidateContractParties(doc, rows); err != nil {
 		return nil, invalid("reviewed contract parties: %v", err)
 	}
+	if err := htmlsource.ValidateSigningFields(doc, fields, pageCount); err != nil {
+		return nil, invalid("reviewed signing page fields: %v", err)
+	}
 	if len(rows) == 0 || len(rows) > MaxParties || len(fields) == 0 || len(fields) > MaxFields {
 		return nil, invalid("PDF needs bounded recipients and placed signature fields")
 	}

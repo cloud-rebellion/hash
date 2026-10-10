@@ -31,11 +31,12 @@ type htmlTemplatePreviewInput struct {
 	ExpectedVersion       int32         `json:"expected_version"`
 	ExpectedContentSHA256 string        `json:"expected_content_sha256"`
 	Values                htmlStringMap `json:"values,omitempty"`
+	Sections              htmlStringMap `json:"sections,omitempty"`
 }
 
 // Samples affect this preview only. The exact saved defaults and section prose
 // stay in the template commitment; a preview never writes documents or objects.
-func materializeHTMLTemplatePreview(content htmlmaster.TemplateCommitment, samples htmlStringMap) (htmlmaster.Result, error) {
+func materializeHTMLTemplatePreview(content htmlmaster.TemplateCommitment, samples htmlStringMap, sectionSamples ...htmlStringMap) (htmlmaster.Result, error) {
 	master, err := htmlmaster.Decode(content.MasterJSON)
 	if err != nil {
 		return htmlmaster.Result{}, err
@@ -51,7 +52,11 @@ func materializeHTMLTemplatePreview(content htmlmaster.TemplateCommitment, sampl
 	for name, value := range samples {
 		values[name] = value
 	}
-	return compiled.Materialize(htmlmaster.Input{Values: values})
+	var sections map[string]string
+	if len(sectionSamples) > 0 {
+		sections = sectionSamples[0]
+	}
+	return compiled.Materialize(htmlmaster.Input{Values: values, Sections: sections})
 }
 
 // Check saved and retained content under a short read transaction, then release
@@ -162,7 +167,7 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeScanError(w, err)
 		return
 	}
-	rendered, err := materializeHTMLTemplatePreview(content, in.Values)
+	rendered, err := materializeHTMLTemplatePreview(content, in.Values, in.Sections)
 	if err != nil {
 		s.writeHTMLTemplateError(w, "materialize HTML template preview", err)
 		return
@@ -183,7 +188,36 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "rendered template preview could not be accepted")
 		return
 	}
-	cleaned, err := sanitize.CleanWithContext(ctx, "html-template-preview", "application/pdf", pdf)
+	master, err := htmlmaster.Decode(content.MasterJSON)
+	if err != nil {
+		s.writeHTMLTemplateError(w, "decode template preview", err)
+		return
+	}
+	compiled, err := htmlmaster.Compile(master)
+	if err != nil {
+		s.writeHTMLTemplateError(w, "compile template preview", err)
+		return
+	}
+	var cleaned sanitize.Result
+	pages := 0
+	if compiled.SigningPagePolicy() != nil {
+		values := map[string]string{}
+		if err := json.Unmarshal(content.DefaultsJSON, &values); err != nil {
+			writeError(w, http.StatusBadRequest, "template defaults invalid")
+			return
+		}
+		for name, value := range in.Values {
+			values[name] = value
+		}
+		composed, composeErr := s.composeHTMLSigningPage(ctx, compiled, htmlmaster.Input{Values: values, Sections: in.Sections}, pdf)
+		err = composeErr
+		if err == nil {
+			cleaned = composed.Result
+			pages = composed.Composition.FinalPages
+		}
+	} else {
+		cleaned, err = sanitize.CleanWithContext(ctx, "html-template-preview", "application/pdf", pdf)
+	}
 	if err != nil {
 		if writePDFWorkerError(w, err) {
 			return
@@ -195,7 +229,9 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "rendered template preview could not be accepted")
 		return
 	}
-	pages, err := sanitize.PageCountWithContext(ctx, cleaned.Bytes)
+	if pages == 0 {
+		pages, err = sanitize.PageCountWithContext(ctx, cleaned.Bytes)
+	}
 	if err != nil || cleaned.Report.UnsupportedT || len(cleaned.Bytes) == 0 || len(cleaned.Bytes) > sanitize.MaxPDFBytes || pages <= 0 || pages > sanitize.MaxPDFPages {
 		if writePDFWorkerError(w, err) {
 			return

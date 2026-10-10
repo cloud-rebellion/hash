@@ -116,6 +116,9 @@ func (e *Engine) claimDocumentFinalizing(ctx context.Context, conn *pgxpool.Conn
 	if err != nil {
 		return nil, fmt.Errorf("claim finalization: lock document: %w", err)
 	}
+	if err := htmlsource.ValidateSigningPageState(ctx, q, locked, 0); err != nil {
+		return nil, err
+	}
 	if locked.Status == "finalizing" {
 		if err := validateFinalizationMode(locked, mode); err != nil {
 			return nil, err

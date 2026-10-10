@@ -500,8 +500,9 @@ sent documents use their frozen variables.
 This source draft adds reusable HTML designs separately from the PDF bytes used
 for signing. It is not a deployed release. Declared-text document revision and
 retained PDF history and reviewed contract profiles are described below.
-Automatic signature-page binding, real-renderer visual acceptance and approved
-privacy disposal remain pending.
+The schema-3 automatic signing-page contract below has local source/runtime
+acceptance and still requires managed release and exact-release acceptance.
+Approved privacy disposal remains pending.
 
 Sender sessions can create `POST /api/v1/templates/html` and edit
 `PATCH /api/v1/templates/{id}/html`. Editing requires `expected_version`; every
@@ -536,13 +537,16 @@ Preview a saved revision with `POST /api/v1/templates/{id}/html/preview`:
 {
   "expected_version": 1,
   "expected_content_sha256": "<saved revision SHA-256>",
-  "values": {"customer": "Example customer"}
+  "values": {"customer": "Example customer"},
+  "sections": {"scope": "Reviewed sample scope for this preview"}
 }
 ```
 
 Sender and owner sessions can preview. Declared sample values fill required
-placeholders without changing saved defaults or creating a document. Sections
-use their saved defaults. Unsaved HTML is not accepted by this endpoint. The
+placeholders without changing saved defaults or creating a document. Optional
+declared section samples are escaped plain text and affect only this preview;
+omitted sections use saved defaults. Unknown keys, null maps/entries and
+nonstring samples are refused. Unsaved HTML is not accepted by this endpoint. The
 renderer output is scanned, sanitized and page-counted before disclosure, with
 the shared import admission limit, a 15-second processing deadline, a 50 MiB PDF limit and
 500-page limit. Rendering and worker calls occur outside database locks. The
@@ -619,7 +623,8 @@ compatibility. This records review of that exact materialization and PDF; it
 does not validate contract terms or signature geometry. Sending
 refuses absent review, altered provenance, or resolved variables that differ
 from the printed values. New prose always needs this human review. Existing
-field-design and recipient setup still apply; static PDF template export of an
+field-design and recipient setup still apply to generic designs. Schema 3 uses
+the protected generated fields described below; static PDF template export of an
 HTML-authored document is refused. The automation API remains blocks-only.
 An unrelated sender cannot record this review. Original-PDF downloads recheck
 the original credential, live member and document revision after fetching the
@@ -633,7 +638,7 @@ approvals cannot be rewritten; migration rollback refuses retained HTML data.
 
 ### Reviewed contract profiles and intended parties
 
-An HTML master with `schema_version:2` requires a `contract_profile`. Schema 1
+An HTML master with `schema_version:2` or `3` requires a `contract_profile`. Schema 1
 remains the generic design format with its original canonical commitments; it
 cannot carry a profile. Approval of a schema-2 template covers the profile and
 its exact printed bindings as well as the design, assets and approved defaults.
@@ -655,9 +660,10 @@ Proposal profiles require `scope`, `price`, `currency`, `tax`, `payment_terms`
 and `valid_until`. Services profiles require `scope`, `price`, `currency`, `tax`,
 `payment_terms`, `effective_date`, `duration` and `termination`. Every declared
 term must be nonblank, including approved section text or its human override.
-The current owner approval preview supplies value samples and uses saved section
-defaults. Essential sections therefore need reviewed nonblank defaults before
-that preview/approval; explicit section samples for approval are not implemented.
+The current owner approval preview supplies value and optional section samples.
+Essential sections must resolve to nonblank text for that preview. Samples do
+not change saved defaults; document creation independently requires complete
+actual terms and fresh review.
 Human document population and revision can override those defaults as plain text
 and require fresh review of the generated artifact.
 These are engineering checks for reviewed contract designs, not a universal
@@ -695,6 +701,79 @@ require each party's captured signature. Already-finalizing rebuild and resume
 recheck these requirements under the document lock before source-version work,
 rendering or evidence access. Scoped pre-sign delegation and trusted
 per-organization CRM freshness/provenance remain unfinished integration work.
+
+### Approved automatic branded signing page
+
+This opt-in format uses `schema_version:3`, the reviewed contract profile above
+and an explicit `signing_page` object. Existing schema-1/2 templates keep their
+original commitments and layout; enabling the option creates a new saved
+revision requiring complete owner preview and approval.
+
+```json
+{
+  "version": 1,
+  "policy": "hash-branded-signing-page-a4-v1",
+  "branding": {
+    "primary_hex": "#243047", "accent_hex": "#B78632",
+    "surface_hex": "#FFFFFF", "text_hex": "#202938",
+    "muted_hex": "#586575", "logo_url": "", "logo_alt": "",
+    "font_heading": "Inter", "font_body": "Inter",
+    "signature_color": "#243047"
+  },
+  "logo_asset": "", "logo_sha256": "", "logo_alt": "",
+  "font_sha256": "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62"
+}
+```
+
+Every member is required. Colors are six-digit hex values. Text and muted labels
+must contrast with the surface by at least 4.5:1; large headings and signature
+borders need 3:1. The bundled Inter font is pinned by digest. This first policy
+supports its Latin glyph set; unsupported identity characters are refused before
+rendering. Company/representative/authority text is capped at 80 characters and
+display units, company ID at 40 and email at 128. Outer whitespace, controls and
+invisible direction/format characters are refused. These are page-layout limits,
+not universal identity or email limits.
+
+General branding logo URL and alt remain explicitly empty. An optional page
+logo uses a declared bounded PNG/JPEG asset's name, exact SHA-256 and nonblank
+plain alt text, capped at 80 characters/display units. Without a logo all three
+page-logo members are empty. No remote or later live organization logo is used.
+
+Hash renders the body and app-owned A4 suffix separately. Master CSS cannot
+move or hide the suffix. The application applies the malware scanner gate to
+both inputs before worker admission. The isolated worker inspects both PDFs,
+refuses active PDF facilities, composes under the combined 50 MiB/500-page limits, then verifies
+the body geometry and exactly one fixed suffix page. Its measured raw Chromium
+A4 boxes are 594.959960 by 841.919980 points; manifest milli-points describe the
+geometry without normalizing the PDF. A configured compatible worker is required
+even in explicit development for this operation.
+
+The immutable schema-3 source binds the approved brand/font/logo policy, printed
+parties and stable recipient UUIDs, both component digests, merged-input and
+sanitized-output digests, page count/geometry and fixed field plan. Within the
+original authorization/quota/audit transaction, Hash creates exactly two required
+signature fields on the last page: customer at x10/y42/w80/h7 percent, provider
+at x10/y79/w80/h7 percent. Generic field CRUD is refused. Sender/signing/finalizing
+and direct recovery validate the complete party/field/brand binding before
+external effects. Deferred database guards refuse direct field, recipient,
+branding or document-mode drift. This binds declared identities; it does not
+externally verify identity, authority or legal suitability.
+
+Current and historical HTML source responses add `source_schema_version`.
+Schema 3 includes validated `signing_page` and `signing_artifact`; they expose
+the approved policy, plan and component/geometry commitments, without storage
+keys, VersionIDs, raw master or inline assets. The owner UI shows protected
+signature locations and still requires all-page review of the actual contract.
+Send remains closed if source validation, field readback or page rendering fails.
+
+Text revisions archive the prior source/parties/fields/review/brand, preserve
+party UUIDs, render a new page and create fresh field UUIDs with the new source
+commitment. Review resets even when PDF bytes match. Old coordinates are never
+adopted as the new plan. Migration76 allows only that per-render artifact to
+change; the original approved master/policy/bindings remain fixed. Down refuses
+retained schema-3 templates, revisions or document sources. Release requires the
+matching app, schema and protocol-2 composition worker with old processing
+drained; mixed incompatible workers must not be used.
 
 ### Revising declared document text
 
@@ -736,7 +815,8 @@ snapshot retains its own source-sanitization report; the current PDF/report
 projection changes atomically. Legacy unmeasured history stays unknown.
 Captured signature, acceptance or field evidence,
 unfinished sealing and pending privacy work refuse a revision. A changed source
-requires fresh human review and fresh signature placement, including when the
+requires fresh human review and fresh signature placement (generated again for
+schema 3), including when the
 new PDF digest is identical. Success is 201 with `document`,
 `materialization_revision`, `page_count`, `review_required:true` and
 `placement_reset:true`. No invitation is sent by this operation.

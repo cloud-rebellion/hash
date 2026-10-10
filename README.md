@@ -38,13 +38,16 @@ retention schedules before processing customer data.
 
 In Templates, create an HTML design with its print CSS, declared values, saved
 wording and local images/fonts. Save the design before previewing it. Preview
-values are separate from saved defaults. An owner reviews every rendered page
+values and section samples are separate from saved defaults. An owner reviews every rendered page
 and explicitly approves the saved revision; any saved edit requires new approval.
 
 Use an approved design to populate a fresh document. Review that document's
-actual PDF, add its signing parties and fields, then send it through the normal
-signing workflow. Design approval does not approve a future contract's terms or
-signature placement. See [HTML design API](docs/API.md#html-design-draft-api)
+actual PDF, confirm its signing parties and fields, then send it through the normal
+signing workflow. Reviewed contract profiles derive the two named parties from
+the printed values. A design with the approved branded signing-page option also
+adds a fixed final page and places each party's protected signature field there.
+Design approval does not approve a future contract's terms.
+See [HTML design API](docs/API.md#html-design-draft-api)
 and [completion status](docs/COMPLETION-STATUS.md) for contracts and remaining
 release acceptance.
 

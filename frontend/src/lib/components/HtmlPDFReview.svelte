@@ -3,10 +3,12 @@
   import { fetchVerifiedDocumentPDF, reviewHTMLDocument, type DocumentResponse } from '$lib/api/client';
   import type { PdfDoc } from '$lib/pdf';
 
-  let { document, canReview, revisionBlocked = false, onReviewed, onRefresh }: {
+  let { document, canReview, revisionBlocked = false, expectedPages, hasSigningPage = false, onReviewed, onRefresh }: {
     document: DocumentResponse;
     canReview: boolean;
     revisionBlocked?: boolean;
+    expectedPages?: number;
+    hasSigningPage?: boolean;
     onReviewed: (updated: DocumentResponse) => void;
     onRefresh: () => Promise<void> | void;
   } = $props();
@@ -30,6 +32,7 @@
   const current = () => !disposed && document.id === sourceID && document.updated_at === sourceStamp && document.pdf_sha256 === sourceSHA
     && (document.html_source_commitment ?? '') === sourceCommitment;
   const allPagesSeen = $derived(pageCount > 0 && seenPages.length === pageCount);
+  const pageCountMatches = $derived(expectedPages === undefined || (Number.isInteger(expectedPages) && expectedPages > 0 && expectedPages <= 500 && pageCount === expectedPages));
   $effect(() => { if (revisionBlocked) acknowledged = false; });
 
   async function renderPage(number: number) {
@@ -77,7 +80,7 @@
   }
   async function approve() {
     if (!current() || !canReview || revisionBlocked || !document.has_html_source || !document.html_review_required
-        || loading || rendering || busy || error || !activePDF || !allPagesSeen || !acknowledged) return;
+        || loading || rendering || busy || error || !activePDF || !allPagesSeen || !pageCountMatches || !acknowledged) return;
     busy = true;
     error = null;
     try {
@@ -107,6 +110,7 @@
   <div>
     <h2 class="font-display text-lg">Review the generated PDF</h2>
     <p class="text-sm text-text-secondary mt-1">Check the printed information, wording, page breaks and layout before sending. This review applies to this exact PDF.</p>
+    {#if hasSigningPage}<p class="text-sm mt-2">Review the final signing page too: both company and representative details, saved branding, and the two generated signature locations.</p>{/if}
   </div>
   {#if revisionBlocked}<p role="note" class="text-sm text-warning">Save or reconcile the document values and wording before approving or sending. This PDF does not include unsaved local changes.</p>{/if}
   {#if loading}<p role="status" class="text-sm">Loading and verifying the PDF…</p>{/if}
@@ -120,6 +124,7 @@
     <canvas bind:this={canvas} aria-label={`Generated PDF, page ${pageNumber}`} class="max-w-full h-auto mx-auto"></canvas>
   </div>
   {#if pageCount > 0}
+    {#if !pageCountMatches}<p role="alert" class="text-sm text-danger">This PDF’s page count differs from its retained source. Refresh this document before reviewing it.</p>{/if}
     <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
       <button type="button" class="btn btn-secondary" disabled={loading || rendering || busy || pageNumber <= 1} onclick={() => renderPage(pageNumber - 1)}>Previous page</button>
       <p role="status">Page {pageNumber} of {pageCount}{rendering ? ' · Rendering…' : ''}</p>
@@ -129,15 +134,15 @@
   {#if document.html_review_required}
     {#if canReview}
       <label class="flex gap-3 items-start text-sm">
-        <input type="checkbox" bind:checked={acknowledged} disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !!error} class="mt-1" />
-        <span>I have reviewed every page of this PDF and approve its printed content and layout.</span>
+        <input type="checkbox" bind:checked={acknowledged} disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !!error} class="mt-1" />
+        <span>I have reviewed every page of this PDF and approve its printed content and layout{hasSigningPage ? ', including both printed parties and signature locations on the final signing page' : ''}.</span>
       </label>
       {#if !allPagesSeen && pageCount > 0}<p class="text-sm text-text-secondary">Open every page before approving this PDF.</p>{/if}
-      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !acknowledged || !!error} onclick={approve}>{busy ? 'Recording review…' : 'Approve this PDF for sending'}</button>
+      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !acknowledged || !!error} onclick={approve}>{busy ? 'Recording review…' : 'Approve this PDF for sending'}</button>
     {:else}
       <p class="text-sm" role="note">The document's sender or an owner must review this PDF before it can be sent.</p>
     {/if}
   {:else}
-    <p class="text-sm text-success" role="status">This exact PDF has been reviewed. Add recipients and any required signature fields below before sending.</p>
+    <p class="text-sm text-success" role="status">This exact PDF has been reviewed. {hasSigningPage ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.'}</p>
   {/if}
 </section>

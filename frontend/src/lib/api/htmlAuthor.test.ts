@@ -26,6 +26,15 @@ test('author create/update persist structured source and defaults on exact route
     expect(JSON.parse(calls[1].options.body as string)).toEqual({ ...input, expected_version: 3 });
   }, () => Response.json({}));
 });
+test('preview-only human section samples are explicit and do not change the saved template pins', async () => {
+  await mockedFetch(async (calls) => {
+    const signal = new AbortController().signal;
+    const sections = { scope_text: 'Synthetic preview <text> & terms' };
+    const result = await previewHTMLTemplate('design', 3, 'a'.repeat(64), { company: 'Sample' }, signal, sections);
+    expect(JSON.parse(calls[0].options.body as string)).toEqual({ expected_version: 3, expected_content_sha256: 'a'.repeat(64), values: { company: 'Sample' }, sections });
+    expect(result.contentSHA256).toBe('a'.repeat(64));
+  }, () => new Response(bytes, { headers: headers() }));
+});
 test('preview verifies exact saved revision metadata and bytes; samples stay separate from defaults and sections', async () => {
   let phase = 0;
   await mockedFetch(async (calls) => {

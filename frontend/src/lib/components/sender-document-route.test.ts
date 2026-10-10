@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { currentHTMLSource, htmlUUID } from '../htmlRevision';
+import { documentFixture, signingPageSourceFixture } from '../htmlRevision.test';
 
 const source = readFileSync(new URL('../../routes/documents/[id]/+page.svelte', import.meta.url), 'utf8');
 const start = source.indexOf('  type DocumentScope');
@@ -8,7 +9,7 @@ const end = source.indexOf('  $effect(() =>', start);
 const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end));
 const bind = new Function('env', `with(env) { ${code}; return {
   loadDocument, loadComments, sendComment, loadChangeRequests, resolveCr, revise,
-  toggleSignatureMode, receiveHTMLSource, receiveEditorDocument, receiveStatus, changeDefaultLocale, resetRouteState
+  toggleSignatureMode, receiveHTMLSource, receivePlacementProof, receiveEditorDocument, receiveStatus, changeDefaultLocale, resetRouteState
 }; }`);
 function document(id: string, status = 'changes_requested') {
   return { id, name: id, status, updated_at: `${id}-timestamp`, source_kind: 'blocks', requires_signature: true, blocks_json: { blocks: [{ text: `${id} content` }] } };
@@ -19,7 +20,7 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
-    showPDFSave: false, pdfSignatureFields: [], recipientRevision: 0, htmlRevisionBlocked: true, htmlSource: null,
+    showPDFSave: false, pdfSignatureFields: [], generatedPlacementReady: false, recipientRevision: 0, htmlRevisionBlocked: true, htmlSource: null,
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
     postingComment: false, commentLoadRevision: 0, commentRefreshError: null, savingMode: false,
@@ -43,6 +44,20 @@ test('unverified HTML source and declared contract signing intent block acknowle
   const legacy = fixture(); legacy.env.doc = { ...document('A', 'draft'), has_html_source: true }; legacy.env.htmlRevisionBlocked = false;
   legacy.env.htmlSource = {}; const pending = legacy.actions.toggleSignatureMode();
   expect(legacy.calls[0].kind).toBe('update'); legacy.calls[0].resolve({ ...legacy.env.doc, requires_signature: false }); await pending;
+});
+test('actual parent gate accepts current generated PDF proof and refuses stale source or navigation callbacks', () => {
+  const state = fixture(), source = signingPageSourceFixture();
+  state.env.doc = documentFixture(source); state.env.$page.params.id = source.document_id;
+  state.env.htmlSource = source; state.env.htmlRevisionBlocked = false;
+  const scope = { id: source.document_id, routeRevision: state.env.routeRevision, documentRevision: state.env.documentRevision };
+  const proof = { documentID: source.document_id, pdfSHA256: source.pdf_sha256, htmlSourceCommitment: source.html_source_commitment, ready: true };
+  state.actions.receivePlacementProof(proof, scope); expect(state.env.generatedPlacementReady).toBe(true);
+  state.env.generatedPlacementReady = false;
+  for (const altered of [{ ...proof, documentID: 'other' }, { ...proof, pdfSHA256: '9'.repeat(64) }, { ...proof, htmlSourceCommitment: '8'.repeat(64) }]) {
+    state.actions.receivePlacementProof(altered, scope); expect(state.env.generatedPlacementReady).toBe(false);
+  }
+  state.env.htmlRevisionBlocked = true; state.actions.receivePlacementProof(proof, scope); expect(state.env.generatedPlacementReady).toBe(false);
+  state.env.htmlRevisionBlocked = false; state.env.routeRevision++; state.actions.receivePlacementProof(proof, scope); expect(state.env.generatedPlacementReady).toBe(false);
 });
 function move(state: ReturnType<typeof fixture>, id: string) {
   state.env.$page.params.id = id;

@@ -26,7 +26,7 @@ function fixture() {
   const env: any = {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
-    requiresSignature: true, reviewRequired: false, revisionBlocked: false, signerRoles: [], missingRoles: [], hasParticipant: true,
+    requiresSignature: true, reviewRequired: false, revisionBlocked: false, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     intendedParties: [], recipientIdentityLocked: false, sourceCommitment: '', observedSourceCommitment: '',
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
@@ -66,6 +66,18 @@ test('both declared parties are checked before any signature field exists and mi
     expect(state.env.signatureFields ?? []).toEqual([]); expect(state.actions.intendedPartyConflicts().length).toBeGreaterThan(0);
     await state.actions.send(); expect(state.calls).toEqual([]);
   }
+});
+test('automatic page dispatch requires actual verified generated locations even with reviewed PDF and matching intended parties', async () => {
+  const state = fixture(); bindContractParties(state); state.env.lawfulBasis = 'contract';
+  state.env.generatedPlacementRequired = true;
+  await state.actions.send(); expect(state.calls).toEqual([]);
+  state.env.generatedPlacementReady = true;
+  const pending = state.actions.send();
+  expect(state.calls[0].kind).toBe('send');
+  state.calls[0].resolve({ status: 'sent', links: [] }); await Promise.resolve(); await Promise.resolve();
+  const readback = state.calls.find((call) => call.kind === 'list');
+  expect(readback).toBeDefined(); readback.resolve(state.env.recipients); await pending;
+  expect(state.env.busy).toBeNull();
 });
 test('bound signer identity cannot be separately added, deleted or rewritten, while email language can be saved', async () => {
   const state = fixture(); bindContractParties(state); const customer = state.env.recipients[1];

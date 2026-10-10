@@ -142,7 +142,7 @@
 
 <section class="card p-6 mb-6 space-y-4" aria-label="Revise HTML document">
   <h2 class="font-display text-lg">Document values and wording</h2>
-  <p class="text-sm text-text-secondary">The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review and field placement before sending.</p>
+  <p class="text-sm text-text-secondary">The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review{retained?.source_schema_version === 3 ? ', and both signature locations are regenerated for the new PDF' : ' and field placement'} before sending.</p>
   {#if loading}<p role="status" class="text-sm">Loading retained document source…</p>{/if}
   {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
   {#if needsRefresh || uncertain}<div class="text-sm space-y-2"><p>Your local inputs are retained. Inspect the saved revision before another write.</p>
@@ -155,8 +155,9 @@
     <p class="text-xs text-text-secondary">Retained template version {retained.template_version} · PDF revision {retained.materialization_revision}</p>
     {#if retained.contract_profile}<div class="border border-border-light rounded-md p-4 text-sm space-y-2">
       <p class="font-medium">Reviewed {retained.contract_profile.kind === 'proposal' ? 'proposal' : 'ordinary B2B services'} profile · version {retained.contract_profile.version}</p>
-      <p>Both parties sign. Representative names and email addresses come from these printed values. Changing them updates the intended signer, renders a fresh PDF and clears review and signature placement. Declared identity and authority are assertions; Hash does not independently verify them or determine legal sufficiency.</p>
+      <p>Both parties sign. Representative names and email addresses come from these printed values. Changing them updates the intended signer, renders a fresh PDF and {retained.source_schema_version === 3 ? 'regenerates the signature locations for fresh review' : 'clears review and signature placement'}. Declared identity and authority are assertions; Hash does not independently verify them or determine legal sufficiency.</p>
     </div>{/if}
+    {#if retained.source_schema_version === 3}<p class="text-sm" role="note">The appended signing page and its branding stay fixed to the approved design. Both signature locations are generated automatically and cannot be moved or reassigned. Party details must fit its bounded layout and bundled Latin font.</p>{/if}
     {#if !retained.can_edit || document.status !== 'draft'}<p role="note" class="text-sm">This document cannot currently be revised here. If a recipient has entered a field value, signed or accepted, preserve that evidence and create a superseding document instead.</p>
     {:else if !authority}<p role="note" class="text-sm">The original sender or an owner must revise this document.</p>{/if}
     <form onsubmit={save} class="space-y-4">

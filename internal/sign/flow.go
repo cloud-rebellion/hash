@@ -2884,6 +2884,9 @@ func (e *Engine) signerRolesForDocumentTx(ctx context.Context, q *generated.Quer
 		if q == nil {
 			return nil, errors.New("resolve signer roles: PDF field store unavailable")
 		}
+		if err := htmlsource.ValidateSigningPageState(ctx, q, doc, 0); err != nil {
+			return nil, err
+		}
 		rows, err := q.ListRecipientsByDocument(ctx, doc.ID)
 		if err != nil {
 			return nil, err
@@ -3131,7 +3134,7 @@ func (e *Engine) validateFrozenDocumentFamily(ctx context.Context, doc *generate
 	}
 	if !doc.IsEnvelope {
 		if doc.SourceKind != "blocks" {
-			return nil
+			return htmlsource.ValidateSigningPageState(ctx, e.Queries, doc, 0)
 		}
 		tree, _, err := frozenBlockDocument(doc)
 		if err != nil {

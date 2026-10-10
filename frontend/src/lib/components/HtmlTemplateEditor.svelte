@@ -3,8 +3,8 @@
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getTemplate, createHTMLTemplate, updateHTMLTemplate, previewHTMLTemplate, approveHTMLTemplate,
     type TemplateResponse, type HTMLTemplatePreview } from '$lib/api/client';
-  import { blankHTMLAuthorDraft, blankHTMLContractProfile, draftFromHTMLTemplate, htmlAuthorInput, htmlAuthorFingerprint, htmlAssetFromFile, assetByteLength } from '$lib/htmlAuthor';
-  import { htmlContractProfile, htmlPartyBindings, htmlPartyLabels, requiredHTMLContractTerms, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLContractProfile } from '$lib/htmlTemplate';
+  import { blankHTMLAuthorDraft, blankHTMLContractProfile, blankHTMLSigningPage, draftFromHTMLTemplate, htmlAuthorInput, htmlAuthorFingerprint, htmlAssetFromFile, assetByteLength } from '$lib/htmlAuthor';
+  import { htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlSigningPageColours, htmlSigningPageColourLabels, htmlPartyBindings, htmlPartyLabels, requiredHTMLContractTerms, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLContractProfile } from '$lib/htmlTemplate';
   import VerifiedPDFPages from './VerifiedPDFPages.svelte';
 
   type Identity = Awaited<ReturnType<typeof getMe>>;
@@ -20,6 +20,7 @@
   let draft = $state(blankHTMLAuthorDraft());
   let baseline = $state(untrack(() => htmlAuthorFingerprint(draft)));
   let samples = $state<Record<string, string>>({});
+  let sectionSamples = $state<Record<string, string>>({});
   let sampleBaseline = $state('{}');
   let loading = $state(true);
   let busy = $state<string | null>(null);
@@ -43,26 +44,27 @@
   let previewAbort: AbortController | null = null;
   const current = () => !disposed && templateID === sourceID;
   const dirty = $derived(htmlAuthorFingerprint(draft) !== baseline);
-  const sampleDirty = $derived(JSON.stringify(samples) !== sampleBaseline);
+  const sampleDirty = $derived(JSON.stringify({ values: samples, sections: sectionSamples }) !== sampleBaseline);
   const assetDraftDirty = $derived(!!assetName || !!pendingAssetFile);
   const canWrite = $derived(!!me && me.org_id === orgScope && (!sourceID || saved !== null) && (me.role === 'owner' || me.role === 'sender'));
   const canApprove = $derived(canWrite && me?.role === 'owner');
   const approved = $derived(saved !== null && isApprovedHTMLTemplate(saved));
   const profileProblem = $derived.by(() => {
-    if (draft.schema_version !== 2) return null;
-    try { htmlContractProfile({ schema_version: 2, html: draft.html, css: draft.css, values: draft.values, sections: draft.sections,
+    if (draft.schema_version === 1) return null;
+    try { htmlContractProfile({ schema_version: draft.schema_version, html: draft.html, css: draft.css, values: draft.values, sections: draft.sections, assets: draft.assets,
+      ...(draft.signing_page ? { signing_page: draft.signing_page } : {}),
       ...(draft.contract_profile ? { contract_profile: draft.contract_profile } : {}) }); return null; }
     catch (e) { return (e as Error).message; }
   });
   const previewKey = $derived(`preview-${previewSequence}`);
   const previewValid = $derived(!!preview && !!saved && !dirty && !assetDraftDirty && !needsRefresh && !writeUncertain
     && preview.templateID === saved.id && preview.version === saved.version && preview.contentSHA256 === saved.content_sha256
-    && previewActor === me?.user_id && previewSamples === JSON.stringify(samples) && now < Date.parse(preview.expiresAt));
+    && previewActor === me?.user_id && previewSamples === JSON.stringify({ values: samples, sections: sectionSamples }) && now < Date.parse(preview.expiresAt));
   let observedDraft = untrack(() => htmlAuthorFingerprint(draft));
-  let observedSamples = untrack(() => JSON.stringify(samples));
+  let observedSamples = untrack(() => JSON.stringify({ values: samples, sections: sectionSamples }));
   let observedAssetIntent = '';
   $effect(() => {
-    const nextDraft = htmlAuthorFingerprint(draft), nextSamples = JSON.stringify(samples);
+    const nextDraft = htmlAuthorFingerprint(draft), nextSamples = JSON.stringify({ values: samples, sections: sectionSamples });
     const assetIntent = `${assetName}:${pendingAssetFile?.name ?? ''}:${pendingAssetFile?.lastModified ?? ''}`;
     if (nextDraft !== observedDraft || nextSamples !== observedSamples || assetIntent !== observedAssetIntent) {
       observedDraft = nextDraft; observedSamples = nextSamples;
@@ -91,7 +93,8 @@
     const nextDraft = draftFromHTMLTemplate(next);
     saved = next; knownID = next.id; draft = nextDraft; baseline = htmlAuthorFingerprint(nextDraft);
     samples = Object.fromEntries(htmlTemplateFields(next).map((field) => [field.name, field.defaultValue]));
-    sampleBaseline = JSON.stringify(samples);
+    sectionSamples = Object.fromEntries((next.html_master_json!.sections ?? []).map((section) => [section.name, section.default_text]));
+    sampleBaseline = JSON.stringify({ values: samples, sections: sectionSamples });
     rowKey = Math.max(nextDraft.values.length, nextDraft.sections.length);
     latest = null; needsRefresh = false; writeUncertain = false; error = null;
     acknowledgedSave = null;
@@ -212,12 +215,35 @@
   function changeProfile(event: Event) {
     if (!canWrite || busy) return;
     const enabled = (event.currentTarget as HTMLInputElement).checked;
-    if (!enabled && draft.contract_profile && !window.confirm('Remove these contract checks and intended parties from the local design? Saving creates a generic version 1 revision for owner review.')) {
+    if (!enabled && draft.contract_profile && !window.confirm('Remove these contract checks, intended parties and any appended signing page from the local design? Saving creates a generic version 1 revision for owner review.')) {
       (event.currentTarget as HTMLInputElement).checked = true;
       return;
     }
     draft.schema_version = enabled ? 2 : 1;
     draft.contract_profile = enabled ? blankHTMLContractProfile() : null;
+    draft.signing_page = null;
+  }
+  function changeSigningPage(event: Event) {
+    if (!canWrite || busy || !draft.contract_profile) return;
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    if (!enabled && !window.confirm('Remove the appended signing page from this local design? Saving creates a new version 2 revision for owner review. Existing documents keep their saved page.')) {
+      (event.currentTarget as HTMLInputElement).checked = true;
+      return;
+    }
+    draft.schema_version = enabled ? 3 : 2;
+    draft.signing_page = enabled ? blankHTMLSigningPage() : null;
+  }
+  function changeSigningLogo(event: Event) {
+    if (!canWrite || busy || !draft.signing_page) return;
+    const name = (event.currentTarget as HTMLSelectElement).value;
+    if (!name) {
+      draft.signing_page.logo_asset = ''; draft.signing_page.logo_sha256 = ''; draft.signing_page.logo_alt = '';
+      return;
+    }
+    const asset = draft.assets.find((candidate) => candidate.name === name && ['image/png', 'image/jpeg'].includes(candidate.media_type));
+    if (!asset) return;
+    draft.signing_page.logo_asset = asset.name; draft.signing_page.logo_sha256 = asset.sha256;
+    draft.signing_page.logo_alt = asset.name.replaceAll('_', ' ');
   }
   function changeProfileKind(event: Event) {
     if (!canWrite || busy || !draft.contract_profile) return;
@@ -236,14 +262,20 @@
   }
   async function generatePreview() {
     if (!current() || !canWrite || !saved || dirty || assetDraftDirty || busy || loading || needsRefresh || writeUncertain) return;
-    const target = saved, actor = me!.user_id, fingerprint = JSON.stringify(samples), selected = ++operation;
-    let values;
-    try { values = htmlValuesForSubmission(htmlTemplateFields(target), samples); } catch (e) { recordError(e); return; }
+    const target = saved, actor = me!.user_id, fingerprint = JSON.stringify({ values: samples, sections: sectionSamples }), selected = ++operation;
+    let values, sections;
+    try {
+      values = htmlValuesForSubmission(htmlTemplateFields(target), samples);
+      sections = htmlPreviewSections(target.html_master_json!, sectionSamples);
+      const profile = htmlContractProfile(target.html_master_json!);
+      const issues = profile ? [...htmlProfileIssues(profile, values, sections), ...(target.html_master_json!.schema_version === 3 ? htmlSigningPageIssues(profile, values) : [])] : [];
+      if (issues.length) throw new Error(issues[0]);
+    } catch (e) { recordError(e); return; }
     invalidatePreview(); const controller = new AbortController(); previewAbort = controller;
     busy = 'preview'; error = null;
     try {
-      const response = await previewHTMLTemplate(target.id, target.version, target.content_sha256!, values, controller.signal);
-      if (!current() || selected !== operation || !saved || !samePin(saved, target) || dirty || assetDraftDirty || controller.signal.aborted || JSON.stringify(samples) !== fingerprint || me?.user_id !== actor) return;
+      const response = await previewHTMLTemplate(target.id, target.version, target.content_sha256!, values, controller.signal, sections);
+      if (!current() || selected !== operation || !saved || !samePin(saved, target) || dirty || assetDraftDirty || controller.signal.aborted || JSON.stringify({ values: samples, sections: sectionSamples }) !== fingerprint || me?.user_id !== actor) return;
       preview = response; previewSamples = fingerprint; previewActor = actor; previewSequence++;
     } catch (e) { if (current() && selected === operation && !controller.signal.aborted) recordError(e); }
     finally { if (current() && selected === operation) busy = null; }
@@ -320,7 +352,7 @@
         </section>
         <section class="card p-6 space-y-4" aria-label="Reviewed contract profile">
           <h2 class="font-display text-lg">Contract checks and intended parties</h2>
-          <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 2} onchange={changeProfile} class="mt-1" />
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version !== 1} onchange={changeProfile} class="mt-1" />
             <span>Declare a reviewed proposal or ordinary B2B services profile. Hash requires both named parties and the mapped information before sending.</span></label>
           <p class="text-sm text-text-secondary">Map these checks to values and wording printed by this design. An owner reviews the exact revision. These checks do not establish legal sufficiency, verify identity or prove representative authority.</p>
           {#if draft.contract_profile}
@@ -352,6 +384,23 @@
               <button type="button" class="btn btn-secondary" disabled={draft.contract_profile.terms.length >= 16} onclick={() => draft.contract_profile?.terms.push({ name: '', value: '' })}>Add another term</button>
             </div>
             <p class="text-sm text-text-secondary">Both representatives will sign; their names and email addresses come from the printed document values. Changing those values creates a fresh PDF for review. Pre-signing on someone’s behalf is unavailable.</p>
+            <div class="border border-border-light rounded-md p-4 space-y-4" aria-label="Appended signing page">
+              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 3} onchange={changeSigningPage} class="mt-1" /><span>Append a branded signing page with fixed signature locations for both parties.</span></label>
+              <p class="text-sm text-text-secondary">The saved page uses the same printed party details. Its appearance and signature locations require owner review of the complete PDF. Colours, fonts and logo stay fixed in documents made from this approved design.</p>
+              {#if draft.signing_page}
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {#each htmlSigningPageColours as colour (colour)}<label class="text-sm">{htmlSigningPageColourLabels[colour]}<input type="color" value={draft.signing_page.branding[colour]} oninput={(event) => { if (draft.signing_page) draft.signing_page.branding[colour] = event.currentTarget.value.toUpperCase(); }} class="mt-1 block w-full h-10 border border-border-light rounded-md bg-bg-elevated" /></label>{/each}
+                </div>
+                <p class="text-sm text-text-secondary">Text and secondary text require at least 4.5:1 contrast with the background; headings and signatures require 3:1. Preview the saved page to inspect readability.</p>
+                <p class="text-sm">Heading and body font: bundled Inter, saved with this page design. This page supports the bundled Latin glyphs; other scripts require a future approved page design.</p>
+                <label class="block text-sm">Signing-page logo<select value={draft.signing_page.logo_asset} onchange={changeSigningLogo} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
+                  <option value="">No logo (saved choice)</option>
+                  {#each draft.assets.filter((asset) => ['image/png', 'image/jpeg'].includes(asset.media_type)) as asset (asset.name)}<option value={asset.name}>{asset.name.replaceAll('_', ' ')}</option>{/each}
+                </select></label>
+                {#if draft.signing_page.logo_asset}<label class="block text-sm">Logo description (80 characters and display units)<input bind:value={draft.signing_page.logo_alt} required maxlength="160" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>{/if}
+                <p class="text-sm text-text-secondary">Choose a local image added below, or approve the explicit no-logo choice. Review its size and readability on the final preview page.</p>
+              {/if}
+            </div>
             {#if profileProblem}<p class="text-sm text-warning" role="status">{profileProblem}</p>{/if}
           {:else}<p class="text-sm text-text-secondary">This generic version 1 design has no declared contract profile. Its owner and sender must review completeness and intended parties themselves.</p>{/if}
         </section>
@@ -380,7 +429,8 @@
         <section class="card p-6 space-y-4" aria-label="Local design assets">
           <h2 class="font-display text-lg">Local images and fonts</h2><p class="text-sm text-text-secondary">PNG, JPEG, WOFF and WOFF2 only: 2 MiB per file, 16 files / 8 MiB total. Reference them as <code>hash-asset:asset_name</code> in supported image or font locations. Files are validated and scanned on save; inspect them in the PDF preview.</p>
           {#each draft.assets as asset (asset.name)}<div class="border border-border-light rounded-md p-3 text-sm space-y-2"><p class="break-words">{asset.name} · {asset.media_type} · {Math.ceil(assetByteLength(asset) / 1024)} KiB</p><p class="font-mono text-xs break-all">SHA-256 {asset.sha256}</p>
-            <button type="button" class="btn btn-secondary text-xs" onclick={() => draft.assets = draft.assets.filter((row) => row.name !== asset.name)}>Remove asset</button></div>{/each}
+            <button type="button" class="btn btn-secondary text-xs" disabled={draft.signing_page?.logo_asset === asset.name} onclick={() => draft.assets = draft.assets.filter((row) => row.name !== asset.name)}>Remove asset</button>
+            {#if draft.signing_page?.logo_asset === asset.name}<p class="text-text-secondary">This is the saved signing-page logo. Choose another image or no logo before removing it.</p>{/if}</div>{/each}
           <label class="block text-sm">New asset name<input bind:value={assetName} maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
           <label class="block text-sm">Local file<input type="file" bind:this={assetFile} onchange={() => { pendingAssetFile = assetFile?.files?.[0] ?? null; }} accept=".png,.jpg,.jpeg,.woff,.woff2" class="mt-1 block w-full text-sm" /></label>
           <button type="button" class="btn btn-secondary" disabled={draft.assets.length >= 16} onclick={addAsset}>Add local asset</button>
@@ -394,17 +444,19 @@
   {#if saved}
     <section class="card p-6 space-y-4" aria-label="Saved design preview and approval">
       <h2 class="font-display text-lg">Preview saved revision {saved.version}</h2>
-      <p class="text-sm text-text-secondary">These values are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.</p>
+      <p class="text-sm text-text-secondary">These values and wording samples are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.</p>
+      {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.</p>{/if}
       {#if dirty}<p class="text-sm text-warning" role="note">Save the editor changes before generating a new preview.</p>{/if}
       <fieldset disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} class="space-y-3">
         {#each htmlTemplateFields(saved) as field (field.name)}<label class="block text-sm capitalize">Preview {field.label}{field.required ? ' (required)' : ''}<textarea bind:value={samples[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
+        {#each saved.html_master_json?.sections ?? [] as section (section.name)}<label class="block text-sm capitalize">Preview-only {section.name.replaceAll('_', ' ')} wording<textarea bind:value={sectionSamples[section.name]} rows="4" maxlength={section.max_chars * 2} placeholder={section.default_text ? undefined : 'Enter synthetic wording for owner preview'} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
       </fieldset>
       <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{busy === 'preview' ? 'Rendering saved design…' : 'Generate PDF preview'}</button>
       {#if preview}
         {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} />{/key}
         {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">This preview is no longer current. Generate a new preview before approving.</p>{/if}
         {#if canApprove && !approved}
-          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>I have reviewed every PDF page, saved source, defaults, wording, local assets{saved.html_master_json?.schema_version === 2 ? ', contract checks and intended party mappings' : ''}, and approve this exact design revision. Preview sample values are separate from saved defaults.</span></label>
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>I have reviewed every PDF page, saved source, defaults, wording, local assets{saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : ''}{saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : ''}, and approve this exact design revision. Preview sample values and wording are separate from saved defaults.</span></label>
           {#if !allPagesSeen}<p class="text-sm text-text-secondary">Open every page before approving this revision.</p>{/if}
           <button type="button" class="btn btn-primary" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision'}</button>
         {/if}

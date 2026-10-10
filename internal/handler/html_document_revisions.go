@@ -106,6 +106,9 @@ func (s *Server) lockHTMLDocumentRevision(ctx context.Context, tx pgx.Tx, actor 
 	if _, err := htmlmaterialization.Current(ctx, q, guard.Document); err != nil {
 		return nil, err
 	}
+	if err := htmlsource.ValidateSigningPageState(ctx, q, guard.Document, 0); err != nil {
+		return nil, err
+	}
 	return guard, nil
 }
 
@@ -240,12 +243,32 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 		stopProcessing()
 		return nil, 0, 0, errHTMLDocumentRevisionConflict
 	}
-	cleaned, err := sanitize.CleanWithContext(processing, "html-document-revision", "application/pdf", pdf)
+	master, err := htmlmaster.Decode(input.MasterJSON)
 	if err != nil {
 		stopProcessing()
 		return nil, 0, 0, err
 	}
-	pages, err = sanitize.PageCountWithContext(processing, cleaned.Bytes)
+	compiled, err := htmlmaster.Compile(master)
+	if err != nil {
+		stopProcessing()
+		return nil, 0, 0, err
+	}
+	var cleaned sanitize.Result
+	if compiled.SigningPagePolicy() != nil {
+		composed, composeErr := s.composeHTMLSigningPage(processing, compiled, htmlmaster.Input{Values: input.Values, Sections: input.Sections}, pdf)
+		if composeErr != nil {
+			stopProcessing()
+			return nil, 0, 0, composeErr
+		}
+		cleaned = composed.Result
+		pages = composed.Composition.FinalPages
+		input.SigningArtifact, err = htmlsource.NewSigningArtifact(compiled, htmlmaster.Input{Values: input.Values, Sections: input.Sections}, input.PartyBindings, composed.Composition)
+	} else {
+		cleaned, err = sanitize.CleanWithContext(processing, "html-document-revision", "application/pdf", pdf)
+		if err == nil {
+			pages, err = sanitize.PageCountWithContext(processing, cleaned.Bytes)
+		}
+	}
 	stopProcessing()
 	if err != nil {
 		return nil, 0, 0, err
@@ -314,6 +337,9 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 		return nil, 0, 0, err
 	}
 	if err := htmlsource.ValidateContractParties(updated, currentRecipients); err != nil {
+		return nil, 0, 0, err
+	}
+	if err := createHTMLSigningFields(commitCtx, q, updated); err != nil {
 		return nil, 0, 0, err
 	}
 	if _, err := versions.New(q).Snapshot(commitCtx, versions.SnapshotInput{DocumentID: id, OrgID: actor.OrgID, Name: updated.Name, SourceKind: updated.SourceKind, VariablesJS: updated.VariablesJson, HTMLSourceJSON: source, HTMLMaterializationID: updated.HtmlCurrentMaterializationID, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "HTML contract text revised"}); err != nil {

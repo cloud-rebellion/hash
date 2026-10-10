@@ -31,7 +31,7 @@ func (c *Compiled) CanonicalJSON() []byte { return bytes.Clone(c.canonical) }
 func (c *Compiled) Digest() string        { return c.masterDigest }
 
 func Compile(master Master) (*Compiled, error) {
-	if master.SchemaVersion != SchemaVersion && master.SchemaVersion != ContractSchemaVersion {
+	if master.SchemaVersion != SchemaVersion && master.SchemaVersion != ContractSchemaVersion && master.SchemaVersion != SigningPageSchemaVersion {
 		return nil, invalid("unsupported schema version")
 	}
 	if len(master.HTML) == 0 || len(master.HTML) > MaxHTMLBytes || len(master.CSS) > MaxCSSBytes {
@@ -67,6 +67,9 @@ func Compile(master Master) (*Compiled, error) {
 		return nil, err
 	}
 	c.assets = assets
+	if err := c.compileSigningPage(&master); err != nil {
+		return nil, err
+	}
 	if err := validateHTMLTokens(master.HTML); err != nil {
 		return nil, err
 	}

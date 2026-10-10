@@ -179,7 +179,21 @@ resource/syscall tests without race instrumentation (its virtual shadow memory
 would exceed the child's production limit); the ordinary package suite still
 runs with the race detector.
 
-This boundary covers the sanitizer and shared page counter. Signing watermark
+The protocol-2 `compose-signing-page-v1` operation adds separately rendered body
+and fixed signing-page PDFs inside the isolated worker. The application applies
+the malware scanner gate to both inputs before child admission; the worker
+performs active-content inspection before bounded merging. The worker
+then performs measured cleanup and verifies every original body page plus the
+single approved A4 suffix geometry. Combined inputs/output remain capped at
+50 MiB and final pages at 500. The response binds both components, merged input,
+final output and page geometry; strict parent checks refuse inconsistent proof.
+Configured worker failure never falls back to parent-process composition, even
+in development. Migration76 and the matching app/worker need a coordinated
+release after old processing is drained. Actual release-host acceptance remains
+pending.
+
+This boundary covers the sanitizer, shared page counter and this specific
+HTML signing-page composition. Signing watermark
 and merge, evidence attachment/extraction and HTML parsers still have separate
 in-process calls. Full exact-image Linux amd64 acceptance, parser attack corpus,
 aggregate parent/child RSS and concurrency headroom, real scanner and recovery

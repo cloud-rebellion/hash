@@ -1,11 +1,12 @@
 import type { HTMLTemplateInput, TemplateResponse } from './api/client';
-import { htmlContractProfile, htmlTemplateFields, requiredHTMLContractTerms, type HTMLAsset, type HTMLContractProfile, type HTMLSectionDefinition, type HTMLValueDefinition } from './htmlTemplate';
+import { htmlContractProfile, htmlSigningPage, htmlSigningPageFontSHA256, htmlSigningPagePolicy, htmlTemplateFields, requiredHTMLContractTerms, type HTMLAsset, type HTMLContractProfile, type HTMLSectionDefinition, type HTMLSigningPage, type HTMLValueDefinition } from './htmlTemplate';
 
 export interface AuthorValue extends HTMLValueDefinition { key: number; default_value: string }
 export interface AuthorSection extends HTMLSectionDefinition { key: number }
 export interface HTMLAuthorDraft {
-  schema_version: 1 | 2;
+  schema_version: 1 | 2 | 3;
   contract_profile: HTMLContractProfile | null;
+  signing_page: HTMLSigningPage | null;
   name: string;
   html: string;
   css: string;
@@ -20,7 +21,13 @@ const MAX_ASSET = 2 * 1024 * 1024;
 const MAX_ASSETS_TOTAL = 8 * 1024 * 1024;
 
 export function blankHTMLAuthorDraft(): HTMLAuthorDraft {
-  return { schema_version: 1, contract_profile: null, name: '', html: '', css: '', values: [], sections: [], assets: [] };
+  return { schema_version: 1, contract_profile: null, signing_page: null, name: '', html: '', css: '', values: [], sections: [], assets: [] };
+}
+export function blankHTMLSigningPage(): HTMLSigningPage {
+  return { version: 1, policy: htmlSigningPagePolicy, font_sha256: htmlSigningPageFontSHA256, branding: {
+    primary_hex: '#0F172A', accent_hex: '#3B82F6', surface_hex: '#FFFFFF', text_hex: '#0F172A', muted_hex: '#64748B',
+    logo_url: '', logo_alt: '', font_heading: 'Inter', font_body: 'Inter', signature_color: '#0F172A',
+  }, logo_asset: '', logo_sha256: '', logo_alt: '' };
 }
 export function blankHTMLContractProfile(kind: HTMLContractProfile['kind'] = 'proposal'): HTMLContractProfile {
   return { id: 'sales_proposal', version: 1, kind, parties: ['provider', 'customer'].map((slot) => ({
@@ -31,7 +38,7 @@ export function draftFromHTMLTemplate(template: TemplateResponse): HTMLAuthorDra
   const fields = htmlTemplateFields(template);
   const master = template.html_master_json!;
   const draft: HTMLAuthorDraft = {
-    schema_version: master.schema_version, contract_profile: htmlContractProfile(master),
+    schema_version: master.schema_version, contract_profile: htmlContractProfile(master), signing_page: htmlSigningPage(master),
     name: template.name, html: master.html, css: master.css,
     values: fields.map((field, key) => ({ name: field.name, required: field.required, max_chars: field.max_chars, default_value: field.defaultValue, key })),
     sections: (master.sections ?? []).map((section, key) => ({ ...section, key })),
@@ -42,7 +49,7 @@ export function draftFromHTMLTemplate(template: TemplateResponse): HTMLAuthorDra
 }
 // This is local dirty-state comparison, not the server's canonical commitment.
 export function htmlAuthorFingerprint(draft: HTMLAuthorDraft): string {
-  return JSON.stringify({ schema_version: draft.schema_version, contract_profile: draft.contract_profile, name: draft.name, html: draft.html, css: draft.css,
+  return JSON.stringify({ schema_version: draft.schema_version, contract_profile: draft.contract_profile, signing_page: draft.signing_page, name: draft.name, html: draft.html, css: draft.css,
     values: draft.values.map((value) => ({ name: value.name, required: value.required, max_chars: value.max_chars, default_value: value.default_value })),
     sections: draft.sections.map((section) => ({ name: section.name, default_text: section.default_text, max_chars: section.max_chars })),
     assets: draft.assets.map((asset) => ({ name: asset.name, media_type: asset.media_type, data_base64: asset.data_base64, sha256: asset.sha256 })) });
@@ -106,8 +113,11 @@ export function htmlAuthorInput(draft: HTMLAuthorDraft): HTMLTemplateInput {
   if (total > MAX_ASSETS_TOTAL) throw new Error('The design exceeds the 8 MiB asset total.');
   const master: HTMLTemplateInput['html_master_json'] = { schema_version: draft.schema_version, html: draft.html, css: draft.css, values, sections, assets };
   if (draft.contract_profile !== null) master.contract_profile = draft.contract_profile;
+  if (draft.signing_page !== null) master.signing_page = draft.signing_page;
   const profile = htmlContractProfile(master);
   if (profile) master.contract_profile = profile;
+  const signingPage = htmlSigningPage(master);
+  if (signingPage) master.signing_page = signingPage;
   const input: HTMLTemplateInput = { name: draft.name, html_master_json: master, variables_json: defaults };
   if (textEncoder.encode(JSON.stringify(input)).length > 12 * 1024 * 1024) throw new Error('The encoded design exceeds 12 MiB.');
   return input;

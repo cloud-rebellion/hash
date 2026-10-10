@@ -21,18 +21,19 @@ import (
 )
 
 const (
-	SchemaVersion         = 1
-	ContractSchemaVersion = 2
-	MaxMasterJSONBytes    = 12 << 20
-	MaxHTMLBytes          = 256 << 10
-	MaxCSSBytes           = 128 << 10
-	MaxAssets             = 16
-	MaxAssetBytes         = 2 << 20
-	MaxTotalAssetBytes    = 8 << 20
-	MaxValueChars         = 8192
-	MaxSectionChars       = 32768
-	MaxDefinitions        = 64
-	MaxMaterializedBytes  = 16 << 20
+	SchemaVersion            = 1
+	ContractSchemaVersion    = 2
+	SigningPageSchemaVersion = 3
+	MaxMasterJSONBytes       = 12 << 20
+	MaxHTMLBytes             = 256 << 10
+	MaxCSSBytes              = 128 << 10
+	MaxAssets                = 16
+	MaxAssetBytes            = 2 << 20
+	MaxTotalAssetBytes       = 8 << 20
+	MaxValueChars            = 8192
+	MaxSectionChars          = 32768
+	MaxDefinitions           = 64
+	MaxMaterializedBytes     = 16 << 20
 )
 
 var (
@@ -44,13 +45,14 @@ var (
 )
 
 type Master struct {
-	SchemaVersion   int              `json:"schema_version"`
-	HTML            string           `json:"html"`
-	CSS             string           `json:"css"`
-	Values          []Value          `json:"values,omitempty"`
-	Sections        []Section        `json:"sections,omitempty"`
-	Assets          []Asset          `json:"assets,omitempty"`
-	ContractProfile *ContractProfile `json:"contract_profile,omitempty"`
+	SchemaVersion   int                `json:"schema_version"`
+	HTML            string             `json:"html"`
+	CSS             string             `json:"css"`
+	Values          []Value            `json:"values,omitempty"`
+	Sections        []Section          `json:"sections,omitempty"`
+	Assets          []Asset            `json:"assets,omitempty"`
+	ContractProfile *ContractProfile   `json:"contract_profile,omitempty"`
+	SigningPage     *SigningPagePolicy `json:"signing_page,omitempty"`
 }
 
 type Value struct {
@@ -98,6 +100,9 @@ type TemplateCommitment struct {
 func Decode(raw []byte) (Master, error) {
 	var master Master
 	if err := strictJSON(raw, &master, MaxMasterJSONBytes); err != nil {
+		return master, err
+	}
+	if err := validateSigningPageJSON(raw, master); err != nil {
 		return master, err
 	}
 	return master, nil

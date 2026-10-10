@@ -179,6 +179,10 @@ func (e *MutationEngine) mutate(ctx context.Context, actor Actor, docID uuid.UUI
 		return nil, err
 	}
 	if len(doc.HtmlSourceJson) != 0 {
+		_, signingArtifact, err := htmlsource.SigningPage(doc)
+		if err != nil || signingArtifact != nil {
+			return nil, ErrHTMLArtifactChanged
+		}
 		if _, err := htmlmaterialization.Current(ctx, q, doc); err != nil {
 			return nil, ErrHTMLArtifactChanged
 		}

@@ -29,6 +29,7 @@ import (
 
 const SchemaVersion = 1
 const ContractSchemaVersion = 2
+const SigningPageSchemaVersion = 3
 const maxSourceBytes = 24 << 20
 
 var (
@@ -50,6 +51,7 @@ type Input struct {
 	TemplateApprovedBy    uuid.UUID
 	TemplateApprovedAt    time.Time
 	PartyBindings         []PartyBinding
+	SigningArtifact       *SigningArtifact
 }
 
 type source struct {
@@ -72,6 +74,7 @@ type source struct {
 	PDFVersionID          string            `json:"pdf_version_id"`
 	Commitment            string            `json:"commitment"`
 	PartyBindings         []PartyBinding    `json:"party_bindings,omitempty"`
+	SigningArtifact       *SigningArtifact  `json:"signing_artifact,omitempty"`
 }
 
 // New constructs provenance after the caller renders and stores the exact PDF.
@@ -91,8 +94,8 @@ func New(input Input, doc *generated.Document) (json.RawMessage, error) {
 		return nil, invalid("master")
 	}
 	version := SchemaVersion
-	if master.SchemaVersion == ContractSchemaVersion {
-		version = ContractSchemaVersion
+	if master.SchemaVersion == ContractSchemaVersion || master.SchemaVersion == SigningPageSchemaVersion {
+		version = master.SchemaVersion
 	}
 	bindings := slices.Clone(input.PartyBindings)
 	slices.SortFunc(bindings, func(a, b PartyBinding) int { return strings.Compare(a.Slot, b.Slot) })
@@ -104,7 +107,8 @@ func New(input Input, doc *generated.Document) (json.RawMessage, error) {
 		MasterJSON: bytes.Clone(input.MasterJSON), DefaultVarsJSON: bytes.Clone(input.DefaultVarsJSON),
 		Values: maps.Clone(input.Values), Sections: maps.Clone(input.Sections),
 		PDFKey: doc.PdfStorageKey.String, PDFSHA256: hex.EncodeToString(doc.PdfSha256), PDFVersionID: doc.PdfStorageVersionID.String,
-		PartyBindings: bindings,
+		PartyBindings:   bindings,
+		SigningArtifact: cloneSigningArtifact(input.SigningArtifact),
 	}
 	if s.Values == nil {
 		s.Values = map[string]string{}
@@ -121,6 +125,9 @@ func New(input Input, doc *generated.Document) (json.RawMessage, error) {
 	}
 	s.MasterJSON, s.DefaultVarsJSON = canonical.MasterJSON, canonical.DefaultsJSON
 	s.MasterDigest, s.ContentDigest = result.MasterDigest, result.ContentDigest
+	if err := validateSigningArtifact(s); err != nil {
+		return nil, err
+	}
 	if err := validateVariables(s.Values, doc.VariablesJson); err != nil {
 		return nil, err
 	}
@@ -215,6 +222,9 @@ func validatedRecord(doc *generated.Document, raw []byte, requireReview bool) (s
 	if s.MasterDigest != result.MasterDigest || s.ContentDigest != result.ContentDigest {
 		return source{}, invalid("materialization commitment")
 	}
+	if err := validateSigningArtifact(s); err != nil {
+		return source{}, err
+	}
 	commitment, err := sourceCommitment(s, canonical)
 	if err != nil || s.Commitment != commitment {
 		return source{}, invalid("source commitment")
@@ -254,7 +264,7 @@ func InputForCurrent(doc *generated.Document) (Input, error) {
 	}
 	return Input{TemplateID: s.TemplateID, TemplateVersion: s.TemplateVersion, TemplateContentSHA256: s.TemplateContentSHA256,
 		MasterJSON: bytes.Clone(s.MasterJSON), DefaultVarsJSON: bytes.Clone(s.DefaultVarsJSON), Values: maps.Clone(s.Values), Sections: maps.Clone(s.Sections),
-		TemplateApprovedBy: s.TemplateApprovedBy, TemplateApprovedAt: s.TemplateApprovedAt, PartyBindings: slices.Clone(s.PartyBindings)}, nil
+		TemplateApprovedBy: s.TemplateApprovedBy, TemplateApprovedAt: s.TemplateApprovedAt, PartyBindings: slices.Clone(s.PartyBindings), SigningArtifact: cloneSigningArtifact(s.SigningArtifact)}, nil
 }
 
 // OriginCommitment validates the immutable first materialization independently
@@ -345,7 +355,7 @@ func materialize(s source) (htmlmaster.TemplateCommitment, htmlmaster.Result, er
 }
 
 func validateIdentity(s source, doc *generated.Document) error {
-	if (s.SchemaVersion != SchemaVersion && s.SchemaVersion != ContractSchemaVersion) || s.DocumentID == uuid.Nil || s.OrgID == uuid.Nil ||
+	if (s.SchemaVersion != SchemaVersion && s.SchemaVersion != ContractSchemaVersion && s.SchemaVersion != SigningPageSchemaVersion) || s.DocumentID == uuid.Nil || s.OrgID == uuid.Nil ||
 		s.DocumentID != doc.ID || s.OrgID != doc.OrgID || doc.SourceKind != "pdf" || doc.IsEnvelope ||
 		s.TemplateID == uuid.Nil || s.TemplateVersion < 1 || !doc.TemplateID.Valid || uuid.UUID(doc.TemplateID.Bytes) != s.TemplateID ||
 		s.TemplateApprovedBy == uuid.Nil || s.TemplateApprovedAt.IsZero() || !validSHA256(s.TemplateContentSHA256) {
@@ -410,7 +420,7 @@ func decodeSource(raw []byte, s *source) error {
 		return invalid("source must be an object")
 	}
 	allowed := map[string]bool{"schema_version": true, "document_id": true, "org_id": true, "template_id": true, "template_version": true, "template_content_sha256": true, "template_approved_by": true, "template_approved_at": true, "master": true, "default_values": true, "values": true, "sections": true, "master_digest": true, "content_digest": true, "pdf_key": true, "pdf_sha256": true, "pdf_version_id": true, "commitment": true}
-	if s.SchemaVersion == ContractSchemaVersion {
+	if s.SchemaVersion == ContractSchemaVersion || s.SchemaVersion == SigningPageSchemaVersion {
 		allowed["party_bindings"] = true
 		var bindings []map[string]json.RawMessage
 		if err := json.Unmarshal(fields["party_bindings"], &bindings); err != nil || len(bindings) != 2 {
@@ -420,6 +430,12 @@ func decodeSource(raw []byte, s *source) error {
 			if len(binding) != 2 || binding["slot"] == nil || binding["recipient_id"] == nil {
 				return invalid("contract party binding schema keys")
 			}
+		}
+	}
+	if s.SchemaVersion == SigningPageSchemaVersion {
+		allowed["signing_artifact"] = true
+		if err := exactSigningArtifactJSON(fields["signing_artifact"], s.SigningArtifact); err != nil {
+			return err
 		}
 	}
 	if len(fields) != len(allowed) {

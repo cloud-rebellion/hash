@@ -48,6 +48,7 @@
   let savedTemplateFlash = $state(false);
   let showPDFSave = $state(false);
   let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
+  let generatedPlacementReady = $state(false);
   let htmlRevisionBlocked = $state(true);
   let htmlSource = $state.raw<HTMLDocumentSource | null>(null);
   let changeRequests = $state<ChangeRequest[]>([]);
@@ -99,6 +100,7 @@
     if (!doc || doc.id !== updated.id || doc.pdf_sha256 !== updated.pdf_sha256
         || doc.html_source_commitment !== updated.html_source_commitment || doc.html_materialization_revision !== updated.html_materialization_revision) {
       pdfSignatureFields = [];
+      generatedPlacementReady = false;
       htmlRevisionBlocked = true;
       htmlSource = null;
       recipientRevision++;
@@ -107,15 +109,25 @@
   }
   function receiveHTMLSource(source: HTMLDocumentSource | null, scope: DocumentScope) {
     if (!doc || !isCurrentDocument(scope)) return;
-    if (!source) { htmlSource = null; return; }
-    try { htmlSource = currentHTMLSource(source, doc); }
-    catch { htmlSource = null; htmlRevisionBlocked = true; }
+    if (!source) { htmlSource = null; generatedPlacementReady = false; return; }
+    try {
+      const verified = currentHTMLSource(source, doc);
+      if (verified.html_source_commitment !== htmlSource?.html_source_commitment || verified.pdf_sha256 !== htmlSource?.pdf_sha256
+          || verified.source_schema_version !== htmlSource?.source_schema_version) generatedPlacementReady = false;
+      htmlSource = verified;
+    }
+    catch { htmlSource = null; htmlRevisionBlocked = true; generatedPlacementReady = false; }
   }
   async function refreshHTMLDocument() {
     const scope = captureDocument();
     if (!scope) return;
     try { receiveDocument(await getDocument(scope.id), scope); }
     catch (e) { if (isCurrentDocument(scope)) error = (e as Error).message; }
+  }
+  function receivePlacementProof(proof: { documentID: string; pdfSHA256: string; htmlSourceCommitment: string; ready: boolean }, scope: DocumentScope) {
+    if (!doc || !isCurrentDocument(scope) || proof.documentID !== doc.id || proof.pdfSHA256 !== doc.pdf_sha256
+        || proof.htmlSourceCommitment !== doc.html_source_commitment || htmlSource?.source_schema_version !== 3 || htmlRevisionBlocked) return;
+    generatedPlacementReady = proof.ready;
   }
   function receiveStatus(next: string, scope: DocumentScope) {
     if (!doc || !isCurrentDocument(scope)) return;
@@ -332,6 +344,7 @@
     savedTemplateFlash = false;
     showPDFSave = false;
     pdfSignatureFields = [];
+    generatedPlacementReady = false;
     htmlRevisionBlocked = true;
     htmlSource = null;
     changeRequests = [];
@@ -407,7 +420,7 @@
         <h1 class="page-title min-w-0 w-full break-words sm:flex-1">{doc.name}</h1>
         <div class="flex max-w-full flex-wrap gap-2">
           <button class="btn btn-secondary" onclick={() => (showPreview = !showPreview)}>
-            <Eye class="size-4" /> {showPreview ? 'Edit' : 'Preview'}
+            <Eye class="size-4" /> {showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview'}
           </button>
           {#if doc.source_kind === 'blocks'}
             <button class="btn btn-secondary" disabled={savingTemplate} onclick={saveAsTemplate}>
@@ -431,17 +444,26 @@
       }} />
     {/if}
 
-    {#if doc.status === 'draft' && doc.has_html_source}
+    {#if doc.has_html_source}
+      {#if doc.status !== 'draft'}<details class="mb-6"><summary class="cursor-pointer text-sm text-text-secondary">Saved document information and intended parties</summary>
+        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
+          onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
+          onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
+      </details>{:else}
       {#key doc.id}
         <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       {/key}
+      {/if}
+      {#if doc.status === 'draft'}
       {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}:${doc.html_source_commitment}`}
         <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked}
+          expectedPages={htmlSource?.page_count} hasSigningPage={htmlSource?.source_schema_version === 3}
           canReview={viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)}
           onReviewed={(updated) => receiveDocument(updated, documentScope)} onRefresh={refreshHTMLDocument} />
       {/key}
+      {/if}
     {/if}
     {#if doc.has_html_source}{#key doc.id}<HtmlDocumentHistory document={doc} />{/key}{/if}
 
@@ -534,10 +556,14 @@
       {/if}
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
+        {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">Load and reconcile the retained document values before viewing or changing signature locations.</p>
+        {:else}
         {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
-          hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} onSignatureFieldsChange={(fields) => {
+          hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource}
+          onPlacementProof={(proof) => receivePlacementProof(proof, documentScope)} onSignatureFieldsChange={(fields) => {
           if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
         }} />{/key}
+        {/if}
       </div>
       {#if showPreview}
         <iframe title="preview" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
@@ -552,10 +578,13 @@
     {:else if doc.source_kind === 'blocks'}
       <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
+      {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">Loading and verifying the saved signature locations…</p>
+      {:else}
       {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
-        hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} onSignatureFieldsChange={(fields) => {
+        hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource} readonly={true} onSignatureFieldsChange={(fields) => {
         if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
       }} />{/key}
+      {/if}
     {/if}
 
     <div class="mt-8">
@@ -565,6 +594,8 @@
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
         revisionBlocked={doc.has_html_source === true && htmlRevisionBlocked}
+        generatedPlacementRequired={htmlSource?.source_schema_version === 3}
+        {generatedPlacementReady}
         intendedParties={htmlSource?.contract_parties ?? []}
         recipientIdentityLocked={doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile)}
         sourceCommitment={doc.html_source_commitment ?? ''}

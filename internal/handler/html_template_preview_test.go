@@ -247,6 +247,13 @@ func TestHTMLTemplatePreviewSamplesDoNotChangeApprovedDefaultsOrSections(t *test
 	if _, err := materializeHTMLTemplatePreview(content, htmlStringMap{"undeclared": "sample"}); !errors.Is(err, htmlmaster.ErrInvalid) {
 		t.Fatal("undeclared sample was accepted")
 	}
+	sectionSample, err := materializeHTMLTemplatePreview(content, nil, htmlStringMap{"scope": "Explicit preview-only scope <sample>"})
+	if err != nil || !strings.Contains(sectionSample.HTML, "Explicit preview-only scope &lt;sample&gt;") || sectionSample.ContentDigest == baseline.ContentDigest || !bytes.Equal(content.DefaultsJSON, defaultsBefore) {
+		t.Fatal("section samples were not escaped and committed independently from saved prose")
+	}
+	if _, err := materializeHTMLTemplatePreview(content, nil, htmlStringMap{"undeclared": "sample"}); !errors.Is(err, htmlmaster.ErrInvalid) {
+		t.Fatal("undeclared section sample was accepted")
+	}
 	blank, err := htmlmaster.CanonicalTemplate(master, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -259,9 +266,10 @@ func TestHTMLTemplatePreviewSamplesDoNotChangeApprovedDefaultsOrSections(t *test
 	}
 }
 
-func TestHTMLTemplatePreviewInputRefusesProseOverridesAndTextCoercion(t *testing.T) {
+func TestHTMLTemplatePreviewInputRefusesAmbiguousSamplesAndTextCoercion(t *testing.T) {
 	for _, body := range []string{
-		`{"expected_version":3,"expected_content_sha256":"a","sections":{"scope":"changed"}}`,
+		`{"expected_version":3,"expected_content_sha256":"a","sections":{"scope":42}}`,
+		`{"expected_version":3,"expected_content_sha256":"a","sections":null}`,
 		`{"expected_version":3,"expected_content_sha256":"a","values":null}`,
 		`{"expected_version":3,"expected_content_sha256":"a","values":{"customer":null}}`,
 		`{"expected_version":3,"expected_content_sha256":"a","values":{"customer":42}}`,

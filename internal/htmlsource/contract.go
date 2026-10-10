@@ -51,7 +51,7 @@ func validatePartyBindings(s source, doc *generated.Document) error {
 // from a later live-template revision. The returned value owns its data.
 func ContractProfile(doc *generated.Document) (*htmlmaster.ContractProfile, error) {
 	s, err := validatedSource(doc, false)
-	if err != nil || s.SchemaVersion != ContractSchemaVersion {
+	if err != nil || (s.SchemaVersion != ContractSchemaVersion && s.SchemaVersion != SigningPageSchemaVersion) {
 		return nil, err
 	}
 	master, err := htmlmaster.Decode(s.MasterJSON)
@@ -70,7 +70,7 @@ func ContractProfile(doc *generated.Document) (*htmlmaster.ContractProfile, erro
 // profile provenance never falls back to generic recipient-derived intention.
 func ContractParties(doc *generated.Document) ([]ContractParty, error) {
 	s, err := validatedSource(doc, false)
-	if err != nil || s.SchemaVersion != ContractSchemaVersion {
+	if err != nil || (s.SchemaVersion != ContractSchemaVersion && s.SchemaVersion != SigningPageSchemaVersion) {
 		return nil, err
 	}
 	master, err := htmlmaster.Decode(s.MasterJSON)

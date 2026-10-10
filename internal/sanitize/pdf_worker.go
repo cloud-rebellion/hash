@@ -43,18 +43,21 @@ type pdfWorker struct {
 }
 
 type pdfWorkerRequest struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	Operation       string `json:"operation"`
-	Length          int    `json:"length"`
-	Asset           string `json:"asset,omitempty"`
+	ProtocolVersion   int    `json:"protocol_version"`
+	Operation         string `json:"operation"`
+	Length            int    `json:"length"`
+	Asset             string `json:"asset,omitempty"`
+	BodyLength        int    `json:"body_length,omitempty"`
+	SigningPageLength int    `json:"signing_page_length,omitempty"`
 }
 
 type pdfWorkerResponse struct {
-	ProtocolVersion int     `json:"protocol_version"`
-	Length          int     `json:"length"`
-	Pages           int     `json:"pages,omitempty"`
-	Report          *Report `json:"report,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	ProtocolVersion int                     `json:"protocol_version"`
+	Length          int                     `json:"length"`
+	Pages           int                     `json:"pages,omitempty"`
+	Report          *Report                 `json:"report,omitempty"`
+	Error           string                  `json:"error,omitempty"`
+	Composition     *PDFCompositionManifest `json:"composition,omitempty"`
 }
 
 // ConfigurePDFWorker is called before server/worker admission. Outside explicit
@@ -149,6 +152,27 @@ func (w *pdfWorker) clean(ctx context.Context, asset, ct string, raw []byte) (Re
 	return Result{Bytes: body, Report: *response.Report}, nil
 }
 
+func (w *pdfWorker) composeSigningPage(ctx context.Context, asset string, bodyPDF, signingPagePDF []byte) (PDFCompositionResult, error) {
+	if len(bodyPDF) == 0 || len(signingPagePDF) == 0 || len(bodyPDF) > MaxPDFBytes || len(signingPagePDF) > MaxPDFBytes-len(bodyPDF) || len(asset) > 128 {
+		return PDFCompositionResult{}, errPDFComposition
+	}
+	raw := make([]byte, 0, len(bodyPDF)+len(signingPagePDF))
+	raw = append(raw, bodyPDF...)
+	raw = append(raw, signingPagePDF...)
+	response, output, err := w.run(ctx, pdfWorkerRequest{Operation: pdfComposeSigningPageOperation, Asset: asset, Length: len(raw), BodyLength: len(bodyPDF), SigningPageLength: len(signingPagePDF)}, raw)
+	if err != nil {
+		return PDFCompositionResult{}, err
+	}
+	if response.Report == nil || response.Composition == nil || response.Report.Asset != asset || response.Composition.BodySHA256 != pdfSHA(bodyPDF) || response.Composition.SigningPageSHA256 != pdfSHA(signingPagePDF) {
+		return PDFCompositionResult{}, ErrPDFWorkerUnavailable
+	}
+	result := PDFCompositionResult{Result: Result{Bytes: output, Report: *response.Report}, Composition: *response.Composition}
+	if ValidatePDFCompositionResult(result) != nil {
+		return PDFCompositionResult{}, ErrPDFWorkerUnavailable
+	}
+	return result, nil
+}
+
 func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []byte) (pdfWorkerResponse, []byte, error) {
 	if w.path == "" {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
@@ -198,7 +222,7 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
 	if response.Error != "" {
-		if response.Length != 0 || response.Report != nil || response.Pages != 0 {
+		if response.Length != 0 || response.Report != nil || response.Pages != 0 || response.Composition != nil {
 			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 		}
 		switch response.Error {
@@ -210,9 +234,17 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 			return pdfWorkerResponse{}, nil, ErrActivePDFContent
 		case "invalid-pdf":
 			return pdfWorkerResponse{}, nil, errors.New("sanitize: invalid PDF")
+		case "invalid-signing-page":
+			if request.Operation != pdfComposeSigningPageOperation {
+				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+			}
+			return pdfWorkerResponse{}, nil, ErrPDFSigningPageInvalid
 		default:
 			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 		}
+	}
+	if request.Operation != pdfComposeSigningPageOperation && response.Composition != nil {
+		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
 	if request.Operation == "clean" && (response.Pages != 0 || response.Length < 1 || response.Report == nil || ValidatePDFResult(*response.Report, pdfSHA(raw), pdfSHA(body), int64(len(raw)), int64(len(body))) != nil) {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
@@ -222,6 +254,15 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 	}
 	if request.Operation == "probe" && (response.Pages != 1 || response.Length != 0 || response.Report != nil) {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
+	if request.Operation == pdfComposeSigningPageOperation {
+		if request.BodyLength < 1 || request.SigningPageLength < 1 || request.BodyLength > len(raw) || request.SigningPageLength != len(raw)-request.BodyLength || response.Pages != 0 || response.Length < 1 || response.Report == nil || response.Composition == nil {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+		result := PDFCompositionResult{Result: Result{Bytes: body, Report: *response.Report}, Composition: *response.Composition}
+		if response.Report.Asset != request.Asset || response.Composition.BodySHA256 != pdfSHA(raw[:request.BodyLength]) || response.Composition.SigningPageSHA256 != pdfSHA(raw[request.BodyLength:]) || ValidatePDFCompositionResult(result) != nil {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
 	}
 	return response, body, nil
 }
@@ -262,9 +303,9 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 		allowed := false
 		switch target.(type) {
 		case *pdfWorkerRequest:
-			allowed = key == "protocol_version" || key == "operation" || key == "length" || key == "asset"
+			allowed = key == "protocol_version" || key == "operation" || key == "length" || key == "asset" || key == "body_length" || key == "signing_page_length"
 		case *pdfWorkerResponse:
-			allowed = key == "protocol_version" || key == "length" || key == "pages" || key == "report" || key == "error"
+			allowed = key == "protocol_version" || key == "length" || key == "pages" || key == "report" || key == "error" || key == "composition"
 		}
 		if !allowed || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return ErrPDFWorkerUnavailable
@@ -275,8 +316,27 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 			return ErrPDFWorkerUnavailable
 		}
 	}
+	if request, ok := target.(*pdfWorkerRequest); ok {
+		if _, exists := fields["operation"]; !exists {
+			return ErrPDFWorkerUnavailable
+		}
+		_, body := fields["body_length"]
+		_, suffix := fields["signing_page_length"]
+		if request.Operation == pdfComposeSigningPageOperation {
+			if !body || !suffix {
+				return ErrPDFWorkerUnavailable
+			}
+		} else if body || suffix {
+			return ErrPDFWorkerUnavailable
+		}
+	}
 	if response, ok := target.(*pdfWorkerResponse); ok && response.Report != nil {
 		if _, err := DecodePDFReport(fields["report"]); err != nil {
+			return ErrPDFWorkerUnavailable
+		}
+	}
+	if response, ok := target.(*pdfWorkerResponse); ok && response.Composition != nil {
+		if _, err := DecodePDFCompositionManifest(fields["composition"]); err != nil {
 			return ErrPDFWorkerUnavailable
 		}
 	}
@@ -352,10 +412,13 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 	if request.ProtocolVersion != pdfWorkerProtocolVersion || request.Length < 0 || request.Length > MaxPDFBytes || len(request.Asset) > 128 {
 		return ErrPDFWorkerUnavailable
 	}
-	if request.Operation != "probe" && request.Operation != "clean" && request.Operation != "pages" {
+	if request.Operation != "probe" && request.Operation != "clean" && request.Operation != "pages" && request.Operation != pdfComposeSigningPageOperation {
 		return ErrPDFWorkerUnavailable
 	}
-	if request.Operation == "probe" && request.Length != 0 || request.Operation != "clean" && request.Asset != "" {
+	if request.Operation == "probe" && request.Length != 0 || request.Operation != "clean" && request.Operation != pdfComposeSigningPageOperation && request.Asset != "" {
+		return ErrPDFWorkerUnavailable
+	}
+	if request.Operation == pdfComposeSigningPageOperation && (request.BodyLength < 1 || request.SigningPageLength < 1 || request.BodyLength > request.Length || request.SigningPageLength != request.Length-request.BodyLength) {
 		return ErrPDFWorkerUnavailable
 	}
 	raw, err := io.ReadAll(io.LimitReader(reader, int64(request.Length)+1))
@@ -390,6 +453,13 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 		if err == nil && response.Pages > MaxPDFPages {
 			err = ErrTooManyPages
 		}
+	case pdfComposeSigningPageOperation:
+		var result PDFCompositionResult
+		result, err = composeSigningPageInProcess(request.Asset, raw[:request.BodyLength], raw[request.BodyLength:])
+		if err == nil {
+			response.Report, response.Composition = &result.Report, &result.Composition
+			body = result.Bytes
+		}
 	}
 	if err != nil {
 		switch {
@@ -399,11 +469,13 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 			response.Error = "too-many-pages"
 		case errors.Is(err, ErrActivePDFContent):
 			response.Error = "active-content"
+		case errors.Is(err, ErrPDFSigningPageInvalid):
+			response.Error = "invalid-signing-page"
 		default:
 			response.Error = "invalid-pdf"
 		}
 		body = nil
-		response.Pages, response.Report = 0, nil
+		response.Pages, response.Report, response.Composition = 0, nil, nil
 	}
 	response.Length = len(body)
 	header, err := json.Marshal(response)

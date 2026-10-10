@@ -88,6 +88,20 @@ func CreatePDFTemplateDocument(ctx context.Context, q documentQueries, st object
 	return createPDFSourceDocument(ctx, q, st, orgID, userID, name, pgtype.UUID{Bytes: templateID, Valid: true}, expiresAt, data)
 }
 
+// CreateComposedPDFTemplateDocument stores the exact once-cleaned output from
+// the isolated composition worker. Re-cleaning would invalidate its component
+// and geometry manifest. The pure validator rechecks bytes and measured proof
+// before the first object or database write.
+func CreateComposedPDFTemplateDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID uuid.UUID, expiresAt pgtype.Timestamptz, composed sanitize.PDFCompositionResult) (*generated.Document, int, OwnedPDFSource, error) {
+	if orgID == uuid.Nil || userID == uuid.Nil || templateID == uuid.Nil {
+		return nil, 0, OwnedPDFSource{}, errors.New("organization, user and template IDs required")
+	}
+	if err := sanitize.ValidatePDFCompositionResult(composed); err != nil {
+		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: composed PDF proof: %w", ErrSanitizePDF, err)
+	}
+	return storePDFSourceDocument(ctx, q, st, orgID, userID, name, pgtype.UUID{Bytes: templateID, Valid: true}, expiresAt, composed.Result, composed.Composition.FinalPages)
+}
+
 func createPDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz, data []byte) (*generated.Document, int, OwnedPDFSource, error) {
 	cleaned, err := sanitize.CleanWithContext(ctx, "proposal-pdf", "application/pdf", data)
 	if err != nil {
@@ -105,6 +119,10 @@ func createPDFSourceDocument(ctx context.Context, q documentQueries, st objectSt
 	if pageCount > maxIntakePages {
 		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: %d pages exceeds the %d-page limit", ErrTooManyPages, pageCount, maxIntakePages)
 	}
+	return storePDFSourceDocument(ctx, q, st, orgID, userID, name, templateID, expiresAt, cleaned, pageCount)
+}
+
+func storePDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz, cleaned sanitize.Result, pageCount int) (*generated.Document, int, OwnedPDFSource, error) {
 	key := path.Join("org", orgID.String(), "documents", uuid.NewString()+".pdf")
 	stored, err := st.PutVersioned(ctx, key, "application/pdf", cleaned.Bytes)
 	if err != nil {

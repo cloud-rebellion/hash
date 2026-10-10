@@ -71,6 +71,9 @@ type ContractReadiness struct {
 }
 
 func versionedDomain(base string, schema int) string {
+	if schema == SigningPageSchemaVersion {
+		return base + ".v3"
+	}
 	if schema == ContractSchemaVersion {
 		return base + ".v2"
 	}
@@ -210,6 +213,10 @@ func (c *Compiled) ContractReadiness(input Input) (ContractReadiness, error) {
 		} {
 			if isBlank(field.text) {
 				issue("missing", base+field.name, "Required printed party information is missing.")
+			} else if c.master.SigningPage != nil {
+				if problem := signingPageTextProblem(field.name, field.text); problem != "" {
+					issue("signing_page_text", base+field.name, problem)
+				}
 			}
 		}
 		if !isBlank(party.RepresentativeEmail) && !canonicalRepresentativeEmail(party.RepresentativeEmail) {

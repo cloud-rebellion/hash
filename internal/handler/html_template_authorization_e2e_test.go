@@ -738,7 +738,11 @@ func htmlMigrationPartsE2E(t *testing.T) (string, string) {
 	if len(provenanceParts) != 2 {
 		t.Fatal("PDF provenance migration requires Up/Down")
 	}
-	return parts[0] + "\n" + dependentParts[0] + "\n" + provenanceParts[0], provenanceParts[1] + "\n" + dependentParts[1] + "\n" + parts[1]
+	branded, err := os.ReadFile("../db/migrations/00076_branded_signing_pages.sql")
+	if err != nil { t.Fatal(err) }
+	brandedParts := strings.SplitN(string(branded), "-- +goose Down", 2)
+	if len(brandedParts) != 2 { t.Fatal("Branded page migration requires Up/Down") }
+	return parts[0] + "\n" + dependentParts[0] + "\n" + provenanceParts[0] + "\n" + brandedParts[0], brandedParts[1] + "\n" + provenanceParts[1] + "\n" + dependentParts[1] + "\n" + parts[1]
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {

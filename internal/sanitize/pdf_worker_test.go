@@ -52,6 +52,10 @@ func TestPDFWorkerChildHelper(t *testing.T) {
 				os.Exit(0)
 			}
 		}
+	case "composition-wrong-input", "composition-wrong-output", "composition-wrong-report", "composition-missing-report", "composition-missing-manifest", "composition-extra-key", "composition-wrong-geometry":
+		if serveMalformedCompositionForTest(os.Args[len(os.Args)-1]) != nil {
+			os.Exit(6)
+		}
 	default:
 		os.Exit(5)
 	}

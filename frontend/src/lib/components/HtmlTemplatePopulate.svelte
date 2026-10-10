@@ -2,7 +2,7 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { getTemplate, createHTMLTemplateDocument, APIError, type TemplateResponse, type DocumentResponse } from '$lib/api/client';
-  import { htmlContractProfile, htmlProfileIssues, htmlProfileSectionValues, htmlTemplateGroups, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLFormField, type HTMLSectionDefinition } from '$lib/htmlTemplate';
+  import { htmlContractProfile, htmlProfileIssues, htmlProfileSectionValues, htmlSigningPageIssues, htmlTemplateGroups, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLFormField, type HTMLSectionDefinition } from '$lib/htmlTemplate';
 
   type DraftNavigation = { cancel: () => void; willUnload: boolean; from: { url: URL } | null; to: { url: URL } | null };
 
@@ -36,7 +36,7 @@
   const approved = $derived(design !== null && isApprovedHTMLTemplate(design));
   const profile = $derived(design?.html_master_json ? htmlContractProfile(design.html_master_json) : null);
   const groups = $derived(design ? htmlTemplateGroups(design) : []);
-  const profileIssues = $derived(profile ? htmlProfileIssues(profile, values, sections) : []);
+  const profileIssues = $derived(profile ? [...htmlProfileIssues(profile, values, sections), ...(design?.html_master_json?.schema_version === 3 ? htmlSigningPageIssues(profile, values) : [])] : []);
   const unusedValues = $derived(Object.entries(values).filter(([name]) => !fields.some((field) => field.name === name)));
   const unusedSections = $derived(Object.entries(sections).filter(([name]) => !sectionDefinitions.some((section) => section.name === name)));
   const dirty = $derived(name !== initialName || unusedValues.length > 0 || unusedSections.length > 0 || fields.some((field) => values[field.name] !== field.defaultValue)
@@ -176,6 +176,7 @@
     {#if profile}<div class="border border-border-light rounded-md p-4 space-y-2 text-sm" aria-label="Declared contract checks">
       <p class="font-medium">{profile.kind === 'proposal' ? 'Proposal' : 'Ordinary B2B services'} · reviewed profile {profile.id.replaceAll('_', ' ')} version {profile.version}</p>
       <p>Both representatives will sign. Hash creates the provider and customer recipients from the names and email addresses printed below. These declarations do not independently verify identity or authority, or establish legal sufficiency.</p>
+      {#if design.html_master_json?.schema_version === 3}<p>The approved design appends a signing page with saved branding and fixed signature locations for both representatives. Party details must fit its bounded layout and bundled Latin font. Review the complete generated PDF, including that final page, before sending.</p>{/if}
       {#each profile.parties as party (party.slot)}<p class="break-words"><strong>{party.slot === 'provider' ? 'Our company' : 'Customer'}:</strong> {values[party.company_name]?.trim() || 'Company not entered'} · {values[party.representative_name]?.trim() || 'Representative not entered'} · {values[party.representative_email]?.trim() || 'Email not entered'}</p>{/each}
       {#if profileIssues.length}<p class="text-warning" role="status">Complete the declared party and commercial information before creating the PDF.</p><ul class="list-disc pl-5 space-y-1">{#each profileIssues as issue, index (index)}<li>{issue}</li>{/each}</ul>{/if}
     </div>{/if}

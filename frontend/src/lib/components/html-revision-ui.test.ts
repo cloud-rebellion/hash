@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
-import { advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, htmlUUID, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLRevision, htmlPlacementPins } from '../htmlRevision';
+import { advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, htmlUUID, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLGeneratedFields, verifiedHTMLRevision, htmlPlacementPins } from '../htmlRevision';
+import { generatedAssignmentFixture } from '../htmlRevision.test';
 
 function bind(file: string, names: string[], env: any) {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -180,7 +181,7 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
   for (const action of ['onPointerUp', 'remove']) {
     const calls: any[] = [], changed: any[] = [];
     const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64), htmlSourceCommitment: 'a'.repeat(64), disposed: false,
-      draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: {}, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
+      draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: {}, readonly: false, generated: false, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
       TOOLS: [{ type: 'signature', label: 'Signature' }], fields: [{ id: 'field', document_id: ID }], saving: false, error: null, htmlPlacementPins,
       emitSignatureFields: () => changed.push(true), current: (target: string) => !env.disposed && target === ID && env.htmlSourceCommitment === env.sourceCommitment };
     for (const name of ['addField', 'deleteField']) env[name] = (...args: any[]) => new Promise((resolve) => calls.push({ name, args, resolve }));
@@ -192,11 +193,39 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
     await actions.onPointerUp(); await actions.remove(env.fields[0]); expect(calls).toHaveLength(1);
   }
 });
+test('automatic or readonly placement handlers cannot dispatch add/delete even if invoked directly', async () => {
+  for (const mode of ['generated', 'readonly']) {
+    const calls: unknown[] = [];
+    const env: any = { documentID: ID, readonly: mode === 'readonly', generated: mode === 'generated',
+      draft: { page: 2, x: 10, y: 42, w: 80, h: 7 }, dragStart: {}, placementUnavailable: false, current: () => true,
+      addField: () => calls.push('add'), deleteField: () => calls.push('delete') };
+    const actions = bind('./PdfFieldDesigner.svelte', ['onPointerUp', 'remove'], env);
+    await actions.onPointerUp(); await actions.remove({ id: 'existing', document_id: ID });
+    expect(calls).toEqual([]); expect(env.draft).toBeNull();
+  }
+});
+test('generated field refresh invalidates readiness before read and only restores it after exact party and rectangle readback', async () => {
+  for (const drift of [false, true]) {
+    const fixture = generatedAssignmentFixture(), calls: any[] = [], proofs: boolean[] = [];
+    const env: any = { documentID: ID, generated: true, retainedSource: fixture.source, recipientRevision: 1,
+      rendered: true, loading: false, saving: false, refreshingRecipients: false, recipientRefreshError: null, appliedRecipientRevision: 0,
+      dragStart: null, draft: null, recipients: fixture.recipients, fields: fixture.fields, recipientID: fixture.recipients[0].id,
+      current: () => true, verifiedHTMLGeneratedFields, emitProof: (ready: boolean) => proofs.push(ready), emitSignatureFields: () => {} };
+    env.listRecipients = () => new Promise(resolve => calls.push({ kind: 'recipients', resolve }));
+    env.listFields = () => new Promise(resolve => calls.push({ kind: 'fields', resolve }));
+    const actions = bind('./PdfFieldDesigner.svelte', ['verifyAssignments', 'refreshPlacementContext'], env);
+    const pending = actions.refreshPlacementContext(1); expect(proofs).toEqual([false]);
+    const fields = structuredClone(fixture.fields); if (drift) fields[0].y_pct = 43;
+    calls.find(call => call.kind === 'recipients').resolve(fixture.recipients); calls.find(call => call.kind === 'fields').resolve(fields); await pending;
+    expect(proofs).toEqual(drift ? [false] : [false, true]);
+    expect(env.recipientRefreshError !== null).toBe(drift);
+  }
+});
 
 test('review binds new materialization source and refuses an identical-PDF response from another source', async () => {
   const calls: any[] = [], reviewed: any[] = [];
   const env: any = { document: document(), sourceID: ID, sourceStamp: source().updated_at, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
-    disposed: false, canReview: true, revisionBlocked: false, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, acknowledged: true,
+    disposed: false, canReview: true, revisionBlocked: false, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, pageCountMatches: true, acknowledged: true,
     current: () => !env.disposed && env.document.html_source_commitment === env.sourceCommitment,
     reviewHTMLDocument: (...args: any[]) => new Promise((resolve) => calls.push({ args, resolve })), onReviewed: (d: any) => reviewed.push(d) };
   const actions = bind('./HtmlPDFReview.svelte', ['approve'], env); const pending = actions.approve();
@@ -210,4 +239,13 @@ test('dirty or unreconciled local wording blocks review of the previously render
     canReview: true, revisionBlocked: true, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, acknowledged: true,
     current: () => true, reviewHTMLDocument: () => { throw new Error('Old PDF review must not dispatch'); } };
   await bind('./HtmlPDFReview.svelte', ['approve'], env).approve(); expect(env.busy).toBe(false);
+});
+test('unseen appended page or mismatched retained page count blocks the actual PDF approval callback', async () => {
+  for (const mode of ['unseen_page', 'wrong_count']) {
+    const env: any = { document: document(), sourceID: ID, sourceStamp: source().updated_at, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
+      canReview: true, revisionBlocked: false, loading: false, rendering: false, busy: false, error: null, activePDF: {},
+      allPagesSeen: mode !== 'unseen_page', pageCountMatches: mode !== 'wrong_count', acknowledged: true,
+      current: () => true, reviewHTMLDocument: () => { throw new Error('Incomplete page review must not dispatch'); } };
+    await bind('./HtmlPDFReview.svelte', ['approve'], env).approve(); expect(env.busy).toBe(false);
+  }
 });

@@ -47,6 +47,8 @@
     requiresSignature?: boolean;
     reviewRequired?: boolean;
     revisionBlocked?: boolean;
+    generatedPlacementRequired?: boolean;
+    generatedPlacementReady?: boolean;
     intendedParties?: HTMLDocumentParty[];
     recipientIdentityLocked?: boolean;
     sourceCommitment?: string;
@@ -63,6 +65,8 @@
     requiresSignature = true,
     reviewRequired = false,
     revisionBlocked = false,
+    generatedPlacementRequired = false,
+    generatedPlacementReady = false,
     intendedParties = [],
     recipientIdentityLocked = false,
     sourceCommitment = '',
@@ -408,7 +412,8 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked || loading || recipientRefreshError || partyConflicts.length) return;
+    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked
+        || (generatedPlacementRequired && !generatedPlacementReady) || loading || recipientRefreshError || partyConflicts.length) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
       return;
@@ -811,13 +816,15 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={revisionBlocked || reviewRequired || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
       {#if revisionBlocked}
         <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>
       {:else if reviewRequired}
         <span class="text-xs text-warning">Review the generated PDF above before sending.</span>
+      {:else if generatedPlacementRequired && !generatedPlacementReady}
+        <span class="text-xs text-warning">Verify the generated signature locations above before sending. Refresh the document if they differ from its intended parties.</span>
       {:else if partyConflicts.length > 0}
         <span class="text-xs text-warning">Resolve the declared party conflicts before sending.</span>
       {:else if !hasParticipant}

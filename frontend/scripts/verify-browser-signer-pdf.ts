@@ -15,16 +15,18 @@ type Observation = { document_id: string; recipient_id: string; pdf_sha256: stri
 const fixture = JSON.parse(await Bun.stdin.text()) as {
   base: string; documentID: string; pdfSHA256: string; sourceCommitment: string; pageCount: number;
   materializationRevision: number; rendererVersion: string; parties: Party[];
+  ownerCookie: string;
   legacy: { documentID: string; token: string; recipientID: string; name: string; textFieldID: string; signatureFieldID: string };
   artifactDir: string; receiptPath: string;
 };
 const uuid = /^[a-f0-9-]{36}$/i, digest = /^[a-f0-9]{64}$/;
 const validToken = (value: string) => /^[A-Za-z0-9_-]{32,256}$/.test(value);
+const ownerCookie = typeof fixture.ownerCookie === 'string' ? /^([A-Za-z0-9_-]{1,64})=([^;\s\u0000-\u001f\u007f]{16,4096})$/.exec(fixture.ownerCookie) : null;
 if (!/^https:\/\/127\.0\.0\.1:\d+$/.test(fixture.base) || !uuid.test(fixture.documentID)
   || !digest.test(fixture.pdfSHA256) || !digest.test(fixture.sourceCommitment)
   || !Number.isInteger(fixture.pageCount) || fixture.pageCount < 2 || fixture.pageCount > 12
   || fixture.materializationRevision !== 1 || fixture.rendererVersion !== '8.36.0-hash.1'
-  || fixture.parties?.length !== 2 || fixture.parties[0].recipientID === fixture.parties[1].recipientID
+  || !ownerCookie || fixture.parties?.length !== 2 || fixture.parties[0].recipientID === fixture.parties[1].recipientID
   || fixture.parties.some(p => !validToken(p.token) || !uuid.test(p.recipientID) || !uuid.test(p.fieldID) || !p.name)
   || !fixture.legacy || !validToken(fixture.legacy.token) || !uuid.test(fixture.legacy.documentID)
   || !uuid.test(fixture.legacy.recipientID) || !uuid.test(fixture.legacy.textFieldID) || !uuid.test(fixture.legacy.signatureFieldID)
@@ -40,6 +42,8 @@ const faults: { case: string; requestsToSign: number; gateDisabled?: boolean;
   gateDisabledDuringOldLoad?: boolean; currentRecipientReadyAfterSettlement?: boolean;
   lateRouteOutcome?: 'fulfilled' | 'aborted' }[] = [];
 let signRequests = 0, savedFields = 0;
+let ownerFieldMutations = 0;
+let ownerReadOnlyProof: unknown;
 
 function witnessHeaders(headers: Record<string, string>, observation: Observation) {
   for (const [name, expected] of [
@@ -151,7 +155,110 @@ async function inspectOwnFields(context: any, token: string, observation: Observ
   return body.fields;
 }
 
+async function inspectOwnerReadOnlyLocations() {
+  const { context, page } = await newPage();
+  await context.addCookies([{ name: ownerCookie![1], value: ownerCookie![2], url: fixture.base,
+    httpOnly: true, secure: true, sameSite: 'Lax' }]);
+  page.on('request', (request: any) => {
+    if (['POST', 'PATCH', 'DELETE'].includes(request.method()) && /^\/api\/v1\/(?:documents\/[^/]+\/fields|fields\/[^/]+)/.test(new URL(request.url()).pathname)) ownerFieldMutations++;
+  });
+  const responses = await Promise.all([
+    context.request.get(`${fixture.base}/api/v1/documents/${fixture.documentID}/html/source`),
+    context.request.get(`${fixture.base}/api/v1/documents/${fixture.documentID}/fields`),
+    context.request.get(`${fixture.base}/api/v1/documents/${fixture.documentID}/recipients`),
+  ]);
+  if (responses.some((response: any) => !response.ok())) throw new Error('Owner source and generated fields unavailable');
+  const [source, fieldResponse, recipientResponse] = await Promise.all(responses.map((response: any) => response.json()));
+  const fields = fieldResponse.fields, recipients = recipientResponse.recipients;
+  if (source.source_schema_version !== 3 || source.document_id !== fixture.documentID || source.pdf_sha256 !== fixture.pdfSHA256
+      || source.html_source_commitment !== fixture.sourceCommitment || source.page_count !== fixture.pageCount
+      || source.signing_page?.version !== 1 || source.signing_page?.policy !== 'hash-branded-signing-page-a4-v1'
+      || source.signing_page.font_sha256 !== '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62'
+      || source.signing_page.branding?.logo_url !== '' || source.signing_page.branding?.logo_alt !== ''
+      || source.signing_artifact?.composition?.output_sha256 !== fixture.pdfSHA256 || source.signing_artifact?.composition?.final_pages !== fixture.pageCount
+      || source.signing_artifact?.fields?.length !== 2 || fields?.length !== 2 || recipients?.length !== 2) {
+    throw new Error('Owner page source is not the automatic branded artifact');
+  }
+  const assignments: { slot: string; fieldID: string; recipientID: string; page: number }[] = [];
+  const partyBindings = [
+    ['company_name', 'company_name', 'Company name'],
+    ['company_id', 'company_id', 'Company or registration identifier'],
+    ['representative_name', 'name', 'Representative name'],
+    ['representative_email', 'email', 'Representative email'],
+    ['representative_authority', 'representative_authority', 'Declared representative authority'],
+  ] as const;
+  for (const slot of ['customer', 'provider']) {
+    const party = source.contract_parties?.find((candidate: any) => candidate.slot === slot);
+    const mapping = source.contract_profile?.parties?.find((candidate: any) => candidate.slot === slot);
+    const expected = source.signing_artifact.fields.find((candidate: any) => candidate.slot === slot);
+    const field = fields.find((candidate: any) => candidate.recipient_id === party?.recipient_id);
+    const recipient = recipients.find((candidate: any) => candidate.id === party?.recipient_id);
+    const packetParty = fixture.parties.find((candidate) => candidate.role === slot);
+    if (!party || !mapping || !expected || !field || !recipient || !packetParty || party.recipient_id !== packetParty.recipientID
+        || field.id !== packetParty.fieldID || field.type !== 'signature' || field.required !== true || field.document_id !== fixture.documentID
+        || field.page !== fixture.pageCount || field.x_pct !== 10 || field.y_pct !== (slot === 'customer' ? 42 : 79) || field.w_pct !== 80 || field.h_pct !== 7
+        || expected.page !== field.page || expected.x !== 100000 || expected.y !== field.y_pct * 10000 || expected.w !== 800000 || expected.h !== 70000
+        || recipient.document_id !== fixture.documentID || recipient.role !== slot || recipient.name !== party.name || recipient.email !== party.email) {
+      throw new Error('Owner generated slot differs from printed party or exact PDF');
+    }
+    for (const [binding, assertion] of partyBindings) {
+      const declared = source.values?.find((candidate: any) => candidate.name === mapping[binding]);
+      if (!declared || declared.required !== true || declared.text !== party[assertion]) throw new Error('Owner printed party assertion differs from its frozen declaration');
+    }
+    assignments.push({ slot, fieldID: field.id, recipientID: party.recipient_id, page: field.page });
+  }
+  await page.goto(`${fixture.base}/documents/${fixture.documentID}`);
+  await page.getByText('Saved document information and intended parties', { exact: true }).click();
+  for (const slot of ['provider', 'customer']) {
+    const party = source.contract_parties.find((candidate: any) => candidate.slot === slot);
+    const group = page.getByRole('region', { name: slot === 'provider' ? 'Our company' : 'Customer', exact: true });
+    await group.waitFor();
+    for (const [, assertion, label] of partyBindings) {
+      const input = group.getByLabel(new RegExp(`^${label}\\s*\\(required\\)`));
+      if (!await input.isVisible() || !await input.isDisabled() || await input.inputValue() !== party[assertion]) throw new Error('Owner saved party details do not visibly preserve their frozen printed values');
+    }
+  }
+  await page.getByRole('button', { name: 'Signature locations', exact: true }).click();
+  const designer = page.getByRole('region', { name: 'PDF signature locations', exact: true });
+  await page.locator('[aria-label="PDF signature locations"][data-generated-signatures="true"][data-placement-ready="true"]').waitFor();
+  await designer.getByRole('heading', { name: 'Signature locations', exact: true }).waitFor();
+  if (!(await designer.getByText('Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties.', { exact: false }).isVisible())
+      || await designer.getByRole('button', { name: 'Remove field', exact: true }).count()
+      || await designer.getByRole('combobox', { name: 'Recipient', exact: true }).count()
+      || await designer.getByRole('button', { name: /^(Signature|Text|Date|Checkbox|Initial)$/ }).count()
+      || await designer.locator('[data-field-id]').count() !== 2) throw new Error('Owner generated positions are not visibly locked');
+  const canvas = designer.getByLabel(`Document page ${fixture.pageCount}`, { exact: true });
+  await canvas.scrollIntoViewIfNeeded();
+  const geometry = await canvas.evaluate((node: HTMLCanvasElement) => {
+    const ctx = node.getContext('2d');
+    if (!ctx) throw new Error('Owner canvas unavailable');
+    const pixels = ctx.getImageData(0, 0, node.width, node.height).data;
+    let ink = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] && pixels[i] + pixels[i + 1] + pixels[i + 2] < 650) ink++;
+    return { width: node.width, height: node.height, ink };
+  });
+  if (!await canvas.isVisible() || geometry.width < 200 || geometry.height < 200 || geometry.ink < 100) throw new Error('Owner signing page is not visible and rendered');
+  for (const assignment of assignments) {
+    const box = designer.locator(`[data-field-id="${assignment.fieldID}"][data-recipient-id="${assignment.recipientID}"]`);
+    if (!await box.isVisible()) throw new Error('Owner generated party overlay is absent');
+  }
+  await designer.getByRole('application', { name: `Field placement layer for page ${fixture.pageCount}`, exact: true }).click();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  if (ownerFieldMutations !== 0) throw new Error('Owner generated page dispatched a field mutation');
+  const name = 'owner-automatic-signature-locations';
+  const target = `${fixture.artifactDir}/${name}.png`;
+  await canvas.screenshot({ path: target });
+  screenshots.push({ name, sha256: hash(new Uint8Array(await Bun.file(target).arrayBuffer())) });
+  ownerReadOnlyProof = { sourceSchemaVersion: 3, originalPDFSHA256: fixture.pdfSHA256, sourceCommitment: fixture.sourceCommitment,
+    pageCount: fixture.pageCount, signingPage: fixture.pageCount, assignments, visibleNonblankCanvas: geometry,
+    lockedPlacementVerified: true, printedPartyBindingsVerified: true, lockedExplanationVisible: true,
+    manualControlsAbsent: true, attemptedPointerMutationRequests: ownerFieldMutations };
+  await context.close();
+}
+
 try {
+  stage = 'owner automatic signing-page locations are source-bound and read-only';
+  await inspectOwnerReadOnlyLocations();
   const first = fixture.parties[0], second = fixture.parties[1];
   stage = 'failed PDF responses cannot authorize signing';
   for (const kind of ['pdf503', 'invalid_digest', 'failed_render', 'pins_mismatch', 'fields_pins_mismatch']) {
@@ -353,8 +460,8 @@ try {
   await Bun.write(fixture.receiptPath, JSON.stringify({ result: 'pass', documentID: fixture.documentID,
     scope: 'Actual built Svelte/pdf.js on disposable real Go HTTPS/PostgreSQL/source worker and exact real Chromium. S3/retention, participants, certificate key and delivery outbox synthetic; no live SMTP/provider/production/legal acceptance.',
     rendererVersion: fixture.rendererVersion, pageCount: fixture.pageCount, originalPDFSHA256: fixture.pdfSHA256,
-    originalSourceCommitment: fixture.sourceCommitment, finalPDFSHA256, userVisibleDownloadVerified, manualSignaturePlacement: true,
-    automaticBrandedPageSupport: false, independentContexts: true, signRequests, savedFields, faults,
+    originalSourceCommitment: fixture.sourceCommitment, finalPDFSHA256, userVisibleDownloadVerified, manualSignaturePlacement: false,
+    automaticBrandedPageSupport: true, owner: ownerReadOnlyProof, independentContexts: true, signRequests, savedFields, faults,
     autosave: autosaveWitness!, parties: partyProofs, screenshots, pageErrors, failedAssets }, null, 2) + '\n');
   console.log('PASS: exact rendered multi-page PDF, refusal gates, independent two-party signing and confirmed autosave');
 } catch {

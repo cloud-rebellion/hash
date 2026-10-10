@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
-import { htmlContractProfile, htmlPartyBindings, htmlProfileIssues, htmlProfileSectionValues, htmlTemplateFields, htmlTemplateGroups, htmlValuesForSubmission, isApprovedHTMLTemplate, requiredHTMLContractTerms, type HTMLContractProfile } from './htmlTemplate';
+import { htmlContractProfile, htmlPartyBindings, htmlPreviewSections, htmlProfileIssues, htmlProfileSectionValues, htmlSigningPage, htmlSigningPageIssues, htmlSigningPagePlainText, htmlTemplateFields, htmlTemplateGroups, htmlValuesForSubmission, isApprovedHTMLTemplate, requiredHTMLContractTerms, type HTMLContractProfile } from './htmlTemplate';
+import { blankHTMLSigningPage } from './htmlAuthor';
 import type { TemplateResponse } from './api/client';
 
 export function htmlTemplateFixture(): TemplateResponse {
@@ -20,6 +21,79 @@ export function contractTemplateFixture(kind: HTMLContractProfile['kind'] = 'pro
     contract_profile: { id: 'reviewed_sales', version: 1, kind, parties, terms } }, variables_json: Object.fromEntries(names.map((name) => [name,
       name.endsWith('representative_email') ? `${name}@example.test` : `Approved ${name}`])) };
 }
+export function signingPageTemplateFixture(): TemplateResponse {
+  const template = contractTemplateFixture();
+  template.html_master_json!.schema_version = 3;
+  template.html_master_json!.signing_page = blankHTMLSigningPage();
+  return template;
+}
+
+test('appended signing page is explicit and preserved while version 1 and 2 designs retain their original bytes', () => {
+  for (const template of [htmlTemplateFixture(), contractTemplateFixture()]) {
+    const before = JSON.stringify(template);
+    expect(htmlSigningPage(template.html_master_json!)).toBeNull();
+    htmlTemplateFields(template);
+    expect(JSON.stringify(template)).toBe(before);
+  }
+  const template = signingPageTemplateFixture(), master = template.html_master_json!;
+  expect(htmlSigningPage(master)).toEqual(blankHTMLSigningPage());
+  expect(htmlTemplateGroups(template).map((group) => group.id)).toEqual(['provider', 'customer', 'terms']);
+  expect(htmlContractProfile(master)).toEqual(master.contract_profile!);
+  delete master.contract_profile;
+  expect(() => htmlTemplateFields(template)).toThrow('both parties');
+});
+
+test('page refuses incomplete branding, unsupported policy, mutable logos and missing or mismatched local image', () => {
+  const mutations: ((master: NonNullable<TemplateResponse['html_master_json']>) => void)[] = [
+    (master) => { master.schema_version = 2; },
+    (master) => { delete master.signing_page; },
+    (master) => { (master.signing_page as any).version = 2; },
+    (master) => { (master.signing_page as any).policy = 'unknown'; },
+    (master) => { delete (master.signing_page as any).font_sha256; },
+    (master) => { (master.signing_page as any).font_sha256 = 'a'.repeat(64); },
+    (master) => { (master.signing_page as any).extra = true; },
+    (master) => { delete (master.signing_page!.branding as any).muted_hex; },
+    (master) => { master.signing_page!.branding.font_body = 'Mutable Font'; },
+    (master) => { master.signing_page!.branding.logo_url = '/branding/logo/org.png'; },
+    (master) => { master.signing_page!.branding.logo_alt = 'Fallback logo'; },
+    (master) => { master.signing_page!.branding.signature_color = 'red'; },
+    (master) => { master.signing_page!.branding.text_hex = '#FFFFFF'; },
+    (master) => { master.signing_page!.branding.muted_hex = '#DDDDDD'; },
+    (master) => { master.signing_page!.logo_alt = 'No-logo drift'; },
+    (master) => { master.signing_page!.logo_asset = 'unavailable'; master.signing_page!.logo_sha256 = 'a'.repeat(64); master.signing_page!.logo_alt = 'Company logo'; },
+  ];
+  for (const mutate of mutations) { const template = signingPageTemplateFixture(); mutate(template.html_master_json!); expect(() => htmlTemplateFields(template)).toThrow(); }
+  const template = signingPageTemplateFixture(), master = template.html_master_json!;
+  master.assets = [{ name: 'company_logo', media_type: 'image/png', data_base64: 'AA==', sha256: 'a'.repeat(64) }];
+  Object.assign(master.signing_page!, { logo_asset: 'company_logo', logo_sha256: 'a'.repeat(64), logo_alt: 'Company logo' });
+  expect(htmlSigningPage(master)?.logo_asset).toBe('company_logo');
+  master.assets[0].sha256 = 'b'.repeat(64); expect(() => htmlSigningPage(master)).toThrow('exact design');
+  master.assets[0].sha256 = 'a'.repeat(64); master.assets[0].media_type = 'font/woff2'; expect(() => htmlSigningPage(master)).toThrow('image asset');
+});
+
+test('signing-page text bounds preserve Unicode and reject invisible, overflowing or clipped identity assertions', () => {
+  expect(htmlSigningPagePlainText('Å'.repeat(80), 80)).toBe(true);
+  expect(htmlSigningPagePlainText('™'.repeat(40), 80)).toBe(true);
+  expect(htmlSigningPagePlainText('a\u0301'.repeat(40), 80)).toBe(true);
+  for (const text of ['™'.repeat(41), '界', 'Αθήνα', 'Москва', 'a'.repeat(81), '\u0301Name', 'Name\u202e', 'Name\nOther', ' Name', 'Name ', '\uD800']) expect(htmlSigningPagePlainText(text, 80)).toBe(false);
+  const template = signingPageTemplateFixture(), values = template.variables_json as Record<string, string>, profile = template.html_master_json!.contract_profile!;
+  expect(htmlSigningPageIssues(profile, values)).toEqual([]);
+  const longer = { ...values, customer_representative_name: 'N'.repeat(81) };
+  expect(htmlProfileIssues(profile, longer, { scope_text: 'Human reviewed terms' })).toEqual([]);
+  expect(htmlSigningPageIssues(profile, longer)[0]).toContain('80 characters');
+  expect(longer.customer_representative_name).toHaveLength(81);
+});
+
+test('owner can preview synthetic essential wording without changing blank saved defaults or template commitment', () => {
+  const template = signingPageTemplateFixture(), master = template.html_master_json!;
+  master.sections![0].default_text = '';
+  const before = JSON.stringify(template);
+  expect(() => htmlPreviewSections(master, { scope_text: '' })).toThrow('scope');
+  const samples = { scope_text: 'Synthetic preview scope <text> & terms' };
+  expect(htmlPreviewSections(master, samples)).toEqual(samples);
+  expect(JSON.stringify(template)).toBe(before);
+  expect(() => htmlPreviewSections(master, { ...samples, undisclosed: 'Unapproved section' })).toThrow('declared');
+});
 
 test('HTML approval belongs to the exact returned revision and reload cannot infer missing approval', () => {
   const template = htmlTemplateFixture();

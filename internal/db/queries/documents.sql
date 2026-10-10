@@ -94,7 +94,8 @@ WHERE d.id = sqlc.arg(id)::uuid AND d.org_id = sqlc.arg(org_id)::uuid
   AND d.pdf_sha256 = sqlc.arg(expected_pdf_sha256)::bytea
   AND d.updated_at = sqlc.arg(expected_updated_at)::timestamptz
   AND EXISTS (SELECT 1 FROM users u WHERE u.id = sqlc.arg(reviewed_by)::uuid
-      AND u.org_id = d.org_id AND u.role IN ('owner', 'sender'))
+      AND u.org_id = d.org_id
+      AND (u.role = 'owner' OR (u.role = 'sender' AND u.id = d.sender_id)))
 RETURNING d.*;
 
 -- name: SetDocumentDefaultLocale :one

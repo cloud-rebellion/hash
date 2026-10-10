@@ -48,7 +48,7 @@ test('template use collects identities and pins the selected revision; failed cr
   const template = { id: 'template', name: 'Master', source_kind: 'pdf', version: 7,
     fields_json: { version: 1, parties: [{ role: 'provider', label: 'Provider' }, { role: 'client', label: 'Client' }],
       fields: [{ party_role: 'provider', type: 'signature', required: true }, { party_role: 'client', type: 'signature', required: true }] } };
-  const env: any = { creatingId: null, error: null, selectedTemplate: null, selectedParties: [], bindings: [], documentName: '', disposed: false,
+  const env: any = { creatingId: null, error: null, selectedTemplate: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedParties: [], bindings: [], documentName: '', disposed: false,
     pdfTemplateParties, createDocumentFromTemplate: (...args: any[]) => new Promise((resolve, reject) => calls.push({ args, resolve, reject })),
     goto: (url: string) => { navigations.push(url); } };
   const actions = bind('../../routes/templates/+page.svelte', ['useTemplate', 'createBoundDocument'], env);

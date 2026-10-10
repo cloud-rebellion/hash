@@ -476,13 +476,22 @@ inserted; templates cannot evaluate Go expressions or JavaScript. CSS and HTML
 use the restricted grammar in `internal/htmlmaster`. Images and fonts must be
 declared, bounded embedded assets referenced as `hash-asset:<name>`; remote URLs,
 SVG, scripts, forms and arbitrary HTML section replacement are refused. The
-master JSON is capped at12MiB, HTML256KiB, CSS128KiB and16 assets totaling8MiB.
+master JSON is capped at 12 MiB, HTML at 256 KiB, CSS at 128 KiB and 16 assets
+totaling 8 MiB.
 An organization import slot bounds concurrent scanner/render work.
 
 An owner approves the exact current design using
 `POST /api/v1/templates/{id}/html/approve` with `expected_version` and
 `expected_content_sha256` from the template response. The digest includes the
 canonical master and its defaults. Approval cannot carry over to a new revision.
+
+For HTML designs, `GET /api/v1/templates/{id}` includes `html_approval` with
+`version` and `content_sha256` for that exact returned master and defaults.
+`approved_by` and `approved_at` are both present after owner approval; both are
+omitted for an unapproved revision. The detail validates the immutable revision
+against the current template content. Concurrent edits can make the returned
+pins stale; instantiation rechecks them and refuses a changed revision. List and
+create/edit responses omit approval state; fetch detail before using a design.
 
 `POST /api/v1/templates/{id}/html/documents` accepts `name`,
 `expected_template_version`, `expected_template_content_sha256`, optional
@@ -493,6 +502,11 @@ are rendered, scanned, sanitized and stored as a fresh PDF-source draft with
 the exact storage version/hash and immutable copied authoring provenance.
 The response includes `document`, `page_count` and `review_required:true`.
 
+HTML-derived document responses include `has_html_source:true` throughout their
+lifetime, even after `html_review_required` becomes false and is omitted. Their
+`source_kind` remains `pdf`. Use this provenance flag to preserve the static-PDF
+template export restriction after review.
+
 The original sender or an owner must inspect `/api/v1/documents/{id}/pdf` and
 explicitly review its current bytes with
 `POST /api/v1/documents/{id}/html/review`, supplying the observed
@@ -502,6 +516,10 @@ refuses absent review, altered provenance, or resolved variables that differ
 from the printed values. New prose always needs this human review. Existing
 field-design and recipient setup still apply; static PDF template export of an
 HTML-authored document is refused. The automation API remains blocks-only.
+An unrelated sender cannot record this review. Original-PDF downloads recheck
+the original credential, live member and document revision after fetching the
+exact object version, before returning bytes. A changed document returns 409;
+expired/revoked access or deletion returns the relevant 401/403/404 refusal.
 
 Template and version lists omit the large inline master. Explicit template and
 version reads return it under the existing tenant/session authorization. Metadata
@@ -510,7 +528,7 @@ approvals cannot be rewritten; migration rollback refuses retained HTML data.
 
 Recipient redaction and recipient-only exports cannot account for personal data
 in retained HTML designs, defaults and source history. When any such inventory
-exists in a tenant, automated erasure fulfillment and that export return409 and
+exists in a tenant, automated erasure fulfillment and that export return 409 and
 require separate privacy/retention review; requests can remain in progress.
 The handler rechecks after the tenant audit lock to cover concurrent first-design
 creation. Archiving preserves revisions. This is a preservation and truthful

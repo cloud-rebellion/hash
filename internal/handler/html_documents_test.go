@@ -41,7 +41,7 @@ func TestHTMLDocumentRequestRefusesTextCoercion(t *testing.T) {
 
 func TestHTMLDocumentResponseRequiresMatchingPDFReview(t *testing.T) {
 	doc := generated.Document{HtmlSourceJson: []byte(`{}`), PdfSha256: bytes.Repeat([]byte{1}, 32)}
-	if !toDocumentResponse(&doc).HTMLReviewRequired {
+	if !toDocumentResponse(&doc).HTMLReviewRequired || !toDocumentResponse(&doc).HasHTMLSource {
 		t.Fatal("missing review was hidden")
 	}
 	doc.HtmlReviewedBy = pgtype.UUID{Bytes: uuid.New(), Valid: true}
@@ -51,12 +51,12 @@ func TestHTMLDocumentResponseRequiresMatchingPDFReview(t *testing.T) {
 		t.Fatal("review of a different PDF was presented as current")
 	}
 	doc.HtmlReviewedPdfSha256 = bytes.Clone(doc.PdfSha256)
-	if toDocumentResponse(&doc).HTMLReviewRequired {
+	if toDocumentResponse(&doc).HTMLReviewRequired || !toDocumentResponse(&doc).HasHTMLSource {
 		t.Fatal("matching complete review marker was ignored")
 	}
 	doc.HtmlSourceJson = nil
 	doc.HtmlReviewedBy = pgtype.UUID{}
-	if toDocumentResponse(&doc).HTMLReviewRequired {
+	if toDocumentResponse(&doc).HTMLReviewRequired || toDocumentResponse(&doc).HasHTMLSource {
 		t.Fatal("legacy document gained HTML review requirement")
 	}
 }

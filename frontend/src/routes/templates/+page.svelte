@@ -12,6 +12,7 @@
   } from '$lib/api/client';
   import { pdfTemplateParties, type PDFTemplateParty } from '$lib/pdfTemplate';
   import { LOCALES } from '$lib/i18n';
+  import HtmlTemplatePopulate from '$lib/components/HtmlTemplatePopulate.svelte';
   import { Upload, FileText, FilePlus, Sparkles, FileSignature } from 'lucide-svelte';
 
   let templates = $state<TemplateResponse[]>([]);
@@ -21,6 +22,8 @@
   let creatingId = $state<string | null>(null);
   let seeding = $state<string | null>(null);
   let selectedTemplate = $state<TemplateResponse | null>(null);
+  let selectedHTMLTemplate = $state<TemplateResponse | null>(null);
+  let htmlFormDirty = $state(false);
   let selectedParties = $state<PDFTemplateParty[]>([]);
   let bindings = $state<PDFPartyBinding[]>([]);
   let documentName = $state('');
@@ -55,7 +58,17 @@
 
   async function useTemplate(t: TemplateResponse) {
     if (creatingId !== null) return;
+    if (selectedHTMLTemplate && htmlFormDirty && !window.confirm('Discard the entered values and select another template?')) return;
+    if (selectedTemplate && bindings.some((binding) => binding.name.trim() || binding.email.trim())
+        && !window.confirm('Discard the entered signing parties and select another template?')) return;
+    selectedHTMLTemplate = null;
+    htmlFormDirty = false;
+    selectedTemplate = null;
     error = null;
+    if (t.source_kind === 'html') {
+      selectedHTMLTemplate = t;
+      return;
+    }
     if (t.source_kind === 'pdf') {
       try {
         const parties = pdfTemplateParties(t.fields_json);
@@ -144,6 +157,17 @@
   </div>
 
   {#if error}<p role="alert" class="card p-4 mb-6 text-danger">{error}</p>{/if}
+
+  {#if selectedHTMLTemplate}
+    {#key selectedHTMLTemplate.id}
+      {@const selectedID = selectedHTMLTemplate.id}
+      <HtmlTemplatePopulate template={selectedHTMLTemplate}
+        onDirtyChange={(dirty) => { if (selectedHTMLTemplate?.id === selectedID) htmlFormDirty = dirty; }}
+        onBusyChange={(busy) => { if (!disposed && selectedHTMLTemplate?.id === selectedID) creatingId = busy ? selectedID : null; }}
+        onClose={() => { if (selectedHTMLTemplate?.id === selectedID) { selectedHTMLTemplate = null; htmlFormDirty = false; } }}
+        onCreated={async (doc) => { if (!disposed && selectedHTMLTemplate?.id === selectedID) { htmlFormDirty = false; await goto(`/documents/${doc.id}`); } }} />
+    {/key}
+  {/if}
 
   {#if selectedTemplate}
     <form onsubmit={createBoundDocument} class="card p-6 mb-6 space-y-4" aria-label="Create document from PDF signing template">
@@ -253,7 +277,7 @@
                   onclick={() => useTemplate(t)}
                 >
                   <FilePlus class="size-3" />
-                  {creatingId === t.id ? 'Creating…' : 'New document'}
+                  {creatingId === t.id ? 'Creating…' : t.source_kind === 'html' ? 'Use design' : 'New document'}
                 </button>
               </td>
             </tr>

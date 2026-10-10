@@ -44,6 +44,7 @@
     documentID: string;
     status: string;
     requiresSignature?: boolean;
+    reviewRequired?: boolean;
     defaultLocale?: string;
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
@@ -55,6 +56,7 @@
     documentID,
     status,
     requiresSignature = true,
+    reviewRequired = false,
     defaultLocale = 'en',
     signatureFields = [],
     onStatusChange,
@@ -360,7 +362,7 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || busy || saving || savingLocale || removingID) return;
+    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
       return;
@@ -674,7 +676,9 @@
       No recipients yet.{#if editable}{' '}{modeCopy.emptyRecipients}{/if}
     </p>
   {:else}
-    <table class="w-full text-sm mb-4">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll all recipient columns.) -->
+    <div class="max-w-full overflow-x-auto mb-4" role="region" aria-label="Recipient details" tabindex="0">
+    <table class="w-full text-sm">
       <thead>
         <tr class="text-left text-xs uppercase tracking-widest text-text-muted">
           <th class="py-2">Recipient</th>
@@ -723,6 +727,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 
   <!-- Action bar -->
@@ -750,10 +755,12 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={reviewRequired || documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
-      {#if !hasParticipant}
+      {#if reviewRequired}
+        <span class="text-xs text-warning">Review the generated PDF above before sending.</span>
+      {:else if !hasParticipant}
         <span class="text-xs text-text-muted">{modeCopy.missingParticipant}</span>
       {:else if missingRoles.length > 0}
         <span class="text-xs text-warning">Add a recipient for: {missingRoles.join(', ')}.</span>

@@ -1,10 +1,11 @@
 // Hash frontend API client.
+import type { HTMLMaster } from '../htmlTemplate';
 
 export interface TemplateResponse {
   id: string;
   org_id: string;
   name: string;
-  source_kind: 'blocks' | 'pdf';
+  source_kind: 'blocks' | 'pdf' | 'html';
   blocks_json?: unknown;
   variables_json: unknown;
   pdf_storage_key?: string;
@@ -13,6 +14,8 @@ export interface TemplateResponse {
   fields_json: unknown;
   version: number;
   content_sha256?: string;
+  html_master_json?: HTMLMaster;
+  html_approval?: { version: number; content_sha256: string; approved_by?: string; approved_at?: string };
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -26,6 +29,9 @@ export interface DocumentResponse {
   status: string;
   routing_mode: string;
   source_kind: 'blocks' | 'pdf';
+  pdf_sha256?: string;
+  has_html_source?: boolean;
+  html_review_required?: boolean;
   requires_signature?: boolean;
   blocks_json?: BlockTree;
   variables_json: Record<string, string>;
@@ -111,6 +117,67 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 export async function listTemplates(): Promise<{ templates: TemplateResponse[]; total: number }> {
   return request('GET', '/api/v1/templates');
+}
+
+export async function getTemplate(id: string): Promise<TemplateResponse> {
+  return request('GET', `/api/v1/templates/${encodeURIComponent(id)}`);
+}
+
+export interface HTMLDocumentInput {
+  name: string;
+  expected_template_version: number;
+  expected_template_content_sha256: string;
+  values: Record<string, string>;
+}
+
+export async function createHTMLTemplateDocument(templateID: string, input: HTMLDocumentInput): Promise<ImportResult & { review_required: boolean }> {
+  return request('POST', `/api/v1/templates/${encodeURIComponent(templateID)}/html/documents`, {
+    name: input.name,
+    expected_template_version: input.expected_template_version,
+    expected_template_content_sha256: input.expected_template_content_sha256,
+    values: input.values,
+  });
+}
+
+export async function reviewHTMLDocument(documentID: string, expectedUpdatedAt: string, expectedPDFSHA256: string): Promise<DocumentResponse> {
+  return request('POST', `/api/v1/documents/${encodeURIComponent(documentID)}/html/review`, {
+    expected_updated_at: expectedUpdatedAt,
+    expected_pdf_sha256: expectedPDFSHA256,
+  });
+}
+
+// Preview only bytes matching the observed artifact, before PDF parsing or a
+// manual review action. Error HTML and an iframe load event are not PDF proof.
+export async function fetchVerifiedDocumentPDF(documentID: string, expectedSHA256: string, signal: AbortSignal): Promise<Uint8Array> {
+  if (!/^[a-f0-9]{64}$/.test(expectedSHA256)) throw new Error('The current PDF commitment is unavailable. Refresh this document.');
+  const res = await fetch(`/api/v1/documents/${encodeURIComponent(documentID)}/pdf`, {
+    credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
+  });
+  if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  if (res.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/pdf' || !res.body) {
+    throw new Error('The server did not return a PDF. Refresh this document before reviewing it.');
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      length += next.value.length;
+      if (length > 50 * 1024 * 1024) throw new Error('This PDF exceeds the preview limit. Ask its owner to review it.');
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.buffer)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (!length || digest !== expectedSHA256) throw new Error('The PDF changed. Refresh this document and review its current PDF.');
+  return bytes;
 }
 
 export async function uploadPDFTemplate(name: string, file: File): Promise<TemplateResponse> {

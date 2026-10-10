@@ -34,22 +34,23 @@ const maxPDFUpload = 50 << 20 // 50 MB
 // templateResponse is what we return on the API. We translate sqlc's pgtype.*
 // fields into JSON-friendly nullables.
 type templateResponse struct {
-	ID             uuid.UUID       `json:"id"`
-	OrgID          uuid.UUID       `json:"org_id"`
-	Name           string          `json:"name"`
-	SourceKind     string          `json:"source_kind"`
-	BlocksJSON     json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON  json.RawMessage `json:"variables_json"`
-	PDFStorageKey  string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256      string          `json:"pdf_sha256,omitempty"`
-	PageCount      int32           `json:"page_count,omitempty"`
-	FieldsJSON     json.RawMessage `json:"fields_json"`
-	Version        int32           `json:"version"`
-	ContentSHA256  string          `json:"content_sha256,omitempty"`
-	HTMLMasterJSON json.RawMessage `json:"html_master_json,omitempty"`
-	CreatedBy      uuid.UUID       `json:"created_by"`
-	CreatedAt      string          `json:"created_at"`
-	UpdatedAt      string          `json:"updated_at"`
+	ID             uuid.UUID                     `json:"id"`
+	OrgID          uuid.UUID                     `json:"org_id"`
+	Name           string                        `json:"name"`
+	SourceKind     string                        `json:"source_kind"`
+	BlocksJSON     json.RawMessage               `json:"blocks_json,omitempty"`
+	VariablesJSON  json.RawMessage               `json:"variables_json"`
+	PDFStorageKey  string                        `json:"pdf_storage_key,omitempty"`
+	PDFSHA256      string                        `json:"pdf_sha256,omitempty"`
+	PageCount      int32                         `json:"page_count,omitempty"`
+	FieldsJSON     json.RawMessage               `json:"fields_json"`
+	Version        int32                         `json:"version"`
+	ContentSHA256  string                        `json:"content_sha256,omitempty"`
+	HTMLMasterJSON json.RawMessage               `json:"html_master_json,omitempty"`
+	HTMLApproval   *htmlTemplateApprovalResponse `json:"html_approval,omitempty"`
+	CreatedBy      uuid.UUID                     `json:"created_by"`
+	CreatedAt      string                        `json:"created_at"`
+	UpdatedAt      string                        `json:"updated_at"`
 }
 
 func toTemplateResponse(t *generated.Template) (templateResponse, error) {
@@ -413,6 +414,24 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get template failed")
+		return
+	}
+	if t.SourceKind == "html" {
+		revision, err := s.Queries.GetHTMLTemplateRevision(r.Context(), generated.GetHTMLTemplateRevisionParams{TemplateID: t.ID, OrgID: u.OrgID, Version: t.Version})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "template revision not found")
+			return
+		}
+		if err != nil {
+			writeInternalErrorMsg(w, "load template approval failed", err)
+			return
+		}
+		response, err := toHTMLTemplateDetailResponse(t, revision)
+		if err != nil {
+			writeInternalErrorMsg(w, "template approval is invalid", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 	writeTemplateResponse(w, http.StatusOK, t)

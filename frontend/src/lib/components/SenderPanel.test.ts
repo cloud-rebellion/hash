@@ -26,7 +26,7 @@ function fixture() {
   const env: any = {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
-    requiresSignature: true, signerRoles: [], missingRoles: [], hasParticipant: true,
+    requiresSignature: true, reviewRequired: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
     recipients: [{ id: 'original', document_id: 'A', name: 'Original', email: 'original@example.test', role: 'signer', locale: 'en', order_index: 0 }],
@@ -145,4 +145,12 @@ test('send refuses unsaved recipient edits and all stale URL actions refuse disp
   expect(state.calls).toHaveLength(0); expect(state.env.error).toContain('Save or cancel');
   state.env.$page.params.id = 'B'; await state.actions.submitForm(); await state.actions.send(); await state.actions.refresh();
   expect(state.calls).toHaveLength(0);
+});
+
+test('an unreviewed HTML PDF cannot dispatch Send even with complete recipients and lawful basis', async () => {
+  const state = fixture();
+  state.env.lawfulBasis = 'contract'; state.env.reviewRequired = true;
+  await state.actions.send();
+  expect(state.calls).toEqual([]);
+  expect(state.env.busy).toBeNull();
 });

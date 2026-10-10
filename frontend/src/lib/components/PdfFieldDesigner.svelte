@@ -325,7 +325,8 @@
   {#if loading}
     <p class="text-text-muted text-sm">Loading PDF...</p>
   {:else}
-    <div class="space-y-6">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll the fixed PDF placement surface.) -->
+    <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label="PDF field placement pages" tabindex="0">
       {#each pages as p (p.num)}
         <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px">
           <canvas bind:this={canvasEls[p.num]} class="block"></canvas>

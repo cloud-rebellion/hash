@@ -29,10 +29,13 @@
   import TimelinePanel from '$lib/components/TimelinePanel.svelte';
   import PdfFieldDesigner from '$lib/components/PdfFieldDesigner.svelte';
   import SavePDFTemplate from '$lib/components/SavePDFTemplate.svelte';
+  import HtmlPDFReview from '$lib/components/HtmlPDFReview.svelte';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
   let doc = $state<DocumentResponse | null>(null);
   let userName = $state('You');
+  let viewerRole = $state('');
+  let viewerUserID = $state('');
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showPreview = $state(false);
@@ -83,6 +86,12 @@
     if (!isCurrentDocument(scope) || updated.id !== scope.id) return;
     doc = updated;
     documentRevision++;
+  }
+  async function refreshHTMLDocument() {
+    const scope = captureDocument();
+    if (!scope) return;
+    try { receiveDocument(await getDocument(scope.id), scope); }
+    catch (e) { if (isCurrentDocument(scope)) error = (e as Error).message; }
   }
   function receiveStatus(next: string, scope: DocumentScope) {
     if (!doc || !isCurrentDocument(scope)) return;
@@ -261,6 +270,8 @@
       if (d.id !== id) throw new Error('The server returned a different document.');
       doc = d;
       documentRevision++;
+      viewerRole = me?.org_id === d.org_id ? me.role : '';
+      viewerUserID = me?.org_id === d.org_id ? me.user_id : '';
       // A draft opens in the editor; anything already sent opens read-only so
       // the sender reviews the frozen content rather than appearing to edit it.
       showPreview = d.status !== 'draft';
@@ -286,6 +297,8 @@
   function resetRouteState() {
     doc = null;
     userName = 'You';
+    viewerRole = '';
+    viewerUserID = '';
     loading = true;
     error = null;
     showPreview = false;
@@ -362,9 +375,9 @@
     {#if error}<div role="alert" class="card p-4 text-danger mb-4">{error}</div>{/if}
     <div class="mb-6 space-y-2">
       <p class="page-eyebrow">Document · {doc.status}</p>
-      <div class="flex items-baseline justify-between gap-4">
-        <h1 class="page-title">{doc.name}</h1>
-        <div class="flex gap-2">
+      <div class="flex flex-col items-start gap-4 sm:flex-row sm:items-baseline sm:justify-between">
+        <h1 class="page-title min-w-0 w-full break-words sm:flex-1">{doc.name}</h1>
+        <div class="flex max-w-full flex-wrap gap-2">
           <button class="btn btn-secondary" onclick={() => (showPreview = !showPreview)}>
             <Eye class="size-4" /> {showPreview ? 'Edit' : 'Preview'}
           </button>
@@ -372,7 +385,7 @@
             <button class="btn btn-secondary" disabled={savingTemplate} onclick={saveAsTemplate}>
               <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template'}
             </button>
-          {:else if doc.status === 'draft'}
+          {:else if doc.status === 'draft' && !doc.has_html_source}
             <button class="btn btn-secondary" onclick={() => (showPDFSave = !showPDFSave)}>
               <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : 'Save as template'}
             </button>
@@ -384,10 +397,18 @@
       </div>
     </div>
 
-    {#if showPDFSave && doc.status === 'draft' && doc.source_kind === 'pdf'}
+    {#if showPDFSave && doc.status === 'draft' && doc.source_kind === 'pdf' && !doc.has_html_source}
       <SavePDFTemplate document={doc} onClose={() => (showPDFSave = false)} onSaved={() => {
         if (isCurrentDocument(documentScope)) { showPDFSave = false; savedTemplateFlash = true; }
       }} />
+    {/if}
+
+    {#if doc.status === 'draft' && doc.has_html_source}
+      {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}`}
+        <HtmlPDFReview document={doc}
+          canReview={viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)}
+          onReviewed={(updated) => receiveDocument(updated, documentScope)} onRefresh={refreshHTMLDocument} />
+      {/key}
     {/if}
 
     {#if doc.status === 'draft'}
@@ -505,6 +526,7 @@
         documentID={doc.id}
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
+        reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
         defaultLocale={doc.default_locale}
         signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : pdfSignatureFields}
         onStatusChange={(next) => receiveStatus(next, documentScope)}

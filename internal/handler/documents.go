@@ -23,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
+	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -53,6 +54,7 @@ type documentResponse struct {
 	CreatedAt          string          `json:"created_at"`
 	UpdatedAt          string          `json:"updated_at"`
 	HTMLReviewRequired bool            `json:"html_review_required,omitempty"`
+	HasHTMLSource      bool            `json:"has_html_source,omitempty"`
 }
 
 func toDocumentResponse(d *generated.Document) documentResponse {
@@ -72,6 +74,7 @@ func toDocumentResponse(d *generated.Document) documentResponse {
 		CreatedAt:          d.CreatedAt.Time.Format(time.RFC3339),
 		UpdatedAt:          d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
 		HTMLReviewRequired: len(d.HtmlSourceJson) > 0 && (!d.HtmlReviewedBy.Valid || !d.HtmlReviewedAt.Valid || len(d.PdfSha256) != 32 || !bytes.Equal(d.HtmlReviewedPdfSha256, d.PdfSha256)),
+		HasHTMLSource:      len(d.HtmlSourceJson) > 0,
 	}
 	if d.TemplateID.Valid {
 		out.TemplateID = uuidFromBytes(d.TemplateID.Bytes).String()
@@ -382,7 +385,14 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
+	authorize, err := s.sessionDraftAuthorization(r, u.OrgID, u.UserID)
+	if err != nil {
+		s.writePreviewError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), resolver.PreviewTimeout)
+	defer cancel()
+	d, err := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
@@ -395,9 +405,13 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
 		return
 	}
-	body, err := readDocumentArtifact(r.Context(), s.Storage, d, d.PdfStorageKey.String, d.PdfSha256, d.PdfStorageVersionID)
+	body, err := readDocumentArtifact(ctx, s.Storage, d, d.PdfStorageKey.String, d.PdfSha256, d.PdfStorageVersionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load pdf failed")
+		return
+	}
+	if err := resolver.CheckPreview(ctx, s.Pool, d, nil, u.UserID, authorize); err != nil {
+		s.writePreviewError(w, err)
 		return
 	}
 	setDocumentPreviewHeaders(w, false)

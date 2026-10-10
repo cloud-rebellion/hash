@@ -1503,7 +1503,8 @@ WHERE d.id = $3::uuid AND d.org_id = $4::uuid
   AND d.pdf_sha256 = $1::bytea
   AND d.updated_at = $5::timestamptz
   AND EXISTS (SELECT 1 FROM users u WHERE u.id = $2::uuid
-      AND u.org_id = d.org_id AND u.role IN ('owner', 'sender'))
+      AND u.org_id = d.org_id
+      AND (u.role = 'owner' OR (u.role = 'sender' AND u.id = d.sender_id)))
 RETURNING d.id, d.org_id, d.template_id, d.name, d.status, d.routing_mode, d.source_kind, d.blocks_json, d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key, d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key, d.expires_at, d.sent_at, d.completed_at, d.sender_id, d.metadata, d.created_at, d.updated_at, d.parent_envelope_id, d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier, d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at, d.default_locale, d.requires_signature, d.audit_payload_key, d.audit_payload_sha256, d.audit_signature_key, d.audit_signature_sha256, d.pdf_storage_version_id, d.rendered_pdf_version_id, d.final_pdf_version_id, d.audit_cert_sha256, d.audit_cert_version_id, d.audit_payload_version_id, d.audit_signature_version_id, d.evidence_version_pins_required, d.completion_effective_at, d.completion_effective_at_bound, d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed, d.html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at
 `
 

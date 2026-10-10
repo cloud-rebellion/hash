@@ -314,6 +314,10 @@ func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request
 		return
 	}
 	doc, err := q.MarkDocumentHTMLReviewed(ctx, generated.MarkDocumentHTMLReviewedParams{ID: id, OrgID: u.OrgID, ExpectedUpdatedAt: pgtype.Timestamptz{Time: expected, Valid: true}, ExpectedPdfSha256: digest, ReviewedBy: u.UserID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusForbidden, "only the document sender or an owner can review this PDF")
+		return
+	}
 	if err != nil {
 		s.writeDraftAuthoringError(w, "record HTML document review", err)
 		return

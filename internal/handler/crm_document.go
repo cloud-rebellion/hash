@@ -59,10 +59,11 @@ type crmDocumentResponseWitness struct {
 }
 
 type crmDocumentVariable struct {
-	Name         string `json:"name"`
-	Required     bool   `json:"required"`
-	MaxChars     int    `json:"max_chars"`
-	CurrentValue string `json:"current_value"`
+	Name           string `json:"name"`
+	Required       bool   `json:"required"`
+	MaxChars       int    `json:"max_chars"`
+	CurrentValue   string `json:"current_value"`
+	CurrentPresent bool   `json:"current_present"`
 }
 
 type crmDocumentContext struct {
@@ -94,10 +95,11 @@ func crmDocumentVariables(doc *generated.Document) ([]crmDocumentVariable, bool,
 			return nil, false, err
 		}
 		for _, field := range master.Values {
+			_, present := values[field.Name]
 			if input.Values[field.Name] != values[field.Name] {
 				return nil, false, errCRMDocumentChanged
 			}
-			variables = append(variables, crmDocumentVariable{Name: field.Name, Required: field.Required, MaxChars: field.MaxChars, CurrentValue: values[field.Name]})
+			variables = append(variables, crmDocumentVariable{Name: field.Name, Required: field.Required, MaxChars: field.MaxChars, CurrentValue: values[field.Name], CurrentPresent: present})
 		}
 	} else if doc.SourceKind == "blocks" {
 		tree, err := blocks.ParseCanonicalTree(doc.BlocksJson)
@@ -109,7 +111,8 @@ func crmDocumentVariables(doc *generated.Document) ([]crmDocumentVariable, bool,
 			return nil, false, crmconnection.ErrLimit
 		}
 		for _, name := range names {
-			variables = append(variables, crmDocumentVariable{Name: name, MaxChars: htmlmaster.MaxValueChars, CurrentValue: values[name]})
+			_, present := values[name]
+			variables = append(variables, crmDocumentVariable{Name: name, MaxChars: htmlmaster.MaxValueChars, CurrentValue: values[name], CurrentPresent: present})
 		}
 	} else {
 		return variables, false, nil

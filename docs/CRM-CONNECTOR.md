@@ -147,6 +147,10 @@ or commercial inputs; it disables Apply. It does not certify signing authority.
 The review digest binds the original account/document/ledger and exact selected
 values; a fresh equal-value observation may have new body/timestamp provenance.
 Apply audits its independently fresh provenance, not a client-provided proof.
+Declared context variables and observation items include `current_present`.
+An omitted value and an explicitly stored empty string are distinct source
+states even when their printed output is identical. Clients must compare both
+presence and exact text when validating an observation.
 
 Apply returns the updated document and witnesses. A changed HTML result also
 returns `materialization_revision`, `page_count`, `review_required: true` and
@@ -207,11 +211,118 @@ changed content still requires explicit true. Mobile CRM/PDF review fits 390px;
 mobile field placement and recipient controls remain separate acceptance work.
 No real provider, Send/signing or production acceptance follows from this fixture.
 
-Initial template population before a document UUID exists is a separate extension.
-Uploaded PDF text cannot be changed through this connector. An optional HTML field
-that has never been materialized cannot be bound to an empty upstream string in
-this unit: it reports `empty_value_not_materialized` and disables Apply, preserving
-historical equal-content digest rules. Existing present-empty values are supported.
+The earlier verified document-scoped unit did not include initial template
+population or an optional value's first explicit empty string. The newer local
+candidate adds the template API below and a narrow optional absent-to-empty
+revision. Only a declared optional absent value can become exactly `""`, with
+the approved origin, all existing text/sections and party identities unchanged.
+It still creates a fresh immutable artifact, resets review and user placement,
+and regenerates protected schema-3 fields. Repeated empty no-ops and required
+empty values remain refused. Historical source domains/bytes are preserved.
+Uploaded PDF text cannot be changed through this connector.
+
+## Initial template population
+
+This local candidate API is for approved HTML templates before a draft exists.
+It uses the current sender/owner browser session. Discovery and observation are
+read-only; they do not allocate a document, mappings or recipients. Prefix:
+`/api/v1/templates/{id}/html/crm`.
+
+| Method/path | Input and result |
+| --- | --- |
+| `GET /context` | Query `expected_template_version` and `expected_template_content_sha256`; returns original org/user, exact approved template pins, active connection identity/generation, declared variables/defaults and scalar catalog. |
+| `POST /records/search` | Complete context witness plus `kind`, `query`, `offset`; typed bounded account-scoped record search. |
+| `POST /observations` | Witness, `candidate` (`name`, `values`, optional `sections`/`expires_at`) and full `mappings`; returns exact saved/fresh values, canonical mappings, provenance, `review_digest`, `can_create`, observation/deadline and a purpose-separated `review_receipt` when creation is admissible. |
+
+The witness fields are `expected_org_id`, `expected_user_id`,
+`expected_template_version`, `expected_template_content_sha256`,
+`expected_template_approved_by`, `expected_template_approved_at`,
+`expected_connection_id` and `expected_connection_generation`. Approval time is
+the exact RFC3339Nano value returned by context. Connection generation is a
+decimal string; an unavailable account uses empty ID and generation `"0"`.
+Explicit nulls are refused. Candidate values preserve the user's entered text;
+mapped fresh values form a separate preview/create overlay. New legal wording
+is never supplied by the connector.
+
+After the user reviews and confirms exact values, create through the ordinary
+HTML document endpoint with a stable `request_id` and `crm_population` containing
+the witness, full mappings, `reviewed_digest`, `review_receipt` and
+`confirmed:true`. The receipt binds the original signed session, approval,
+candidate, mappings, account and observed exact values. It expires 45 seconds
+after its original source snapshot completes; checking it does not refresh
+that deadline. Creation fetches independently and retains a separate fresh
+45-second deadline. Account/actor/template drift, changed fresh data, expired
+observations and failed audit roll back creation. Provider/render/worker/storage
+waits do not retain database locks. Review, mappings and creation evidence commit
+atomically with the draft. Exact own-object compensation applies before commit;
+an ambiguous commit retains the artifact for durable request recovery.
+
+Keep uncertain creation pending under its original UUID. Authenticated recovery
+and same-command replay return current document state plus immutable original
+creation pins, including a tombstone after deletion. A 404 `unconfirmed` is not
+permission to create another UUID. Recovery markers contain only actor/template/
+request metadata and commitments, never contract text, CRM data or bearer tokens.
+See [HTML creation/recovery contract](API.md#html-design-draft-api). Live provider,
+private transport, actual scopes/callbacks and Reactor acceptance remain separate.
+
+An original sender/owner can explicitly stop a pending request through
+`POST /api/v1/templates/{id}/html/document-requests/{request_id}/close` with
+exactly `expected_org_id`, `expected_user_id` and `confirmed:true` (2 KiB limit).
+The canonical actor pair must match the admitted session; current authoring
+authority and the exact browser origin are rechecked. Close is limited to
+10/minute per organization/user. It uses no provider, renderer, object I/O,
+current approval or expired observation receipt.
+
+A successful Close returns either the existing committed envelope or
+`state:"closed"` with exactly `org_id`, `user_id`, `template_id`, `request_id`
+and durable `closed_at` in addition to `state`. GET recovery returns the same
+closed union. Both use `no-store`. Repeating Close retains the original outcome;
+closing an already committed request cannot undo it. After a lost response or
+ambiguous commit, keep the UUID pending and inspect or repeat Stop for that
+same original actor/template/request. A 404 alone still cannot release it.
+
+Only explicit acknowledgement of a verified closed outcome clears the browser
+marker. Resident manual values and scope wording remain, while prior
+confirmation/receipt is invalidated. Refresh the current design, select/read
+the current account and confirm fresh values before a new user-initiated creation
+gets another UUID. A committed response follows the existing explicit Open or
+deleted-document acknowledgement flow. The browser does not adopt a late
+response from an invalidated operation. Reload stores identifiers only, so it
+cannot restore lost manual prose or the original semantic command.
+
+Migration 79 adds the actor-scoped creation ledger. Database guards derive its
+initial pins from the exact normalized materialization and refuse pin rewrites,
+manual detachment, ledger deletion while the organization exists and Down with
+retained receipts. Document deletion can only detach the current pointer; an
+organization cascade can remove this metadata once retained templates,
+materialization history and other dependencies have been disposed of through
+an approved retention workflow. This does not enable a raw whole-organization
+delete or establish the complete disposal workflow. Member removal retains the
+original opaque actor ID. Privacy inventory includes these records; controller retention
+and disposal decisions remain required. Apply the coordinated schema/app/worker
+release before using the new browser flow.
+
+Migration 80 adds an immutable `committed|closed` registry keyed by organization,
+original actor and request UUID, without rewriting migration-79 receipts or
+historical schema-1/2/3 source bytes. Final creation and Close serialize through
+the same unconditional quota lock, including internal nil-billing callers.
+If closure commits first, an older in-flight preparation cannot commit a draft;
+its exact uncommitted object is compensated. If creation commits first, Close
+returns its immutable creation evidence. Deferred database guards require every
+committed outcome to match its original receipt and every closed outcome to
+have none. Terminal identity/state/time cannot be rewritten or individually
+deleted while the organization exists. Both metadata tables permit an
+organization cascade subject to the retained dependencies and approved disposal
+workflow above; retained closed outcomes refuse migration-80 Down. Actual005
+passes the local 38-test/103-outcome PostgreSQL suite, including closure races,
+credential/audit rollback and terminal guards. It verifies closed metadata's
+cascade in a tenant without retained HTML history; committed-history disposal
+remains unverified. Browser003 also passes 373 checks for initial creation,
+actual lost-response/reload recovery, drift refusals and explicit Stop/readback/
+acknowledgement/fresh review. Its two unsigned three-page PDFs and selected
+mobile screens were visually inspected; the local completion recap records
+typography caveats. These synthetic fixtures do not establish live-provider,
+final signing or production acceptance.
 
 Hash outbound delivery now claims one job immediately before dispatch, retries
 temporary endpoint/key/event dependency failures with bounded existing backoff,

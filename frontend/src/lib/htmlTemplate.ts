@@ -228,13 +228,13 @@ export function htmlTemplateGroups(template: TemplateResponse): HTMLFormGroup[] 
   if (remaining.length) groups.push({ id: 'other', label: 'Other document information', fields: remaining, sections: [] });
   return groups;
 }
-export function htmlProfileSectionValues(master: HTMLMaster, sections: Record<string, string>): Record<string, string> | undefined {
+export function htmlProfileSectionValues(master: HTMLMaster, sections: Record<string, string>, deferRequired = false): Record<string, string> | undefined {
   const profile = htmlContractProfile(master), result: Record<string, string> = {};
   if (!profile) return undefined;
   for (const term of profile.terms) {
     if (!term.section) continue;
     const declaration = master.sections!.find((section) => section.name === term.section)!, text = sections[term.section];
-    if (typeof text !== 'string' || !text.trim() || Array.from(text).length > declaration.max_chars
+    if (typeof text !== 'string' || (!deferRequired && !text.trim()) || Array.from(text).length > declaration.max_chars
         || /[\uD800-\uDFFF\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(text)) {
       throw new Error(`Enter ${term.name.replaceAll('_', ' ')} wording within ${declaration.max_chars} characters.`);
     }
@@ -310,11 +310,11 @@ export function isApprovedHTMLTemplate(template: TemplateResponse): boolean {
     && approval.version === template.version && approval.content_sha256 === template.content_sha256;
 }
 
-export function htmlValuesForSubmission(fields: HTMLFormField[], values: Record<string, string>): Record<string, string> {
+export function htmlValuesForSubmission(fields: HTMLFormField[], values: Record<string, string>, deferRequired = false): Record<string, string> {
   const result: Record<string, string> = {};
   for (const field of fields) {
     const value = values[field.name];
-    if (typeof value !== 'string' || (field.required && !value.trim()) || Array.from(value).length > field.max_chars) {
+    if (typeof value !== 'string' || (!deferRequired && field.required && !value.trim()) || Array.from(value).length > field.max_chars) {
       throw new Error(`Enter ${field.label}${field.required ? ' (required)' : ''}, within ${field.max_chars} characters.`);
     }
     result[field.name] = value;

@@ -532,6 +532,30 @@ type Event struct {
 	PayloadHashed []byte             `json:"payload_hashed"`
 }
 
+type HtmlDocumentCreationRequest struct {
+	OrgID                 uuid.UUID          `json:"org_id"`
+	ActorUserID           uuid.UUID          `json:"actor_user_id"`
+	RequestID             uuid.UUID          `json:"request_id"`
+	InputDigest           []byte             `json:"input_digest"`
+	TemplateID            uuid.UUID          `json:"template_id"`
+	OriginalDocumentID    uuid.UUID          `json:"original_document_id"`
+	CurrentDocumentID     pgtype.UUID        `json:"current_document_id"`
+	HtmlMaterializationID uuid.UUID          `json:"html_materialization_id"`
+	HtmlSourceCommitment  string             `json:"html_source_commitment"`
+	PdfSha256             []byte             `json:"pdf_sha256"`
+	PageCount             int32              `json:"page_count"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+}
+
+type HtmlDocumentCreationResolution struct {
+	OrgID       uuid.UUID          `json:"org_id"`
+	ActorUserID uuid.UUID          `json:"actor_user_id"`
+	RequestID   uuid.UUID          `json:"request_id"`
+	TemplateID  uuid.UUID          `json:"template_id"`
+	State       string             `json:"state"`
+	ResolvedAt  pgtype.Timestamptz `json:"resolved_at"`
+}
+
 type HtmlDocumentMaterialization struct {
 	ID                      uuid.UUID          `json:"id"`
 	DocumentID              uuid.UUID          `json:"document_id"`

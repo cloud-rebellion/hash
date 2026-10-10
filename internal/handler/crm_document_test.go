@@ -148,10 +148,17 @@ func TestCRMDocumentObservationPreservesExactScalarsAndRequiresFreshValueReview(
 	if err != nil || unavailable.CanApply || unavailable.Items[0].Available || unavailable.Items[0].Value != nil || unavailable.Items[0].UnavailableReason != "field_unavailable" {
 		t.Fatal("null became contractual empty string", err)
 	}
-	current.doc.HtmlSourceJson = []byte(`{}`) // Context admission separately validates the actual retained source.
+	originalDoc := current.doc
+	current.doc = htmlOptionalEmptyUnitDocument(t)
 	emptyHTML, err := s.observeCRMDocument(context.Background(), current, []crmDocumentMapping{{"currency", "crm.deal", "deal_one", "currency"}})
-	if err != nil || emptyHTML.CanApply || emptyHTML.Items[0].Value != nil || emptyHTML.Items[0].UnavailableReason != "empty_value_not_materialized" {
-		t.Fatal("omitted HTML value incorrectly offered an equal-content materialization", err)
+	if err != nil || !emptyHTML.CanApply || !emptyHTML.ContentChanged || emptyHTML.Items[0].CurrentPresent || emptyHTML.Items[0].Value == nil || *emptyHTML.Items[0].Value != "" || emptyHTML.values["customer"] != "Existing document AB" {
+		t.Fatal("declared optional absent-to-empty or preserved manual value refused", err)
+	}
+	current.doc = originalDoc
+	current.doc.HtmlSourceJson = []byte(`{}`) // Context admission separately validates the actual retained source.
+	_, err = s.observeCRMDocument(context.Background(), current, []crmDocumentMapping{{"currency", "crm.deal", "deal_one", "currency"}})
+	if err == nil {
+		t.Fatal("invalid retained HTML source offered an optional empty revision")
 	}
 	current.doc.HtmlSourceJson = nil
 	current.variables[2].Required = true

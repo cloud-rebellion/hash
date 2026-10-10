@@ -39,6 +39,7 @@ type CRMMappingRequest struct {
 type crmDocumentObservationItem struct {
 	crmDocumentMapping
 	CurrentValue      string                        `json:"current_value"`
+	CurrentPresent    bool                          `json:"current_present"`
 	Available         bool                          `json:"available"`
 	Value             *string                       `json:"value,omitempty"`
 	UnavailableReason string                        `json:"unavailable_reason,omitempty"`
@@ -149,13 +150,13 @@ func (s *Server) observeCRMDocument(ctx context.Context, current *crmDocumentCon
 	}
 	for _, m := range mappings {
 		field := definitions[m.Variable]
-		item := crmDocumentObservationItem{crmDocumentMapping: m, CurrentValue: field.CurrentValue}
+		_, present := out.values[m.Variable]
+		item := crmDocumentObservationItem{crmDocumentMapping: m, CurrentValue: field.CurrentValue, CurrentPresent: present}
 		record, ok := out.snapshot.Record(crmconnection.RecordKind(m.SourceKind), m.SourceRef)
 		if !ok {
 			return nil, errCRMDocumentChanged
 		}
 		value, err := record.Value(m.SourcePath)
-		_, alreadyMaterialized := out.values[m.Variable]
 		if errors.Is(err, crmconnection.ErrFieldUnavailable) {
 			item.UnavailableReason = "field_unavailable"
 		} else if err != nil {
@@ -164,11 +165,6 @@ func (s *Server) observeCRMDocument(ctx context.Context, current *crmDocumentCon
 			item.UnavailableReason = "exceeds_contract_field_limit"
 		} else if field.Required && strings.TrimSpace(value) == "" {
 			item.UnavailableReason = "required_value_missing"
-		} else if value == "" && !alreadyMaterialized && len(current.doc.HtmlSourceJson) != 0 {
-			// Historical HTML digests normalize an omitted optional field to
-			// empty rendered text. This equal-content case cannot append a new
-			// materialization or claim an absent static value was reviewed.
-			item.UnavailableReason = "empty_value_not_materialized"
 		} else {
 			item.Available = true
 			item.Value = &value
@@ -213,13 +209,14 @@ func (s *Server) observeCRMDocument(ctx context.Context, current *crmDocumentCon
 	// reviewed mapped values. The fresh provenance is audited at Apply; this
 	// confirmation digest binds source identity and values, not an old read time.
 	type valueWitness struct {
-		Mapping     crmDocumentMapping `json:"mapping"`
-		Available   bool               `json:"available"`
-		ValueSHA256 string             `json:"value_sha256"`
+		Mapping        crmDocumentMapping `json:"mapping"`
+		Available      bool               `json:"available"`
+		ValueSHA256    string             `json:"value_sha256"`
+		CurrentPresent bool               `json:"current_present"`
 	}
 	items := make([]valueWitness, 0, len(out.Items))
 	for _, item := range out.Items {
-		v := valueWitness{Mapping: item.crmDocumentMapping, Available: item.Available}
+		v := valueWitness{Mapping: item.crmDocumentMapping, Available: item.Available, CurrentPresent: item.CurrentPresent}
 		if item.Value != nil {
 			v.ValueSHA256 = crmScalarSHA(*item.Value)
 		}

@@ -189,8 +189,26 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 		return nil, nil, err
 	}
 	afterDigest, err := htmlsource.MaterializationDigest(&check)
-	if err != nil || beforeDigest == afterDigest {
+	if err != nil {
 		return nil, nil, ErrInvalid
+	}
+	if beforeDigest == afterDigest {
+		// Even identical rendered bytes require a fresh immutable intake tuple;
+		// input presence is never permission to reuse the old reviewed artifact.
+		if candidate.PdfStorageKey.String == previous.PdfStorageKey.String && candidate.PdfStorageVersionID.String == previous.PdfStorageVersionID.String {
+			return nil, nil, ErrInvalid
+		}
+		input, err := htmlsource.InputForCurrent(&check)
+		if err != nil {
+			return nil, nil, err
+		}
+		addition, err := htmlsource.IsOptionalEmptyAddition(previous, input)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !addition {
+			return nil, nil, ErrInvalid
+		}
 	}
 	changed, err := htmlsource.ChangedSections(&check)
 	if err != nil {

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
-import { htmlProfileIssues, htmlProfileSectionValues, htmlTemplateFields, htmlValuesForSubmission } from '../htmlTemplate';
+import { htmlProfileIssues, htmlProfileSectionValues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '../htmlTemplate';
 import { contractTemplateFixture } from '../htmlTemplate.test';
 
 function callback(source: string, name: string) {
@@ -29,152 +29,88 @@ function design(version = 3) {
     html_approval: { version, content_sha256: 'a'.repeat(64), approved_by: 'owner', approved_at: '2026-10-10T04:00:00Z' } };
 }
 function populateFixture() {
-  const calls: any[] = [], created: any[] = [];
-  const template = design();
+  const calls: any[] = [], template = design();
   const env: any = { template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
     fields: htmlTemplateFields(template as any), values: { customer: 'Typed <AB> & Co' }, name: 'Typed draft name',
-    sections: {}, sectionDefinitions: [],
-    approved: true, loading: false, busy: false, navigating: false, createdDocument: null, creationUncertain: false,
+    sections: {}, sectionDefinitions: [], proposed: {}, populationState: { mappings: [], observation: null },
+    approved: true, loading: false, busy: false, navigating: false, createdDocument: null, creationUncertain: false, markerError: false, clock: 0,
     disposed: false, readRevision: 0, error: null, needsRefresh: false, dirty: true,
     current: () => !env.disposed && env.template.id === env.sourceID,
-    htmlTemplateFields, htmlValuesForSubmission, htmlProfileSectionValues, APIError,
+    htmlTemplateFields, htmlValuesForSubmission, htmlProfileSectionValues, isApprovedHTMLTemplate,
     getTemplate: (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind: 'get', args, resolve, reject })),
-    createHTMLTemplateDocument: (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind: 'create', args, resolve, reject })),
-    onCreated: (doc: any) => created.push(doc), onDirtyChange: () => {}, onBusyChange: () => {},
     window: { confirm: () => false },
   };
-  Object.defineProperty(env, 'profileIssues', { get: () => env.design.html_master_json?.contract_profile ? htmlProfileIssues(env.design.html_master_json.contract_profile, env.values, env.sections) : [] });
-  return { env, calls, created, actions: bind('./HtmlTemplatePopulate.svelte', ['adoptDesign', 'refreshDesign', 'useUpdatedDesign', 'create', 'openCreatedDocument', 'protectNavigation'], env) };
+  env.controller = {
+    canCreate: () => true, effectiveValues: () => ({ ...env.values, ...env.proposed }),
+    create: async () => { calls.push({ kind: 'create', candidate: env.actions.candidate() }); },
+    invalidate: () => { calls.push({ kind: 'invalidate' }); }, inputChanged: () => { env.populationState.confirmation = ''; calls.push({ kind: 'invalidate-input' }); },
+    setTemplate: (t: any) => { calls.push({ kind: 'adopt', template: t }); }, load: async () => {}, openCreated: async () => { calls.push({ kind: 'open' }); },
+    observationFresh: () => true,
+  };
+  Object.defineProperty(env, 'profileIssues', { get: () => env.design.html_master_json?.contract_profile
+    ? htmlProfileIssues(env.design.html_master_json.contract_profile, env.controller.effectiveValues(), env.sections) : [] });
+  env.actions = bind('./HtmlTemplatePopulate.svelte', ['candidate', 'inputChanged', 'mappedRequiredFilled', 'adoptDesign', 'refreshDesign', 'useUpdatedDesign', 'create', 'openCreatedDocument', 'protectNavigation', 'close'], env);
+  return { env, calls, actions: env.actions };
 }
-
-test('contract populate rejects conflicting printed representative identities before creation without dispatching recipient edits', async () => {
+test('contract populate retains conflicting printed identities and refuses creation before delegating to the request controller', async () => {
   for (const conflict of ['email', 'company', 'authority']) {
-    const state = populateFixture(), template = contractTemplateFixture();
-    state.env.design = template; state.env.fields = htmlTemplateFields(template); state.env.values = { ...(template.variables_json as Record<string, string>) };
-    state.env.sections = { scope_text: 'Reviewed scope.' };
-    if (conflict === 'email') state.env.values.customer_representative_email = state.env.values.provider_representative_email;
-    if (conflict === 'company') state.env.values.customer_company_id = state.env.values.provider_company_id;
-    if (conflict === 'authority') state.env.values.customer_representative_authority = ' ';
-    const entered = JSON.stringify(state.env.values);
-    await state.actions.create(event);
-    expect(state.calls).toEqual([]); expect(JSON.stringify(state.env.values)).toBe(entered); expect(state.env.error).toBeTruthy();
+    const s = populateFixture(), t = contractTemplateFixture();
+    s.env.design = t; s.env.fields = htmlTemplateFields(t); s.env.values = { ...(t.variables_json as Record<string, string>) }; s.env.sections = { scope_text: 'Reviewed scope.' };
+    if (conflict === 'email') s.env.values.customer_representative_email = s.env.values.provider_representative_email;
+    if (conflict === 'company') s.env.values.customer_company_id = s.env.values.provider_company_id;
+    if (conflict === 'authority') s.env.values.customer_representative_authority = ' ';
+    const entered = structuredClone(s.env.values); await s.actions.create(event);
+    expect(s.calls).toEqual([]); expect(s.env.values).toEqual(entered); expect(s.env.error).toBeTruthy();
   }
 });
-
-test('human populated essential section uses its declaration key, accepts blank default with explicit text, and blocks blank or stale drafts', async () => {
-  const state = populateFixture(), template = contractTemplateFixture(); template.html_master_json!.sections![0].default_text = '';
-  state.actions.adoptDesign(template); state.env.sections.scope_text = 'Explicit human-proposed service scope.';
-  const pending = state.actions.create(event); expect(state.calls[0].args[1].sections).toEqual({ scope_text: 'Explicit human-proposed service scope.' });
-  expect(state.calls[0].args[1].sections.scope).toBeUndefined(); state.calls[0].reject(new APIError(400, 'Stopped for protocol test')); await pending;
-  const entered = state.env.sections.scope_text; state.env.needsRefresh = true; await state.actions.create(event); expect(state.calls).toHaveLength(1); expect(state.env.sections.scope_text).toBe(entered);
-  state.env.needsRefresh = false; state.env.sections.scope_text = ' '; await state.actions.create(event); expect(state.calls).toHaveLength(1); expect(state.env.error).toContain('scope');
+test('essential wording uses its declared section key, permits preview-only blank input, and is required for creation', async () => {
+  const s = populateFixture(), t = contractTemplateFixture(); t.html_master_json!.sections![0].default_text = '';
+  s.actions.adoptDesign(t); s.calls.length = 0;
+  expect(s.actions.candidate().sections).toEqual({ scope_text: '' });
+  s.env.sections.scope_text = 'Explicit human-proposed service scope.'; await s.actions.create(event);
+  expect(s.calls[0].candidate.sections).toEqual({ scope_text: 'Explicit human-proposed service scope.' }); expect(s.calls[0].candidate.sections.scope).toBeUndefined();
+  s.env.sections.scope_text = ' '; await s.actions.create(event); expect(s.calls).toHaveLength(1); expect(s.env.error).toContain('scope');
+  s.env.needsRefresh = true; s.env.sections.scope_text = 'Preserved prose'; await s.actions.create(event); expect(s.calls).toHaveLength(1);
 });
-function createdResult() {
-  return { document: { id: 'doc', org_id: 'org', template_id: 'design', source_kind: 'pdf', has_html_source: true,
-    html_review_required: true, status: 'draft' }, page_count: 1, review_required: true };
-}
-
-test('populate dispatches once with exact approved pin, preserves form on conflict, and never automatically adopts a changed revision', async () => {
-  const state = populateFixture();
-  const pending = state.actions.create(event); await state.actions.create(event);
-  expect(state.calls).toHaveLength(1);
-  expect(state.calls[0].args).toEqual(['design', { name: 'Typed draft name', expected_template_version: 3,
-    expected_template_content_sha256: 'a'.repeat(64), values: { customer: 'Typed <AB> & Co' } }]);
-  state.calls[0].reject(new APIError(409, 'Design changed')); await pending;
-  expect(state.env.values).toEqual({ customer: 'Typed <AB> & Co' }); expect(state.env.name).toBe('Typed draft name');
-  expect(state.env.needsRefresh).toBe(true); expect(state.env.busy).toBe(false); expect(state.created).toEqual([]);
-  await state.actions.create(event); expect(state.calls).toHaveLength(1);
-  const refreshing = state.actions.refreshDesign(); state.calls[1].resolve(design(4)); await refreshing;
-  expect(state.env.design.version).toBe(3); expect(state.env.pendingDesign.version).toBe(4);
-  state.actions.useUpdatedDesign(); expect(state.env.design.version).toBe(4); expect(state.env.values.customer).toBe('Typed <AB> & Co');
+test('required CRM-filled field passes effective preflight while raw manual candidate remains unchanged', async () => {
+  const s = populateFixture(); s.env.values.customer = ''; s.env.proposed.customer = 'Observed customer';
+  s.env.populationState = { mappings: [{ variable: 'customer' }], observation: { items: [{ variable: 'customer', available: true, value: 'Observed customer' }] } };
+  expect(s.actions.mappedRequiredFilled(s.env.fields[0])).toBe(true); await s.actions.create(event);
+  expect(s.calls[0].candidate.values.customer).toBe(''); expect(s.env.values.customer).toBe('');
+  s.env.proposed = {}; await s.actions.create(event); expect(s.calls).toHaveLength(1); expect(s.env.error).toContain('required');
+  s.env.controller.observationFresh = () => false; expect(s.actions.mappedRequiredFilled(s.env.fields[0])).toBe(false);
 });
-
-test('populate refuses missing values or unapproved state and preserves input on renderer/service failure', async () => {
-  for (const mode of ['blank', 'unapproved']) {
-    const state = populateFixture();
-    if (mode === 'blank') state.env.values.customer = '  '; else state.env.approved = false;
-    await state.actions.create(event); expect(state.calls).toEqual([]);
+test('pending request and marker errors fence create, refresh, close and explicit design changes even when ordinary dirty=false', async () => {
+  for (const guard of ['creationUncertain', 'markerError']) {
+    const s = populateFixture(); s.env[guard] = true; s.env.dirty = false; s.env.pendingDesign = design(4); s.env.onClose = () => s.calls.push({ kind: 'close' });
+    await s.actions.create(event); await s.actions.refreshDesign(); s.actions.useUpdatedDesign(); s.actions.close();
+    expect(s.calls).toEqual([]); expect(s.env.design.version).toBe(3); expect(s.env.values.customer).toBe('Typed <AB> & Co');
   }
-  const state = populateFixture(); const pending = state.actions.create(event);
-  state.calls[0].reject(new APIError(503, 'Renderer unavailable')); await pending;
-  expect(state.env.values.customer).toBe('Typed <AB> & Co'); expect(state.env.name).toBe('Typed draft name');
-  expect(state.env.needsRefresh).toBe(false); expect(state.created).toEqual([]);
-  expect(state.env.creationUncertain).toBe(true);
 });
-
-test('accepted creation with failed navigation retains the draft and retries opening without a second POST', async () => {
-  const state = populateFixture();
-  state.env.onCreated = async () => { throw new Error('Navigation unavailable'); };
-  const pending = state.actions.create(event); state.calls[0].resolve(createdResult()); await pending;
-  expect(state.env.createdDocument.id).toBe('doc');
-  expect(state.env.error).toContain('The draft was created');
-  expect(state.env.values.customer).toBe('Typed <AB> & Co');
-  expect(state.env.name).toBe('Typed draft name');
-  await state.actions.create(event); expect(state.calls).toHaveLength(1);
-  state.env.onCreated = (doc: any) => state.created.push(doc);
-  await state.actions.openCreatedDocument();
-  expect(state.created.map((doc) => doc.id)).toEqual(['doc']); expect(state.calls).toHaveLength(1);
-});
-
-test('pending user navigation is confirmed while the deliberate created-document transition is permitted', async () => {
-  const state = populateFixture(); state.env.busy = true;
-  let canceled = 0;
-  const navigation = (path: string) => ({ cancel: () => canceled++, willUnload: false,
-    from: { url: new URL('https://hash.invalid/templates') }, to: { url: new URL(`https://hash.invalid${path}`) } });
-  state.actions.protectNavigation(navigation('/documents')); expect(canceled).toBe(1);
-  state.env.window.confirm = () => true;
-  state.actions.protectNavigation(navigation('/documents')); expect(canceled).toBe(1);
-  state.env.window.confirm = () => false; state.env.busy = false; state.env.navigating = true;
-  state.env.createdDocument = createdResult().document;
-  state.actions.protectNavigation(navigation('/documents/doc')); expect(canceled).toBe(1);
-  state.actions.protectNavigation(navigation('/documents/other')); expect(canceled).toBe(2);
-});
-
-test('revision adoption retains removed values for copying but dispatches only currently declared values', async () => {
-  const state = populateFixture(); const revised = design(4);
-  revised.html_master_json.values = [{ name: 'contact', required: true, max_chars: 200 }];
-  revised.variables_json = { contact: 'New approved default' } as any;
-  state.env.pendingDesign = revised; state.actions.useUpdatedDesign();
-  expect(state.env.values).toEqual({ customer: 'Typed <AB> & Co', contact: 'New approved default' });
-  const pending = state.actions.create(event);
-  expect(state.calls[0].args[1].values).toEqual({ contact: 'New approved default' });
-  state.calls[0].reject(new APIError(400, 'Refused')); await pending;
-  expect(state.env.values.customer).toBe('Typed <AB> & Co');
-});
-
-test('explicit refreshed design adopts new defaults only where the previous approved default was untouched', () => {
+test('explicit design adoption preserves touched and removed entries, adopts untouched defaults, and invalidates CRM review', async () => {
   for (const edited of [false, true]) {
-    const state = populateFixture();
-    state.env.values.customer = edited ? 'Edited company name' : 'Approved default';
-    const revised = design(4); revised.variables_json.customer = 'New approved company default';
-    state.env.pendingDesign = revised; state.actions.useUpdatedDesign();
-    expect(state.env.values.customer).toBe(edited ? 'Edited company name' : 'New approved company default');
-    expect(state.env.design.version).toBe(4); expect(state.env.needsRefresh).toBe(false);
+    const s = populateFixture(); s.env.values.customer = edited ? 'Edited company name' : 'Approved default';
+    const revised = design(4); revised.variables_json.customer = 'New approved company default'; s.env.pendingDesign = revised; s.actions.useUpdatedDesign();
+    expect(s.env.values.customer).toBe(edited ? 'Edited company name' : 'New approved company default'); expect(s.calls[0].kind).toBe('adopt');
   }
+  const s = populateFixture(), revised = design(4); revised.html_master_json.values = [{ name: 'contact', required: true, max_chars: 200 }]; revised.variables_json = { contact: 'New default' } as any;
+  s.env.pendingDesign = revised; s.actions.useUpdatedDesign(); s.calls.length = 0; await s.actions.create(event);
+  expect(s.env.values.customer).toBe('Typed <AB> & Co'); expect(s.calls[0].candidate.values).toEqual({ contact: 'New default' });
 });
-
-test('unknown creation outcomes preserve values and block an unqualified repeat POST', async () => {
-  for (const error of [new TypeError('Network unavailable'), new APIError(500, 'Server error'), new APIError(502, 'Gateway error'), new APIError(503, 'Please try again in a moment'), new APIError(504, 'Timeout')]) {
-    const state = populateFixture(); const pending = state.actions.create(event);
-    state.calls[0].reject(error); await pending;
-    expect(state.env.creationUncertain).toBe(true); expect(state.env.values.customer).toBe('Typed <AB> & Co');
-    expect(state.env.name).toBe('Typed draft name');
-    expect(state.env.error).toContain('Check the document library');
-    expect(state.env.error).toContain('Your entered values are preserved');
-    expect(state.env.error).not.toContain('try again');
-    await state.actions.create(event); expect(state.calls).toHaveLength(1);
-  }
+test('refresh retains newer revision for explicit adoption, and late source reads cannot affect another selection', async () => {
+  const s = populateFixture(); const reading = s.actions.refreshDesign(); const call = s.calls.find((c: any) => c.kind === 'get'); call.resolve(design(4)); await reading;
+  expect(s.env.design.version).toBe(3); expect(s.env.pendingDesign.version).toBe(4); expect(s.env.values.customer).toBe('Typed <AB> & Co');
+  const late = populateFixture(), pending = late.actions.refreshDesign(); late.env.template = { ...design(), id: 'other' }; late.env.error = 'Current selection error';
+  late.calls.find((c: any) => c.kind === 'get').resolve(design(4)); await pending; expect(late.env.error).toBe('Current selection error'); expect(late.env.design.version).toBe(3);
 });
-
-test('late design read or creation cannot affect a new selection or disposed route', async () => {
-  const reading = populateFixture(); const pendingRead = reading.actions.refreshDesign();
-  reading.env.template = { ...design(), id: 'other' }; reading.env.error = 'Current selection error';
-  reading.calls[0].resolve(design(4)); await pendingRead;
-  expect(reading.env.design.version).toBe(3); expect(reading.env.error).toBe('Current selection error');
-  const state = populateFixture(); const pending = state.actions.create(event); state.env.disposed = true;
-  state.calls[0].resolve({ document: { id: 'doc', org_id: 'org', template_id: 'design', source_kind: 'pdf', has_html_source: true,
-    html_review_required: true, status: 'draft' }, page_count: 1, review_required: true }); await pending;
-  expect(state.created).toEqual([]);
+test('input changes invalidate confirmation synchronously and canceled navigation does not cancel the ongoing operation', () => {
+  const s = populateFixture(); s.env.populationState.confirmation = 'old'; s.actions.inputChanged(); expect(s.env.populationState.confirmation).toBe('');
+  s.calls.length = 0; s.env.creationUncertain = true; s.env.dirty = false; let canceled = 0;
+  const navigation = (path: string) => ({ cancel: () => canceled++, willUnload: false, from: { url: new URL('https://hash.invalid/templates') }, to: { url: new URL('https://hash.invalid' + path) } });
+  s.actions.protectNavigation(navigation('/documents')); expect(canceled).toBe(1); expect(s.calls).toEqual([]);
+  s.env.window.confirm = () => true; s.actions.protectNavigation(navigation('/documents')); expect(s.calls[0].kind).toBe('invalidate');
+  s.calls.length = 0; s.env.window.confirm = () => false; s.env.navigating = true; s.env.createdDocument = { id: 'created' };
+  s.actions.protectNavigation(navigation('/documents/created')); expect(canceled).toBe(1); expect(s.calls).toEqual([]);
 });
 
 function reviewFixture() {
@@ -213,7 +149,7 @@ test('stale review responses and mismatched PDF confirmations never approve the 
 
 test('library selection sends an HTML design to its form without calling generic document creation', async () => {
   const calls: any[] = [];
-  const env: any = { creatingId: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedTemplate: null, error: null,
+  const env: any = { pendingCreation: false, creatingId: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedTemplate: null, error: null,
     createDocumentFromTemplate: (...args: any[]) => calls.push(args) };
   const actions = bind('../../routes/templates/+page.svelte', ['useTemplate'], env);
   await actions.useTemplate(design()); expect(env.selectedHTMLTemplate.id).toBe('design'); expect(calls).toEqual([]);

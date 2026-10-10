@@ -8,8 +8,11 @@
 package docintake
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -64,6 +67,132 @@ type OwnedPDFSource struct {
 	SHA256    [sha256.Size]byte
 }
 
+// PreparedPDFSource is an org-bound, already inspected and stored PDF. Its
+// private fields prevent callers from replacing the artifact identity, pages or
+// report between preparation and attachment. It retains no caller-owned bytes.
+//
+// Preparation performs no SQL. Attach performs no storage or PDF processing.
+// The caller must compensate OwnedSource on any precommit failure, using a
+// detached bounded context, but retain it after any attempted COMMIT until the
+// transaction outcome is reconciled. Attach does not commit or compensate.
+type PreparedPDFSource struct {
+	orgID  uuid.UUID
+	owned  OwnedPDFSource
+	pages  int
+	report json.RawMessage
+}
+
+// OwnedSource returns a value copy of the exact PutVersioned cleanup identity,
+// independent of any later database query result.
+func (p *PreparedPDFSource) OwnedSource() OwnedPDFSource {
+	if p == nil {
+		return OwnedPDFSource{}
+	}
+	return p.owned
+}
+
+func (p *PreparedPDFSource) PageCount() int {
+	if p == nil {
+		return 0
+	}
+	return p.pages
+}
+
+// PreparePDFTemplateSource completes bounded cleanup, page inspection, report
+// encoding and PutVersioned before the caller acquires its database locks.
+func PreparePDFTemplateSource(ctx context.Context, st objectStore, orgID uuid.UUID, data []byte) (*PreparedPDFSource, error) {
+	if orgID == uuid.Nil || st == nil {
+		return nil, errors.New("organization and PDF object store required")
+	}
+	cleaned, err := sanitize.CleanWithContext(ctx, "proposal-pdf", "application/pdf", data)
+	if err != nil {
+		if errors.Is(err, ErrTooManyPages) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", ErrSanitizePDF, err)
+	}
+	pageCount, err := sanitize.PageCountWithContext(ctx, cleaned.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: count sanitized PDF pages: %w", ErrSanitizePDF, err)
+	}
+	if pageCount > maxIntakePages {
+		return nil, fmt.Errorf("%w: %d pages exceeds the %d-page limit", ErrTooManyPages, pageCount, maxIntakePages)
+	}
+	return preparePDFSource(ctx, st, orgID, cleaned, pageCount)
+}
+
+// PrepareComposedPDFTemplateSource stores the exact once-cleaned output from
+// the isolated composition worker. It rechecks the byte/report/manifest proof
+// without a second scrub, parser or page-count operation.
+func PrepareComposedPDFTemplateSource(ctx context.Context, st objectStore, orgID uuid.UUID, composed sanitize.PDFCompositionResult) (*PreparedPDFSource, error) {
+	if orgID == uuid.Nil || st == nil {
+		return nil, errors.New("organization and PDF object store required")
+	}
+	if len(composed.Bytes) == 0 || len(composed.Bytes) > sanitize.MaxPDFBytes {
+		return nil, fmt.Errorf("%w: composed PDF output size", ErrSanitizePDF)
+	}
+	composed.Bytes = bytes.Clone(composed.Bytes)
+	if err := sanitize.ValidatePDFCompositionResult(composed); err != nil {
+		return nil, fmt.Errorf("%w: composed PDF proof: %w", ErrSanitizePDF, err)
+	}
+	return preparePDFSource(ctx, st, orgID, composed.Result, composed.Composition.FinalPages)
+}
+
+func preparePDFSource(ctx context.Context, st objectStore, orgID uuid.UUID, cleaned sanitize.Result, pageCount int) (*PreparedPDFSource, error) {
+	output := sha256.Sum256(cleaned.Bytes)
+	if sanitize.ValidatePDFReport(cleaned.Report) != nil || cleaned.Report.PDF.OutputSHA256 != hex.EncodeToString(output[:]) ||
+		cleaned.Report.BytesAfter != int64(len(cleaned.Bytes)) || cleaned.Report.PDF.PagesAfter != pageCount {
+		return nil, fmt.Errorf("%w: cleaned PDF report differs from exact output or pages", ErrSanitizePDF)
+	}
+	// Report construction must not discover an error after either storage or
+	// SQL has already acquired an externally visible artifact identity.
+	report, err := sanitize.MergeReports(nil, cleaned.Report)
+	if err != nil {
+		return nil, fmt.Errorf("build metadata redaction report: %w", err)
+	}
+	key := path.Join("org", orgID.String(), "documents", uuid.NewString()+".pdf")
+	stored, err := st.PutVersioned(ctx, key, "application/pdf", cleaned.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedPDFSource{orgID: orgID, owned: OwnedPDFSource{Key: key, VersionID: stored.VersionID, SHA256: stored.SHA256}, pages: pageCount, report: bytes.Clone(report)}, nil
+}
+
+// Attach creates the template-backed document and its measured report using
+// only SQL. The caller owns the surrounding transaction, authorization, quota
+// and fresh template/CRM admission. Wrong-org or zero preparations fail before
+// SQL. On every error the owned artifact remains available for caller cleanup.
+func (p *PreparedPDFSource) Attach(ctx context.Context, q documentQueries, orgID, userID uuid.UUID, name string, templateID uuid.UUID, expiresAt pgtype.Timestamptz) (*generated.Document, error) {
+	if templateID == uuid.Nil {
+		return nil, errors.New("template ID required")
+	}
+	return p.attach(ctx, q, orgID, userID, name, pgtype.UUID{Bytes: templateID, Valid: true}, expiresAt)
+}
+
+func (p *PreparedPDFSource) attach(ctx context.Context, q documentQueries, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz) (*generated.Document, error) {
+	if p == nil || q == nil || orgID == uuid.Nil || userID == uuid.Nil || p.orgID != orgID ||
+		p.owned.Key == "" || p.owned.VersionID == "" || p.pages < 1 || p.pages > maxIntakePages || len(p.report) == 0 {
+		return nil, errors.New("valid prepared PDF source, same organization and user required")
+	}
+	owned := p.owned
+	doc, err := q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
+		OrgID: orgID, TemplateID: templateID, Name: name,
+		PdfStorageKey: pgtype.Text{String: owned.Key, Valid: true}, PdfSha256: owned.SHA256[:],
+		PdfStorageVersionID: pgtype.Text{String: owned.VersionID, Valid: true}, EvidenceVersionPinsRequired: true,
+		SenderID: userID, ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create PDF document: %w", err)
+	}
+	if doc == nil || doc.ID == uuid.Nil {
+		return nil, errors.New("create PDF document: missing document identity")
+	}
+	if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{ID: doc.ID, MetadataRedactionReport: bytes.Clone(p.report)}); err != nil {
+		return nil, fmt.Errorf("persist metadata redaction report: %w", err)
+	}
+	return doc, nil
+}
+
 // CreatePDFSourceDocument sanitizes the PDF bytes (strips /Info, XMP, JS,
 // AcroForm, attachments, annotations), stores the cleaned copy, and creates a
 // template-less pdf-source document ready for the field designer. Returns the
@@ -96,78 +225,35 @@ func CreateComposedPDFTemplateDocument(ctx context.Context, q documentQueries, s
 	if orgID == uuid.Nil || userID == uuid.Nil || templateID == uuid.Nil {
 		return nil, 0, OwnedPDFSource{}, errors.New("organization, user and template IDs required")
 	}
-	if err := sanitize.ValidatePDFCompositionResult(composed); err != nil {
-		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: composed PDF proof: %w", ErrSanitizePDF, err)
-	}
-	return storePDFSourceDocument(ctx, q, st, orgID, userID, name, pgtype.UUID{Bytes: templateID, Valid: true}, expiresAt, composed.Result, composed.Composition.FinalPages)
-}
-
-func createPDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz, data []byte) (*generated.Document, int, OwnedPDFSource, error) {
-	cleaned, err := sanitize.CleanWithContext(ctx, "proposal-pdf", "application/pdf", data)
-	if err != nil {
-		if errors.Is(err, ErrTooManyPages) {
-			return nil, 0, OwnedPDFSource{}, err
-		}
-		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: %w", ErrSanitizePDF, err)
-	}
-	// Reject an amplification bomb BEFORE storing it or handing it to the
-	// downstream pdfcpu passes.
-	pageCount, err := sanitize.PageCountWithContext(ctx, cleaned.Bytes)
-	if err != nil {
-		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: count sanitized PDF pages: %w", ErrSanitizePDF, err)
-	}
-	if pageCount > maxIntakePages {
-		return nil, 0, OwnedPDFSource{}, fmt.Errorf("%w: %d pages exceeds the %d-page limit", ErrTooManyPages, pageCount, maxIntakePages)
-	}
-	return storePDFSourceDocument(ctx, q, st, orgID, userID, name, templateID, expiresAt, cleaned, pageCount)
-}
-
-func storePDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz, cleaned sanitize.Result, pageCount int) (*generated.Document, int, OwnedPDFSource, error) {
-	key := path.Join("org", orgID.String(), "documents", uuid.NewString()+".pdf")
-	stored, err := st.PutVersioned(ctx, key, "application/pdf", cleaned.Bytes)
+	prepared, err := PrepareComposedPDFTemplateSource(ctx, st, orgID, composed)
 	if err != nil {
 		return nil, 0, OwnedPDFSource{}, err
 	}
-	d, err := q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
-		OrgID:                       orgID,
-		TemplateID:                  templateID,
-		Name:                        name,
-		PdfStorageKey:               pgtype.Text{String: key, Valid: true},
-		PdfSha256:                   stored.SHA256[:],
-		PdfStorageVersionID:         pgtype.Text{String: stored.VersionID, Valid: true},
-		EvidenceVersionPinsRequired: true,
-		SenderID:                    userID,
-		ExpiresAt:                   expiresAt,
-	})
+	return attachPreparedPDFSource(ctx, q, st, prepared, orgID, userID, name, pgtype.UUID{Bytes: templateID, Valid: true}, expiresAt)
+}
+
+func createPDFSourceDocument(ctx context.Context, q documentQueries, st objectStore, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz, data []byte) (*generated.Document, int, OwnedPDFSource, error) {
+	prepared, err := PreparePDFTemplateSource(ctx, st, orgID, data)
 	if err != nil {
-		// Object storage and PostgreSQL cannot share a transaction. If the DB
-		// insert fails after Put succeeded, compensate immediately using a
-		// context detached from the request cancellation that commonly caused
-		// the DB error. Otherwise every failed upload leaves an unreferenced PDF
-		// in the bucket forever.
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
+		return nil, 0, OwnedPDFSource{}, err
+	}
+	return attachPreparedPDFSource(ctx, q, st, prepared, orgID, userID, name, templateID, expiresAt)
+}
+
+func attachPreparedPDFSource(ctx context.Context, q documentQueries, st objectStore, prepared *PreparedPDFSource, orgID, userID uuid.UUID, name string, templateID pgtype.UUID, expiresAt pgtype.Timestamptz) (*generated.Document, int, OwnedPDFSource, error) {
+	doc, err := prepared.attach(ctx, q, orgID, userID, name, templateID, expiresAt)
+	if err != nil {
+		owned := prepared.OwnedSource()
+		cleanupErr := deleteAfterFailedWrite(ctx, st, owned.Key, storage.StoredObject{VersionID: owned.VersionID, SHA256: owned.SHA256})
 		if cleanupErr != nil {
 			return nil, 0, OwnedPDFSource{}, errors.Join(
-				fmt.Errorf("create PDF document: %w", err),
-				fmt.Errorf("delete orphaned PDF %q: %w", key, cleanupErr),
+				err,
+				fmt.Errorf("delete orphaned PDF %q: %w", owned.Key, cleanupErr),
 			)
 		}
-		return nil, 0, OwnedPDFSource{}, fmt.Errorf("create PDF document: %w", err)
+		return nil, 0, OwnedPDFSource{}, err
 	}
-	// Record the measured source cleaning on the document so the audit cert can
-	// reference it without a template lookup.
-	rep, rerr := sanitize.MergeReports(nil, cleaned.Report)
-	if rerr != nil {
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
-		return nil, 0, OwnedPDFSource{}, errors.Join(fmt.Errorf("build metadata redaction report: %w", rerr), cleanupErr)
-	}
-	if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{
-		ID: d.ID, MetadataRedactionReport: rep,
-	}); err != nil {
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
-		return nil, 0, OwnedPDFSource{}, errors.Join(fmt.Errorf("persist metadata redaction report: %w", err), cleanupErr)
-	}
-	return d, pageCount, OwnedPDFSource{Key: key, VersionID: stored.VersionID, SHA256: stored.SHA256}, nil
+	return doc, prepared.PageCount(), prepared.OwnedSource(), nil
 }
 
 func deleteAfterFailedWrite(parent context.Context, st objectStore, key string, stored storage.StoredObject) error {

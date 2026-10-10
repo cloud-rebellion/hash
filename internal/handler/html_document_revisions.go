@@ -77,8 +77,14 @@ func materializeHTMLDocumentRevision(doc *generated.Document, in htmlDocumentRev
 		return htmlsource.Input{}, htmlmaster.Result{}, err
 	}
 	before, err := htmlsource.MaterializationDigest(doc)
-	if err != nil || before == rendered.ContentDigest {
+	if err != nil {
 		return htmlsource.Input{}, htmlmaster.Result{}, errHTMLDocumentRevisionConflict
+	}
+	if before == rendered.ContentDigest {
+		allowed, err := htmlsource.IsOptionalEmptyAddition(doc, input)
+		if err != nil || !allowed {
+			return htmlsource.Input{}, htmlmaster.Result{}, errHTMLDocumentRevisionConflict
+		}
 	}
 	return input, rendered, nil
 }

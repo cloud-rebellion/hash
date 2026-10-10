@@ -15,7 +15,7 @@ export interface CRMExpected {
   expected_binding_fingerprint: string; expected_connection_id: string; expected_connection_generation: string;
 }
 export interface CRMMapping { variable: string; source_kind: CRMKind; source_ref: string; source_path: string }
-export interface CRMVariable { name: string; required: boolean; max_chars: number; current_value: string }
+export interface CRMVariable { name: string; required: boolean; max_chars: number; current_value: string; current_present: boolean }
 export interface CRMField { path: string; type: 'string' | 'decimal' | 'timestamp' | 'reference' | 'boolean'; nullable: boolean; derived: boolean }
 export interface CRMBinding { variable: string; source_kind: string; source_ref?: string; source_path?: string; fallback?: string; last_value?: string; last_resolved?: string; last_error?: string; updated_at: string }
 export interface CRMDocumentContext extends CRMDocumentWitness {
@@ -29,7 +29,7 @@ export interface CRMValueObservation {
   record_updated_at: string; observed_at: string; body_sha256: string; value_sha256: string; transformation?: 'trim-first-and-last-name-v1';
 }
 export interface CRMObservationItem extends CRMMapping {
-  current_value: string; available: boolean; value?: string; unavailable_reason?: string; crm_observation?: CRMValueObservation;
+  current_value: string; current_present: boolean; available: boolean; value?: string; unavailable_reason?: string; crm_observation?: CRMValueObservation;
 }
 export interface CRMObservation extends CRMDocumentWitness {
   mappings: CRMMapping[]; items: CRMObservationItem[]; review_digest: string; can_apply: boolean; content_changed: boolean; observed_at: string;
@@ -104,8 +104,8 @@ export function checkedCRMContext(v: unknown): CRMDocumentContext {
   const w = witness(r);
   if (typeof r.supported !== 'boolean' || typeof r.available !== 'boolean' || typeof r.mapping_review_required !== 'boolean') throw new Error(invalid);
   const variables = unique(list(r.variables, 256).map((v) => {
-    const x = record(v, ['name', 'required', 'max_chars', 'current_value']);
-    if (!name(x.name) || typeof x.required !== 'boolean' || !Number.isInteger(x.max_chars) || (x.max_chars as number) < 1 || (x.max_chars as number) > 1000000 || !text(x.current_value)) throw new Error(invalid);
+    const x = record(v, ['name', 'required', 'max_chars', 'current_value', 'current_present']);
+    if (!name(x.name) || typeof x.required !== 'boolean' || !Number.isInteger(x.max_chars) || (x.max_chars as number) < 1 || (x.max_chars as number) > 1000000 || !text(x.current_value) || typeof x.current_present !== 'boolean' || (!x.current_present && x.current_value !== '')) throw new Error(invalid);
     return x as unknown as CRMVariable;
   }), (v) => v.name);
   const bindings = unique(list(r.bindings, 256).map((v) => {
@@ -147,9 +147,9 @@ export function checkedCRMObservation(v: unknown): CRMObservation {
   if (!sha(r.review_digest) || typeof r.can_apply !== 'boolean' || typeof r.content_changed !== 'boolean'
       || !(mappings.length ? time(r.observed_at) : r.observed_at === '')) throw new Error(invalid);
   const items = unique(list(r.items, 256).map((v) => {
-    const i = record(v, ['variable', 'source_kind', 'source_ref', 'source_path', 'current_value', 'available'], ['value', 'unavailable_reason', 'crm_observation']);
+    const i = record(v, ['variable', 'source_kind', 'source_ref', 'source_path', 'current_value', 'current_present', 'available'], ['value', 'unavailable_reason', 'crm_observation']);
     const m = checkedCRMMapping({ variable: i.variable, source_kind: i.source_kind, source_ref: i.source_ref, source_path: i.source_path });
-    if (!text(i.current_value) || typeof i.available !== 'boolean') throw new Error(invalid);
+    if (!text(i.current_value) || typeof i.current_present !== 'boolean' || (!i.current_present && i.current_value !== '') || typeof i.available !== 'boolean') throw new Error(invalid);
     if (i.available) {
       if (!text(i.value) || Object.hasOwn(i, 'unavailable_reason')) throw new Error(invalid);
       const p = record(i.crm_observation, ['connection_id', 'generation', 'origin', 'crm_team_id', 'crm_user_id', 'record_updated_at', 'observed_at', 'body_sha256', 'value_sha256'], ['transformation']);
@@ -190,7 +190,8 @@ function sameValues(actual: Record<string, string>, expected: Record<string, str
     && Object.entries(expected).every(([key, value]) => Object.hasOwn(actual, key) && actual[key] === value);
 }
 function contextValuesMatch(c: CRMDocumentContext, d: DocumentResponse): boolean {
-  return c.variables.every((v) => v.current_value === (Object.hasOwn(d.variables_json, v.name) ? d.variables_json[v.name] : ''));
+  return c.variables.every((v) => v.current_present === Object.hasOwn(d.variables_json, v.name)
+    && v.current_value === (Object.hasOwn(d.variables_json, v.name) ? d.variables_json[v.name] : ''));
 }
 export function checkedCRMApply(v: unknown): CRMApply {
   const r = record(v, [...witnessKeys, 'document', 'content_changed', 'mapping_review_required'], ['materialization_revision', 'page_count', 'review_required', 'placement_reset']), w = witness(r);
@@ -311,7 +312,10 @@ export class CRMDocumentController {
     const c = this.state.context!, mappings = crmMappings(this.state.mappings), op = this.start('observe'); this.update({ observation: null });
     try { this.actorMatches(await this.transport.identity(op.signal)); if (!this.current(op.epoch)) return;
       const o = checkedCRMObservation(await this.transport.observe(this.doc.id, { ...crmExpected(c), mappings }, op.signal)); if (!this.current(op.epoch)) return;
-      this.same(o, c); if (crmMappingKey(o.mappings) !== crmMappingKey(mappings) || o.items.some((i) => i.current_value !== c.variables.find((v) => v.name === i.variable)?.current_value)) throw new Error(invalid);
+      this.same(o, c); if (crmMappingKey(o.mappings) !== crmMappingKey(mappings) || o.items.some((i) => {
+        const field = c.variables.find((v) => v.name === i.variable);
+        return i.current_value !== field?.current_value || i.current_present !== field?.current_present;
+      })) throw new Error(invalid);
       this.actorMatches(await this.transport.identity(op.signal)); if (!this.current(op.epoch)) return; this.update({ observation: o });
     } catch (e) { if (this.current(op.epoch)) this.update({ fresh: false, error: crmDocumentError(e) }); }
     finally { if (this.current(op.epoch)) this.update({ busy: null }); }

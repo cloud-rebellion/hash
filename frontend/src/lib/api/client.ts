@@ -186,6 +186,11 @@ export interface HTMLDocumentInput {
   expected_template_content_sha256: string;
   values: Record<string, string>;
   sections?: Record<string, string>;
+  expires_at?: string;
+  request_id?: string;
+  expected_org_id?: string;
+  expected_user_id?: string;
+  crm_population?: import('../crmTemplatePopulation').CRMTemplatePopulationInput;
 }
 
 export async function createHTMLTemplateDocument(templateID: string, input: HTMLDocumentInput): Promise<ImportResult & { review_required: boolean }> {
@@ -195,6 +200,11 @@ export async function createHTMLTemplateDocument(templateID: string, input: HTML
     expected_template_content_sha256: input.expected_template_content_sha256,
     values: input.values,
     ...(input.sections === undefined ? {} : { sections: input.sections }),
+    ...(input.expires_at === undefined ? {} : { expires_at: input.expires_at }),
+    ...(input.request_id === undefined ? {} : { request_id: input.request_id }),
+    ...(input.expected_org_id === undefined ? {} : { expected_org_id: input.expected_org_id }),
+    ...(input.expected_user_id === undefined ? {} : { expected_user_id: input.expected_user_id }),
+    ...(input.crm_population === undefined ? {} : { crm_population: input.crm_population }),
   });
 }
 

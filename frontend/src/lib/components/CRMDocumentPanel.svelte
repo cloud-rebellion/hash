@@ -119,7 +119,7 @@
               onchange={(event) => map(variable.name, event.currentTarget.value)} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2">
               <option value="">Keep manually supplied value</option>
               {#each CRM_KINDS as kind}{#if crmState.selected[kind]}<optgroup label={labels[kind]}>{#each context.catalog[kind] as field (field.path)}<option value={`${kind}:${field.path}`}>{field.path} · {field.type}{field.derived ? ' (derived)' : ''}</option>{/each}</optgroup>{/if}{/each}
-            </select><span class="text-xs text-text-muted">Current document: <span class="whitespace-pre-wrap break-words">{variable.current_value === '' ? '(empty)' : variable.current_value}</span></span>
+            </select><span class="text-xs text-text-muted">Current document: <span class="whitespace-pre-wrap break-words">{!variable.current_present ? '(not entered)' : variable.current_value === '' ? '(empty)' : variable.current_value}</span></span>
           </label>
         {/each}
       </div>
@@ -134,7 +134,7 @@
         {#each observation.items as item (item.variable)}<div class="border border-border-light rounded-md p-3 space-y-2 text-sm min-w-0">
           <p class="font-medium break-words">{item.variable}</p>
           <p class="text-xs font-mono break-all">{item.source_kind} · {item.source_ref} · {item.source_path}</p>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><div><p class="text-xs text-text-muted">Current document</p><p class="whitespace-pre-wrap break-words">{item.current_value === '' ? '(empty)' : item.current_value}</p></div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><div><p class="text-xs text-text-muted">Current document</p><p class="whitespace-pre-wrap break-words">{!item.current_present ? '(not entered)' : item.current_value === '' ? '(empty)' : item.current_value}</p></div>
             <div><p class="text-xs text-text-muted">Observed CRM value</p>{#if item.available}<p class="whitespace-pre-wrap break-words">{item.value === '' ? '(empty)' : item.value}</p>{:else}<p class="text-warning">Unavailable: {item.unavailable_reason}. It will not become an empty value or fallback.</p>{/if}</div></div>
           {#if item.crm_observation}<details class="text-xs"><summary>Record provenance</summary><p class="break-all mt-2">Record updated {item.crm_observation.record_updated_at} · observed {item.crm_observation.observed_at}</p><p class="font-mono break-all">Record SHA-256: {item.crm_observation.body_sha256}</p><p class="font-mono break-all">Value SHA-256: {item.crm_observation.value_sha256}</p>{#if item.crm_observation.transformation}<p>Derived using {item.crm_observation.transformation}.</p>{/if}</details>{/if}
         </div>{/each}

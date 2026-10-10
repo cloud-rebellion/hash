@@ -15,14 +15,14 @@ export function crmContextFixture(document = crmDocumentFixture()): CRMDocumentC
     html_source_commitment: document.html_source_commitment ?? '', binding_fingerprint: 'a'.repeat(64), connection: {
       id: '44444444-4444-4444-8444-444444444444', generation: '9007199254740993', status: 'active', origin: 'https://crm.example.test', crm_team_id: 'team_CUID2', crm_user_id: 'user_CUID2',
     }, supported: true, available: true, mapping_review_required: false,
-    variables: [{ name: 'amount', required: true, max_chars: 8192, current_value: document.variables_json.amount }], bindings: [],
+    variables: [{ name: 'amount', required: true, max_chars: 8192, current_value: document.variables_json.amount ?? '', current_present:Object.hasOwn(document.variables_json,'amount') }], bindings: [],
     catalog: { 'crm.deal': [{ path: 'value', type: 'decimal', nullable: true, derived: false }], 'crm.contact': [], 'crm.company': [] } };
 }
 export const CRM_MAPPING = { variable: 'amount', source_kind: 'crm.deal' as const, source_ref: 'deal_CUID2', source_path: 'value' };
 export function crmObservationFixture(context = crmContextFixture(), value = '12345678901234567890.012300'): CRMObservation {
   return { org_id: context.org_id, user_id: context.user_id, document_id: context.document_id, updated_at: context.updated_at,
     html_source_commitment: context.html_source_commitment, binding_fingerprint: context.binding_fingerprint, connection: context.connection,
-    mappings: [CRM_MAPPING], items: [{ ...CRM_MAPPING, current_value: context.variables[0].current_value, available: true, value,
+    mappings: [CRM_MAPPING], items: [{ ...CRM_MAPPING, current_value: context.variables[0].current_value, current_present:context.variables[0].current_present, available: true, value,
       crm_observation: { connection_id: context.connection!.id, generation: context.connection!.generation, origin: context.connection!.origin,
         crm_team_id: context.connection!.crm_team_id, crm_user_id: context.connection!.crm_user_id, record_updated_at: '2026-10-10T12:00:00Z',
         observed_at: '2026-10-10T12:02:00Z', body_sha256: 'b'.repeat(64), value_sha256: 'c'.repeat(64) } }],

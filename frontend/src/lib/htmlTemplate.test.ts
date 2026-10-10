@@ -3,6 +3,18 @@ import { htmlContractProfile, htmlPartyBindings, htmlPreviewSections, htmlProfil
 import { blankHTMLSigningPage } from './htmlAuthor';
 import type { TemplateResponse } from './api/client';
 
+test('initial manual candidate defers only required blanks for observed overlay while preserving declared text/empty and size limits', () => {
+  const fields = htmlTemplateFields(htmlTemplateFixture());
+  expect(htmlValuesForSubmission(fields, { customer: '' }, true)).toEqual({ customer: '' });
+  expect(() => htmlValuesForSubmission(fields, { customer: '' })).toThrow('required');
+  expect(() => htmlValuesForSubmission(fields, { customer: 'x'.repeat(201) }, true)).toThrow('within');
+  expect(() => htmlValuesForSubmission(fields, { customer: null as any }, true)).toThrow();
+  const template = contractTemplateFixture(), manual = { scope_text: '' };
+  expect(htmlProfileSectionValues(template.html_master_json!, manual, true)).toEqual(manual);
+  expect(() => htmlProfileSectionValues(template.html_master_json!, manual)).toThrow('scope');
+  expect(htmlProfileSectionValues(template.html_master_json!, { scope_text: 'Human text.\nSecond line.' }, true)).toEqual({ scope_text: 'Human text.\nSecond line.' });
+});
+
 export function htmlTemplateFixture(): TemplateResponse {
   return { id: 'design', org_id: 'org', name: 'Approved design', source_kind: 'html', version: 3,
     content_sha256: 'a'.repeat(64), variables_json: { customer: 'Approved customer' }, fields_json: [],

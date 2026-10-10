@@ -244,6 +244,10 @@ supports one HTTP server under a database singleton lease.
 | Signer legal mutations | 60 per token |
 | PDF downloads | 30 per token plus 240 per IP |
 | Clarification | 10 per token plus 60 per IP |
+| HTML draft creation | 10 per organization/user |
+| HTML creation request closure | 10 per organization/user |
+| Template CRM context and creation recovery | 60 per organization/user, separate route budgets |
+| Template CRM search and observation | 30 per organization/user, separate route budgets |
 
 Rate keys derived from signer credentials use a one-way digest. Separate budgets
 keep expensive downloads/AI from consuming legal-response capacity. Not every
@@ -599,12 +603,98 @@ create/edit responses omit approval state; fetch detail before using a design.
 
 `POST /api/v1/templates/{id}/html/documents` accepts `name`,
 `expected_template_version`, `expected_template_content_sha256`, optional
-`values` and `sections` string maps, and optional future `expires_at`.
-Explicit JSON null maps or entries are refused. The current approved revision
-is retained through the transaction. Its defaults and supplied declared text
-are rendered, scanned, sanitized and stored as a fresh PDF-source draft with
-the exact storage version/hash and immutable copied authoring provenance.
-The response includes `document`, `page_count` and `review_required:true`.
+`values` and `sections` string maps, optional future `expires_at`, and optional
+nonzero canonical `request_id`. Explicit JSON null maps or entries are refused.
+New browser callers also supply the optional paired canonical `expected_org_id`
+and `expected_user_id` to refuse a changed session actor before any creation or
+replay. The pair is part of the semantic command; legacy omitted pairs remain
+compatible.
+The approved revision is checked before preparation and in the final transaction.
+Rendering, scanning, sanitization and versioned storage preparation occur outside
+database locks. A short final transaction rechecks the original actor, template,
+quota and deadline, then stores the draft and immutable authoring provenance.
+New creation returns 201 with `document`, `page_count`, `review_required:true`
+and `replayed:false`.
+
+A supplied request UUID is bound to the original organization/user and complete
+semantic creation command. A same-command committed replay returns 200 with
+`replayed:true`; changed-input reuse returns 409. Responses with a request UUID
+also contain original `org_id`/`user_id`, `request_id`, `input_digest` and immutable
+original `creation` pins. Compare the exact actor pair with the pending request,
+including on tombstones; a later session probe cannot substitute for it.
+Read an uncertain result through
+`GET /api/v1/templates/{id}/html/document-requests/{request_id}` using a current
+session for that same original actor. A committed response contains `state`,
+`request_id`, `org_id`, `user_id`, `input_digest`, `template_id`, current `document` and original
+`creation`. The latter pins `document_id`, `html_materialization_id`,
+`html_source_commitment`, `pdf_sha256`, `page_count` and `created_at`.
+The current document can have a later revision or be null after deletion;
+creation pins describe its original artifact. Recovery does not reuse an old
+CRM receipt or call the provider/renderer. A 404 with `state:"unconfirmed"`
+does not establish failure: an original preparation may still be running.
+Keep that UUID pending and inspect again; do not create another request UUID.
+
+To stop an uncommitted request explicitly, call
+`POST /api/v1/templates/{id}/html/document-requests/{request_id}/close`.
+The body is limited to 2 KiB and has exactly `expected_org_id`,
+`expected_user_id` and `confirmed:true`. The actor IDs and path IDs must be
+canonical nonzero UUIDs; query parameters, duplicate/case-alias/unknown keys,
+nulls and trailing JSON are refused. A current original sender/owner session
+and exact application origin are required. The expected actor pair must match
+that admitted session before lookup or mutation; an owner cannot stop another
+actor's request. The rate limit is 10/minute per organization/user.
+
+Close and GET return `Cache-Control: no-store`. A 200 `state:"closed"` response
+has exactly `state`, `org_id`, `user_id`, `template_id`, `request_id` and
+`closed_at` (the durable UTC RFC3339Nano timestamp). GET can return this same
+closed response, the existing committed envelope, or an unconfirmed 404.
+Closing an already committed request returns its committed envelope, including
+a null current document after deletion. It does not cancel the document or
+change the original creation pins. Repeating Close for the same actor/template/
+request is idempotent; a stopped nonce cannot later create a document.
+
+Migration 80 adds an immutable terminal registry keyed by organization,
+original actor and request UUID. Its state is `committed` or `closed`.
+The final creation transaction and Close take the same unconditional database
+quota lock, even for internal callers with billing disabled. If Close commits
+first, an older preparation cannot attach or commit a draft; if creation commits
+first, Close returns that committed result. Database guards require each
+committed outcome to match its immutable migration-79 receipt and prohibit a
+closed outcome from having one. Existing source domains and initial pins are
+unchanged. Retained closed outcomes block migration-80 Down; organization
+erasure can cascade the migration-79/80 metadata only after retained templates,
+materialization history and other dependencies have been disposed of through
+an approved retention workflow. These metadata guards do not enable a raw
+whole-organization delete or establish a complete disposal workflow.
+
+A malformed close returns 400; an expired session 401; revoked authoring
+authority 403; a conflicting existing template scope 404; a changed actor or
+stopped creation attempt 409; audit or other backend failure 500; and unavailable
+closure dependencies, quota waits/deadline or an ambiguous commit 503.
+Keep the original marker after any uncertain Close
+or lost response and inspect or repeat Close for that exact UUID. An error
+status or elapsed time does not establish a terminal outcome. Close performs
+no CRM, renderer or object-storage work and needs no current template approval,
+account or old review receipt.
+
+The browser exposes **Stop this request** with explicit confirmation. Only
+explicit acknowledgement of an exact actor/template/request-matched closed
+response or readback clears the pending marker. A subsequent user-initiated
+creation uses a new UUID after refreshing the current design and reviewing
+fresh CRM observations. Resident manual values and sections are retained;
+previous confirmation/receipt is invalidated. Reload retains only request
+metadata, never contract text or CRM values. Committed outcomes still require
+explicit Open or the existing deleted-document acknowledgement. Late responses
+from an invalidated operation are not adopted.
+
+Optional `crm_population` uses the separately witnessed template-scoped review
+contract in [initial CRM population](CRM-CONNECTOR.md#initial-template-population).
+It requires `request_id`. Fresh independently fetched data must equal the exact
+confirmed observation, while unmapped values and human sections are preserved.
+Both original and fresh observation deadlines, active account generation and
+original actor/template approval are rechecked before and after the final audit.
+Mappings, current review, source, parties, fields, creation receipt and audits
+commit together. Every resulting PDF still needs its own review before Send.
 
 HTML-derived document responses include `has_html_source:true` throughout their
 lifetime, even after `html_review_required` becomes false and is omitted. Their

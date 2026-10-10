@@ -3,8 +3,8 @@
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getTemplate, createHTMLTemplate, updateHTMLTemplate, previewHTMLTemplate, approveHTMLTemplate,
     type TemplateResponse, type HTMLTemplatePreview } from '$lib/api/client';
-  import { blankHTMLAuthorDraft, draftFromHTMLTemplate, htmlAuthorInput, htmlAuthorFingerprint, htmlAssetFromFile, assetByteLength } from '$lib/htmlAuthor';
-  import { htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '$lib/htmlTemplate';
+  import { blankHTMLAuthorDraft, blankHTMLContractProfile, draftFromHTMLTemplate, htmlAuthorInput, htmlAuthorFingerprint, htmlAssetFromFile, assetByteLength } from '$lib/htmlAuthor';
+  import { htmlContractProfile, htmlPartyBindings, htmlPartyLabels, requiredHTMLContractTerms, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLContractProfile } from '$lib/htmlTemplate';
   import VerifiedPDFPages from './VerifiedPDFPages.svelte';
 
   type Identity = Awaited<ReturnType<typeof getMe>>;
@@ -48,6 +48,12 @@
   const canWrite = $derived(!!me && me.org_id === orgScope && (!sourceID || saved !== null) && (me.role === 'owner' || me.role === 'sender'));
   const canApprove = $derived(canWrite && me?.role === 'owner');
   const approved = $derived(saved !== null && isApprovedHTMLTemplate(saved));
+  const profileProblem = $derived.by(() => {
+    if (draft.schema_version !== 2) return null;
+    try { htmlContractProfile({ schema_version: 2, html: draft.html, css: draft.css, values: draft.values, sections: draft.sections,
+      ...(draft.contract_profile ? { contract_profile: draft.contract_profile } : {}) }); return null; }
+    catch (e) { return (e as Error).message; }
+  });
   const previewKey = $derived(`preview-${previewSequence}`);
   const previewValid = $derived(!!preview && !!saved && !dirty && !assetDraftDirty && !needsRefresh && !writeUncertain
     && preview.templateID === saved.id && preview.version === saved.version && preview.contentSHA256 === saved.content_sha256
@@ -203,6 +209,31 @@
   }
   function addValue() { if (canWrite && !busy) draft.values = [...draft.values, { key: ++rowKey, name: '', required: false, max_chars: 256, default_value: '' }]; }
   function addSection() { if (canWrite && !busy) draft.sections = [...draft.sections, { key: ++rowKey, name: '', max_chars: 4096, default_text: '' }]; }
+  function changeProfile(event: Event) {
+    if (!canWrite || busy) return;
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    if (!enabled && draft.contract_profile && !window.confirm('Remove these contract checks and intended parties from the local design? Saving creates a generic version 1 revision for owner review.')) {
+      (event.currentTarget as HTMLInputElement).checked = true;
+      return;
+    }
+    draft.schema_version = enabled ? 2 : 1;
+    draft.contract_profile = enabled ? blankHTMLContractProfile() : null;
+  }
+  function changeProfileKind(event: Event) {
+    if (!canWrite || busy || !draft.contract_profile) return;
+    const kind = (event.currentTarget as HTMLSelectElement).value as HTMLContractProfile['kind'];
+    if (!['proposal', 'b2b_services'].includes(kind)) return;
+    draft.contract_profile.kind = kind;
+    for (const name of requiredHTMLContractTerms(kind)) if (!draft.contract_profile.terms.some((term) => term.name === name)) {
+      draft.contract_profile.terms.push({ name, value: '' });
+    }
+  }
+  function changeTermBinding(index: number, event: Event) {
+    if (!canWrite || busy || !draft.contract_profile) return;
+    const target = (event.currentTarget as HTMLSelectElement).value, term = draft.contract_profile.terms[index];
+    draft.contract_profile.terms[index] = target.startsWith('section:')
+      ? { name: term.name, section: target.slice(8) } : { name: term.name, value: target.startsWith('value:') ? target.slice(6) : '' };
+  }
   async function generatePreview() {
     if (!current() || !canWrite || !saved || dirty || assetDraftDirty || busy || loading || needsRefresh || writeUncertain) return;
     const target = saved, actor = me!.user_id, fingerprint = JSON.stringify(samples), selected = ++operation;
@@ -287,6 +318,43 @@
           <label class="block text-sm">HTML body fragment<textarea bind:value={draft.html} spellcheck={false} rows="14" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
           <label class="block text-sm">Print CSS<textarea bind:value={draft.css} spellcheck={false} rows="9" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
         </section>
+        <section class="card p-6 space-y-4" aria-label="Reviewed contract profile">
+          <h2 class="font-display text-lg">Contract checks and intended parties</h2>
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 2} onchange={changeProfile} class="mt-1" />
+            <span>Declare a reviewed proposal or ordinary B2B services profile. Hash requires both named parties and the mapped information before sending.</span></label>
+          <p class="text-sm text-text-secondary">Map these checks to values and wording printed by this design. An owner reviews the exact revision. These checks do not establish legal sufficiency, verify identity or prove representative authority.</p>
+          {#if draft.contract_profile}
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <label class="text-sm">Profile identifier<input bind:value={draft.contract_profile.id} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">Profile version<input type="number" bind:value={draft.contract_profile.version} required min="1" max="1000000" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">Contract type<select value={draft.contract_profile.kind} onchange={changeProfileKind} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"><option value="proposal">Proposal</option><option value="b2b_services">Ordinary B2B services</option></select></label>
+            </div>
+            {#each draft.contract_profile.parties as party (party.slot)}
+              <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">{party.slot === 'provider' ? 'Our company (provider)' : 'Customer'}</h3>
+                {#each htmlPartyBindings as binding (binding)}<label class="block text-sm">{htmlPartyLabels[binding]}
+                  <select bind:value={party[binding]} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" required>
+                    <option value="">Choose a required printed value…</option>
+                    {#each draft.values.filter((value) => value.required && value.name) as value (value.key)}<option value={value.name}>{value.name.replaceAll('_', ' ')}</option>{/each}
+                  </select></label>{/each}
+              </div>
+            {/each}
+            <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">Commercial terms</h3>
+              <p class="text-sm text-text-secondary">Required term names: {requiredHTMLContractTerms(draft.contract_profile.kind).join(', ')}. Each needs its own printed value or wording section.</p>
+              {#each draft.contract_profile.terms as term, index (index)}<div class="grid grid-cols-1 sm:grid-cols-[1fr_2fr_auto] gap-3 items-end">
+                <label class="text-sm">Term name<input bind:value={term.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+                <label class="text-sm">Printed information<select value={term.section !== undefined ? `section:${term.section}` : term.value ? `value:${term.value}` : ''} onchange={(event) => changeTermBinding(index, event)} required class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
+                  <option value="">Choose its own value or wording section…</option>
+                  <optgroup label="Required printed values">{#each draft.values.filter((value) => value.required && value.name) as value (value.key)}<option value={`value:${value.name}`}>{value.name.replaceAll('_', ' ')}</option>{/each}</optgroup>
+                  <optgroup label="Approved wording sections">{#each draft.sections.filter((section) => section.name) as section (section.key)}<option value={`section:${section.name}`}>{section.name.replaceAll('_', ' ')}</option>{/each}</optgroup>
+                </select></label>
+                <button type="button" class="btn btn-secondary text-xs" onclick={() => { if (draft.contract_profile) draft.contract_profile.terms = draft.contract_profile.terms.filter((_, i) => i !== index); }}>Remove</button>
+              </div>{/each}
+              <button type="button" class="btn btn-secondary" disabled={draft.contract_profile.terms.length >= 16} onclick={() => draft.contract_profile?.terms.push({ name: '', value: '' })}>Add another term</button>
+            </div>
+            <p class="text-sm text-text-secondary">Both representatives will sign; their names and email addresses come from the printed document values. Changing those values creates a fresh PDF for review. Pre-signing on someone’s behalf is unavailable.</p>
+            {#if profileProblem}<p class="text-sm text-warning" role="status">{profileProblem}</p>{/if}
+          {:else}<p class="text-sm text-text-secondary">This generic version 1 design has no declared contract profile. Its owner and sender must review completeness and intended parties themselves.</p>{/if}
+        </section>
         <section class="card p-6 space-y-4" aria-label="Declared values and defaults">
           <h2 class="font-display text-lg">Declared values and saved defaults</h2>
           <p class="text-sm text-text-secondary">Use an empty text marker such as <code class="break-all">&lt;span data-hash-value="company_name"&gt;&lt;/span&gt;</code>. Names use lowercase letters, digits and underscores. Required defaults may stay blank until a document is populated.</p>
@@ -336,7 +404,7 @@
         {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} />{/key}
         {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">This preview is no longer current. Generate a new preview before approving.</p>{/if}
         {#if canApprove && !approved}
-          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>I have reviewed every PDF page, saved source, defaults, wording and local assets, and approve this exact design revision. Preview sample values are separate from saved defaults.</span></label>
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>I have reviewed every PDF page, saved source, defaults, wording, local assets{saved.html_master_json?.schema_version === 2 ? ', contract checks and intended party mappings' : ''}, and approve this exact design revision. Preview sample values are separate from saved defaults.</span></label>
           {#if !allPagesSeen}<p class="text-sm text-text-secondary">Open every page before approving this revision.</p>{/if}
           <button type="button" class="btn btn-primary" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision'}</button>
         {/if}

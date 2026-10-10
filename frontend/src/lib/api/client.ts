@@ -1,5 +1,5 @@
 // Hash frontend API client.
-import type { HTMLMaster } from '../htmlTemplate';
+import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot } from '../htmlTemplate';
 
 export interface TemplateResponse {
   id: string;
@@ -185,6 +185,7 @@ export interface HTMLDocumentInput {
   expected_template_version: number;
   expected_template_content_sha256: string;
   values: Record<string, string>;
+  sections?: Record<string, string>;
 }
 
 export async function createHTMLTemplateDocument(templateID: string, input: HTMLDocumentInput): Promise<ImportResult & { review_required: boolean }> {
@@ -193,6 +194,7 @@ export async function createHTMLTemplateDocument(templateID: string, input: HTML
     expected_template_version: input.expected_template_version,
     expected_template_content_sha256: input.expected_template_content_sha256,
     values: input.values,
+    ...(input.sections === undefined ? {} : { sections: input.sections }),
   });
 }
 
@@ -212,6 +214,13 @@ export interface HTMLDocumentSource {
   values: { name: string; required: boolean; max_chars: number; text: string }[];
   sections: { name: string; max_chars: number; text: string; default_text: string }[];
   changed_sections: string[]; can_edit: boolean;
+  contract_profile?: HTMLContractProfile;
+  contract_profile_digest?: string;
+  contract_parties?: HTMLDocumentParty[];
+}
+export interface HTMLDocumentParty {
+  slot: HTMLPartySlot; role: HTMLPartySlot; recipient_id: string;
+  name: string; email: string; company_name: string; company_id: string; representative_authority: string;
 }
 export interface HTMLDocumentRevisionInput {
   expected_updated_at: string; expected_html_source_commitment: string;

@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
-import { htmlTemplateFields, htmlValuesForSubmission } from '../htmlTemplate';
+import { htmlProfileIssues, htmlProfileSectionValues, htmlTemplateFields, htmlValuesForSubmission } from '../htmlTemplate';
+import { contractTemplateFixture } from '../htmlTemplate.test';
 
 function callback(source: string, name: string) {
   let start = source.indexOf(`function ${name}(`);
@@ -32,17 +33,42 @@ function populateFixture() {
   const template = design();
   const env: any = { template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
     fields: htmlTemplateFields(template as any), values: { customer: 'Typed <AB> & Co' }, name: 'Typed draft name',
+    sections: {}, sectionDefinitions: [],
     approved: true, loading: false, busy: false, navigating: false, createdDocument: null, creationUncertain: false,
     disposed: false, readRevision: 0, error: null, needsRefresh: false, dirty: true,
     current: () => !env.disposed && env.template.id === env.sourceID,
-    htmlTemplateFields, htmlValuesForSubmission, APIError,
+    htmlTemplateFields, htmlValuesForSubmission, htmlProfileSectionValues, APIError,
     getTemplate: (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind: 'get', args, resolve, reject })),
     createHTMLTemplateDocument: (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind: 'create', args, resolve, reject })),
     onCreated: (doc: any) => created.push(doc), onDirtyChange: () => {}, onBusyChange: () => {},
     window: { confirm: () => false },
   };
+  Object.defineProperty(env, 'profileIssues', { get: () => env.design.html_master_json?.contract_profile ? htmlProfileIssues(env.design.html_master_json.contract_profile, env.values, env.sections) : [] });
   return { env, calls, created, actions: bind('./HtmlTemplatePopulate.svelte', ['adoptDesign', 'refreshDesign', 'useUpdatedDesign', 'create', 'openCreatedDocument', 'protectNavigation'], env) };
 }
+
+test('contract populate rejects conflicting printed representative identities before creation without dispatching recipient edits', async () => {
+  for (const conflict of ['email', 'company', 'authority']) {
+    const state = populateFixture(), template = contractTemplateFixture();
+    state.env.design = template; state.env.fields = htmlTemplateFields(template); state.env.values = { ...(template.variables_json as Record<string, string>) };
+    state.env.sections = { scope_text: 'Reviewed scope.' };
+    if (conflict === 'email') state.env.values.customer_representative_email = state.env.values.provider_representative_email;
+    if (conflict === 'company') state.env.values.customer_company_id = state.env.values.provider_company_id;
+    if (conflict === 'authority') state.env.values.customer_representative_authority = ' ';
+    const entered = JSON.stringify(state.env.values);
+    await state.actions.create(event);
+    expect(state.calls).toEqual([]); expect(JSON.stringify(state.env.values)).toBe(entered); expect(state.env.error).toBeTruthy();
+  }
+});
+
+test('human populated essential section uses its declaration key, accepts blank default with explicit text, and blocks blank or stale drafts', async () => {
+  const state = populateFixture(), template = contractTemplateFixture(); template.html_master_json!.sections![0].default_text = '';
+  state.actions.adoptDesign(template); state.env.sections.scope_text = 'Explicit human-proposed service scope.';
+  const pending = state.actions.create(event); expect(state.calls[0].args[1].sections).toEqual({ scope_text: 'Explicit human-proposed service scope.' });
+  expect(state.calls[0].args[1].sections.scope).toBeUndefined(); state.calls[0].reject(new APIError(400, 'Stopped for protocol test')); await pending;
+  const entered = state.env.sections.scope_text; state.env.needsRefresh = true; await state.actions.create(event); expect(state.calls).toHaveLength(1); expect(state.env.sections.scope_text).toBe(entered);
+  state.env.needsRefresh = false; state.env.sections.scope_text = ' '; await state.actions.create(event); expect(state.calls).toHaveLength(1); expect(state.env.error).toContain('scope');
+});
 function createdResult() {
   return { document: { id: 'doc', org_id: 'org', template_id: 'design', source_kind: 'pdf', has_html_source: true,
     html_review_required: true, status: 'draft' }, page_count: 1, review_required: true };

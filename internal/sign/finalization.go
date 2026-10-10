@@ -23,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/storage"
 )
@@ -118,6 +119,17 @@ func (e *Engine) claimDocumentFinalizing(ctx context.Context, conn *pgxpool.Conn
 	if locked.Status == "finalizing" {
 		if err := validateFinalizationMode(locked, mode); err != nil {
 			return nil, err
+		}
+		// Recovery must retain the independently declared contract parties even
+		// when an earlier process already committed the finalizing state.
+		parties, err := htmlsource.ContractParties(locked)
+		if err != nil {
+			return nil, err
+		}
+		if len(parties) != 0 {
+			if _, err := e.requiredRolesForFinalization(ctx, q, locked, mode); err != nil {
+				return nil, err
+			}
 		}
 		if !locked.CompletionEffectiveAtBound {
 			return nil, errors.New("claim finalization: completion-effective timestamp is not bound")
@@ -275,6 +287,9 @@ func validateEnvelopeChildrenFinalizationFreeze(parent *generated.Document, expe
 func validateFinalizationMode(doc *generated.Document, mode string) error {
 	if doc == nil {
 		return errors.New("finalization: document unavailable")
+	}
+	if _, err := htmlsource.ContractParties(doc); err != nil {
+		return err
 	}
 	switch mode {
 	case "signature":
@@ -707,11 +722,28 @@ func (e *Engine) resumeDocumentFinalization(ctx context.Context, conn *pgxpool.C
 	if conn == nil || e.Queries == nil || e.Storage == nil || e.Audit == nil {
 		return nil, false, errors.New("resume finalization: dependencies unavailable")
 	}
+	if doc == nil || doc.Status != "finalizing" {
+		return nil, false, ErrDocumentRevisedDuringFinalize
+	}
+	q := generated.New(conn)
+	intent, err := q.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("resume finalization: load intent: %w", err)
+	}
+	// Every caller, including a direct recovery invocation, must recheck the
+	// current named parties, ceremony mode and captured signatures under the
+	// parent lock before version compatibility work or object retention. The
+	// finalizing claim keeps legacy readiness semantics while validating both
+	// independently bound parties for reviewed contracts.
+	doc, err = e.claimDocumentFinalizing(ctx, conn, doc.OrgID, doc.ID, intent.Mode)
+	if err != nil {
+		return nil, false, err
+	}
 	if err := e.validateFrozenDocumentFamily(ctx, doc); err != nil {
 		return nil, false, fmt.Errorf("resume finalization: %w", err)
 	}
-	q := generated.New(conn)
-	var err error
 	doc, err = e.ensureDocumentSourceVersions(ctx, doc)
 	if err != nil {
 		return nil, false, err
@@ -728,12 +760,6 @@ func (e *Engine) resumeDocumentFinalization(ctx context.Context, conn *pgxpool.C
 			return nil, false, err
 		}
 		signatureDocuments = append(signatureDocuments, children...)
-	}
-	intent, err := q.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("resume finalization: load intent: %w", err)
 	}
 	intent, err = ensureFinalizationIntentVersions(ctx, q, e.Storage, intent)
 	if err != nil {

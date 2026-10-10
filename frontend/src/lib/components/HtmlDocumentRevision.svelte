@@ -2,12 +2,12 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getDocument, getHTMLDocumentSource, reviseHTMLDocument, type DocumentResponse, type HTMLDocumentSource } from '$lib/api/client';
-  import { advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, htmlUUID, revisionDraft, verifiedHTMLRevision } from '$lib/htmlRevision';
+  import { advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionGroups, htmlRevisionInput, htmlUUID, revisionDraft, verifiedHTMLRevision } from '$lib/htmlRevision';
 
   type Identity = Awaited<ReturnType<typeof getMe>>;
   type Navigation = { cancel: () => void; willUnload: boolean; from: { url: URL } | null; to: { url: URL } | null };
-  let { document, onRevised, onStateChange }: { document: DocumentResponse; onRevised: (updated: DocumentResponse) => boolean | void;
-    onStateChange?: (blocked: boolean) => void } = $props();
+  let { document, onRevised, onStateChange, onSourceChange }: { document: DocumentResponse; onRevised: (updated: DocumentResponse) => boolean | void;
+    onStateChange?: (blocked: boolean) => void; onSourceChange?: (source: HTMLDocumentSource | null) => void } = $props();
   const sourceID = untrack(() => document.id), sourceOrg = untrack(() => document.org_id);
   let retained = $state<HTMLDocumentSource | null>(null);
   let values = $state<Record<string, string>>({}), sections = $state<Record<string, string>>({}), summary = $state('');
@@ -27,6 +27,7 @@
     && retained.updated_at === document.updated_at && retained.html_source_commitment === document.html_source_commitment
     && retained.pdf_sha256 === document.pdf_sha256 && retained.materialization_revision === document.html_materialization_revision);
   const canSave = $derived(current() && document.status === 'draft' && authority && retained?.can_edit && observationCurrent && !needsRefresh && !uncertain && !busy && !loading);
+  const valueGroups = $derived(retained ? htmlRevisionGroups(retained) : []);
   $effect(() => { reconcileObservation(); });
   $effect(() => { reportRevisionState(); });
 
@@ -38,7 +39,8 @@
   }
   function reportRevisionState() {
     const blocked = dirty || busy || loading || needsRefresh || uncertain || !retained || !observationCurrent || !me;
-    untrack(() => onStateChange?.(blocked));
+    const verified = !blocked ? retained : null;
+    untrack(() => { onStateChange?.(blocked); onSourceChange?.(verified); });
   }
 
   function identity(next: Identity): Identity {
@@ -135,7 +137,7 @@
   function protectUnload(event: BeforeUnloadEvent) { if (dirty || busy || uncertain) { event.preventDefault(); event.returnValue = ''; } }
   beforeNavigate(protectNavigation);
   onMount(() => { void loadInitial(); window.addEventListener('beforeunload', protectUnload); return () => window.removeEventListener('beforeunload', protectUnload); });
-  onDestroy(() => { disposed = true; operation++; onStateChange?.(true); });
+  onDestroy(() => { disposed = true; operation++; onStateChange?.(true); onSourceChange?.(null); });
 </script>
 
 <section class="card p-6 mb-6 space-y-4" aria-label="Revise HTML document">
@@ -151,13 +153,19 @@
     <button type="button" class="btn btn-secondary" disabled={busy} onclick={adoptLatest}>Load saved HTML revision</button></div>{/if}
   {#if retained}
     <p class="text-xs text-text-secondary">Retained template version {retained.template_version} · PDF revision {retained.materialization_revision}</p>
+    {#if retained.contract_profile}<div class="border border-border-light rounded-md p-4 text-sm space-y-2">
+      <p class="font-medium">Reviewed {retained.contract_profile.kind === 'proposal' ? 'proposal' : 'ordinary B2B services'} profile · version {retained.contract_profile.version}</p>
+      <p>Both parties sign. Representative names and email addresses come from these printed values. Changing them updates the intended signer, renders a fresh PDF and clears review and signature placement. Declared identity and authority are assertions; Hash does not independently verify them or determine legal sufficiency.</p>
+    </div>{/if}
     {#if !retained.can_edit || document.status !== 'draft'}<p role="note" class="text-sm">This document cannot currently be revised here. If a recipient has entered a field value, signed or accepted, preserve that evidence and create a superseding document instead.</p>
     {:else if !authority}<p role="note" class="text-sm">The original sender or an owner must revise this document.</p>{/if}
     <form onsubmit={save} class="space-y-4">
       <fieldset disabled={!canSave} class="space-y-4 min-w-0">
-        {#each retained.values as field (field.name)}<label class="block text-sm break-words">Document {field.name.replaceAll('_', ' ')}{field.required ? ' (required)' : ''}
-          <textarea bind:value={values[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea>
-          <span class="text-xs text-text-secondary">Up to {field.max_chars} characters.</span></label>{/each}
+        {#each valueGroups as group (group.id)}<section class="space-y-3" aria-label={group.label}><h3 class="font-medium">{group.label}</h3>
+          {#each group.values as field (field.name)}<label class="block text-sm break-words">{field.label}{field.required ? ' (required)' : ''}
+            <textarea bind:value={values[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea>
+            <span class="text-xs text-text-secondary">Up to {field.max_chars} characters.</span></label>{/each}
+        </section>{/each}
         {#each retained.sections as section (section.name)}<div class="space-y-2"><label class="block text-sm break-words">Document wording: {section.name.replaceAll('_', ' ')}
           <textarea bind:value={sections[section.name]} rows="5" maxlength={section.max_chars * 2} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea></label>
           <details class="text-xs text-text-secondary"><summary>Approved template wording</summary><p class="whitespace-pre-wrap break-words mt-2">{section.default_text}</p></details>

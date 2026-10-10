@@ -1741,6 +1741,12 @@ func validateSendRecipients(doc *generated.Document, envelopeRoles []string, rec
 	if doc == nil {
 		return ErrDocumentNotFound
 	}
+	// For reviewed HTML contracts the approved party declaration, rather than
+	// the remaining editable recipient rows, owns the required signing set.
+	// This check precedes the acknowledgement branch as well.
+	if err := htmlsource.ValidateContractParties(doc, recs); err != nil {
+		return err
+	}
 	for _, rec := range recs {
 		if rec == nil {
 			return fmt.Errorf("%w: missing recipient row", ErrInvalidRecipient)

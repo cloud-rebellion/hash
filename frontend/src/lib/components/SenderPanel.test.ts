@@ -4,7 +4,7 @@ import { sameRecipientDraft } from './senderDraft';
 
 const source = readFileSync(new URL('./SenderPanel.svelte', import.meta.url), 'utf8');
 const names = ['captureScope', 'isCurrent', 'currentForm', 'recipientDraftChanged', 'hasMeaningfulDraft', 'confirmFormReplacement',
-  'changeDocLocale', 'refresh', 'initializePanel', 'openAdd', 'openEdit', 'closeForm', 'submitForm', 'remove', 'send', 'remind', 'voidDoc', 'copyLink'];
+  'intendedPartyConflicts', 'refreshSourceRecipients', 'changeDocLocale', 'refresh', 'initializePanel', 'openAdd', 'openEdit', 'closeForm', 'submitForm', 'remove', 'send', 'remind', 'voidDoc', 'copyLink'];
 function callback(name: string): string {
   let start = source.indexOf(`function ${name}(`);
   if (source.slice(start - 6, start) === 'async ') start -= 6;
@@ -27,6 +27,7 @@ function fixture() {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
     requiresSignature: true, reviewRequired: false, revisionBlocked: false, signerRoles: [], missingRoles: [], hasParticipant: true,
+    intendedParties: [], recipientIdentityLocked: false, sourceCommitment: '', observedSourceCommitment: '',
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
     recipients: [{ id: 'original', document_id: 'A', name: 'Original', email: 'original@example.test', role: 'signer', locale: 'en', order_index: 0 }],
@@ -43,8 +44,47 @@ function fixture() {
     confirm: () => env.confirmed, prompt: () => 'Audit reason', confirmed: false, SendError: class extends Error {},
     setTimeout, clearTimeout
   };
-  return { env, calls, prompts, recipientChanges, actions: bind(env) };
+  const actions = bind(env);
+  Object.defineProperty(env, 'partyConflicts', { get: () => actions.intendedPartyConflicts() });
+  return { env, calls, prompts, recipientChanges, actions };
 }
+function bindContractParties(state: ReturnType<typeof fixture>) {
+  state.env.recipientIdentityLocked = true;
+  state.env.intendedParties = ['provider', 'customer'].map((slot) => ({ slot, role: slot, recipient_id: slot,
+    name: `${slot} representative`, email: `${slot}@example.test`, company_name: `${slot} company`, company_id: `${slot}-id`, representative_authority: 'Declared director' }));
+  state.env.recipients = state.env.intendedParties.map((party: any, index: number) => ({ id: party.recipient_id, document_id: 'A', role: party.role,
+    name: party.name, email: party.email, locale: 'en', order_index: index }));
+}
+test('both declared parties are checked before any signature field exists and missing or drifting identity blocks send', async () => {
+  for (const drift of ['missing', 'name', 'email', 'role', 'extra_role']) {
+    const state = fixture(); bindContractParties(state); state.env.lawfulBasis = 'contract';
+    if (drift === 'missing') state.env.recipients.pop();
+    if (drift === 'name') state.env.recipients[1].name = 'Different person';
+    if (drift === 'email') state.env.recipients[1].email = 'different@example.test';
+    if (drift === 'role') state.env.recipients[1].role = 'signer';
+    if (drift === 'extra_role') state.env.recipients.push({ ...state.env.recipients[1], id: 'another' });
+    expect(state.env.signatureFields ?? []).toEqual([]); expect(state.actions.intendedPartyConflicts().length).toBeGreaterThan(0);
+    await state.actions.send(); expect(state.calls).toEqual([]);
+  }
+});
+test('bound signer identity cannot be separately added, deleted or rewritten, while email language can be saved', async () => {
+  const state = fixture(); bindContractParties(state); const customer = state.env.recipients[1];
+  state.actions.openAdd(); expect(state.env.showForm).toBe(false);
+  state.env.confirmed = true; await state.actions.remove(customer); expect(state.calls).toEqual([]);
+  state.actions.openEdit(customer); state.env.fName = 'Another name'; await state.actions.submitForm(); expect(state.calls).toEqual([]);
+  state.env.fName = customer.name; state.env.fLocale = 'sv'; const pending = state.actions.submitForm();
+  expect(state.calls[0].args).toEqual(['A', 'customer', { name: customer.name, email: customer.email, role: 'customer', locale: 'sv' }]);
+  state.calls[0].resolve({ ...customer, locale: 'sv' }); await Promise.resolve(); await Promise.resolve();
+  state.calls[1].resolve(state.env.recipients); await pending;
+});
+test('fresh source recipient refresh invalidates old reads and keeps unsaved email-language draft for deliberate reconciliation', async () => {
+  const state = fixture(); bindContractParties(state); state.actions.openEdit(state.env.recipients[1]); state.env.fLocale = 'sv';
+  const old = state.actions.refresh(); state.actions.refreshSourceRecipients('new-source');
+  expect(state.env.fLocale).toBe('sv'); expect(state.env.error).toContain('draft is retained');
+  state.calls[1].resolve([{ ...state.env.recipients[1], name: 'Fresh printed person' }]); await Promise.resolve(); await Promise.resolve();
+  state.calls[0].resolve([{ ...state.env.recipients[1], name: 'Old stale person' }]); await old;
+  expect(state.env.recipients[0].name).toBe('Fresh printed person'); expect(state.env.fLocale).toBe('sv');
+});
 function move(state: ReturnType<typeof fixture>) {
   state.env.documentID = 'B'; state.env.boundDocumentID = 'B'; state.env.$page.params.id = 'B'; state.env.panelRevision++;
   state.env.error = 'Current B error'; state.env.recipientRefreshError = 'Current B refresh';

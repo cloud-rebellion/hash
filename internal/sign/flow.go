@@ -39,6 +39,7 @@ import (
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/i18n"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
@@ -709,6 +710,11 @@ func requireSESTypedSignature(doc *generated.Document) error {
 	if doc == nil || !strings.EqualFold(strings.TrimSpace(doc.RoutingTier), "SES") {
 		return ErrSignatureTierUnavailable
 	}
+	// A reviewed contract's committed signing intent cannot be changed into an
+	// acknowledgement by toggling the mutable document flag.
+	if _, err := htmlsource.ContractParties(doc); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -855,6 +861,10 @@ func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID 
 		return prepared, false, nil
 	}
 	if prepared.Status == "finalizing" && !prepared.RequiresSignature {
+		prepared, err = e.claimDocumentFinalizing(ctx, conn, prepared.OrgID, prepared.ID, "acknowledgement")
+		if err != nil {
+			return nil, false, err
+		}
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: prepared.ID, OrgID: prepared.OrgID,
 		}); ierr == nil {
@@ -967,9 +977,9 @@ func (e *Engine) FinalizeStranded(ctx context.Context, orgID, docID uuid.UUID) e
 	if (doc.Status != "in_progress" && doc.Status != "finalizing") || doc.FinalPdfKey.Valid {
 		return nil
 	}
-	// A finalizing row already passed the locked readiness claim. Route it
-	// straight through the mode-specific resume/rebuild path even when the
-	// process died before it could persist an artifact intent.
+	// A finalizing row already passed the initial readiness claim. Its
+	// mode-specific resume/rebuild path rechecks reviewed contract intent before
+	// touching evidence, including a crash before the artifact intent exists.
 	if doc.Status == "finalizing" {
 		if doc.RequiresSignature {
 			_, _, _, err := e.finalize(ctx, orgID, docID, nil)
@@ -2549,6 +2559,10 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		return "", "", false, fmt.Errorf("finalize block evidence: %w", err)
 	}
 	if doc.Status == "finalizing" {
+		doc, err = e.claimDocumentFinalizing(ctx, conn, doc.OrgID, doc.ID, "signature")
+		if err != nil {
+			return "", "", false, err
+		}
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: doc.ID, OrgID: doc.OrgID,
 		}); ierr == nil {

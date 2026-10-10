@@ -1,9 +1,11 @@
 import type { HTMLTemplateInput, TemplateResponse } from './api/client';
-import { htmlTemplateFields, type HTMLAsset, type HTMLSectionDefinition, type HTMLValueDefinition } from './htmlTemplate';
+import { htmlContractProfile, htmlTemplateFields, requiredHTMLContractTerms, type HTMLAsset, type HTMLContractProfile, type HTMLSectionDefinition, type HTMLValueDefinition } from './htmlTemplate';
 
 export interface AuthorValue extends HTMLValueDefinition { key: number; default_value: string }
 export interface AuthorSection extends HTMLSectionDefinition { key: number }
 export interface HTMLAuthorDraft {
+  schema_version: 1 | 2;
+  contract_profile: HTMLContractProfile | null;
   name: string;
   html: string;
   css: string;
@@ -18,12 +20,18 @@ const MAX_ASSET = 2 * 1024 * 1024;
 const MAX_ASSETS_TOTAL = 8 * 1024 * 1024;
 
 export function blankHTMLAuthorDraft(): HTMLAuthorDraft {
-  return { name: '', html: '', css: '', values: [], sections: [], assets: [] };
+  return { schema_version: 1, contract_profile: null, name: '', html: '', css: '', values: [], sections: [], assets: [] };
+}
+export function blankHTMLContractProfile(kind: HTMLContractProfile['kind'] = 'proposal'): HTMLContractProfile {
+  return { id: 'sales_proposal', version: 1, kind, parties: ['provider', 'customer'].map((slot) => ({
+    slot: slot as 'provider' | 'customer', company_name: '', company_id: '', representative_name: '', representative_email: '', representative_authority: '',
+  })), terms: requiredHTMLContractTerms(kind).map((name) => ({ name, value: '' })) };
 }
 export function draftFromHTMLTemplate(template: TemplateResponse): HTMLAuthorDraft {
   const fields = htmlTemplateFields(template);
   const master = template.html_master_json!;
   const draft: HTMLAuthorDraft = {
+    schema_version: master.schema_version, contract_profile: htmlContractProfile(master),
     name: template.name, html: master.html, css: master.css,
     values: fields.map((field, key) => ({ name: field.name, required: field.required, max_chars: field.max_chars, default_value: field.defaultValue, key })),
     sections: (master.sections ?? []).map((section, key) => ({ ...section, key })),
@@ -34,7 +42,7 @@ export function draftFromHTMLTemplate(template: TemplateResponse): HTMLAuthorDra
 }
 // This is local dirty-state comparison, not the server's canonical commitment.
 export function htmlAuthorFingerprint(draft: HTMLAuthorDraft): string {
-  return JSON.stringify({ name: draft.name, html: draft.html, css: draft.css,
+  return JSON.stringify({ schema_version: draft.schema_version, contract_profile: draft.contract_profile, name: draft.name, html: draft.html, css: draft.css,
     values: draft.values.map((value) => ({ name: value.name, required: value.required, max_chars: value.max_chars, default_value: value.default_value })),
     sections: draft.sections.map((section) => ({ name: section.name, default_text: section.default_text, max_chars: section.max_chars })),
     assets: draft.assets.map((asset) => ({ name: asset.name, media_type: asset.media_type, data_base64: asset.data_base64, sha256: asset.sha256 })) });
@@ -96,7 +104,11 @@ export function htmlAuthorInput(draft: HTMLAuthorDraft): HTMLTemplateInput {
     return { name: asset.name, media_type: asset.media_type, data_base64: asset.data_base64, sha256: asset.sha256 };
   });
   if (total > MAX_ASSETS_TOTAL) throw new Error('The design exceeds the 8 MiB asset total.');
-  const input: HTMLTemplateInput = { name: draft.name, html_master_json: { schema_version: 1, html: draft.html, css: draft.css, values, sections, assets }, variables_json: defaults };
+  const master: HTMLTemplateInput['html_master_json'] = { schema_version: draft.schema_version, html: draft.html, css: draft.css, values, sections, assets };
+  if (draft.contract_profile !== null) master.contract_profile = draft.contract_profile;
+  const profile = htmlContractProfile(master);
+  if (profile) master.contract_profile = profile;
+  const input: HTMLTemplateInput = { name: draft.name, html_master_json: master, variables_json: defaults };
   if (textEncoder.encode(JSON.stringify(input)).length > 12 * 1024 * 1024) throw new Error('The encoded design exceeds 12 MiB.');
   return input;
 }

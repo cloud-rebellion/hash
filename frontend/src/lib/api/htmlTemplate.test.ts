@@ -11,10 +11,10 @@ async function mockedFetch(run: (calls: { path: string; options: RequestInit }[]
   try { await run(calls); } finally { globalThis.fetch = original; }
 }
 
-test('HTML creation uses its exact-pinned route and always omits new section prose; review sends observed PDF pins', async () => {
+test('HTML creation uses its exact-pinned route and omits section overrides unless explicitly supplied; review sends observed PDF pins', async () => {
   await mockedFetch(async (calls) => {
     await createHTMLTemplateDocument('design', { name: 'Reviewed customer draft', expected_template_version: 3,
-      expected_template_content_sha256: 'a'.repeat(64), values: { customer: '<AB> & Co' }, sections: { scope: 'New prose must not dispatch' } } as any);
+      expected_template_content_sha256: 'a'.repeat(64), values: { customer: '<AB> & Co' } });
     expect(calls[0].path).toBe('/api/v1/templates/design/html/documents');
     expect(calls[0].options.credentials).toBe('include');
     expect(JSON.parse(calls[0].options.body as string)).toEqual({ name: 'Reviewed customer draft', expected_template_version: 3,
@@ -22,6 +22,15 @@ test('HTML creation uses its exact-pinned route and always omits new section pro
     await reviewHTMLDocument('document', 'observed-nanosecond-timestamp', 'b'.repeat(64));
     expect(calls[1].path).toBe('/api/v1/documents/document/html/review');
     expect(JSON.parse(calls[1].options.body as string)).toEqual({ expected_updated_at: 'observed-nanosecond-timestamp', expected_pdf_sha256: 'b'.repeat(64) });
+  }, () => Response.json({}));
+});
+
+test('human declared section text is explicitly transported under its real declaration name for fresh PDF review', async () => {
+  await mockedFetch(async (calls) => {
+    await createHTMLTemplateDocument('design', { name: 'Human-reviewed draft', expected_template_version: 3,
+      expected_template_content_sha256: 'a'.repeat(64), values: { customer: 'Customer' }, sections: { service_scope_text: 'Human proposed scope.' } });
+    expect(JSON.parse(calls[0].options.body as string)).toEqual({ name: 'Human-reviewed draft', expected_template_version: 3,
+      expected_template_content_sha256: 'a'.repeat(64), values: { customer: 'Customer' }, sections: { service_scope_text: 'Human proposed scope.' } });
   }, () => Response.json({}));
 });
 

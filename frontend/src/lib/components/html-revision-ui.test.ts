@@ -30,7 +30,7 @@ function fixture() {
     values: { company: 'Negotiated <AB> & Co' }, sections: { scope: 'Human-proposed wording' }, summary: 'Negotiated scope', baseline: '', dirty: true, canSave: true,
     loading: false, busy: false, error: null, needsRefresh: false, uncertain: false, acknowledgedDocument: null, latestDocument: null, latestSource: null,
     APIError, htmlUUID, advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, revisionDraft, verifiedHTMLRevision,
-    onRevised: (d: any) => revised.push(d), window: { confirm: () => false } };
+    onRevised: (d: any) => revised.push(d), onSourceChange: undefined, window: { confirm: () => false } };
   env.current = () => !env.disposed && env.document.id === ID && env.document.org_id === ORG;
   env.fingerprint = () => JSON.stringify({ values: env.values, sections: env.sections, summary: env.summary });
   for (const [name, kind] of [['reviseHTMLDocument', 'write'], ['getHTMLDocumentSource', 'source'], ['getDocument', 'document'], ['getMe', 'identity']]) {
@@ -52,6 +52,17 @@ test('clean same-source review and field metadata release the revision send guar
     expect(f.env.retained.updated_at).toBe(f.env.document.updated_at); expect(f.env.needsRefresh).toBe(false); expect(states).toEqual([false]);
     expect(f.env.retained.values).toBe(retained.values); expect(f.env.retained.sections).toBe(retained.sections);
     expect(f.env.fingerprint()).toBe(inputs); expect(f.env.baseline).toBe(inputs); expect(f.calls).toHaveLength(0);
+  }
+});
+
+test('parent receives only clean verified source and loses identity-edit authority during dirty or stale observations', () => {
+  const f = fixture(), published: any[] = [];
+  f.env.untrack = (run: () => void) => run(); f.env.onSourceChange = (source: any) => published.push(source); f.env.onStateChange = undefined;
+  f.env.dirty = false; f.env.observationCurrent = true;
+  f.actions.reportRevisionState(); expect(published).toEqual([f.env.retained]);
+  for (const flags of [{ dirty: true }, { needsRefresh: true }, { busy: true }, { observationCurrent: false }]) {
+    f.env.dirty = false; f.env.needsRefresh = false; f.env.busy = false; f.env.observationCurrent = true;
+    Object.assign(f.env, flags); f.actions.reportRevisionState(); expect(published.at(-1)).toBeNull();
   }
 });
 

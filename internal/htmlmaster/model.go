@@ -21,33 +21,36 @@ import (
 )
 
 const (
-	SchemaVersion        = 1
-	MaxMasterJSONBytes   = 12 << 20
-	MaxHTMLBytes         = 256 << 10
-	MaxCSSBytes          = 128 << 10
-	MaxAssets            = 16
-	MaxAssetBytes        = 2 << 20
-	MaxTotalAssetBytes   = 8 << 20
-	MaxValueChars        = 8192
-	MaxSectionChars      = 32768
-	MaxDefinitions       = 64
-	MaxMaterializedBytes = 16 << 20
+	SchemaVersion         = 1
+	ContractSchemaVersion = 2
+	MaxMasterJSONBytes    = 12 << 20
+	MaxHTMLBytes          = 256 << 10
+	MaxCSSBytes           = 128 << 10
+	MaxAssets             = 16
+	MaxAssetBytes         = 2 << 20
+	MaxTotalAssetBytes    = 8 << 20
+	MaxValueChars         = 8192
+	MaxSectionChars       = 32768
+	MaxDefinitions        = 64
+	MaxMaterializedBytes  = 16 << 20
 )
 
 var (
-	ErrInvalid       = errors.New("invalid HTML master")
-	ErrLimit         = errors.New("HTML master exceeds limits")
-	ErrMissingValues = errors.New("required HTML master values are missing")
-	namePattern      = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	ErrInvalid            = errors.New("invalid HTML master")
+	ErrLimit              = errors.New("HTML master exceeds limits")
+	ErrMissingValues      = errors.New("required HTML master values are missing")
+	ErrContractIncomplete = errors.New("reviewed contract profile is incomplete or conflicting")
+	namePattern           = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 )
 
 type Master struct {
-	SchemaVersion int       `json:"schema_version"`
-	HTML          string    `json:"html"`
-	CSS           string    `json:"css"`
-	Values        []Value   `json:"values,omitempty"`
-	Sections      []Section `json:"sections,omitempty"`
-	Assets        []Asset   `json:"assets,omitempty"`
+	SchemaVersion   int              `json:"schema_version"`
+	HTML            string           `json:"html"`
+	CSS             string           `json:"css"`
+	Values          []Value          `json:"values,omitempty"`
+	Sections        []Section        `json:"sections,omitempty"`
+	Assets          []Asset          `json:"assets,omitempty"`
+	ContractProfile *ContractProfile `json:"contract_profile,omitempty"`
 }
 
 type Value struct {
@@ -131,7 +134,7 @@ func CanonicalTemplate(masterJSON, defaultVariablesJSON []byte) (TemplateCommitm
 		Defaults json.RawMessage `json:"defaults"`
 	}{result.MasterJSON, result.DefaultsJSON}
 	canonical, _ := json.Marshal(envelope)
-	result.SHA256 = digest("hash.html-template.v1", canonical)
+	result.SHA256 = digest(versionedDomain("hash.html-template", master.SchemaVersion), canonical)
 	return result, nil
 }
 
@@ -185,6 +188,11 @@ func strictJSON(raw []byte, destination any, maxBytes int) error {
 func checkJSONValue(decoder *json.Decoder, depth int, shape reflect.Type) error {
 	if depth > 16 {
 		return ErrLimit
+	}
+	// Optional typed declarations are omitted when absent. Explicit JSON null
+	// remains forbidden, including for pointers, to avoid ambiguous snapshots.
+	for shape.Kind() == reflect.Pointer {
+		shape = shape.Elem()
 	}
 	token, err := decoder.Token()
 	if err != nil {

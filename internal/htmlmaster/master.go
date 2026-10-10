@@ -31,7 +31,7 @@ func (c *Compiled) CanonicalJSON() []byte { return bytes.Clone(c.canonical) }
 func (c *Compiled) Digest() string        { return c.masterDigest }
 
 func Compile(master Master) (*Compiled, error) {
-	if master.SchemaVersion != SchemaVersion {
+	if master.SchemaVersion != SchemaVersion && master.SchemaVersion != ContractSchemaVersion {
 		return nil, invalid("unsupported schema version")
 	}
 	if len(master.HTML) == 0 || len(master.HTML) > MaxHTMLBytes || len(master.CSS) > MaxCSSBytes {
@@ -58,6 +58,9 @@ func Compile(master Master) (*Compiled, error) {
 			return nil, invalid("section definition")
 		}
 		c.sections[section.Name] = section
+	}
+	if err := c.compileContractProfile(&master); err != nil {
+		return nil, err
 	}
 	assets, err := compileAssets(master.Assets)
 	if err != nil {
@@ -119,7 +122,7 @@ func Compile(master Master) (*Compiled, error) {
 	if len(c.canonical) > MaxMasterJSONBytes {
 		return nil, limited("canonical master bytes")
 	}
-	c.masterDigest = digest("hash.html-master.v1", c.canonical)
+	c.masterDigest = digest(versionedDomain("hash.html-master", master.SchemaVersion), c.canonical)
 	return c, nil
 }
 
@@ -151,25 +154,37 @@ func (c *Compiled) validateValues(values map[string]string, requireComplete bool
 	return nil
 }
 
+func (c *Compiled) validateSections(sections map[string]string) error {
+	if len(sections) > MaxDefinitions {
+		return limited("input sections")
+	}
+	for name, text := range sections {
+		definition, found := c.sections[name]
+		if !found {
+			return invalid("unknown section name")
+		}
+		if !validText(text, definition.MaxChars) {
+			return limited("section text: " + name)
+		}
+	}
+	return nil
+}
+
 func (c *Compiled) Materialize(input Input) (Result, error) {
 	var result Result
 	if c == nil {
 		return result, invalid("missing compiled master")
 	}
+	// Profile readiness supplies semantic issue paths before generic required
+	// value checks; both still apply to the same immutable input snapshot.
+	if err := c.requireContractComplete(input); err != nil {
+		return result, err
+	}
 	if err := c.validateValues(input.Values, true); err != nil {
 		return result, err
 	}
-	if len(input.Sections) > MaxDefinitions {
-		return result, limited("input sections")
-	}
-	for name, text := range input.Sections {
-		definition, found := c.sections[name]
-		if !found {
-			return result, invalid("unknown section name")
-		}
-		if !validText(text, definition.MaxChars) {
-			return result, limited("section text: " + name)
-		}
+	if err := c.validateSections(input.Sections); err != nil {
+		return result, err
 	}
 	values, sections := map[string]string{}, map[string]string{}
 	for name := range c.values {
@@ -215,9 +230,9 @@ func (c *Compiled) Materialize(input Input) (Result, error) {
 		Values     map[string]string `json:"values"`
 		Sections   map[string]string `json:"sections"`
 		HTMLDigest string            `json:"html_digest"`
-	}{c.masterDigest, values, sections, digest("hash.html-output.v1", out.Bytes())}
+	}{c.masterDigest, values, sections, digest(versionedDomain("hash.html-output", c.master.SchemaVersion), out.Bytes())}
 	canonical, _ := json.Marshal(envelope)
-	result.ContentDigest = digest("hash.html-materialization.v1", canonical)
+	result.ContentDigest = digest(versionedDomain("hash.html-materialization", c.master.SchemaVersion), canonical)
 	return result, nil
 }
 

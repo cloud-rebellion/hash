@@ -20,6 +20,7 @@
     type DocumentResponse,
     type ChangeRequest,
     type DocComment,
+    type HTMLDocumentSource,
   } from '$lib/api/client';
   import BlockEditor from '$lib/components/BlockEditor/Editor.svelte';
   import RiskPanel from '$lib/components/RiskPanel.svelte';
@@ -32,7 +33,7 @@
   import HtmlPDFReview from '$lib/components/HtmlPDFReview.svelte';
   import HtmlDocumentRevision from '$lib/components/HtmlDocumentRevision.svelte';
   import HtmlDocumentHistory from '$lib/components/HtmlDocumentHistory.svelte';
-  import { htmlUUID } from '$lib/htmlRevision';
+  import { currentHTMLSource, htmlUUID } from '$lib/htmlRevision';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
   let doc = $state<DocumentResponse | null>(null);
@@ -48,6 +49,7 @@
   let showPDFSave = $state(false);
   let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
   let htmlRevisionBlocked = $state(true);
+  let htmlSource = $state.raw<HTMLDocumentSource | null>(null);
   let changeRequests = $state<ChangeRequest[]>([]);
   let revising = $state(false);
   let approvalMode = $state<'accept' | 'auto_apply'>('accept');
@@ -98,9 +100,16 @@
         || doc.html_source_commitment !== updated.html_source_commitment || doc.html_materialization_revision !== updated.html_materialization_revision) {
       pdfSignatureFields = [];
       htmlRevisionBlocked = true;
+      htmlSource = null;
       recipientRevision++;
       showPDFSave = false;
     }
+  }
+  function receiveHTMLSource(source: HTMLDocumentSource | null, scope: DocumentScope) {
+    if (!doc || !isCurrentDocument(scope)) return;
+    if (!source) { htmlSource = null; return; }
+    try { htmlSource = currentHTMLSource(source, doc); }
+    catch { htmlSource = null; htmlRevisionBlocked = true; }
   }
   async function refreshHTMLDocument() {
     const scope = captureDocument();
@@ -127,7 +136,8 @@
 
   async function toggleSignatureMode() {
     const scope = captureDocument();
-    if (!scope || !doc || doc.status !== 'draft' || savingMode || revising || resolvingId) return;
+    if (!scope || !doc || doc.status !== 'draft' || savingMode || revising || resolvingId
+        || (doc.has_html_source && (htmlRevisionBlocked || !htmlSource || htmlSource.contract_profile))) return;
     savingMode = true;
     error = null;
     try {
@@ -323,6 +333,7 @@
     showPDFSave = false;
     pdfSignatureFields = [];
     htmlRevisionBlocked = true;
+    htmlSource = null;
     changeRequests = [];
     revising = false;
     approvalMode = 'accept';
@@ -423,7 +434,8 @@
     {#if doc.status === 'draft' && doc.has_html_source}
       {#key doc.id}
         <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
-          onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }} />
+          onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
+          onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       {/key}
       {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}:${doc.html_source_commitment}`}
         <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked}
@@ -443,10 +455,11 @@
               : 'Bara läsa och acceptera: mottagarna öppnar och klickar Acceptera. Ingen signatur.'}
           </p>
         </div>
-        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode} onclick={toggleSignatureMode}>
+        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
           {savingMode ? 'Sparar…' : doc.requires_signature ? 'Byt till acceptera' : 'Kräv signatur'}
         </button>
       </div>
+      {#if htmlSource?.contract_profile}<p class="text-sm text-text-secondary mb-6" role="note">The reviewed contract design requires both parties to sign. Its ceremony cannot be changed to acknowledgement.</p>{/if}
     {/if}
 
     {#if doc.status === 'changes_requested'}
@@ -552,6 +565,9 @@
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
         revisionBlocked={doc.has_html_source === true && htmlRevisionBlocked}
+        intendedParties={htmlSource?.contract_parties ?? []}
+        recipientIdentityLocked={doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile)}
+        sourceCommitment={doc.html_source_commitment ?? ''}
         defaultLocale={doc.default_locale}
         signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : pdfSignatureFields}
         onStatusChange={(next) => receiveStatus(next, documentScope)}

@@ -9,19 +9,27 @@ import (
 	"sort"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// RequiredRoles resolves the legal signing parties from the actual placed
-// fields, never from a historical template or a recipient's display order.
+// RequiredRoles resolves signing parties from actual placed fields and a
+// reviewed HTML contract's independent pinned party declaration, never from a
+// mutable live template or a recipient's display order.
 // Callers hold the document lock at mutation/finalization boundaries. A zero
 // pageCount permits role rechecks after send; stamping checks the exact source
 // page range again before producing the final artifact.
 func RequiredRoles(doc *generated.Document, rows []*generated.Recipient, fields []*generated.DocumentField, pageCount int) ([]string, error) {
 	if doc == nil || doc.SourceKind != "pdf" || !doc.RequiresSignature || doc.IsEnvelope {
 		return nil, invalid("standalone signature-required PDF is required")
+	}
+	// Reviewed HTML contracts declare their intended parties independently of
+	// the editable recipient and field lists. Removing both a party and its
+	// placed field must not reduce the signatures needed for that contract.
+	if err := htmlsource.ValidateContractParties(doc, rows); err != nil {
+		return nil, invalid("reviewed contract parties: %v", err)
 	}
 	if len(rows) == 0 || len(rows) > MaxParties || len(fields) == 0 || len(fields) > MaxFields {
 		return nil, invalid("PDF needs bounded recipients and placed signature fields")

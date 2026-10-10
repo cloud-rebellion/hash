@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { htmlUUID } from '../htmlRevision';
+import { currentHTMLSource, htmlUUID } from '../htmlRevision';
 
 const source = readFileSync(new URL('../../routes/documents/[id]/+page.svelte', import.meta.url), 'utf8');
 const start = source.indexOf('  type DocumentScope');
@@ -8,7 +8,7 @@ const end = source.indexOf('  $effect(() =>', start);
 const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end));
 const bind = new Function('env', `with(env) { ${code}; return {
   loadDocument, loadComments, sendComment, loadChangeRequests, resolveCr, revise,
-  toggleSignatureMode, receiveEditorDocument, receiveStatus, changeDefaultLocale, resetRouteState
+  toggleSignatureMode, receiveHTMLSource, receiveEditorDocument, receiveStatus, changeDefaultLocale, resetRouteState
 }; }`);
 function document(id: string, status = 'changes_requested') {
   return { id, name: id, status, updated_at: `${id}-timestamp`, source_kind: 'blocks', requires_signature: true, blocks_json: { blocks: [{ text: `${id} content` }] } };
@@ -19,12 +19,12 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
-    showPDFSave: false, pdfSignatureFields: [], recipientRevision: 0, htmlRevisionBlocked: true,
+    showPDFSave: false, pdfSignatureFields: [], recipientRevision: 0, htmlRevisionBlocked: true, htmlSource: null,
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
     postingComment: false, commentLoadRevision: 0, commentRefreshError: null, savingMode: false,
     changeRequestRefreshError: null, refreshingChanges: false, savingApprovalMode: false, changeRequestLoadRevision: 0,
-    templateFlashTimer: null, htmlUUID, getMe: async () => ({ email: 'owner@example.test', change_approval_mode: 'accept' }),
+    templateFlashTimer: null, htmlUUID, currentHTMLSource, getMe: async () => ({ email: 'owner@example.test', change_approval_mode: 'accept' }),
     getDocument: pending('getDocument'), listComments: pending('listComments'), postComment: pending('postComment'),
     listChangeRequests: pending('listChangeRequests'), approveChangeRequest: pending('approve'), denyChangeRequest: pending('deny'),
     reviseDocument: pending('revise'), updateDocument: pending('update'), createBlocksTemplate: pending('template'),
@@ -32,6 +32,18 @@ function fixture() {
   };
   return { env, calls, actions: bind(env) };
 }
+
+test('unverified HTML source and declared contract signing intent block acknowledgement downgrade before dispatch', async () => {
+  for (const mode of ['unverified', 'dirty', 'contract']) {
+    const state = fixture(); state.env.doc = { ...document('A', 'draft'), has_html_source: true };
+    state.env.htmlRevisionBlocked = mode === 'dirty';
+    state.env.htmlSource = mode === 'unverified' ? null : { contract_profile: mode === 'contract' ? { id: 'profile' } : undefined };
+    await state.actions.toggleSignatureMode(); expect(state.calls).toEqual([]);
+  }
+  const legacy = fixture(); legacy.env.doc = { ...document('A', 'draft'), has_html_source: true }; legacy.env.htmlRevisionBlocked = false;
+  legacy.env.htmlSource = {}; const pending = legacy.actions.toggleSignatureMode();
+  expect(legacy.calls[0].kind).toBe('update'); legacy.calls[0].resolve({ ...legacy.env.doc, requires_signature: false }); await pending;
+});
 function move(state: ReturnType<typeof fixture>, id: string) {
   state.env.$page.params.id = id;
   state.env.routeRevision++;

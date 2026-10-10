@@ -220,9 +220,14 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	if err != nil {
 		return nil, 0, err
 	}
+	bindings, err := createHTMLContractParties(ctx, q, doc, compiled, htmlmaster.Input{Values: values, Sections: in.Sections})
+	if err != nil {
+		return nil, 0, err
+	}
 	provenance, err := htmlsource.New(htmlsource.Input{TemplateID: templateID, TemplateVersion: revision.Version,
 		TemplateContentSHA256: content.SHA256, MasterJSON: content.MasterJSON, DefaultVarsJSON: content.DefaultsJSON,
-		Values: values, Sections: in.Sections, TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time}, doc)
+		Values: values, Sections: in.Sections, TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time,
+		PartyBindings: bindings}, doc)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -246,7 +251,8 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	}
 	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: audit.KindDocumentCreated,
 		Payload: map[string]any{"source_kind": "pdf", "authoring_kind": "html", "template_id": templateID, "template_version": revision.Version,
-			"template_content_sha256": content.SHA256, "html_source_commitment": sourceCommitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "review_required": true, "changed_sections": rendered.ChangedSections}})
+			"template_content_sha256": content.SHA256, "html_source_commitment": sourceCommitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "review_required": true, "changed_sections": rendered.ChangedSections,
+			"contract_party_bindings": bindings, "contract_profile_digest": compiled.ProfileDigest()}})
 	if err != nil {
 		return nil, 0, err
 	}

@@ -504,6 +504,13 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing := guard.Document
+	if in.RequiresSignature != nil && !*in.RequiresSignature {
+		parties, err := htmlsource.ContractParties(existing)
+		if err != nil || len(parties) != 0 {
+			writeError(w, http.StatusConflict, "this reviewed contract requires both intended parties to sign")
+			return
+		}
+	}
 
 	if !existing.UpdatedAt.Valid || !existing.UpdatedAt.Time.Equal(expected) {
 		writeError(w, http.StatusPreconditionFailed, "Document changed since this edit began. Download your local draft, then reload and review the latest document.")

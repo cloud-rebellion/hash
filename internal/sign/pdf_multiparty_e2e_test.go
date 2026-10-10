@@ -181,6 +181,7 @@ func TestNamedPartyPDFNonA4AndRotatedGeometryE2E(t *testing.T) {
 
 func multipartySourcePDF(t *testing.T, paper string, rotation int) []byte {
 	t.Helper()
+	pdfapi.DisableConfigDir()
 	conf := pdfmodel.NewDefaultConfiguration()
 	conf.ValidationMode = pdfmodel.ValidationRelaxed
 	position := 720
@@ -348,22 +349,27 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 }
 
 type multipartyPDFFixture struct {
-	ctx          context.Context
-	pool         *pgxpool.Pool
-	q            *generated.Queries
-	engine       *Engine
-	orgID, docID uuid.UUID
-	sourceKey    string
-	source       storage.StoredObject
-	names        []string
-	tokens       []string
-	store        *multipartyVersionStore
-	rendererFail atomic.Bool
-	htmlMu       sync.Mutex
-	html         []string
+	ctx              context.Context
+	pool             *pgxpool.Pool
+	q                *generated.Queries
+	engine           *Engine
+	orgID, docID     uuid.UUID
+	sourceKey        string
+	source           storage.StoredObject
+	names            []string
+	tokens           []string
+	store            *multipartyVersionStore
+	rendererFail     atomic.Bool
+	rendererRequests atomic.Int64
+	htmlMu           sync.Mutex
+	html             []string
 }
 
 func newMultipartyPDFE2E(t *testing.T, legacy bool, sourceBodies ...[]byte) *multipartyPDFFixture {
+	return newMultipartyPDFE2EWithDraft(t, legacy, nil, sourceBodies...)
+}
+
+func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multipartyPDFFixture, *generated.Document) *generated.Document, sourceBodies ...[]byte) *multipartyPDFFixture {
 	t.Helper()
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {
@@ -442,6 +448,9 @@ func newMultipartyPDFE2E(t *testing.T, legacy bool, sourceBodies ...[]byte) *mul
 			}
 		}
 	}
+	if prepare != nil {
+		doc = prepare(f, doc)
+	}
 	logger := audit.New(q, pool)
 	sender := &sendengine.Engine{Pool: pool, Queries: q, Storage: store, Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", OrgName: org.Name}
 	result, err := sender.Send(ctx, sendengine.Actor{UserID: &user.ID, OrgID: org.ID, Via: "rest", LawfulBasis: "contract", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return nil }}, doc.ID)
@@ -454,6 +463,7 @@ func newMultipartyPDFE2E(t *testing.T, legacy bool, sourceBodies ...[]byte) *mul
 	fixturePDF := onePagePDF(t, "Synthetic renderer fixture")
 	target := strings.TrimRight(os.Getenv("HASH_E2E_GOTENBERG_URL"), "/")
 	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.rendererRequests.Add(1)
 		if f.rendererFail.Load() {
 			http.Error(w, "synthetic renderer outage", http.StatusServiceUnavailable)
 			return

@@ -193,7 +193,7 @@ func (s *Server) writeHTMLDocumentRevisionError(w http.ResponseWriter, err error
 		writeError(w, http.StatusConflict, "document source changed or is inconsistent; reload and review its current PDF")
 		return
 	}
-	if errors.Is(err, htmlmaster.ErrInvalid) || errors.Is(err, htmlmaster.ErrLimit) || errors.Is(err, htmlmaster.ErrMissingValues) {
+	if errors.Is(err, htmlmaster.ErrInvalid) || errors.Is(err, htmlmaster.ErrLimit) || errors.Is(err, htmlmaster.ErrMissingValues) || errors.Is(err, htmlmaster.ErrContractIncomplete) {
 		writeError(w, http.StatusBadRequest, "declared values or sections are invalid or exceed their limits")
 		return
 	}
@@ -300,6 +300,20 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// Append captures the old source, fields, review and recipient assertions
+	// before projecting the fresh PDF. Change identities only after that capture
+	// so the retained old revision never contains the new representative.
+	partiesChanged, err := updateHTMLContractParties(commitCtx, q, guard.Document, input)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	currentRecipients, err := q.ListRecipientsByDocument(commitCtx, id)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if err := htmlsource.ValidateContractParties(updated, currentRecipients); err != nil {
+		return nil, 0, 0, err
+	}
 	updated, err = q.UpdateHTMLMaterializationRedactionReport(commitCtx, generated.UpdateHTMLMaterializationRedactionReportParams{DocumentID: id, OrgID: actor.OrgID, MaterializationID: row.ID, ExpectedUpdatedAt: updated.UpdatedAt, MetadataRedactionReport: report})
 	if err != nil {
 		return nil, 0, 0, err
@@ -307,7 +321,7 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 	if _, err := versions.New(q).Snapshot(commitCtx, versions.SnapshotInput{DocumentID: id, OrgID: actor.OrgID, Name: updated.Name, SourceKind: updated.SourceKind, VariablesJS: updated.VariablesJson, HTMLSourceJSON: source, HTMLMaterializationID: updated.HtmlCurrentMaterializationID, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "HTML contract text revised"}); err != nil {
 		return nil, 0, 0, err
 	}
-	pending, err := s.Audit.LogTx(commitCtx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: map[string]any{"html_materialization_revision": row.Sequence, "html_source_commitment": updated.HtmlEffectiveSourceCommitment.String, "review_required": true, "placement_reset": true, "changed_sections": rendered.ChangedSections}})
+	pending, err := s.Audit.LogTx(commitCtx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: map[string]any{"html_materialization_revision": row.Sequence, "html_source_commitment": updated.HtmlEffectiveSourceCommitment.String, "review_required": true, "placement_reset": true, "changed_sections": rendered.ChangedSections, "contract_party_identities_updated": partiesChanged}})
 	if err != nil {
 		return nil, 0, 0, err
 	}

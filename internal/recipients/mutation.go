@@ -14,6 +14,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/magictoken"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -59,7 +60,10 @@ type Patch struct {
 
 func (e *MutationEngine) Create(ctx context.Context, actor MutationActor, docID uuid.UUID, input Values) (*generated.Recipient, error) {
 	return e.mutate(ctx, actor, docID, true, audit.KindRecipientCreated,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.Recipient, error) {
+		func(ctx context.Context, q *generated.Queries, doc *generated.Document, parties []htmlsource.ContractParty) (*generated.Recipient, error) {
+			if len(parties) != 0 {
+				return nil, invalid("contract_party", "reviewed contract recipients are created from the printed party information; use a contract revision")
+			}
 			if input.Role == "" {
 				input.Role = "signer"
 			}
@@ -97,13 +101,16 @@ func (e *MutationEngine) Create(ctx context.Context, actor MutationActor, docID 
 
 func (e *MutationEngine) Update(ctx context.Context, actor MutationActor, docID, recipientID uuid.UUID, patch Patch) (*generated.Recipient, error) {
 	return e.mutate(ctx, actor, docID, false, audit.KindRecipientUpdated,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.Recipient, error) {
+		func(ctx context.Context, q *generated.Queries, doc *generated.Document, parties []htmlsource.ContractParty) (*generated.Recipient, error) {
 			existing, err := mutationRecipient(ctx, q, actor.OrgID, doc.ID, recipientID)
 			if err != nil {
 				return nil, err
 			}
 			values, err := NormalizePatch(existing, patch)
 			if err != nil {
+				return nil, err
+			}
+			if err := validateContractRecipientUpdate(parties, existing, values); err != nil {
 				return nil, err
 			}
 			updated, err := q.UpdateRecipient(ctx, generated.UpdateRecipientParams{
@@ -119,16 +126,38 @@ func (e *MutationEngine) Update(ctx context.Context, actor MutationActor, docID,
 
 func (e *MutationEngine) Delete(ctx context.Context, actor MutationActor, docID, recipientID uuid.UUID) (*generated.Recipient, error) {
 	return e.mutate(ctx, actor, docID, false, audit.KindRecipientDeleted,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.Recipient, error) {
+		func(ctx context.Context, q *generated.Queries, doc *generated.Document, parties []htmlsource.ContractParty) (*generated.Recipient, error) {
 			existing, err := mutationRecipient(ctx, q, actor.OrgID, doc.ID, recipientID)
 			if err != nil {
 				return nil, err
+			}
+			if len(parties) != 0 {
+				return nil, invalid("contract_party", "required contract recipients cannot be deleted; use a contract revision")
 			}
 			if _, err := q.DeleteRecipient(ctx, generated.DeleteRecipientParams{ID: existing.ID, DocumentID: doc.ID}); err != nil {
 				return nil, fmt.Errorf("delete recipient: %w", err)
 			}
 			return existing, nil
 		})
+}
+
+// Generic recipient editing cannot silently change who the printed contract
+// names. The contract revision path owns changes to printed identities and the
+// matching bound recipients; ordinary routing edits can keep their UUIDs.
+func validateContractRecipientUpdate(parties []htmlsource.ContractParty, existing *generated.Recipient, values Values) error {
+	if len(parties) == 0 {
+		return nil
+	}
+	for _, party := range parties {
+		if existing != nil && existing.ID == party.RecipientID {
+			if existing.Role == party.Role && existing.Name == party.Name && existing.Email == party.Email &&
+				values.Role == existing.Role && values.Name == existing.Name && values.Email == existing.Email {
+				return nil
+			}
+			return invalid("contract_party", "recipient identity must match the printed contract; use a contract revision")
+		}
+	}
+	return invalid("contract_party", "recipient is not bound to an intended contract party")
 }
 
 func NormalizePatch(existing *generated.Recipient, patch Patch) (Values, error) {
@@ -173,7 +202,7 @@ func mutationRecipient(ctx context.Context, q *generated.Queries, orgID, docID, 
 }
 
 func (e *MutationEngine) mutate(ctx context.Context, actor MutationActor, docID uuid.UUID, quota bool, kind string,
-	mutation func(context.Context, *generated.Queries, *generated.Document) (*generated.Recipient, error),
+	mutation func(context.Context, *generated.Queries, *generated.Document, []htmlsource.ContractParty) (*generated.Recipient, error),
 ) (*generated.Recipient, error) {
 	if actor.UserID == uuid.Nil || actor.OrgID == uuid.Nil || actor.Authorize == nil {
 		return nil, auth.ErrMutationPermissionRevoked
@@ -233,6 +262,10 @@ func (e *MutationEngine) mutate(ctx context.Context, actor MutationActor, docID 
 	if retained {
 		return nil, ErrDocumentHasEvidence
 	}
+	parties, err := htmlsource.ContractParties(doc)
+	if err != nil {
+		return nil, invalid("contract_party", "contract source is invalid; review the document before editing recipients")
+	}
 	// Recipient deletion cascades assigned fields and clears privacy-request
 	// recipient links; edits also replace the subject's current identifying data.
 	// Keep that state stable during both linked and organization-wide review.
@@ -252,7 +285,7 @@ func (e *MutationEngine) mutate(ctx context.Context, actor MutationActor, docID 
 	if pendingPrivacy {
 		return nil, ErrPendingPrivacyReview
 	}
-	rec, err := mutation(ctx, q, doc)
+	rec, err := mutation(ctx, q, doc, parties)
 	if err != nil {
 		return nil, err
 	}

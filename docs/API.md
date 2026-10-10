@@ -456,8 +456,8 @@ sent documents use their frozen variables.
 
 This source draft adds reusable HTML designs separately from the PDF bytes used
 for signing. It is not a deployed release. Declared-text document revision and
-retained PDF history are described below. Contract-completeness profiles,
-automatic signature-page binding, real-renderer visual acceptance and approved
+retained PDF history and reviewed contract profiles are described below.
+Automatic signature-page binding, real-renderer visual acceptance and approved
 privacy disposal remain pending.
 
 Sender sessions can create `POST /api/v1/templates/html` and edit
@@ -587,6 +587,71 @@ Template and version lists omit the large inline master. Explicit template and
 version reads return it under the existing tenant/session authorization. Metadata
 snapshots preserve the immutable document source. Source and completed template
 approvals cannot be rewritten; migration rollback refuses retained HTML data.
+
+### Reviewed contract profiles and intended parties
+
+An HTML master with `schema_version:2` requires a `contract_profile`. Schema 1
+remains the generic design format with its original canonical commitments; it
+cannot carry a profile. Approval of a schema-2 template covers the profile and
+its exact printed bindings as well as the design, assets and approved defaults.
+Profile changes require a fresh template revision, preview and owner approval.
+
+The profile has `id` (the existing lowercase declaration-name format), `version`
+(1 to 1,000,000), `kind` (`proposal` or `b2b_services`), `parties` and `terms`.
+Exactly two parties use slots `provider` and `customer`. Each party maps
+`company_name`, `company_id`, `representative_name`, `representative_email` and
+`representative_authority` to distinct required printed value declarations.
+Representative names and addresses follow the ordinary recipient bounds and
+validation; their exact casing is preserved. The two addresses and declared
+company identifiers must differ. These are declared identity and authority
+assertions, not external verification.
+
+Each term has a unique `name` and exactly one `value` or `section` reference.
+References are distinct across the profile; up to 16 terms are permitted.
+Proposal profiles require `scope`, `price`, `currency`, `tax`, `payment_terms`
+and `valid_until`. Services profiles require `scope`, `price`, `currency`, `tax`,
+`payment_terms`, `effective_date`, `duration` and `termination`. Every declared
+term must be nonblank, including approved section text or its human override.
+The current owner approval preview supplies value samples and uses saved section
+defaults. Essential sections therefore need reviewed nonblank defaults before
+that preview/approval; explicit section samples for approval are not implemented.
+Human document population and revision can override those defaults as plain text
+and require fresh review of the generated artifact.
+These are engineering checks for reviewed contract designs, not a universal
+legal checklist. Hash does not write missing clauses or prove their visual
+visibility, substantive suitability, authority or legal effect. Exact PDF
+preview and human review remain required.
+
+Instantiating an approved schema-2 design uses the existing HTML document
+endpoint and declared inputs. Within the same authorized quota transaction,
+Hash creates fresh provider/customer recipients from the printed representative
+values. Source schema 2 binds those exact recipient UUIDs to the intended slots,
+approved master, inputs and stored PDF. Both parties must sign; replacing a
+recipient, deleting a party and its field, or switching to acknowledgement
+cannot reduce that requirement. Generic recipient creation/deletion and changes
+to bound name/email/role are refused. Locale/order edits can retain the identity.
+Signature fields still require placement against the current PDF; exact PDF
+review remains a separate step.
+
+The dedicated current and historical source responses include
+`contract_profile`, `contract_profile_digest` and `contract_parties` for these
+documents. Each party includes `slot`, `role`, `recipient_id`, `name`, `email`,
+`company_name`, `company_id` and `representative_authority`. These values come
+from the selected immutable source, including for old revisions; a later live
+template or current recipient row cannot rewrite past assertions. Legacy source
+responses omit these fields.
+
+A human HTML text revision can change a representative's declared name/address.
+The transaction archives the old source, review, fields and recipient assertions
+before updating that same pinned UUID and projecting the new PDF. It expires old
+recipient links when identity changes and clears placement/review. Source,
+recipient updates, history and audit commit together; stale pins, rendering
+failure or revoked authority cannot partially change the intended parties.
+Send and signing recheck both pinned identities. Recovery and finalization also
+require each party's captured signature. Already-finalizing rebuild and resume
+recheck these requirements under the document lock before source-version work,
+rendering or evidence access. Scoped pre-sign delegation and trusted
+per-organization CRM freshness/provenance remain unfinished integration work.
 
 ### Revising declared document text
 

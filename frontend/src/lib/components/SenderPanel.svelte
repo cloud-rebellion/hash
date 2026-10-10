@@ -17,6 +17,7 @@
     type Recipient,
     type SignerLink,
     type LawfulBasis,
+    type HTMLDocumentParty,
   } from '$lib/api/client';
   import { LOCALES } from '$lib/i18n';
   import {
@@ -46,6 +47,9 @@
     requiresSignature?: boolean;
     reviewRequired?: boolean;
     revisionBlocked?: boolean;
+    intendedParties?: HTMLDocumentParty[];
+    recipientIdentityLocked?: boolean;
+    sourceCommitment?: string;
     defaultLocale?: string;
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
@@ -59,6 +63,9 @@
     requiresSignature = true,
     reviewRequired = false,
     revisionBlocked = false,
+    intendedParties = [],
+    recipientIdentityLocked = false,
+    sourceCommitment = '',
     defaultLocale = 'en',
     signatureFields = [],
     onStatusChange,
@@ -68,8 +75,9 @@
 
   // Distinct roles that have a signature field; each needs a recipient to sign.
   const signerRoles = $derived([
-    ...new Set(signatureFields.map((field) => field.role.trim().toLowerCase()).filter(Boolean)),
+    ...new Set([...intendedParties.map((party) => party.role), ...signatureFields.map((field) => field.role.trim().toLowerCase()).filter(Boolean)]),
   ]);
+  const partyConflicts = $derived(intendedPartyConflicts());
   const missingRoles = $derived(
     requiresSignature
       ? signerRoles.filter((role) => !recipients.some((r) => r.role === role))
@@ -129,6 +137,7 @@
   let formRevision = 0;
   let panelRevision = 0;
   let refreshRevision = 0;
+  let observedSourceCommitment = untrack(() => sourceCommitment);
   let disposed = false;
   let initialized = false;
   let boundDocumentID = $state(untrack(() => documentID));
@@ -144,6 +153,19 @@
   function isCurrent(scope: PanelScope): boolean {
     return !disposed && !documentChanged && scope.id === boundDocumentID && scope.id === documentID
       && scope.id === $page.params.id && scope.revision === panelRevision;
+  }
+  function intendedPartyConflicts(): string[] {
+    const issues: string[] = [];
+    for (const party of intendedParties) {
+      const recipient = recipients.find((candidate) => candidate.id === party.recipient_id);
+      if (!recipient) issues.push(`${party.slot === 'provider' ? 'Our company' : 'Customer'} representative is missing.`);
+      else if (recipient.role !== party.role || recipient.name !== party.name || recipient.email !== party.email) {
+        issues.push(`${party.slot === 'provider' ? 'Our company' : 'Customer'} recipient differs from the printed representative.`);
+      }
+      if (recipients.some((candidate) => candidate.role === party.role && candidate.id !== party.recipient_id)) issues.push(`More than one recipient occupies the ${party.slot} signing role.`);
+    }
+    if (intendedParties.length && (intendedParties.length !== 2 || !intendedParties.some((party) => party.slot === 'provider') || !intendedParties.some((party) => party.slot === 'customer'))) issues.push('Both declared signing parties are required.');
+    return issues;
   }
   function currentForm(): RecipientDraft {
     return { editingId, name: fName, email: fEmail, role: fRole, locale: fLocale };
@@ -228,6 +250,7 @@
     if (reminderTimer) clearTimeout(reminderTimer);
     if (copyTimer) clearTimeout(copyTimer);
     initialized = true;
+    observedSourceCommitment = sourceCommitment;
     void refresh();
   }
   $effect(() => {
@@ -243,6 +266,19 @@
       initializePanel(id);
     });
   });
+  $effect(() => {
+    const commitment = sourceCommitment;
+    untrack(() => refreshSourceRecipients(commitment));
+  });
+  function refreshSourceRecipients(commitment: string) {
+    if (!initialized || !captureScope() || commitment === observedSourceCommitment) return;
+    observedSourceCommitment = commitment;
+    panelRevision++; refreshRevision++;
+    saving = false; savingLocale = false; removingID = null; busy = null;
+    if (recipientDraftChanged()) error = 'The printed document changed. Your recipient draft is retained; cancel it and review the current representatives before continuing.';
+    else closeForm(true);
+    void refresh();
+  }
   function discardRetainedDraft() {
     if (!window.confirm('Discard the retained recipient and sending draft and open the current document?')) return;
     initializePanel(documentID);
@@ -269,7 +305,7 @@
   });
 
   function openAdd() {
-    if (!captureScope() || !editable || saving || busy || !confirmFormReplacement()) return;
+    if (!captureScope() || !editable || recipientIdentityLocked || saving || busy || !confirmFormReplacement()) return;
     editingId = null;
     fName = '';
     fEmail = '';
@@ -284,7 +320,8 @@
   }
 
   function openEdit(r: Recipient) {
-    if (!captureScope() || !editable || saving || busy || !recipients.some((recipient) => recipient.id === r.id) || !confirmFormReplacement()) return;
+    if (!captureScope() || !editable || saving || busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))
+        || !recipients.some((recipient) => recipient.id === r.id) || !confirmFormReplacement()) return;
     editingId = r.id;
     fName = r.name;
     fEmail = r.email;
@@ -309,6 +346,13 @@
     if (!fName.trim() || !fEmail.trim()) {
       error = 'Name and email are required.';
       return;
+    }
+    if (recipientIdentityLocked) {
+      const party = intendedParties.find((candidate) => candidate.recipient_id === editingId);
+      if (!party || fName !== party.name || fEmail !== party.email || fRole !== party.role) {
+        error = 'Change the printed representative in document values, then save and review the new PDF. Only email language can change here.';
+        return;
+      }
     }
     saving = true;
     error = null;
@@ -346,7 +390,7 @@
 
   async function remove(r: Recipient) {
     const scope = captureScope();
-    if (!scope || !editable || saving || busy || removingID || !recipients.some((recipient) => recipient.id === r.id)) return;
+    if (!scope || !editable || recipientIdentityLocked || saving || busy || removingID || !recipients.some((recipient) => recipient.id === r.id)) return;
     if (!confirm(`Remove ${r.name} <${r.email}> from this document?`)) return;
     error = null;
     removingID = r.id;
@@ -364,7 +408,7 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked) return;
+    if (!scope || !editable || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked || loading || recipientRefreshError || partyConflicts.length) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
       return;
@@ -490,7 +534,7 @@
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
       <Users class="size-4" /> {modeCopy.sectionTitle}
     </h2>
-    {#if editable}
+    {#if editable && !recipientIdentityLocked}
       <button class="btn btn-secondary text-xs" onclick={openAdd} disabled={documentChanged || saving || !!busy}>
         <Plus class="size-3" /> Add recipient
       </button>
@@ -534,6 +578,13 @@
       This document is {status}. No further sending actions are available.
     {/if}
   </p>
+  {#if intendedParties.length}<div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 space-y-3 text-sm" aria-label="Required contract parties">
+    <p class="font-medium">Both declared parties must sign</p>
+    <p>These representatives match the printed contract. Change identity details in document values and review the fresh PDF; this section can change their email language.</p>
+    {#each intendedParties as party (party.slot)}<div class="space-y-1 break-words"><p><strong>{party.slot === 'provider' ? 'Our company' : 'Customer'}:</strong> {party.company_name} · {party.company_id}</p><p>{party.name} · {party.email}</p><p class="text-xs text-text-secondary">Declared authority: {party.representative_authority}</p></div>{/each}
+    <p class="text-xs text-text-secondary">Identity and authority are declarations, not independent verification. These checks do not establish legal sufficiency.</p>
+    {#if partyConflicts.length && !loading}<ul class="list-disc pl-5 text-warning" role="alert">{#each partyConflicts as issue, index (index)}<li>{issue}</li>{/each}</ul>{/if}
+  </div>{/if}
 
   {#if editable && requiresSignature && signerRoles.length > 0}
     <div class="rounded-md border border-border-light bg-bg-elevated p-3 mb-4 text-sm">
@@ -620,6 +671,7 @@
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Name</span>
           <input
             type="text"
+            disabled={recipientIdentityLocked}
             bind:value={fName}
             placeholder="Jane Andersson"
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -629,6 +681,7 @@
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Email</span>
           <input
             type="email"
+            disabled={recipientIdentityLocked}
             bind:value={fEmail}
             placeholder="jane@example.com"
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -637,6 +690,7 @@
         <label class="text-sm">
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Role</span>
           <select
+            disabled={recipientIdentityLocked}
             bind:value={fRole}
             class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
@@ -717,10 +771,10 @@
             </td>
             {#if editable}
               <td class="text-right whitespace-nowrap">
-                <button class="btn btn-secondary text-xs" aria-label={`Edit ${r.name}`} disabled={documentChanged || saving || !!busy} onclick={() => openEdit(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={recipientIdentityLocked ? `Email language for ${r.name}` : `Edit ${r.name}`} disabled={documentChanged || saving || !!busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))} onclick={() => openEdit(r)}>
                   <Pencil class="size-3" />
                 </button>
-                <button class="btn btn-secondary text-xs" aria-label={`Remove ${r.name}`} disabled={documentChanged || saving || !!busy || !!removingID} onclick={() => remove(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={`Remove ${r.name}`} disabled={recipientIdentityLocked || documentChanged || saving || !!busy || !!removingID} onclick={() => remove(r)}>
                   <Trash2 class="size-3" />
                 </button>
               </td>
@@ -757,13 +811,15 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={revisionBlocked || reviewRequired || documentChanged || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={revisionBlocked || reviewRequired || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
       {#if revisionBlocked}
         <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>
       {:else if reviewRequired}
         <span class="text-xs text-warning">Review the generated PDF above before sending.</span>
+      {:else if partyConflicts.length > 0}
+        <span class="text-xs text-warning">Resolve the declared party conflicts before sending.</span>
       {:else if !hasParticipant}
         <span class="text-xs text-text-muted">{modeCopy.missingParticipant}</span>
       {:else if missingRoles.length > 0}

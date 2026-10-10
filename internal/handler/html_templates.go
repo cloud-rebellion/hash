@@ -302,7 +302,7 @@ func (s *Server) writeHTMLTemplateError(w http.ResponseWriter, operation string,
 		writeError(w, http.StatusConflict, "HTML template revision changed or is unavailable; refresh and review it again")
 		return
 	}
-	if errors.Is(err, htmlmaster.ErrInvalid) || errors.Is(err, htmlmaster.ErrLimit) || errors.Is(err, htmlmaster.ErrMissingValues) {
+	if errors.Is(err, htmlmaster.ErrInvalid) || errors.Is(err, htmlmaster.ErrLimit) || errors.Is(err, htmlmaster.ErrMissingValues) || errors.Is(err, htmlmaster.ErrContractIncomplete) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

@@ -1,4 +1,5 @@
 import type { DocumentResponse, HTMLDocumentRevisionInput, HTMLDocumentRevisionResult, HTMLDocumentSource, HTMLHistoryEntry } from './api/client';
+import { htmlContractProfile, htmlProfileIssues, htmlPartyBindings, htmlPartyLabels } from './htmlTemplate';
 
 const namePattern = /^[a-z][a-z0-9_]{0,63}$/;
 export const htmlSHA256 = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -30,7 +31,45 @@ export function validateHTMLSource(source: HTMLDocumentSource, documentID: strin
   }
   if (new Set(source.changed_sections).size !== source.changed_sections.length || source.changed_sections.some((name) => !names.has(name))
       || source.sections.some((section) => source.changed_sections.includes(section.name) !== (section.text !== section.default_text))) throw new Error('The retained wording changes could not be verified.');
+  if (source.contract_profile !== undefined) {
+    const profile = htmlContractProfile({ schema_version: 2, html: '', css: '', contract_profile: source.contract_profile,
+      values: source.values, sections: source.sections });
+    const values = Object.fromEntries(source.values.map((field) => [field.name, field.text]));
+    const sections = Object.fromEntries(source.sections.map((section) => [section.name, section.text]));
+    if (!profile || !htmlSHA256(source.contract_profile_digest) || !Array.isArray(source.contract_parties) || source.contract_parties.length !== 2
+        || htmlProfileIssues(profile, values, sections).length) throw new Error('The declared contract parties and terms could not be verified against this document.');
+    const ids = new Set<string>();
+    for (const mapping of profile.parties) {
+      const matching = source.contract_parties.filter((party) => party?.slot === mapping.slot), party = matching[0];
+      if (matching.length !== 1 || !party || party.role !== mapping.slot || !htmlUUID(party.recipient_id) || ids.has(party.recipient_id)
+          || party.name !== values[mapping.representative_name] || party.email !== values[mapping.representative_email]
+          || party.company_name !== values[mapping.company_name] || party.company_id !== values[mapping.company_id]
+          || party.representative_authority !== values[mapping.representative_authority]) throw new Error('The intended signers do not match this document’s printed party information.');
+      ids.add(party.recipient_id);
+    }
+  } else if (source.contract_profile_digest !== undefined || (source.contract_parties !== undefined && (!Array.isArray(source.contract_parties) || source.contract_parties.length))) {
+    throw new Error('This document contains party bindings without a reviewed contract profile.');
+  }
   return source;
+}
+export function htmlRevisionGroups(source: HTMLDocumentSource) {
+  const profile = source.contract_profile, used = new Set<string>();
+  if (!profile) return [{ id: 'values', label: 'Document information', values: source.values.map((field) => ({ ...field, label: field.name.replaceAll('_', ' ') })) }];
+  const groups = (['provider', 'customer'] as const).map((slot) => {
+    const party = profile.parties.find((candidate) => candidate.slot === slot)!;
+    return { id: slot as string, label: slot === 'provider' ? 'Our company' : 'Customer', values: htmlPartyBindings.map((binding) => {
+      const field = source.values.find((candidate) => candidate.name === party[binding])!; used.add(field.name);
+      return { ...field, label: htmlPartyLabels[binding] };
+    }) };
+  });
+  const terms = profile.terms.filter((term) => term.value).map((term) => {
+    const field = source.values.find((candidate) => candidate.name === term.value)!; used.add(field.name);
+    return { ...field, label: term.name.replaceAll('_', ' ') };
+  });
+  groups.push({ id: 'terms', label: 'Commercial terms', values: terms });
+  const other = source.values.filter((field) => !used.has(field.name));
+  if (other.length) groups.push({ id: 'other', label: 'Other document information', values: other.map((field) => ({ ...field, label: field.name.replaceAll('_', ' ') })) });
+  return groups;
 }
 export function currentHTMLSource(source: HTMLDocumentSource, document: DocumentResponse): HTMLDocumentSource {
   validateHTMLSource(source, document.id, document.org_id);
@@ -68,6 +107,10 @@ export function htmlRevisionInput(source: HTMLDocumentSource, values: Record<str
     const text = sections[section.name];
     if (!textWithin(text, section.max_chars)) throw new Error(`Enter ${section.name.replaceAll('_', ' ')} wording within ${section.max_chars} characters.`);
     nextSections[section.name] = text;
+  }
+  if (source.contract_profile) {
+    const issues = htmlProfileIssues(source.contract_profile, nextValues, nextSections);
+    if (issues.length) throw new Error(issues[0]);
   }
   if (!textWithin(summary, 500)) throw new Error('Keep the revision summary within 500 characters.');
   const input = { expected_updated_at: source.updated_at, expected_html_source_commitment: source.html_source_commitment, values: nextValues, sections: nextSections, summary };

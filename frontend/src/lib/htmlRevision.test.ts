@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { advanceCleanHTMLObservation, currentHTMLSource, htmlPlacementPins, htmlRevisionInput, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLRevision } from './htmlRevision';
+import { advanceCleanHTMLObservation, currentHTMLSource, htmlPlacementPins, htmlRevisionGroups, htmlRevisionInput, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLRevision } from './htmlRevision';
 import type { DocumentResponse, HTMLDocumentSource } from './api/client';
+import { contractTemplateFixture } from './htmlTemplate.test';
 
 export const documentID = '10000000-0000-4000-8000-000000000001', orgID = '20000000-0000-4000-8000-000000000002';
 export const senderID = '30000000-0000-4000-8000-000000000003', templateID = '40000000-0000-4000-8000-000000000004';
@@ -9,6 +10,15 @@ export function sourceFixture(): HTMLDocumentSource {
     materialization_revision: 1, pdf_sha256: 'b'.repeat(64), page_count: 2, template_id: templateID, template_version: 4,
     template_content_sha256: 'c'.repeat(64), values: [{ name: 'company', required: true, max_chars: 64, text: 'Original <AB> & Co' }],
     sections: [{ name: 'scope', max_chars: 128, text: 'Approved scope', default_text: 'Approved scope' }], changed_sections: [], can_edit: true };
+}
+export function contractSourceFixture(): HTMLDocumentSource {
+  const template = contractTemplateFixture(), master = template.html_master_json!, values = template.variables_json as Record<string, string>, profile = master.contract_profile!;
+  return { ...sourceFixture(), contract_profile: profile, contract_profile_digest: 'f'.repeat(64),
+    values: master.values!.map((field) => ({ ...field, text: values[field.name] })),
+    sections: master.sections!.map((section) => ({ ...section, text: section.default_text })),
+    contract_parties: profile.parties.map((party, index) => ({ slot: party.slot, role: party.slot, recipient_id: `${index + 5}0000000-0000-4000-8000-00000000000${index + 5}`,
+      name: values[party.representative_name], email: values[party.representative_email], company_name: values[party.company_name],
+      company_id: values[party.company_id], representative_authority: values[party.representative_authority] })) };
 }
 export function documentFixture(source = sourceFixture()): DocumentResponse {
   return { id: documentID, org_id: orgID, sender_id: senderID, template_id: templateID, source_kind: 'pdf', status: 'draft', has_html_source: true,
@@ -95,4 +105,51 @@ test('history rejects duplicate or malformed immutable revisions and conflicting
   expect(validateHTMLHistory([row])).toEqual([row]);
   for (const rows of [[row, row], [row, { ...row, sequence: 2 }], [{ ...row, page_count: 501 }], [{ ...row, source_commitment: 'bad' }],
     [{ ...row, summary: '🦊'.repeat(501) }], [{ ...row, created_by: null }]]) expect(() => validateHTMLHistory(rows as any)).toThrow();
+});
+
+test('contract source checks both pinned recipients against every printed identity and rejects drifting or incomplete bindings', () => {
+  const source = contractSourceFixture(); expect(validateHTMLSource(source, documentID, orgID)).toBe(source);
+  expect(htmlRevisionGroups(source).map((group) => group.id)).toEqual(['provider', 'customer', 'terms']);
+  const mutations: ((value: HTMLDocumentSource) => void)[] = [
+    (value) => { delete value.contract_profile_digest; }, (value) => { value.contract_profile_digest = 'bad'; },
+    (value) => { value.contract_parties!.pop(); }, (value) => { value.contract_parties![1].recipient_id = value.contract_parties![0].recipient_id; },
+    (value) => { value.contract_parties![1].recipient_id = '00000000-0000-0000-0000-000000000000'; },
+    (value) => { value.contract_parties![1].name = 'Different person'; }, (value) => { value.contract_parties![1].email = 'different@example.test'; },
+    (value) => { value.contract_parties![1].role = 'provider'; }, (value) => { value.contract_parties![1].company_id = 'Different company'; },
+    (value) => { value.contract_parties![1].representative_authority = 'Different authority'; },
+    (value) => { value.sections[0].text = ' '; value.changed_sections = [value.sections[0].name]; },
+  ];
+  for (const mutate of mutations) { const value = structuredClone(source); mutate(value); expect(() => validateHTMLSource(value, documentID, orgID)).toThrow(); }
+  const unprofiled = { ...sourceFixture(), contract_parties: source.contract_parties };
+  expect(() => validateHTMLSource(unprofiled, documentID, orgID)).toThrow('without a reviewed');
+});
+
+test('contract revisions preserve declared mappings and require canonical distinct identities and nonblank essential wording', () => {
+  const source = contractSourceFixture(), draft = revisionDraft(source);
+  const identity = source.contract_profile!.parties.find((party) => party.slot === 'customer')!;
+  draft.values[identity.representative_name] = 'New designated representative';
+  draft.values[identity.representative_email] = 'new@example.test';
+  expect(htmlRevisionInput(source, draft.values, draft.sections, 'New representative').values[identity.representative_email]).toBe('new@example.test');
+  draft.values[identity.representative_email] = source.contract_parties![0].email;
+  expect(() => htmlRevisionInput(source, draft.values, draft.sections, '')).toThrow('different');
+  draft.values[identity.representative_email] = 'new@example.test'; draft.sections.scope_text = ' ';
+  expect(() => htmlRevisionInput(source, draft.values, draft.sections, '')).toThrow('scope');
+});
+
+test('historical source keeps its former representative assertions while a fresh revision uses the same stable party IDs', () => {
+  const history = { ...contractSourceFixture(), can_edit: false }, current = structuredClone(history), party = current.contract_profile!.parties[1];
+  current.materialization_revision = 2; current.html_source_commitment = 'e'.repeat(64);
+  current.values.find((field) => field.name === party.representative_name)!.text = 'Updated representative';
+  current.contract_parties![1].name = 'Updated representative';
+  expect(validateHTMLSource(history, documentID, orgID)).toBe(history); expect(validateHTMLSource(current, documentID, orgID)).toBe(current);
+  expect(history.contract_parties![1].recipient_id).toBe(current.contract_parties![1].recipient_id);
+  expect(history.contract_parties![1].name).not.toBe(current.contract_parties![1].name);
+});
+
+test('retained profile accepts explicit nonblank document wording even when its frozen template default is blank', () => {
+  const source = contractSourceFixture(); source.sections[0].default_text = ''; source.changed_sections = ['scope_text'];
+  expect(validateHTMLSource(source, documentID, orgID)).toBe(source);
+  const draft = revisionDraft(source); expect(htmlRevisionInput(source, draft.values, draft.sections, '').sections.scope_text).toBe('Reviewed service scope.');
+  source.sections[0].text = ''; source.changed_sections = [];
+  expect(() => validateHTMLSource(source, documentID, orgID)).toThrow('terms');
 });

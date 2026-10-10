@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { assetByteLength, blankHTMLAuthorDraft, draftFromHTMLTemplate, htmlAssetFromFile, htmlAuthorFingerprint, htmlAuthorInput } from './htmlAuthor';
+import { assetByteLength, blankHTMLAuthorDraft, blankHTMLContractProfile, draftFromHTMLTemplate, htmlAssetFromFile, htmlAuthorFingerprint, htmlAuthorInput } from './htmlAuthor';
 import type { HTMLAsset } from './htmlTemplate';
+import { contractTemplateFixture } from './htmlTemplate.test';
 
 function draft() {
   return { ...blankHTMLAuthorDraft(), name: 'Reusable design', html: '<p><span data-hash-value="company"></span></p><div data-hash-section="scope"></div>',
@@ -37,6 +38,45 @@ test('author rejects duplicate/unknown declaration names, invalid Unicode and en
   const input = draft(); input.values[0].max_chars = 1; input.values[0].default_value = '😀';
   expect(htmlAuthorInput(input).variables_json.company).toBe('😀');
   input.values[0].default_value += 'a'; expect(() => htmlAuthorInput(input)).toThrow();
+});
+
+test('author preserves reviewed profile in schema 2 save and reload while generic schema 1 bytes omit it', () => {
+  const generic = htmlAuthorInput(draft());
+  expect(generic.html_master_json.schema_version).toBe(1);
+  expect(Object.hasOwn(generic.html_master_json, 'contract_profile')).toBe(false);
+  for (const kind of ['proposal', 'b2b_services'] as const) {
+    const template = contractTemplateFixture(kind), originalProfile = structuredClone(template.html_master_json!.contract_profile);
+    const author = draftFromHTMLTemplate(template), baseline = htmlAuthorFingerprint(author);
+    // Svelte state wraps the editable profile in proxies. Save must return plain
+    // data without relying on structuredClone, which refuses those proxies.
+    author.contract_profile = new Proxy(author.contract_profile!, {});
+    const input = htmlAuthorInput(author);
+    expect(input.html_master_json.schema_version).toBe(2);
+    expect(input.html_master_json.contract_profile).toEqual(originalProfile);
+    const recovered = draftFromHTMLTemplate({ ...template, ...input });
+    expect(htmlAuthorFingerprint(recovered)).toBe(baseline);
+    recovered.contract_profile!.version = 2;
+    expect(htmlAuthorFingerprint(recovered)).not.toBe(baseline);
+    const changedInput = htmlAuthorInput(recovered);
+    expect(changedInput.html_master_json.contract_profile!.version).toBe(2);
+    changedInput.html_master_json.contract_profile!.parties[0].company_name = 'tampered';
+    expect(recovered.contract_profile!.parties[0].company_name).toBe('provider_company_name');
+    expect(template.html_master_json!.contract_profile).toEqual(originalProfile);
+  }
+});
+
+test('author refuses incomplete profile, schema downgrade or loss of printed required bindings', () => {
+  const author = draftFromHTMLTemplate(contractTemplateFixture());
+  author.schema_version = 1;
+  expect(() => htmlAuthorInput(author)).toThrow('Version 1');
+  author.schema_version = 2;
+  author.contract_profile = null;
+  expect(() => htmlAuthorInput(author)).toThrow('both parties');
+  author.contract_profile = blankHTMLContractProfile();
+  expect(() => htmlAuthorInput(author)).toThrow('required printed value');
+  const checked = draftFromHTMLTemplate(contractTemplateFixture());
+  checked.values[0].required = false;
+  expect(() => htmlAuthorInput(checked)).toThrow('required printed value');
 });
 
 test('base64 validation is linear at the actual 2 MiB boundary and refuses malformed/canonical padding', () => {

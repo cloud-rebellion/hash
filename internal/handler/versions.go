@@ -25,34 +25,36 @@ import (
 // variables are returned as raw JSON so callers can pass them straight back
 // into the editor without a re-encode roundtrip.
 type versionDTO struct {
-	ID            string          `json:"id"`
-	DocumentID    string          `json:"document_id"`
-	VersionNo     int32           `json:"version_no"`
-	Name          string          `json:"name"`
-	SourceKind    string          `json:"source_kind"`
-	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON json.RawMessage `json:"variables_json"`
-	CreatedBy     string          `json:"created_by,omitempty"`
-	CreatedVia    string          `json:"created_via"`
-	CreatedAt     string          `json:"created_at"`
-	ParentID      string          `json:"parent_id,omitempty"`
-	SchemaVersion int32           `json:"schema_version"`
-	Summary       string          `json:"summary,omitempty"`
+	ID             string          `json:"id"`
+	DocumentID     string          `json:"document_id"`
+	VersionNo      int32           `json:"version_no"`
+	Name           string          `json:"name"`
+	SourceKind     string          `json:"source_kind"`
+	BlocksJSON     json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON  json.RawMessage `json:"variables_json"`
+	CreatedBy      string          `json:"created_by,omitempty"`
+	CreatedVia     string          `json:"created_via"`
+	CreatedAt      string          `json:"created_at"`
+	ParentID       string          `json:"parent_id,omitempty"`
+	SchemaVersion  int32           `json:"schema_version"`
+	Summary        string          `json:"summary,omitempty"`
+	HTMLSourceJSON json.RawMessage `json:"html_source_json,omitempty"`
 }
 
 func toVersionDTO(v *generated.DocumentVersion) versionDTO {
 	out := versionDTO{
-		ID:            v.ID.String(),
-		DocumentID:    v.DocumentID.String(),
-		VersionNo:     v.VersionNo,
-		Name:          v.Name,
-		SourceKind:    v.SourceKind,
-		BlocksJSON:    v.BlockTreeJson,
-		VariablesJSON: v.VariablesJson,
-		CreatedVia:    v.CreatedVia,
-		CreatedAt:     v.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
-		SchemaVersion: v.SchemaVersion,
-		Summary:       v.Summary,
+		ID:             v.ID.String(),
+		DocumentID:     v.DocumentID.String(),
+		VersionNo:      v.VersionNo,
+		Name:           v.Name,
+		SourceKind:     v.SourceKind,
+		BlocksJSON:     v.BlockTreeJson,
+		VariablesJSON:  v.VariablesJson,
+		CreatedVia:     v.CreatedVia,
+		CreatedAt:      v.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		SchemaVersion:  v.SchemaVersion,
+		Summary:        v.Summary,
+		HTMLSourceJSON: v.HtmlSourceJson,
 	}
 	if v.CreatedBy.Valid {
 		out.CreatedBy = uuid.UUID(v.CreatedBy.Bytes).String()

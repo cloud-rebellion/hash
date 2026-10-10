@@ -44,6 +44,7 @@ import (
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/magictoken"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
@@ -431,6 +432,12 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 		if err != nil {
 			return SendResult{}, err
 		}
+	}
+	// Recheck the locked, persisted authoring snapshot before creating an
+	// irreversible sealing intent. HTML-origin PDFs must still contain exactly
+	// their reviewed printed values after resolver freezing and lock waits.
+	if err := validateResolvedSealedSnapshot(doc, envelopeChildren); err != nil {
+		return SendResult{}, err
 	}
 
 	// Recipient CRUD shares this parent row lock. Re-list only after acquiring
@@ -862,6 +869,9 @@ func (e *Engine) loadSealedSendSnapshot(ctx context.Context, docID, orgID uuid.U
 	if err := requireValidSignerDisclosure(doc, confirmation); err != nil {
 		return nil, fmt.Errorf("resume send sealing: %w", err)
 	}
+	if err := htmlsource.Validate(doc, true); err != nil {
+		return nil, fmt.Errorf("resume send sealing: HTML source: %w", err)
+	}
 	// Validate signer-visible disclosure before resolving source versions or
 	// touching the durable retention-start marker. A pre-cutover reversible
 	// sealing intent can therefore return safely to draft on invalid authoring
@@ -881,6 +891,9 @@ func (e *Engine) loadSealedSendSnapshot(ctx context.Context, docID, orgID uuid.U
 			return nil, fmt.Errorf("resume send envelope: list children: %w", err)
 		}
 		for i, child := range snapshot.children {
+			if err := htmlsource.Validate(child, true); err != nil {
+				return nil, fmt.Errorf("resume send envelope: child HTML source: %w", err)
+			}
 			pinned, pinErr := e.pinSendEvidenceVersions(ctx, child)
 			if pinErr != nil {
 				return nil, fmt.Errorf("resume send envelope: pin child evidence VersionIds: %w", pinErr)
@@ -1022,6 +1035,9 @@ func (e *Engine) completeSealedSend(ctx context.Context, prepared *sealedSendSna
 		if err := verifyPreparedEnvelopeChildren(prepared.children, children); err != nil {
 			return SendResult{}, err
 		}
+	}
+	if err := validateResolvedSealedSnapshot(doc, children); err != nil {
+		return SendResult{}, err
 	}
 
 	recipients, err := q.ListRecipientsByDocument(ctx, doc.ID)
@@ -1264,6 +1280,9 @@ func retainSendEvidence(ctx context.Context, retainer EvidenceRetainer, doc *gen
 	if doc == nil {
 		return ErrDocumentNotFound
 	}
+	if err := htmlsource.Validate(doc, true); err != nil {
+		return fmt.Errorf("retain send evidence: HTML source: %w", err)
+	}
 	if doc.SourceKind != "pdf" && doc.RequiresSignature {
 		return nil
 	}
@@ -1328,6 +1347,9 @@ func validateAcknowledgementFields(fields []*generated.DocumentField) error {
 func inspectSendSourcePDF(ctx context.Context, store EvidenceRetainer, doc *generated.Document) (int, error) {
 	if doc == nil {
 		return 0, ErrDocumentNotFound
+	}
+	if err := htmlsource.Validate(doc, true); err != nil {
+		return 0, fmt.Errorf("send PDF: HTML source: %w", err)
 	}
 	if doc.SourceKind != "pdf" {
 		return 0, nil
@@ -1577,6 +1599,14 @@ func prepareFrozenEnvelopeChildren(ctx context.Context, freezer documentFreezer,
 }
 
 func persistAuthorizedFrozenDocument(ctx context.Context, q *generated.Queries, doc *generated.Document, frozen json.RawMessage) (*generated.Document, error) {
+	if doc == nil {
+		return nil, ErrDocumentNotFound
+	}
+	candidate := *doc
+	candidate.VariablesJson = frozen
+	if err := validateResolvedBlockVariables(&candidate); err != nil {
+		return nil, err
+	}
 	updated, err := q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
 		ID: doc.ID, OrgID: doc.OrgID, VariablesJson: frozen, ExpectedUpdatedAt: doc.UpdatedAt,
 	})
@@ -1820,14 +1850,18 @@ func validateImmutableBlockEvidence(tree *blocks.Tree) error {
 	return nil
 }
 
-// validateResolvedBlockVariables prevents a document from becoming immutable
-// while it still contains authoring tokens. A literal {{variable}} in a signed
+// validateResolvedBlockVariables also binds HTML-origin PDFs to their reviewed
+// authoring snapshot. It prevents a document from becoming immutable while
+// it still contains authoring tokens. A literal {{variable}} in a signed
 // PDF is not merely cosmetic: it can leave party identity, dates, price, or
 // other contract terms undefined. Validation happens against the frozen map
 // before any send-sealing state or recipient credential is created.
 func validateResolvedBlockVariables(doc *generated.Document) error {
 	if doc == nil {
 		return ErrDocumentNotFound
+	}
+	if err := htmlsource.Validate(doc, true); err != nil {
+		return err
 	}
 	if doc.SourceKind != "blocks" {
 		return nil
@@ -2077,6 +2111,12 @@ func verifyPreparedSendDocument(prepared, locked *generated.Document) error {
 		!bytes.Equal(prepared.BlocksJson, locked.BlocksJson) ||
 		!bytes.Equal(prepared.VariablesJson, locked.VariablesJson) ||
 		!bytes.Equal(prepared.Metadata, locked.Metadata) ||
+		!bytes.Equal(prepared.HtmlSourceJson, locked.HtmlSourceJson) ||
+		!bytes.Equal(prepared.HtmlReviewedPdfSha256, locked.HtmlReviewedPdfSha256) ||
+		prepared.HtmlReviewedBy != locked.HtmlReviewedBy ||
+		prepared.HtmlReviewedAt.Valid != locked.HtmlReviewedAt.Valid ||
+		prepared.HtmlReviewedAt.InfinityModifier != locked.HtmlReviewedAt.InfinityModifier ||
+		(prepared.HtmlReviewedAt.Valid && !prepared.HtmlReviewedAt.Time.Equal(locked.HtmlReviewedAt.Time)) ||
 		!bytes.Equal(prepared.RenderedPdfSha, locked.RenderedPdfSha) ||
 		!bytes.Equal(prepared.PdfSha256, locked.PdfSha256) ||
 		prepared.ExpiresAt.Valid != locked.ExpiresAt.Valid ||

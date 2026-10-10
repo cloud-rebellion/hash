@@ -298,7 +298,7 @@ func (q *Queries) GetDataSubjectRequestForUpdate(ctx context.Context, arg GetDat
 }
 
 const getDocumentForPrivacyUpdate = `-- name: GetDocumentForPrivacyUpdate :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
 `
 
 type GetDocumentForPrivacyUpdateParams struct {
@@ -364,6 +364,10 @@ func (q *Queries) GetDocumentForPrivacyUpdate(ctx context.Context, arg GetDocume
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }
@@ -387,6 +391,32 @@ type HasCollabRecoveryArchivesForDSRParams struct {
 // alone cannot account for it. Keep the check independently tenant-scoped.
 func (q *Queries) HasCollabRecoveryArchivesForDSR(ctx context.Context, arg HasCollabRecoveryArchivesForDSRParams) (bool, error) {
 	row := q.db.QueryRow(ctx, hasCollabRecoveryArchivesForDSR, arg.DocumentID, arg.OrgID)
+	var present bool
+	err := row.Scan(&present)
+	return present, err
+}
+
+const hasHTMLAuthoringDataForDSR = `-- name: HasHTMLAuthoringDataForDSR :one
+SELECT EXISTS (
+    SELECT 1 FROM html_template_revisions r WHERE r.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM templates t WHERE t.org_id = $1::uuid
+        AND (t.source_kind = 'html' OR t.html_master_json IS NOT NULL)
+    UNION ALL
+    SELECT 1 FROM documents d WHERE d.org_id = $1::uuid
+        AND d.html_source_json IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM document_versions v WHERE v.org_id = $1::uuid
+        AND v.html_source_json IS NOT NULL
+) AS present
+`
+
+// Reusable masters, defaults and frozen document provenance can retain personal
+// data outside recipient rows. The targeted recipient redaction/export path
+// cannot prove complete fulfillment while any of this tenant's HTML authoring
+// inventory exists, including archived templates and historical snapshots.
+func (q *Queries) HasHTMLAuthoringDataForDSR(ctx context.Context, orgID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasHTMLAuthoringDataForDSR, orgID)
 	var present bool
 	err := row.Scan(&present)
 	return present, err

@@ -64,6 +64,39 @@ SET name = $3,
 WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
 RETURNING *;
 
+-- name: SetDocumentHTMLSource :one
+-- Set-once provenance for a freshly rendered PDF draft. No caller-controlled
+-- generic metadata patch can rewrite this snapshot or inherit prior review.
+UPDATE documents
+SET html_source_json = sqlc.arg(html_source_json)::jsonb,
+    html_reviewed_pdf_sha256 = NULL,
+    html_reviewed_by = NULL,
+    html_reviewed_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = sqlc.arg(id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  AND status = 'draft' AND deleted_at IS NULL AND source_kind = 'pdf'
+  AND html_source_json IS NULL
+  AND updated_at = sqlc.arg(expected_updated_at)::timestamptz
+RETURNING *;
+
+-- name: MarkDocumentHTMLReviewed :one
+-- The reviewer UUID is derived from the authenticated server actor. Retain
+-- its live member/credential guard and document lock through audit and commit.
+-- A review belongs to this exact PDF digest and observation, never a boolean.
+UPDATE documents d
+SET html_reviewed_pdf_sha256 = sqlc.arg(expected_pdf_sha256)::bytea,
+    html_reviewed_by = sqlc.arg(reviewed_by)::uuid,
+    html_reviewed_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+WHERE d.id = sqlc.arg(id)::uuid AND d.org_id = sqlc.arg(org_id)::uuid
+  AND d.status = 'draft' AND d.deleted_at IS NULL AND d.source_kind = 'pdf'
+  AND d.html_source_json IS NOT NULL
+  AND d.pdf_sha256 = sqlc.arg(expected_pdf_sha256)::bytea
+  AND d.updated_at = sqlc.arg(expected_updated_at)::timestamptz
+  AND EXISTS (SELECT 1 FROM users u WHERE u.id = sqlc.arg(reviewed_by)::uuid
+      AND u.org_id = d.org_id AND u.role IN ('owner', 'sender'))
+RETURNING d.*;
+
 -- name: SetDocumentDefaultLocale :one
 -- The sender's document-level default signing language. Draft-only: once sent,
 -- recipients are locked, so the default can no longer change.

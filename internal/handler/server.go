@@ -453,6 +453,10 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/", s.handleListTemplates)
 			r.Post("/", s.handleCreateTemplate)
 			r.Post("/starter", s.handleCreateStarterTemplate)
+			r.Post("/html", s.handleCreateHTMLTemplate)
+			r.Patch("/{id}/html", s.handleUpdateHTMLTemplate)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/{id}/html/approve", s.handleApproveHTMLTemplate)
+			r.Post("/{id}/html/documents", s.handleInstantiateHTMLTemplate)
 			r.Get("/{id}", s.handleGetTemplate)
 			r.Patch("/{id}", s.handleUpdateTemplate)
 			r.Delete("/{id}", s.handleArchiveTemplate)
@@ -475,6 +479,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/{id}/recipients", s.handleListRecipients)
 			r.Post("/{id}/recipients", s.handleCreateRecipient)
 			r.Post("/{id}/pdf-template", s.handleSavePDFTemplate)
+			r.Post("/{id}/html/review", s.handleReviewHTMLDocument)
 			r.Patch("/{id}/recipients/{rid}", s.handleUpdateRecipient)
 			r.Delete("/{id}/recipients/{rid}", s.handleDeleteRecipient)
 

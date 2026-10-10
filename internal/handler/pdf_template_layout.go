@@ -105,6 +105,10 @@ func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "save a PDF layout from an editable PDF draft")
 		return
 	}
+	if len(admitted.HtmlSourceJson) > 0 {
+		writeError(w, http.StatusConflict, "reuse the approved HTML design to render a fresh document; static PDF template export of HTML documents is unavailable")
+		return
+	}
 	if !admitted.UpdatedAt.Valid || !expected.Equal(admitted.UpdatedAt.Time) {
 		writeError(w, http.StatusPreconditionFailed, "document changed; review the current design")
 		return
@@ -140,6 +144,10 @@ func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := guard.Document
+	if len(current.HtmlSourceJson) > 0 {
+		writeError(w, http.StatusConflict, "reuse the approved HTML design to render a fresh document; static PDF template export of HTML documents is unavailable")
+		return
+	}
 	if !samePDFTemplateSource(admitted, current) || !current.UpdatedAt.Time.Equal(expected) {
 		writeError(w, http.StatusPreconditionFailed, "document or PDF source changed; review the current design")
 		return

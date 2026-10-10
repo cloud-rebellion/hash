@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 )
 
 type purgeObjectDeleter interface {
@@ -257,6 +258,9 @@ func deleteClaimedSoftDeletedSourceAndRow(ctx context.Context, doc *generated.Do
 }
 
 func ownedPurgeSourceKey(doc *generated.Document) (string, error) {
+	if err := validateHTMLPurgeSource(doc); err != nil {
+		return "", err
+	}
 	if doc != nil && doc.Status == "draft" && doc.SourceKind != "pdf" &&
 		doc.PdfStorageKey.Valid && doc.PdfStorageKey.String != "" {
 		return "", errors.New("soft delete purge: source kind and cleanup reference require review")
@@ -285,10 +289,12 @@ func ownedPurgeSourceKey(doc *generated.Document) (string, error) {
 }
 
 // purgeOwnedSourceKey identifies independently owned PDF draft sources.
-// Template clones share their source object and must retain it; final/audit
-// aliases are legal evidence and must never be removed by draft cleanup.
+// Static PDF template clones share their source object and must retain it.
+// HTML materializations instead own a fresh object; callers validate their
+// source provenance before admitting cleanup. Final/audit aliases are legal
+// evidence and must never be removed by draft cleanup.
 func purgeOwnedSourceKey(doc *generated.Document) string {
-	if doc == nil || doc.Status != "draft" || doc.SourceKind != "pdf" || doc.TemplateID.Valid ||
+	if doc == nil || doc.Status != "draft" || doc.SourceKind != "pdf" || (doc.TemplateID.Valid && len(doc.HtmlSourceJson) == 0) ||
 		!doc.PdfStorageKey.Valid || doc.PdfStorageKey.String == "" {
 		return ""
 	}
@@ -303,7 +309,10 @@ func purgeOwnedSourceKey(doc *generated.Document) string {
 }
 
 func purgeOwnedSourceVersion(doc *generated.Document) (*purgeObjectVersion, error) {
-	if doc == nil || doc.Status != "draft" || doc.TemplateID.Valid ||
+	if err := validateHTMLPurgeSource(doc); err != nil {
+		return nil, err
+	}
+	if doc == nil || doc.Status != "draft" || (doc.TemplateID.Valid && len(doc.HtmlSourceJson) == 0) ||
 		!doc.PdfStorageKey.Valid || doc.PdfStorageKey.String == "" {
 		return nil, nil
 	}
@@ -319,4 +328,14 @@ func purgeOwnedSourceVersion(doc *generated.Document) (*purgeObjectVersion, erro
 	return &purgeObjectVersion{
 		key: key, versionID: doc.PdfStorageVersionID.String, digest: append([]byte(nil), doc.PdfSha256...),
 	}, nil
+}
+
+func validateHTMLPurgeSource(doc *generated.Document) error {
+	if doc == nil || len(doc.HtmlSourceJson) == 0 {
+		return nil
+	}
+	if err := htmlsource.Validate(doc, false); err != nil {
+		return fmt.Errorf("soft delete purge: HTML source provenance requires review: %w", err)
+	}
+	return nil
 }

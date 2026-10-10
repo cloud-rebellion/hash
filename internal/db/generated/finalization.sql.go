@@ -77,7 +77,7 @@ WHERE target.id = lifecycle_clock.id
   AND target.status = 'in_progress'
   AND target.sent_at IS NOT NULL
   AND target.deleted_at IS NULL
-RETURNING target.id, target.org_id, target.template_id, target.name, target.status, target.routing_mode, target.source_kind, target.blocks_json, target.variables_json, target.rendered_pdf_key, target.rendered_pdf_sha, target.pdf_storage_key, target.pdf_sha256, target.final_pdf_key, target.final_pdf_sha, target.audit_cert_key, target.expires_at, target.sent_at, target.completed_at, target.sender_id, target.metadata, target.created_at, target.updated_at, target.parent_envelope_id, target.envelope_position, target.is_envelope, target.metadata_redaction_report, target.routing_tier, target.negotiation_enabled, target.bilingual_target_lang, target.lawful_basis, target.deleted_at, target.default_locale, target.requires_signature, target.audit_payload_key, target.audit_payload_sha256, target.audit_signature_key, target.audit_signature_sha256, target.pdf_storage_version_id, target.rendered_pdf_version_id, target.final_pdf_version_id, target.audit_cert_sha256, target.audit_cert_version_id, target.audit_payload_version_id, target.audit_signature_version_id, target.evidence_version_pins_required, target.completion_effective_at, target.completion_effective_at_bound, target.finalization_retain_until, target.article13_notice_epoch_at, target.article13_notice_schema, target.article13_notice_epoch_v61_committed
+RETURNING target.id, target.org_id, target.template_id, target.name, target.status, target.routing_mode, target.source_kind, target.blocks_json, target.variables_json, target.rendered_pdf_key, target.rendered_pdf_sha, target.pdf_storage_key, target.pdf_sha256, target.final_pdf_key, target.final_pdf_sha, target.audit_cert_key, target.expires_at, target.sent_at, target.completed_at, target.sender_id, target.metadata, target.created_at, target.updated_at, target.parent_envelope_id, target.envelope_position, target.is_envelope, target.metadata_redaction_report, target.routing_tier, target.negotiation_enabled, target.bilingual_target_lang, target.lawful_basis, target.deleted_at, target.default_locale, target.requires_signature, target.audit_payload_key, target.audit_payload_sha256, target.audit_signature_key, target.audit_signature_sha256, target.pdf_storage_version_id, target.rendered_pdf_version_id, target.final_pdf_version_id, target.audit_cert_sha256, target.audit_cert_version_id, target.audit_payload_version_id, target.audit_signature_version_id, target.evidence_version_pins_required, target.completion_effective_at, target.completion_effective_at_bound, target.finalization_retain_until, target.article13_notice_epoch_at, target.article13_notice_schema, target.article13_notice_epoch_v61_committed, target.html_source_json, target.html_reviewed_pdf_sha256, target.html_reviewed_by, target.html_reviewed_at
 `
 
 type BeginDocumentFinalizationParams struct {
@@ -148,6 +148,10 @@ func (q *Queries) BeginDocumentFinalization(ctx context.Context, arg BeginDocume
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }
@@ -199,7 +203,7 @@ WHERE documents.id = $13
       AND i.audit_signature_version_id = $12
       AND i.evidence_version_pins_required = TRUE
   )
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at
 `
 
 type CompleteDocumentFinalizationParams struct {
@@ -290,6 +294,10 @@ func (q *Queries) CompleteDocumentFinalization(ctx context.Context, arg Complete
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }

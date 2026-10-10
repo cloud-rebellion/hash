@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 )
@@ -79,6 +80,8 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 // expects: 402 + upgrade_url for quota, 409 + tier detail for an eIDAS block.
 func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, htmlsource.ErrInvalid), errors.Is(err, htmlsource.ErrReviewRequired):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, auth.ErrMutationCredentialExpired):
 		writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
 	case errors.Is(err, auth.ErrMutationPermissionRevoked):

@@ -28,6 +28,24 @@ SELECT EXISTS (
     WHERE d.id = sqlc.arg(document_id) AND d.org_id = sqlc.arg(org_id)
 ) AS present;
 
+-- name: HasHTMLAuthoringDataForDSR :one
+-- Reusable masters, defaults and frozen document provenance can retain personal
+-- data outside recipient rows. The targeted recipient redaction/export path
+-- cannot prove complete fulfillment while any of this tenant's HTML authoring
+-- inventory exists, including archived templates and historical snapshots.
+SELECT EXISTS (
+    SELECT 1 FROM html_template_revisions r WHERE r.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM templates t WHERE t.org_id = sqlc.arg(org_id)::uuid
+        AND (t.source_kind = 'html' OR t.html_master_json IS NOT NULL)
+    UNION ALL
+    SELECT 1 FROM documents d WHERE d.org_id = sqlc.arg(org_id)::uuid
+        AND d.html_source_json IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM document_versions v WHERE v.org_id = sqlc.arg(org_id)::uuid
+        AND v.html_source_json IS NOT NULL
+) AS present;
+
 -- name: GetDataSubjectRequestForUpdate :one
 -- Serialize competing fulfill/deny/withdraw transitions. All destructive
 -- erasure work and its audit rows run in the same caller-owned transaction

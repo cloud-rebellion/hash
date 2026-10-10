@@ -38,7 +38,7 @@ UPDATE documents AS child
    AND child.is_envelope = FALSE
    AND child.parent_envelope_id IS NULL
    AND child.deleted_at IS NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at
 `
 
 type AttachToEnvelopeParams struct {
@@ -114,6 +114,10 @@ func (q *Queries) AttachToEnvelope(ctx context.Context, arg AttachToEnvelopePara
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }
@@ -139,7 +143,7 @@ WHERE child.parent_envelope_id = $1
   AND parent.completion_effective_at_bound = TRUE
   AND parent.completion_effective_at IS NOT NULL
   AND parent.finalization_retain_until IS NOT NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at
 `
 
 type BeginEnvelopeChildrenFinalizationParams struct {
@@ -215,6 +219,10 @@ func (q *Queries) BeginEnvelopeChildrenFinalization(ctx context.Context, arg Beg
 			&i.Article13NoticeEpochAt,
 			&i.Article13NoticeSchema,
 			&i.Article13NoticeEpochV61Committed,
+			&i.HtmlSourceJson,
+			&i.HtmlReviewedPdfSha256,
+			&i.HtmlReviewedBy,
+			&i.HtmlReviewedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -260,7 +268,7 @@ WHERE child.parent_envelope_id = $1
   AND parent.finalization_retain_until IS NOT NULL
   AND child.completion_effective_at = parent.completion_effective_at
   AND child.finalization_retain_until = parent.finalization_retain_until
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at
 `
 
 type CompleteEnvelopeChildrenParams struct {
@@ -360,6 +368,10 @@ func (q *Queries) CompleteEnvelopeChildren(ctx context.Context, arg CompleteEnve
 			&i.Article13NoticeEpochAt,
 			&i.Article13NoticeSchema,
 			&i.Article13NoticeEpochV61Committed,
+			&i.HtmlSourceJson,
+			&i.HtmlReviewedPdfSha256,
+			&i.HtmlReviewedBy,
+			&i.HtmlReviewedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -400,7 +412,7 @@ UPDATE documents AS child
    AND child.status = 'draft'
    AND child.is_envelope = FALSE
    AND child.deleted_at IS NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at
 `
 
 type DetachFromEnvelopeParams struct {
@@ -466,12 +478,16 @@ func (q *Queries) DetachFromEnvelope(ctx context.Context, arg DetachFromEnvelope
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }
 
 const listEnvelopeChildren = `-- name: ListEnvelopeChildren :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at FROM documents
 WHERE parent_envelope_id = $1 AND org_id = $2
 ORDER BY envelope_position ASC NULLS LAST, created_at ASC
 `
@@ -543,6 +559,10 @@ func (q *Queries) ListEnvelopeChildren(ctx context.Context, arg ListEnvelopeChil
 			&i.Article13NoticeEpochAt,
 			&i.Article13NoticeSchema,
 			&i.Article13NoticeEpochV61Committed,
+			&i.HtmlSourceJson,
+			&i.HtmlReviewedPdfSha256,
+			&i.HtmlReviewedBy,
+			&i.HtmlReviewedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -563,7 +583,7 @@ UPDATE documents
    AND parent_envelope_id IS NULL
    AND source_kind = 'blocks'
    AND deleted_at IS NULL
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at
 `
 
 type MarkAsEnvelopeParams struct {
@@ -627,6 +647,10 @@ func (q *Queries) MarkAsEnvelope(ctx context.Context, arg MarkAsEnvelopeParams) 
 		&i.Article13NoticeEpochAt,
 		&i.Article13NoticeSchema,
 		&i.Article13NoticeEpochV61Committed,
+		&i.HtmlSourceJson,
+		&i.HtmlReviewedPdfSha256,
+		&i.HtmlReviewedBy,
+		&i.HtmlReviewedAt,
 	)
 	return &i, err
 }

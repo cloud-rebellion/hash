@@ -457,6 +457,15 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	// rows. A request without a linked recipient cannot truthfully be marked
 	// fulfilled by this targeted workflow.
 	if in.Status == "fulfilled" && cur.Kind == "erasure" {
+		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
+		if err != nil {
+			writeInternalErrorMsg(w, "inspect retained HTML authoring inventory", err)
+			return
+		}
+		if hasHTMLAuthoring {
+			writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy and retention review; keep this request in progress")
+			return
+		}
 		if !cur.RecipientID.Valid {
 			writeError(w, http.StatusConflict, "erasure fulfillment requires a linked recipient")
 			return
@@ -607,6 +616,21 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		}
 		pendingAudits = append(pendingAudits, pendingAudit)
 	}
+	// HTML writes publish under this same tenant audit-chain lock. Recheck
+	// after acquiring it: a first HTML master may have committed while this
+	// transaction waited to append its terminal privacy events. A refusal
+	// rolls back recipient redaction, status and those unpublished events.
+	if in.Status == "fulfilled" && cur.Kind == "erasure" {
+		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
+		if err != nil {
+			writeInternalErrorMsg(w, "recheck retained HTML authoring inventory", err)
+			return
+		}
+		if hasHTMLAuthoring {
+			writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy and retention review; keep this request in progress")
+			return
+		}
+	}
 	if !s.transactionSessionFresh(w, cookie) {
 		return
 	}
@@ -652,6 +676,15 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
 		return
 	}
+	hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
+	if err != nil {
+		writeInternalErrorMsg(w, "inspect HTML privacy export inventory", err)
+		return
+	}
+	if hasHTMLAuthoring {
+		writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy export review; this recipient export cannot fulfill the request")
+		return
+	}
 	rows, err := q.ExportSubjectData(r.Context(), generated.ExportSubjectDataParams{
 		OrgID: u.OrgID,
 		Lower: email,
@@ -671,6 +704,17 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeInternalErrorMsg(w, "audit export", err)
+		return
+	}
+	// Hold the canonical tenant audit lock while confirming that no first
+	// HTML design committed during the preceding query/audit wait.
+	hasHTMLAuthoring, err = q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
+	if err != nil {
+		writeInternalErrorMsg(w, "recheck HTML privacy export inventory", err)
+		return
+	}
+	if hasHTMLAuthoring {
+		writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy export review; this recipient export cannot fulfill the request")
 		return
 	}
 	if !s.transactionSessionFresh(w, cookie) {

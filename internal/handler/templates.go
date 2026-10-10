@@ -34,21 +34,22 @@ const maxPDFUpload = 50 << 20 // 50 MB
 // templateResponse is what we return on the API. We translate sqlc's pgtype.*
 // fields into JSON-friendly nullables.
 type templateResponse struct {
-	ID            uuid.UUID       `json:"id"`
-	OrgID         uuid.UUID       `json:"org_id"`
-	Name          string          `json:"name"`
-	SourceKind    string          `json:"source_kind"`
-	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON json.RawMessage `json:"variables_json"`
-	PDFStorageKey string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256     string          `json:"pdf_sha256,omitempty"`
-	PageCount     int32           `json:"page_count,omitempty"`
-	FieldsJSON    json.RawMessage `json:"fields_json"`
-	Version       int32           `json:"version"`
-	ContentSHA256 string          `json:"content_sha256,omitempty"`
-	CreatedBy     uuid.UUID       `json:"created_by"`
-	CreatedAt     string          `json:"created_at"`
-	UpdatedAt     string          `json:"updated_at"`
+	ID             uuid.UUID       `json:"id"`
+	OrgID          uuid.UUID       `json:"org_id"`
+	Name           string          `json:"name"`
+	SourceKind     string          `json:"source_kind"`
+	BlocksJSON     json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON  json.RawMessage `json:"variables_json"`
+	PDFStorageKey  string          `json:"pdf_storage_key,omitempty"`
+	PDFSHA256      string          `json:"pdf_sha256,omitempty"`
+	PageCount      int32           `json:"page_count,omitempty"`
+	FieldsJSON     json.RawMessage `json:"fields_json"`
+	Version        int32           `json:"version"`
+	ContentSHA256  string          `json:"content_sha256,omitempty"`
+	HTMLMasterJSON json.RawMessage `json:"html_master_json,omitempty"`
+	CreatedBy      uuid.UUID       `json:"created_by"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
 }
 
 func toTemplateResponse(t *generated.Template) (templateResponse, error) {
@@ -81,6 +82,12 @@ func toTemplateResponse(t *generated.Template) (templateResponse, error) {
 		}
 		resp.ContentSHA256 = content.SHA256Hex()
 	}
+	if t.SourceKind == "html" {
+		if len(t.HtmlContentSha256) != 32 {
+			return templateResponse{}, errors.New("HTML template has no canonical content commitment")
+		}
+		resp.ContentSHA256 = hex.EncodeToString(t.HtmlContentSha256)
+	}
 	return resp, nil
 }
 
@@ -89,6 +96,9 @@ func writeTemplateResponse(w http.ResponseWriter, status int, template *generate
 	if err != nil {
 		writeInternalErrorMsg(w, "template has invalid canonical content", err)
 		return
+	}
+	if template.SourceKind == "html" {
+		response.HTMLMasterJSON = template.HtmlMasterJson
 	}
 	writeJSON(w, status, response)
 }
@@ -112,7 +122,9 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]templateResponse, 0, len(rows))
 	for _, t := range rows {
-		response, err := toTemplateResponse(t)
+		// The generated thin list projection has the same metadata fields as
+		// Template, with the potentially large HTML master deliberately NULL.
+		response, err := toTemplateResponse((*generated.Template)(t))
 		if err != nil {
 			writeInternalErrorMsg(w, "template has invalid canonical content", err)
 			return

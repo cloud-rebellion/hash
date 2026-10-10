@@ -285,6 +285,10 @@ type Document struct {
 	Article13NoticeEpochAt           pgtype.Timestamptz `json:"article13_notice_epoch_at"`
 	Article13NoticeSchema            string             `json:"article13_notice_schema"`
 	Article13NoticeEpochV61Committed bool               `json:"article13_notice_epoch_v61_committed"`
+	HtmlSourceJson                   []byte             `json:"html_source_json"`
+	HtmlReviewedPdfSha256            []byte             `json:"html_reviewed_pdf_sha256"`
+	HtmlReviewedBy                   pgtype.UUID        `json:"html_reviewed_by"`
+	HtmlReviewedAt                   pgtype.Timestamptz `json:"html_reviewed_at"`
 }
 
 type DocumentAgentToken struct {
@@ -429,20 +433,21 @@ type DocumentVariableBinding struct {
 }
 
 type DocumentVersion struct {
-	ID            uuid.UUID          `json:"id"`
-	DocumentID    uuid.UUID          `json:"document_id"`
-	OrgID         uuid.UUID          `json:"org_id"`
-	VersionNo     int32              `json:"version_no"`
-	BlockTreeJson json.RawMessage    `json:"block_tree_json"`
-	VariablesJson json.RawMessage    `json:"variables_json"`
-	Name          string             `json:"name"`
-	SourceKind    string             `json:"source_kind"`
-	Summary       string             `json:"summary"`
-	CreatedBy     pgtype.UUID        `json:"created_by"`
-	CreatedVia    string             `json:"created_via"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	ParentID      pgtype.UUID        `json:"parent_id"`
-	SchemaVersion int32              `json:"schema_version"`
+	ID             uuid.UUID          `json:"id"`
+	DocumentID     uuid.UUID          `json:"document_id"`
+	OrgID          uuid.UUID          `json:"org_id"`
+	VersionNo      int32              `json:"version_no"`
+	BlockTreeJson  json.RawMessage    `json:"block_tree_json"`
+	VariablesJson  json.RawMessage    `json:"variables_json"`
+	Name           string             `json:"name"`
+	SourceKind     string             `json:"source_kind"`
+	Summary        string             `json:"summary"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedVia     string             `json:"created_via"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ParentID       pgtype.UUID        `json:"parent_id"`
+	SchemaVersion  int32              `json:"schema_version"`
+	HtmlSourceJson []byte             `json:"html_source_json"`
 }
 
 type EidasRoutingRule struct {
@@ -489,6 +494,19 @@ type Event struct {
 	PrevHash      []byte             `json:"prev_hash"`
 	RowHash       []byte             `json:"row_hash"`
 	PayloadHashed []byte             `json:"payload_hashed"`
+}
+
+type HtmlTemplateRevision struct {
+	TemplateID     uuid.UUID          `json:"template_id"`
+	Version        int32              `json:"version"`
+	OrgID          uuid.UUID          `json:"org_id"`
+	HtmlMasterJson json.RawMessage    `json:"html_master_json"`
+	VariablesJson  json.RawMessage    `json:"variables_json"`
+	ContentSha256  []byte             `json:"content_sha256"`
+	CreatedBy      uuid.UUID          `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ApprovedBy     pgtype.UUID        `json:"approved_by"`
+	ApprovedAt     pgtype.Timestamptz `json:"approved_at"`
 }
 
 type Org struct {
@@ -656,6 +674,8 @@ type Template struct {
 	ArchivedAt                 pgtype.Timestamptz `json:"archived_at"`
 	PdfStorageVersionID        pgtype.Text        `json:"pdf_storage_version_id"`
 	EvidenceVersionPinRequired bool               `json:"evidence_version_pin_required"`
+	HtmlMasterJson             []byte             `json:"html_master_json"`
+	HtmlContentSha256          []byte             `json:"html_content_sha256"`
 }
 
 type User struct {

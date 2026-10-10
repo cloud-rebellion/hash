@@ -46,7 +46,7 @@ func (q *Queries) CountTemplates(ctx context.Context, orgID uuid.UUID) (int64, e
 const createBlocksTemplate = `-- name: CreateBlocksTemplate :one
 INSERT INTO templates (org_id, name, source_kind, blocks_json, variables_json, created_by)
 VALUES ($1, $2, 'blocks', $3, $4, $5)
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
 `
 
 type CreateBlocksTemplateParams struct {
@@ -84,6 +84,57 @@ func (q *Queries) CreateBlocksTemplate(ctx context.Context, arg CreateBlocksTemp
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+	)
+	return &i, err
+}
+
+const createHTMLTemplate = `-- name: CreateHTMLTemplate :one
+INSERT INTO templates (org_id, name, source_kind, html_master_json, variables_json, created_by, html_content_sha256)
+VALUES ($1, $2, 'html', $3, $4, $5, $6)
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+`
+
+type CreateHTMLTemplateParams struct {
+	OrgID             uuid.UUID       `json:"org_id"`
+	Name              string          `json:"name"`
+	HtmlMasterJson    []byte          `json:"html_master_json"`
+	VariablesJson     json.RawMessage `json:"variables_json"`
+	CreatedBy         uuid.UUID       `json:"created_by"`
+	HtmlContentSha256 []byte          `json:"html_content_sha256"`
+}
+
+func (q *Queries) CreateHTMLTemplate(ctx context.Context, arg CreateHTMLTemplateParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, createHTMLTemplate,
+		arg.OrgID,
+		arg.Name,
+		arg.HtmlMasterJson,
+		arg.VariablesJson,
+		arg.CreatedBy,
+		arg.HtmlContentSha256,
+	)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
@@ -95,7 +146,7 @@ INSERT INTO templates (
     page_count, fields_json, created_by
 )
 VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
 `
 
 type CreatePDFTemplateParams struct {
@@ -141,12 +192,127 @@ func (q *Queries) CreatePDFTemplate(ctx context.Context, arg CreatePDFTemplatePa
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+	)
+	return &i, err
+}
+
+const getHTMLTemplate = `-- name: GetHTMLTemplate :one
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
+`
+
+type GetHTMLTemplateParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) GetHTMLTemplate(ctx context.Context, arg GetHTMLTemplateParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, getHTMLTemplate, arg.ID, arg.OrgID)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+	)
+	return &i, err
+}
+
+const getHTMLTemplateForShare = `-- name: GetHTMLTemplateForShare :one
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
+FOR SHARE
+`
+
+type GetHTMLTemplateForShareParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) GetHTMLTemplateForShare(ctx context.Context, arg GetHTMLTemplateForShareParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, getHTMLTemplateForShare, arg.ID, arg.OrgID)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+	)
+	return &i, err
+}
+
+const getHTMLTemplateForUpdate = `-- name: GetHTMLTemplateForUpdate :one
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
+FOR UPDATE
+`
+
+type GetHTMLTemplateForUpdateParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) GetHTMLTemplateForUpdate(ctx context.Context, arg GetHTMLTemplateForUpdateParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, getHTMLTemplateForUpdate, arg.ID, arg.OrgID)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
 
 const getTemplate = `-- name: GetTemplate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 `
 
 type GetTemplateParams struct {
@@ -175,12 +341,14 @@ func (q *Queries) GetTemplate(ctx context.Context, arg GetTemplateParams) (*Temp
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
 
 const getTemplateForShare = `-- name: GetTemplateForShare :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 FOR SHARE
 `
@@ -214,12 +382,14 @@ func (q *Queries) GetTemplateForShare(ctx context.Context, arg GetTemplateForSha
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
 
 const getTemplateForUpdate = `-- name: GetTemplateForUpdate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 FOR UPDATE
 `
@@ -252,12 +422,19 @@ func (q *Queries) GetTemplateForUpdate(ctx context.Context, arg GetTemplateForUp
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
 
 const listTemplates = `-- name: ListTemplates :many
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json,
+       pdf_storage_key, pdf_sha256, page_count, fields_json, version,
+       created_by, created_at, updated_at, archived_at,
+       pdf_storage_version_id, evidence_version_pin_required,
+       NULL::jsonb AS html_master_json, html_content_sha256
+FROM templates
 WHERE org_id = $1 AND archived_at IS NULL
 ORDER BY updated_at DESC
 LIMIT $2 OFFSET $3
@@ -269,15 +446,40 @@ type ListTemplatesParams struct {
 	Offset int32     `json:"offset"`
 }
 
-func (q *Queries) ListTemplates(ctx context.Context, arg ListTemplatesParams) ([]*Template, error) {
+type ListTemplatesRow struct {
+	ID                         uuid.UUID          `json:"id"`
+	OrgID                      uuid.UUID          `json:"org_id"`
+	Name                       string             `json:"name"`
+	SourceKind                 string             `json:"source_kind"`
+	BlocksJson                 json.RawMessage    `json:"blocks_json"`
+	VariablesJson              json.RawMessage    `json:"variables_json"`
+	PdfStorageKey              pgtype.Text        `json:"pdf_storage_key"`
+	PdfSha256                  []byte             `json:"pdf_sha256"`
+	PageCount                  pgtype.Int4        `json:"page_count"`
+	FieldsJson                 json.RawMessage    `json:"fields_json"`
+	Version                    int32              `json:"version"`
+	CreatedBy                  uuid.UUID          `json:"created_by"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	ArchivedAt                 pgtype.Timestamptz `json:"archived_at"`
+	PdfStorageVersionID        pgtype.Text        `json:"pdf_storage_version_id"`
+	EvidenceVersionPinRequired bool               `json:"evidence_version_pin_required"`
+	HtmlMasterJson             []byte             `json:"html_master_json"`
+	HtmlContentSha256          []byte             `json:"html_content_sha256"`
+}
+
+// Do not transfer/copy each potentially multi-MB inline-asset master merely to
+// display its metadata and canonical digest. Detail reads return the master.
+// Existing block/PDF response columns retain their previous values.
+func (q *Queries) ListTemplates(ctx context.Context, arg ListTemplatesParams) ([]*ListTemplatesRow, error) {
 	rows, err := q.db.Query(ctx, listTemplates, arg.OrgID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*Template{}
+	items := []*ListTemplatesRow{}
 	for rows.Next() {
-		var i Template
+		var i ListTemplatesRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrgID,
@@ -296,6 +498,8 @@ func (q *Queries) ListTemplates(ctx context.Context, arg ListTemplatesParams) ([
 			&i.ArchivedAt,
 			&i.PdfStorageVersionID,
 			&i.EvidenceVersionPinRequired,
+			&i.HtmlMasterJson,
+			&i.HtmlContentSha256,
 		); err != nil {
 			return nil, err
 		}
@@ -315,7 +519,7 @@ SET name = $3,
     version = version + 1,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND source_kind = 'blocks' AND archived_at IS NULL
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
 `
 
 type UpdateBlocksTemplateParams struct {
@@ -353,6 +557,69 @@ func (q *Queries) UpdateBlocksTemplate(ctx context.Context, arg UpdateBlocksTemp
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+	)
+	return &i, err
+}
+
+const updateHTMLTemplate = `-- name: UpdateHTMLTemplate :one
+UPDATE templates
+SET name = $1::text,
+    html_master_json = $2::jsonb,
+    variables_json = $3::jsonb,
+    html_content_sha256 = $4::bytea,
+    version = version + 1,
+    updated_at = clock_timestamp()
+WHERE id = $5::uuid AND org_id = $6::uuid
+  AND source_kind = 'html' AND archived_at IS NULL
+  AND version = $7::integer
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+`
+
+type UpdateHTMLTemplateParams struct {
+	Name              string          `json:"name"`
+	HtmlMasterJson    json.RawMessage `json:"html_master_json"`
+	VariablesJson     json.RawMessage `json:"variables_json"`
+	HtmlContentSha256 []byte          `json:"html_content_sha256"`
+	ID                uuid.UUID       `json:"id"`
+	OrgID             uuid.UUID       `json:"org_id"`
+	ExpectedVersion   int32           `json:"expected_version"`
+}
+
+// Authoring edits create a new immutable revision in this transaction. A
+// completed old approval remains history and never approves the new version.
+func (q *Queries) UpdateHTMLTemplate(ctx context.Context, arg UpdateHTMLTemplateParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, updateHTMLTemplate,
+		arg.Name,
+		arg.HtmlMasterJson,
+		arg.VariablesJson,
+		arg.HtmlContentSha256,
+		arg.ID,
+		arg.OrgID,
+		arg.ExpectedVersion,
+	)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }
@@ -363,7 +630,7 @@ SET fields_json = $3,
     version = version + 1,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND source_kind = 'pdf' AND archived_at IS NULL
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
 `
 
 type UpdatePDFTemplateFieldsParams struct {
@@ -393,6 +660,8 @@ func (q *Queries) UpdatePDFTemplateFields(ctx context.Context, arg UpdatePDFTemp
 		&i.ArchivedAt,
 		&i.PdfStorageVersionID,
 		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
 	)
 	return &i, err
 }

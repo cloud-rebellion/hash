@@ -62,15 +62,16 @@ func New(q *generated.Queries) *Engine {
 // race where another writer flips the document between the edit and the
 // snapshot. Callers in handler/sign code already hold the relevant rows.
 type SnapshotInput struct {
-	DocumentID  uuid.UUID
-	OrgID       uuid.UUID
-	Name        string
-	SourceKind  string
-	BlocksJSON  json.RawMessage // may be nil for source_kind='pdf'
-	VariablesJS json.RawMessage // may be nil; treated as '{}'
-	CreatedBy   *uuid.UUID      // null means system-attributed (e.g., import via API key)
-	Via         Via
-	Summary     string // optional one-line description shown in the timeline
+	DocumentID     uuid.UUID
+	OrgID          uuid.UUID
+	Name           string
+	SourceKind     string
+	BlocksJSON     json.RawMessage // may be nil for source_kind='pdf'
+	VariablesJS    json.RawMessage // may be nil; treated as '{}'
+	HTMLSourceJSON json.RawMessage // immutable HTML authoring provenance for a rendered PDF
+	CreatedBy      *uuid.UUID      // null means system-attributed (e.g., import via API key)
+	Via            Via
+	Summary        string // optional one-line description shown in the timeline
 }
 
 // Snapshot persists a new version. Returns the inserted row.
@@ -113,18 +114,19 @@ func (e *Engine) Snapshot(ctx context.Context, in SnapshotInput) (*generated.Doc
 		createdBy = pgtype.UUID{Bytes: *in.CreatedBy, Valid: true}
 	}
 	row, err := e.Q.InsertDocumentVersion(ctx, generated.InsertDocumentVersionParams{
-		DocumentID:    in.DocumentID,
-		OrgID:         in.OrgID,
-		VersionNo:     maxNo + 1,
-		BlockTreeJson: in.BlocksJSON,
-		VariablesJson: in.VariablesJS,
-		Name:          in.Name,
-		SourceKind:    in.SourceKind,
-		Summary:       in.Summary,
-		CreatedBy:     createdBy,
-		CreatedVia:    string(in.Via),
-		ParentID:      parentID,
-		SchemaVersion: 1,
+		DocumentID:     in.DocumentID,
+		OrgID:          in.OrgID,
+		VersionNo:      maxNo + 1,
+		BlockTreeJson:  in.BlocksJSON,
+		VariablesJson:  in.VariablesJS,
+		Name:           in.Name,
+		SourceKind:     in.SourceKind,
+		Summary:        in.Summary,
+		CreatedBy:      createdBy,
+		CreatedVia:     string(in.Via),
+		ParentID:       parentID,
+		SchemaVersion:  1,
+		HtmlSourceJson: in.HTMLSourceJSON,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: insert: %w", err)
@@ -137,10 +139,18 @@ func (e *Engine) History(ctx context.Context, docID uuid.UUID, limit int32) ([]*
 	if limit <= 0 {
 		limit = 50
 	}
-	return e.Q.ListDocumentVersions(ctx, generated.ListDocumentVersionsParams{
+	rows, err := e.Q.ListDocumentVersions(ctx, generated.ListDocumentVersionsParams{
 		DocumentID: docID,
 		Limit:      limit,
 	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*generated.DocumentVersion, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, (*generated.DocumentVersion)(row))
+	}
+	return out, nil
 }
 
 // Get fetches a single version by ID.
@@ -197,15 +207,16 @@ func (e *Engine) Restore(ctx context.Context, in RestoreInput) (target, snapshot
 		return nil, nil, errors.New("restore: target version belongs to a different org")
 	}
 	snap, err := e.Snapshot(ctx, SnapshotInput{
-		DocumentID:  in.DocumentID,
-		OrgID:       in.OrgID,
-		Name:        target.Name,
-		SourceKind:  target.SourceKind,
-		BlocksJSON:  target.BlockTreeJson,
-		VariablesJS: target.VariablesJson,
-		CreatedBy:   in.CreatedBy,
-		Via:         ViaRestore,
-		Summary:     fmt.Sprintf("restored from v%d", target.VersionNo),
+		DocumentID:     in.DocumentID,
+		OrgID:          in.OrgID,
+		Name:           target.Name,
+		SourceKind:     target.SourceKind,
+		BlocksJSON:     target.BlockTreeJson,
+		VariablesJS:    target.VariablesJson,
+		HTMLSourceJSON: target.HtmlSourceJson,
+		CreatedBy:      in.CreatedBy,
+		Via:            ViaRestore,
+		Summary:        fmt.Sprintf("restored from v%d", target.VersionNo),
 	})
 	if err != nil {
 		return nil, nil, err

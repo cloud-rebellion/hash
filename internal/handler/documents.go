@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -29,46 +30,48 @@ import (
 
 // documentResponse is the JSON shape we return.
 type documentResponse struct {
-	ID                uuid.UUID       `json:"id"`
-	OrgID             uuid.UUID       `json:"org_id"`
-	TemplateID        string          `json:"template_id,omitempty"`
-	Name              string          `json:"name"`
-	Status            string          `json:"status"`
-	RoutingMode       string          `json:"routing_mode"`
-	SourceKind        string          `json:"source_kind"`
-	RequiresSignature bool            `json:"requires_signature"`
-	BlocksJSON        json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON     json.RawMessage `json:"variables_json"`
-	PDFStorageKey     string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256         string          `json:"pdf_sha256,omitempty"`
-	FinalPDFKey       string          `json:"final_pdf_key,omitempty"`
-	AuditCertKey      string          `json:"audit_cert_key,omitempty"`
-	ExpiresAt         string          `json:"expires_at,omitempty"`
-	SentAt            string          `json:"sent_at,omitempty"`
-	CompletedAt       string          `json:"completed_at,omitempty"`
-	SenderID          uuid.UUID       `json:"sender_id"`
-	Metadata          json.RawMessage `json:"metadata"`
-	DefaultLocale     string          `json:"default_locale"`
-	CreatedAt         string          `json:"created_at"`
-	UpdatedAt         string          `json:"updated_at"`
+	ID                 uuid.UUID       `json:"id"`
+	OrgID              uuid.UUID       `json:"org_id"`
+	TemplateID         string          `json:"template_id,omitempty"`
+	Name               string          `json:"name"`
+	Status             string          `json:"status"`
+	RoutingMode        string          `json:"routing_mode"`
+	SourceKind         string          `json:"source_kind"`
+	RequiresSignature  bool            `json:"requires_signature"`
+	BlocksJSON         json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON      json.RawMessage `json:"variables_json"`
+	PDFStorageKey      string          `json:"pdf_storage_key,omitempty"`
+	PDFSHA256          string          `json:"pdf_sha256,omitempty"`
+	FinalPDFKey        string          `json:"final_pdf_key,omitempty"`
+	AuditCertKey       string          `json:"audit_cert_key,omitempty"`
+	ExpiresAt          string          `json:"expires_at,omitempty"`
+	SentAt             string          `json:"sent_at,omitempty"`
+	CompletedAt        string          `json:"completed_at,omitempty"`
+	SenderID           uuid.UUID       `json:"sender_id"`
+	Metadata           json.RawMessage `json:"metadata"`
+	DefaultLocale      string          `json:"default_locale"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
+	HTMLReviewRequired bool            `json:"html_review_required,omitempty"`
 }
 
 func toDocumentResponse(d *generated.Document) documentResponse {
 	out := documentResponse{
-		ID:                d.ID,
-		OrgID:             d.OrgID,
-		Name:              d.Name,
-		Status:            d.Status,
-		RoutingMode:       d.RoutingMode,
-		SourceKind:        d.SourceKind,
-		RequiresSignature: d.RequiresSignature,
-		BlocksJSON:        d.BlocksJson,
-		VariablesJSON:     d.VariablesJson,
-		SenderID:          d.SenderID,
-		Metadata:          d.Metadata,
-		DefaultLocale:     d.DefaultLocale,
-		CreatedAt:         d.CreatedAt.Time.Format(time.RFC3339),
-		UpdatedAt:         d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
+		ID:                 d.ID,
+		OrgID:              d.OrgID,
+		Name:               d.Name,
+		Status:             d.Status,
+		RoutingMode:        d.RoutingMode,
+		SourceKind:         d.SourceKind,
+		RequiresSignature:  d.RequiresSignature,
+		BlocksJSON:         d.BlocksJson,
+		VariablesJSON:      d.VariablesJson,
+		SenderID:           d.SenderID,
+		Metadata:           d.Metadata,
+		DefaultLocale:      d.DefaultLocale,
+		CreatedAt:          d.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt:          d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
+		HTMLReviewRequired: len(d.HtmlSourceJson) > 0 && (!d.HtmlReviewedBy.Valid || !d.HtmlReviewedAt.Valid || len(d.PdfSha256) != 32 || !bytes.Equal(d.HtmlReviewedPdfSha256, d.PdfSha256)),
 	}
 	if d.TemplateID.Valid {
 		out.TemplateID = uuidFromBytes(d.TemplateID.Bytes).String()
@@ -576,7 +579,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 	if s.Versions != nil {
 		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
 			DocumentID: d.ID, OrgID: d.OrgID, Name: d.Name, SourceKind: d.SourceKind,
-			BlocksJSON: d.BlocksJson, VariablesJS: d.VariablesJson, CreatedBy: &actorID,
+			BlocksJSON: d.BlocksJson, VariablesJS: d.VariablesJson, HTMLSourceJSON: d.HtmlSourceJson, CreatedBy: &actorID,
 			Via: versions.ViaHuman, Summary: "update_document",
 		}); err != nil {
 			writeInternalErrorMsg(w, "snapshot document update failed", err)

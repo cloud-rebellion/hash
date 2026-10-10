@@ -445,3 +445,74 @@ select another tenant; identity comes from the authenticated document context.
 An absent branding record reports not configured and follows normal preview
 fallback behavior. These live draft values use the resolver's bounded TTL cache;
 sent documents use their frozen variables.
+
+## HTML design draft API
+
+This source draft adds reusable HTML designs separately from the PDF bytes used
+for signing. It is not a completed sales UI or a deployed release. HTML document
+negotiation and rerendering, contract-completeness profiles, signature-page
+binding, visual acceptance and approved privacy disposal remain pending.
+
+Sender sessions can create `POST /api/v1/templates/html` and edit
+`PATCH /api/v1/templates/{id}/html`. Editing requires `expected_version`; every
+edit creates a new immutable revision and requires new owner approval. The body
+contains `name`, `html_master_json`, and optional `variables_json` defaults:
+
+```json
+{
+  "name": "Ordinary agreement",
+  "html_master_json": {
+    "schema_version": 1,
+    "html": "<h1>Agreement</h1><p>Customer: <span data-hash-value=\"customer\"></span></p><div data-hash-section=\"scope\"></div>",
+    "values": [{"name": "customer", "required": true, "max_chars": 200}],
+    "sections": [{"name": "scope", "default_text": "Approved scope text", "max_chars": 2000}]
+  },
+  "variables_json": {}
+}
+```
+
+Values and editable sections are declared plain text. They are escaped when
+inserted; templates cannot evaluate Go expressions or JavaScript. CSS and HTML
+use the restricted grammar in `internal/htmlmaster`. Images and fonts must be
+declared, bounded embedded assets referenced as `hash-asset:<name>`; remote URLs,
+SVG, scripts, forms and arbitrary HTML section replacement are refused. The
+master JSON is capped at12MiB, HTML256KiB, CSS128KiB and16 assets totaling8MiB.
+An organization import slot bounds concurrent scanner/render work.
+
+An owner approves the exact current design using
+`POST /api/v1/templates/{id}/html/approve` with `expected_version` and
+`expected_content_sha256` from the template response. The digest includes the
+canonical master and its defaults. Approval cannot carry over to a new revision.
+
+`POST /api/v1/templates/{id}/html/documents` accepts `name`,
+`expected_template_version`, `expected_template_content_sha256`, optional
+`values` and `sections` string maps, and optional future `expires_at`.
+Explicit JSON null maps or entries are refused. The current approved revision
+is retained through the transaction. Its defaults and supplied declared text
+are rendered, scanned, sanitized and stored as a fresh PDF-source draft with
+the exact storage version/hash and immutable copied authoring provenance.
+The response includes `document`, `page_count` and `review_required:true`.
+
+The original sender or an owner must inspect `/api/v1/documents/{id}/pdf` and
+explicitly review its current bytes with
+`POST /api/v1/documents/{id}/html/review`, supplying the observed
+`expected_updated_at` and `expected_pdf_sha256`. This records review of that
+exact PDF; it does not validate contract terms or signature geometry. Sending
+refuses absent review, altered provenance, or resolved variables that differ
+from the printed values. New prose always needs this human review. Existing
+field-design and recipient setup still apply; static PDF template export of an
+HTML-authored document is refused. The automation API remains blocks-only.
+
+Template and version lists omit the large inline master. Explicit template and
+version reads return it under the existing tenant/session authorization. Metadata
+snapshots preserve the immutable document source. Source and completed template
+approvals cannot be rewritten; migration rollback refuses retained HTML data.
+
+Recipient redaction and recipient-only exports cannot account for personal data
+in retained HTML designs, defaults and source history. When any such inventory
+exists in a tenant, automated erasure fulfillment and that export return409 and
+require separate privacy/retention review; requests can remain in progress.
+The handler rechecks after the tenant audit lock to cover concurrent first-design
+creation. Archiving preserves revisions. This is a preservation and truthful
+refusal boundary, not an approved indefinite retention policy or a complete
+HTML privacy disposal/export workflow.

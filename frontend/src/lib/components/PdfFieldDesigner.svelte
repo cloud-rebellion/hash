@@ -74,7 +74,7 @@
 
   // Drag-to-place state, in page-percentage coordinates.
   let draft = $state<{ page: number; x: number; y: number; w: number; h: number } | null>(null);
-  let dragStart: { page: number; x: number; y: number } | null = null;
+  let dragStart: { page: number; x: number; y: number; pointerID: number } | null = null;
 
   const canvasEls: Record<number, HTMLCanvasElement> = {};
   const MAX_W = 760;
@@ -207,20 +207,26 @@
   }
 
   function onPointerDown(e: PointerEvent, page: number, layer: HTMLElement) {
-    if (e.button !== 0 || readonly || generated || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
+    // A second pointer turns this into a navigation gesture, not placement.
+    if (dragStart && e.pointerId !== dragStart.pointerID) {
+      dragStart = null;
+      draft = null;
+      return;
+    }
+    if (!e.isPrimary || e.button !== 0 || dragStart || readonly || generated || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
     if (tool === 'signature' && !recipientID) {
       error = 'Pick a recipient before placing a signature field.';
       return;
     }
     error = null;
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    layer.setPointerCapture?.(e.pointerId);
     const p = pctFromEvent(e, layer);
-    dragStart = { page, x: p.x, y: p.y };
+    dragStart = { page, x: p.x, y: p.y, pointerID: e.pointerId };
     draft = { page, x: p.x, y: p.y, w: 0, h: 0 };
   }
 
   function onPointerMove(e: PointerEvent, layer: HTMLElement) {
-    if (!dragStart) return;
+    if (!dragStart || e.pointerId !== dragStart.pointerID) return;
     const p = pctFromEvent(e, layer);
     draft = {
       page: dragStart.page,
@@ -231,7 +237,14 @@
     };
   }
 
-  async function onPointerUp() {
+  function cancelPlacement(e: PointerEvent) {
+    if (!dragStart || e.pointerId !== dragStart.pointerID) return;
+    dragStart = null;
+    draft = null;
+  }
+
+  async function onPointerUp(e: PointerEvent) {
+    if (!dragStart || e.pointerId !== dragStart.pointerID) return;
     const d = draft;
     dragStart = null;
     draft = null;
@@ -297,7 +310,7 @@
   }
 </script>
 
-<section class="card p-5 mb-6" aria-label="PDF signature locations" data-generated-signatures={generated} data-placement-ready={rendered && !error && !recipientRefreshError && !refreshingRecipients}>
+<section class="card p-5 mb-6 min-w-0" aria-label="PDF signature locations" data-generated-signatures={generated} data-placement-ready={rendered && !error && !recipientRefreshError && !refreshingRecipients}>
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
       <Signature class="size-4" /> {generated || readonly ? 'Signature locations' : 'Field designer'}
@@ -306,7 +319,7 @@
   {#if generated}<p class="text-sm text-text-secondary mb-4 leading-relaxed">Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties. Change document values or wording above to create a new PDF; Hash regenerates its locations for fresh review.</p>
   {:else if readonly}<p class="text-sm text-text-secondary mb-4 leading-relaxed">The saved field positions are shown for viewing.</p>
   {:else}<p class="text-sm text-text-secondary mb-4 leading-relaxed">
-    Pick a field type, then click (or drag a box) on the page to place it. Each
+    Pick a field type. On touch screens, tap to place a field and swipe to scroll. With a mouse, click or drag a box. Each
     signer fills their fields and signs where you drop a signature field; the
     values stamp onto the final PDF at exactly these positions.
   </p>{/if}
@@ -324,13 +337,13 @@
         </button>
       {/each}
     </div>
-    <label class="text-sm">
+    <label class="text-sm min-w-0 max-w-full">
       <span class="block text-xs uppercase tracking-widest text-text-muted font-mono mb-1">Recipient</span>
       <select
         aria-label="Recipient"
         bind:value={recipientID}
         disabled={placementUnavailable}
-        class="px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
+        class="max-w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
       >
         {#if tool !== 'signature'}
           <option value="">Any recipient</option>
@@ -366,21 +379,24 @@
   {#if loading}
     <p class="text-text-muted text-sm">Loading PDF...</p>
   {:else}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll the fixed PDF placement surface.) -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll the PDF placement pages.) -->
     <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label="PDF field placement pages" tabindex="0">
       {#each pages as p (p.num)}
-        <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px">
-          <canvas bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block"></canvas>
-          <!-- Field overlay layer (same pixel box as the canvas) -->
+        <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px;max-width:100%">
+          <canvas bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block w-full h-auto"></canvas>
+          <!-- The displayed page and overlay scale together; stored coordinates remain percentages. -->
           <div
             class="absolute inset-0 {generated || readonly ? '' : 'cursor-crosshair'}"
             role="application"
             tabindex="-1"
             aria-label="Field placement layer for page {p.num}"
+            style="touch-action:pan-y pinch-zoom"
             onpointerdown={(e) => onPointerDown(e, p.num, e.currentTarget as HTMLElement)}
             onpointermove={(e) => onPointerMove(e, e.currentTarget as HTMLElement)}
             onpointerup={onPointerUp}
-            onpointerleave={onPointerUp}
+            onpointercancel={cancelPlacement}
+            onlostpointercapture={cancelPlacement}
+            onpointerleave={cancelPlacement}
           >
             {#each fieldsOnPage(p.num) as f (f.id)}
               <div

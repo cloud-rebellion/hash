@@ -13,6 +13,10 @@
   let disposed = false, listOperation = 0, selectionOperation = 0;
   let abort: AbortController | null = null;
   const current = () => !disposed && document.id === sourceID && document.org_id === sourceOrg;
+  function sourceObservation() {
+    return `${document.id}:${document.org_id}:${document.html_materialization_revision}:${document.html_source_commitment}:${document.pdf_sha256}`;
+  }
+  let observedSource = untrack(() => sourceObservation());
   const proofKey = $derived(selected ? `${sourceID}:${selected.materialization_revision}:${selected.html_source_commitment}:${selected.pdf_sha256}` : '');
   // The retained rows are historical observations. Never label one current
   // based on a server flag whose document observation may have since changed.
@@ -20,16 +24,25 @@
     && row.source_commitment === document.html_source_commitment && row.pdf_sha256 === document.pdf_sha256;
 
   async function refresh() {
-    if (!current() || loading && rows.length > 0) return;
+    if (!current()) return;
     const operation = ++listOperation;
+    const observation = sourceObservation();
     loading = true; error = null;
     try {
       const result = await getHTMLDocumentHistory(sourceID);
-      if (!current() || operation !== listOperation) return;
+      if (!current() || operation !== listOperation || observation !== sourceObservation()) return;
       rows = validateHTMLHistory(result.revisions).slice().sort((a, b) => b.sequence - a.sequence);
-    } catch (e) { if (current() && operation === listOperation) error = (e as Error).message; }
-    finally { if (current() && operation === listOperation) loading = false; }
+    } catch (e) { if (current() && operation === listOperation && observation === sourceObservation()) error = (e as Error).message; }
+    finally { if (current() && operation === listOperation && observation === sourceObservation()) loading = false; }
   }
+  $effect(() => {
+    const observation = sourceObservation();
+    untrack(() => {
+      if (!current() || observation === observedSource) return;
+      observedSource = observation;
+      void refresh();
+    });
+  });
   async function openRevision(row: HTMLHistoryEntry) {
     if (!current() || !rows.includes(row)) return;
     const operation = ++selectionOperation;

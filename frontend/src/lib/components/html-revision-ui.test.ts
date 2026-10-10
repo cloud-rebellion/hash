@@ -169,7 +169,7 @@ test('history opens only exact read-only source and verified bytes, keeping olde
   const env: any = { rows: [row], document: document(), sourceID: ID, sourceOrg: ORG, disposed: false, listOperation: 0, selectionOperation: 0, abort: null,
     selected: null, bytes: null, loading: false, opening: false, error: null, validateHTMLSource, validateHTMLHistory, current: () => !env.disposed && env.document.id === ID };
   for (const name of ['getHTMLRevisionSource', 'fetchVerifiedHTMLRevisionPDF', 'getHTMLDocumentHistory']) env[name] = (...args: any[]) => new Promise((resolve, reject) => calls.push({ name, args, resolve, reject }));
-  const actions = bind('./HtmlDocumentHistory.svelte', ['openRevision', 'refresh'], env);
+  const actions = bind('./HtmlDocumentHistory.svelte', ['openRevision', 'sourceObservation', 'refresh'], env);
   const pending = actions.openRevision(row); calls[0].resolve({ ...source(), can_edit: false }); await tick();
   expect(calls[1].args[1].html_source_commitment).toBe(row.source_commitment); const bytes = new Uint8Array([1, 2]); calls[1].resolve(bytes); await pending;
   expect(env.selected.can_edit).toBe(false); expect(env.bytes).toBe(bytes);
@@ -181,16 +181,66 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
   for (const action of ['onPointerUp', 'remove']) {
     const calls: any[] = [], changed: any[] = [];
     const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64), htmlSourceCommitment: 'a'.repeat(64), disposed: false,
-      draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: {}, readonly: false, generated: false, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
+      draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: { pointerID: 1 }, readonly: false, generated: false, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
       TOOLS: [{ type: 'signature', label: 'Signature' }], fields: [{ id: 'field', document_id: ID }], saving: false, error: null, htmlPlacementPins,
       emitSignatureFields: () => changed.push(true), current: (target: string) => !env.disposed && target === ID && env.htmlSourceCommitment === env.sourceCommitment };
     for (const name of ['addField', 'deleteField']) env[name] = (...args: any[]) => new Promise((resolve) => calls.push({ name, args, resolve }));
     const actions = bind('./PdfFieldDesigner.svelte', ['onPointerUp', 'round', 'remove'], env);
-    const pending = action === 'onPointerUp' ? actions.onPointerUp() : actions.remove(env.fields[0]);
+    const pending = action === 'onPointerUp' ? actions.onPointerUp({ pointerId: 1 }) : actions.remove(env.fields[0]);
     expect(calls[0].args[1]).toMatchObject({ expected_pdf_sha256: env.sourceSHA, expected_html_source_commitment: env.sourceCommitment });
     env.htmlSourceCommitment = 'd'.repeat(64); calls[0].resolve({ id: 'created', document_id: ID }); await pending;
     expect(changed).toEqual([]); expect(env.fields).toEqual([{ id: 'field', document_id: ID }]);
-    await actions.onPointerUp(); await actions.remove(env.fields[0]); expect(calls).toHaveLength(1);
+    await actions.onPointerUp({ pointerId: 1 }); await actions.remove(env.fields[0]); expect(calls).toHaveLength(1);
+  }
+});
+
+test('canceled or second-pointer navigation cannot place a field and unrelated pointer-up cannot finish the owned gesture', async () => {
+  for (const mode of ['cancel', 'second-pointer', 'unrelated-up']) {
+    const calls: any[] = [];
+    const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
+      readonly: false, generated: false, placementUnavailable: false, current: () => true, pages: [{ num: 1, w: 760, h: 1000 }],
+      tool: 'signature', recipientID: USER, required: true, TOOLS: [{ type: 'signature', label: 'Signature' }],
+      draft: null, dragStart: null, fields: [], saving: false, error: null, htmlPlacementPins, emitSignatureFields: () => {},
+      addField: async (...args: any[]) => { calls.push(args); return { id: 'new', document_id: ID }; } };
+    const layer = { setPointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 400 }) };
+    const owned = { isPrimary: true, button: 0, pointerId: 1, clientX: 60, clientY: 80 };
+    const other = { ...owned, isPrimary: false, pointerId: 2 };
+    const actions = bind('./PdfFieldDesigner.svelte', ['pctFromEvent', 'onPointerDown', 'onPointerMove', 'cancelPlacement', 'onPointerUp', 'round'], env);
+    actions.onPointerDown(owned, 1, layer);
+    expect(env.dragStart.pointerID).toBe(1);
+    actions.onPointerMove({ ...other, clientX: 290, clientY: 390 }, layer);
+    expect(env.draft).toMatchObject({ x: 20, y: 20, w: 0, h: 0 });
+    if (mode === 'cancel') actions.cancelPlacement(owned);
+    else if (mode === 'second-pointer') actions.onPointerDown(other, 1, layer);
+    else { await actions.onPointerUp(other); expect(env.dragStart.pointerID).toBe(1); }
+    expect(calls).toEqual([]);
+    await actions.onPointerUp(owned);
+    if (mode === 'unrelated-up') {
+      expect(calls).toHaveLength(1);
+      expect(calls[0][1]).toMatchObject({ page: 1, x_pct: 20, y_pct: 20, w_pct: 26, h_pct: 7,
+        expected_pdf_sha256: env.sourceSHA, expected_html_source_commitment: env.sourceCommitment });
+    } else expect(calls).toEqual([]);
+    expect(env.dragStart).toBeNull(); expect(env.draft).toBeNull();
+  }
+});
+
+test('history keeps the latest exact-source rows and readonly selection when older refreshes settle later', async () => {
+  for (const late of ['result', 'error']) {
+    const calls: any[] = [], selected = { ...source(), can_edit: false }, bytes = new Uint8Array([1, 2]);
+    const env: any = { document: document(), sourceID: ID, sourceOrg: ORG, disposed: false, listOperation: 0,
+      rows: [], selected, bytes, loading: false, error: null, validateHTMLHistory,
+      current: () => !env.disposed && env.document.id === ID && env.document.org_id === ORG,
+      getHTMLDocumentHistory: () => new Promise((resolve, reject) => calls.push({ resolve, reject })) };
+    const actions = bind('./HtmlDocumentHistory.svelte', ['sourceObservation', 'refresh'], env);
+    const first = actions.refresh(); env.document = document(2); const second = actions.refresh();
+    const row = { sequence: 2, id: TEMPLATE, source_commitment: source(2).html_source_commitment, pdf_sha256: source(2).pdf_sha256,
+      page_count: 2, created_by: USER, created_at: source(2).updated_at, summary: '', current: true };
+    calls[1].resolve({ revisions: [row] }); await second;
+    if (late === 'result') calls[0].resolve({ revisions: [{ ...row, sequence: 1, source_commitment: source().html_source_commitment }] });
+    else calls[0].reject(new Error('Obsolete refresh failed'));
+    await first;
+    expect(env.rows).toEqual([row]); expect(env.loading).toBe(false); expect(env.error).toBeNull();
+    expect(env.selected).toBe(selected); expect(env.bytes).toBe(bytes);
   }
 });
 
@@ -208,10 +258,10 @@ test('automatic or readonly placement handlers cannot dispatch add/delete even i
   for (const mode of ['generated', 'readonly']) {
     const calls: unknown[] = [];
     const env: any = { documentID: ID, readonly: mode === 'readonly', generated: mode === 'generated',
-      draft: { page: 2, x: 10, y: 42, w: 80, h: 7 }, dragStart: {}, placementUnavailable: false, current: () => true,
+      draft: { page: 2, x: 10, y: 42, w: 80, h: 7 }, dragStart: { pointerID: 1 }, placementUnavailable: false, current: () => true,
       addField: () => calls.push('add'), deleteField: () => calls.push('delete') };
     const actions = bind('./PdfFieldDesigner.svelte', ['onPointerUp', 'remove'], env);
-    await actions.onPointerUp(); await actions.remove({ id: 'existing', document_id: ID });
+    await actions.onPointerUp({ pointerId: 1 }); await actions.remove({ id: 'existing', document_id: ID });
     expect(calls).toEqual([]); expect(env.draft).toBeNull();
   }
 });

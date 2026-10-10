@@ -47,6 +47,12 @@ signing workflow. Reviewed contract profiles derive the two named parties from
 the printed values. A design with the approved branded signing-page option also
 adds a fixed final page and places each party's protected signature field there.
 Design approval does not approve a future contract's terms.
+
+For manually placed fields, select the field type and recipient. On touch screens,
+tap the PDF to place a field and swipe to scroll; with a mouse, click or drag a box.
+Resizing the view retains the saved PDF coordinates. Generated signing-page fields
+keep their protected layout. PDF history updates as the source changes; opening
+an earlier revision is read-only and does not restore, approve or send it.
 See [HTML design API](docs/API.md#html-design-draft-api)
 and [completion status](docs/COMPLETION-STATUS.md) for contracts and remaining
 release acceptance.

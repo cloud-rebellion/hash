@@ -547,14 +547,14 @@
   }
 </script>
 
-<section class="card p-5 mb-6" aria-label="Recipients and sending">
+<section class="card p-5 mb-6 min-w-0" aria-label="Recipients and sending">
   {#if documentChanged}
     <div role="alert" class="mb-4 text-danger">
       <p>The current document differs from this retained recipient draft. Sending and recipient changes are blocked.</p>
       <button type="button" class="btn btn-secondary" onclick={discardRetainedDraft}>Discard retained draft and open current document</button>
     </div>
   {/if}
-  <div class="flex items-center justify-between mb-3">
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
       <Users class="size-4" /> {modeCopy.sectionTitle}
     </h2>
@@ -614,7 +614,7 @@
     <div class="rounded-md border border-border-light bg-bg-elevated p-3 mb-4 text-sm">
       <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-2">Required signature fields</p>
       <ul class="space-y-1">
-        {#each signatureFields as f (f.role + f.label)}
+        {#each signatureFields as f}
           {@const filled = recipients.some((r) => r.role === f.role.trim().toLowerCase())}
           <li class="flex items-center gap-2">
             <span class="inline-block size-1.5 rounded-full {filled ? 'bg-success' : 'bg-warning'}"></span>
@@ -745,7 +745,7 @@
           <span class="text-xs text-text-muted">{modeCopy.recipientLanguageHelp}</span>
         </div>
       </div>
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2">
         <button class="btn btn-primary" onclick={submitForm} disabled={crmBusy || documentChanged || saving || !!busy || savingLocale}>
           {saving ? 'Saving...' : editingId ? 'Save changes' : 'Add recipient'}
         </button>
@@ -763,7 +763,7 @@
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll all recipient columns.) -->
     <div class="max-w-full overflow-x-auto mb-4" role="region" aria-label="Recipient details" tabindex="0">
-    <table class="w-full text-sm">
+    <table class="recipient-table w-full text-sm">
       <thead>
         <tr class="text-left text-xs uppercase tracking-widest text-text-muted">
           <th class="py-2">Recipient</th>
@@ -781,8 +781,9 @@
               <div class="font-medium">{r.name}</div>
               <div class="text-xs text-text-muted">{r.email}</div>
             </td>
-            <td class="capitalize">{r.role}<span class="text-text-muted normal-case"> · {r.locale}</span></td>
+            <td class="capitalize"><span class="mobile-recipient-label" aria-hidden="true">Role: </span>{r.role}<span class="text-text-muted normal-case"> · {r.locale}</span></td>
             <td>
+              <span class="mobile-recipient-label" aria-hidden="true">Status: </span>
               <span
                 class="inline-block text-xs px-2 py-0.5 rounded-full border capitalize {pill(r.status)}"
                 title={r.status === 'accepted'
@@ -799,7 +800,8 @@
               </span>
             </td>
             {#if editable}
-              <td class="text-right whitespace-nowrap">
+              <td class="recipient-actions text-right whitespace-nowrap">
+                <span class="mobile-recipient-label" aria-hidden="true">Actions: </span>
                 <button class="btn btn-secondary text-xs" aria-label={recipientIdentityLocked ? `Email language for ${r.name}` : `Edit ${r.name}`} disabled={crmBusy || documentChanged || saving || !!busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))} onclick={() => openEdit(r)}>
                   <Pencil class="size-3" />
                 </button>
@@ -904,3 +906,33 @@
     </div>
   {/if}
 </section>
+
+<style>
+  .mobile-recipient-label { display: none; }
+  @media (max-width: 639px) {
+    .recipient-table, .recipient-table tbody { display: block; }
+    .recipient-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .recipient-table tr {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem 0;
+    }
+    .recipient-table td {
+      display: block;
+      padding: 0;
+      text-align: left;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .recipient-table td.recipient-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+    .mobile-recipient-label { display: inline; font-size: 0.75rem; color: var(--color-text-muted); }
+  }
+</style>

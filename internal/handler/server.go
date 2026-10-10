@@ -222,6 +222,46 @@ func crmDocumentRateLimit(requestLimit int) func(http.Handler) http.Handler {
 	}))
 }
 
+// This tree is mounted only inside the real signed-session API. In particular,
+// API key context identity cannot substitute for the original signed cookie.
+// Every mutation returns its durable actor-bound outcome, including retries.
+func (s *Server) mountPresignRegistryRoutes(r chi.Router) {
+	r.Route("/presign", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				next.ServeHTTP(w, req)
+			})
+		})
+		r.Use(crmDocumentRateLimit(60))
+		r.Get("/context", s.handlePresignContext)
+		r.Get("/fonts/{font}", s.handlePresignFont)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/templates", s.handlePresignTemplates)
+		r.Get("/workflows", s.handlePresignWorkflows)
+		r.Get("/workflows/{id}", s.handlePresignWorkflow)
+		r.Get("/self-grants", s.handlePresignOwnGrants)
+		r.Get("/self-grants/{id}", s.handlePresignOwnGrant)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/grants", s.handlePresignOwnerGrants)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/grants/{id}", s.handlePresignOwnerGrant)
+		r.Get("/requests/{request_id}", s.handlePresignRequest)
+		r.Group(func(r chi.Router) {
+			r.Use(crmDocumentRateLimit(15))
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/workflows/preview", s.handlePresignWorkflowPreview)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/workflows/approve", s.handlePresignWorkflowApprove)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/workflows/{id}/retire", s.handlePresignWorkflowRetire)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/workflows/{id}/archive", s.handlePresignWorkflowArchive)
+			r.With(auth.RequireRole(auth.RoleSender)).Post("/self-grants/preview", s.handlePresignGrantPreview)
+			r.With(auth.RequireRole(auth.RoleSender)).Post("/self-grants/create", s.handlePresignGrantCreate)
+			r.With(auth.RequireRole(auth.RoleSender)).Post("/self-grants/{id}/revise", s.handlePresignGrantRevise)
+			// A member who lost sending rights must still be able to revoke or
+			// recover their own authority. Live service checks retain membership.
+			r.Post("/self-grants/{id}/revoke", s.handlePresignOwnRevoke)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/grants/{id}/revoke", s.handlePresignOwnerRevoke)
+			r.Post("/requests/{request_id}/close", s.handlePresignRequestClose)
+		})
+	})
+}
+
 // Routes builds the chi router with every Hash endpoint mounted.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
@@ -369,6 +409,7 @@ func (s *Server) Routes() http.Handler {
 		// authoritative for current membership, tenant, and role.
 		r.Use(auth.RequireSession(s.Cookies, SessionCookieName, s.Queries))
 		r.Get("/me", s.handleMe)
+		s.mountPresignRegistryRoutes(r)
 		// Org-wide setting: owner-only, like every other org setting below (a
 		// viewer/sender must not flip how change-request approvals behave for
 		// the whole org, e.g. to auto_apply signer-proposed text).

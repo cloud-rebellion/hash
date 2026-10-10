@@ -24,6 +24,8 @@
       title: 'Team',
       items: [
         { href: '/settings/members', label: 'Members & roles', desc: 'Owner / sender / viewer access.', icon: Users },
+        { href: '/settings/signing-policies', label: 'Signing workflows and policies', desc: 'Owner-reviewed rules; execution unavailable.', icon: ShieldCheck },
+        { href: '/settings/signing-authority', label: 'My signing authority', desc: 'Named self-grants, limits and revocation.', icon: KeyRound },
       ],
     },
     {

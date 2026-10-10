@@ -675,6 +675,88 @@ type OrgSubscription struct {
 	LastQuotaWarningSentAt pgtype.Timestamptz `json:"last_quota_warning_sent_at"`
 }
 
+type PresignGrant struct {
+	OrgID           uuid.UUID          `json:"org_id"`
+	ID              uuid.UUID          `json:"id"`
+	GrantorUserID   uuid.UUID          `json:"grantor_user_id"`
+	CurrentRevision int64              `json:"current_revision"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	RevokedReason   pgtype.Text        `json:"revoked_reason"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type PresignGrantRevision struct {
+	OrgID          uuid.UUID          `json:"org_id"`
+	GrantID        uuid.UUID          `json:"grant_id"`
+	Revision       int64              `json:"revision"`
+	CanonicalGrant []byte             `json:"canonical_grant"`
+	GrantSha256    []byte             `json:"grant_sha256"`
+	PolicyID       uuid.UUID          `json:"policy_id"`
+	PolicyRevision int64              `json:"policy_revision"`
+	PolicySha256   []byte             `json:"policy_sha256"`
+	GrantedAt      pgtype.Timestamptz `json:"granted_at"`
+	NotBefore      pgtype.Timestamptz `json:"not_before"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	MaxUses        int64              `json:"max_uses"`
+	ConsumedUses   int64              `json:"consumed_uses"`
+}
+
+type PresignGrantRevocation struct {
+	OrgID       uuid.UUID          `json:"org_id"`
+	GrantID     uuid.UUID          `json:"grant_id"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	Reason      string             `json:"reason"`
+	ActorUserID pgtype.UUID        `json:"actor_user_id"`
+}
+
+type PresignMutationRequest struct {
+	OrgID            uuid.UUID          `json:"org_id"`
+	ActorUserID      uuid.UUID          `json:"actor_user_id"`
+	RequestID        uuid.UUID          `json:"request_id"`
+	State            string             `json:"state"`
+	Operation        string             `json:"operation"`
+	CommandSha256    []byte             `json:"command_sha256"`
+	ResourceKind     pgtype.Text        `json:"resource_kind"`
+	ResourceID       pgtype.UUID        `json:"resource_id"`
+	ResourceRevision pgtype.Int8        `json:"resource_revision"`
+	ResourceSha256   []byte             `json:"resource_sha256"`
+	OutcomeJson      json.RawMessage    `json:"outcome_json"`
+	OccurredAt       pgtype.Timestamptz `json:"occurred_at"`
+}
+
+type PresignWorkflow struct {
+	OrgID           uuid.UUID          `json:"org_id"`
+	ID              uuid.UUID          `json:"id"`
+	Name            string             `json:"name"`
+	CurrentRevision int64              `json:"current_revision"`
+	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type PresignWorkflowRetirement struct {
+	OrgID      uuid.UUID          `json:"org_id"`
+	WorkflowID uuid.UUID          `json:"workflow_id"`
+	Revision   int64              `json:"revision"`
+	RetiredBy  uuid.UUID          `json:"retired_by"`
+	RetiredAt  pgtype.Timestamptz `json:"retired_at"`
+}
+
+type PresignWorkflowRevision struct {
+	OrgID                 uuid.UUID          `json:"org_id"`
+	WorkflowID            uuid.UUID          `json:"workflow_id"`
+	Revision              int64              `json:"revision"`
+	PolicyID              uuid.UUID          `json:"policy_id"`
+	CanonicalDefinition   []byte             `json:"canonical_definition"`
+	DefinitionSha256      []byte             `json:"definition_sha256"`
+	CanonicalPolicy       []byte             `json:"canonical_policy"`
+	PolicySha256          []byte             `json:"policy_sha256"`
+	TemplateID            uuid.UUID          `json:"template_id"`
+	TemplateVersion       int32              `json:"template_version"`
+	TemplateContentSha256 []byte             `json:"template_content_sha256"`
+	ApprovedBy            uuid.UUID          `json:"approved_by"`
+	ApprovedAt            pgtype.Timestamptz `json:"approved_at"`
+}
+
 type QesSigningSession struct {
 	ID                    uuid.UUID          `json:"id"`
 	DocumentID            uuid.UUID          `json:"document_id"`

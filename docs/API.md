@@ -5,6 +5,10 @@ Hash exposes separate browser, machine, signer, and webhook boundaries. Use the
 middleware, and conditional dependency. The inventory is generated from the
 router and checked with `go run ./cmd/apidocgen -check`.
 
+The [signing workflow/self-grant registry](PRE-SIGNING-REGISTRY-API.md) documents
+the session-only review, consent, revocation and durable recovery contract.
+Its registry does not enable document pre-signing or machine execution.
+
 ## Authentication boundaries
 
 | Surface | Authentication | Contract |
@@ -94,8 +98,11 @@ turn a durable field-save receipt into a failed save.
 
 ## Roles and scopes
 
-`viewer` is read-only, `sender` creates/edits/sends documents, and `owner` also
-controls organization settings and membership. A role never authorizes another
+`viewer` reads documents, `sender` creates/edits/sends documents, and `owner` also
+controls organization settings and membership. A current viewer can still revoke
+their own retained signing grant and inspect or explicitly close their own
+registry requests. These exceptions preserve recovery after loss of sending
+rights; they cannot create authority. A role never authorizes another
 tenant's document. A machine key's scopes narrow its role, and a document-scoped
 credential narrows its target further. Missing scopes do not inherit full access.
 See [role checks](../internal/auth/rbac.go) and

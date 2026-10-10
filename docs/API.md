@@ -49,6 +49,49 @@ Its authenticated billing status reports `billing_enabled: true`,
 Subscription is absent; invoices and purchase catalog are empty. Payment
 operations are disabled while quotas and capabilities remain enforced.
 
+## Recipient PDF observations
+
+For PDF documents, `GET /sign/{token}` returns `pdf_observation` with the exact
+`document_id`, this `recipient_id`, and lowercase `pdf_sha256`. Registered HTML
+materializations also include `html_source_commitment`, `page_count` and
+`materialization_revision`. An older HTML origin may include a source commitment
+without a registered page count or revision. Static PDFs omit these optional
+HTML fields. A missing count is unknown; clients must inspect the exact PDF.
+
+The original PDF read, field list and successful field-save receipt repeat the
+same public observation in these headers:
+
+| Header | Value |
+| --- | --- |
+| `X-Hash-Document-Id` | Observed document UUID |
+| `X-Hash-Recipient-Id` | Authenticated recipient UUID |
+| `X-Hash-PDF-SHA256` | Exact source PDF SHA-256 |
+| `X-Hash-PDF-Pages` | Registered page count, when known |
+| `X-Hash-HTML-Source-Commitment` | Validated HTML source commitment, when present |
+| `X-Hash-Materialization-Revision` | Registered materialization sequence, when present |
+
+Storage keys, object VersionIds, organization IDs and raw HTML source are not
+part of this public witness. Use no-store reads and compare both the values and
+the presence of optional headers with the original context. Verify the PDF
+bytes before parsing, require every page to render, and verify field ownership
+and geometry against that artifact. A failed or incomplete view must keep
+adoption, signing and acceptance disabled. Dispose pending reads/render work
+when the token, recipient, notice or artifact changes.
+
+Context, PDF, rendered block document and field reads retain their original
+magic-link admission and notice through database/render/storage waits. A final
+short transaction locks the parent and exact recipient, then rechecks source,
+normalized HTML history, notice and both original/current deadlines before
+returning data. An expired original admission is not revived by an extended
+deadline. These checks authorize a read; legal mutations retain their separate
+notice, role, status and transaction guards.
+
+Successful field saves return the source observation validated under the
+retained document lock after the field/audit commit. Clients must confirm the
+exact saved field and value before enabling signing. A later source change
+requires a fresh view and mutation authorization; it does not retroactively
+turn a durable field-save receipt into a failed save.
+
 ## Roles and scopes
 
 `viewer` is read-only, `sender` creates/edits/sends documents, and `owner` also

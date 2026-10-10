@@ -1,37 +1,31 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
+  import {
+    SignerPDFSession, confirmSignerPDFField, fetchSignerPDF, readSignerFieldResponse,
+    renderSignerPDFPages, signerPDFScopeKey, validateSignerPDFFields, validateSignerPDFObservation,
+    type SignerPDFField as Field, type SignerPDFObservation, type SignerPDFScope
+  } from '$lib/signerPDF';
   import { t } from '$lib/i18n';
-
-  type Field = {
-    id: string;
-    type: string;
-    page: number;
-    x_pct: number;
-    y_pct: number;
-    w_pct: number;
-    h_pct: number;
-    required: boolean;
-    label?: string;
-    value?: string;
-    options?: { choices?: string[] };
-  };
 
   type Props = {
     token: string;
     noticeDigest: string;
+    observation: SignerPDFObservation;
     signed?: boolean;
     readOnly?: boolean;
-    onFilledChange?: (filled: boolean) => void;
-    onSignatureClick?: () => void;
+    onFilledChange?: (filled: boolean, scope: SignerPDFScope) => void;
+    onSignatureClick?: (scope: SignerPDFScope) => void;
   };
-  let { token, noticeDigest, signed = false, readOnly = false, onFilledChange, onSignatureClick }: Props = $props();
+  let { token, noticeDigest, observation, signed = false, readOnly = false, onFilledChange, onSignatureClick }: Props = $props();
 
-  type PageInfo = { num: number; w: number };
+  type PageInfo = { num: number; w: number; h: number };
 
   let pages = $state<PageInfo[]>([]);
   let fields = $state<Field[]>([]);
   let fieldsLoaded = $state(false);
+  let documentReady = $state(false);
+  let mounted = $state(false);
   let loading = $state(true);
   let error = $state<string | null>(null);
   const buf = $state<Record<string, string>>({});
@@ -39,7 +33,7 @@
   const saving = $state<Record<string, boolean>>({});
   const saveErrors = $state<Record<string, string>>({});
   const canvasEls: Record<number, HTMLCanvasElement> = {};
-  const MAX_W = 760;
+  let session: SignerPDFSession | undefined;
 
   function emptyValue(f: Field): string {
     return f.type === 'checkbox' ? 'false' : '';
@@ -51,6 +45,7 @@
   }
 
   function recomputeFilled(): boolean {
+    if (!session?.current() || loading || error || !documentReady) return false;
     if (!fieldsLoaded) return false;
     if (Object.keys(saveErrors).length > 0) return false;
     for (const f of fields) {
@@ -70,78 +65,106 @@
     // Referencing each state object keeps the parent gate reactive to field
     // loading, every keystroke, and every autosave transition.
     void fieldsLoaded;
+    void documentReady;
+    void loading;
+    void error;
+    void token;
+    void noticeDigest;
+    void JSON.stringify(observation);
     void JSON.stringify(buf);
     void JSON.stringify(persisted);
     void JSON.stringify(saving);
     void JSON.stringify(saveErrors);
     void fields.length;
-    onFilledChange?.(recomputeFilled());
+    if (session?.current()) onFilledChange?.(recomputeFilled(), session.scope);
   });
 
-  onMount(async () => {
-    try {
-      const fres = await fetch(`/sign/${token}/fields`);
-      if (!fres.ok) {
-        throw new Error(await responseError(fres));
+  onMount(() => { mounted = true; });
+
+  $effect(() => {
+    if (!mounted) return;
+    const scope: SignerPDFScope = { token, noticeDigest, observation: { ...observation } };
+    const active = new SignerPDFSession(scope, () => signerPDFScopeKey(token, noticeDigest, observation));
+    untrack(() => {
+      session = active;
+      pages = [];
+      fields = [];
+      fieldsLoaded = false;
+      documentReady = false;
+      loading = true;
+      error = null;
+      for (const state of [buf, persisted, saving, saveErrors, canvasEls]) {
+        const record = state as Record<string, unknown>;
+        for (const name of Object.keys(record)) delete record[name];
       }
-      const data = (await fres.json()) as { fields: Field[] };
-      fields = data.fields ?? [];
-      for (const f of fields) {
+      onFilledChange?.(false, scope);
+      void loadDocument(active);
+    });
+    return () => {
+      active.destroy();
+      // A disposed viewer must never publish a positive callback.
+      onFilledChange?.(false, scope);
+    };
+  });
+
+  async function loadDocument(active: SignerPDFSession) {
+    try {
+      const scope = active.scope;
+      validateSignerPDFObservation(scope.observation, scope.observation.document_id, scope.observation.recipient_id);
+      if (!scope.token || !scope.noticeDigest) throw new Error('The signing context is unavailable. Please reopen your signing link.');
+      const signal = active.controller.signal;
+      const [bytes, data] = await Promise.all([
+        fetchSignerPDF(scope, signal),
+        fetch(`/sign/${scope.token}/fields`, { signal, cache: 'no-store', credentials: 'same-origin' })
+          .then(response => readSignerFieldResponse(response, scope.observation, signal))
+      ]);
+      active.assertCurrent();
+      const pdf = await import('$lib/pdf');
+      active.assertCurrent();
+      const doc = await pdf.loadPdfData(bytes);
+      active.attach(doc);
+      const loadedFields = validateSignerPDFFields(data.fields, scope.observation, doc.numPages);
+      if (data.count !== undefined && data.count !== loadedFields.length) throw new Error('The document field list is incomplete.');
+      const rendered = await renderSignerPDFPages(doc, scope.observation, {
+        current: () => active.assertCurrent(),
+        width: pdf.unscaledWidth,
+        mount: async infos => { pages = infos; await tick(); },
+        canvas: num => canvasEls[num],
+        render: pdf.renderPage
+      });
+      active.assertCurrent();
+      pages = rendered;
+      fields = loadedFields;
+      for (const f of loadedFields) {
         const value = f.value ?? emptyValue(f);
         buf[f.id] = value;
         persisted[f.id] = value;
       }
       fieldsLoaded = true;
-    } catch (e) {
-      error = `Unable to load document fields: ${errorMessage(e)}`;
-    }
-
-    try {
-      const pdf = await import('$lib/pdf');
-      const doc = await pdf.loadPdf(`/sign/${token}/pdf`);
-      const infos: PageInfo[] = [];
-      const scales: number[] = [];
-      for (let n = 1; n <= doc.numPages; n++) {
-        const natural = await pdf.unscaledWidth(doc, n);
-        scales[n] = Math.min(MAX_W / natural, 2);
-        infos.push({ num: n, w: 0 });
-      }
-      pages = infos;
-      await tick();
-      for (const p of pages) {
-        const el = canvasEls[p.num];
-        if (!el) continue;
-        const dim = await pdf.renderPage(doc, p.num, el, scales[p.num]);
-        p.w = dim.width;
-      }
-      pages = [...pages];
-    } catch (e) {
-      const message = `Unable to load document: ${errorMessage(e)}`;
-      error = error ? `${error} ${message}` : message;
-    } finally {
+      documentReady = true;
       loading = false;
+    } catch (e) {
+      if (active.current()) {
+        error = `Unable to load document: ${errorMessage(e)}`;
+        loading = false;
+        documentReady = false;
+        fieldsLoaded = false;
+        onFilledChange?.(false, active.scope);
+      }
+      active.destroy();
     }
-  });
+  }
 
   function errorMessage(value: unknown): string {
     return value instanceof Error && value.message ? value.message : 'The request failed.';
   }
 
-  async function responseError(res: Response): Promise<string> {
-    const fallback = `The request failed (${res.status}).`;
-    const body = (await res.text()).trim();
-    if (!body) return fallback;
-    try {
-      const parsed = JSON.parse(body) as { error?: unknown };
-      if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim();
-    } catch {
-      // A plain-text response is already suitable for the visible error below.
-    }
-    return body;
-  }
-
   async function saveField(f: Field) {
     if (readOnly) return;
+    const active = session;
+    if (signed || !active?.current() || !documentReady || loading || error || !fieldsLoaded) return;
+    const originalField = fields.find(candidate => candidate.id === f.id);
+    if (!originalField || originalField.type === 'signature') return;
     const nextValue = buf[f.id] ?? emptyValue(f);
     const previousValue = persisted[f.id] ?? emptyValue(f);
     if (saving[f.id] || nextValue === previousValue) return;
@@ -149,20 +172,24 @@
     saving[f.id] = true;
     delete saveErrors[f.id];
     try {
-      const res = await fetch(`/sign/${token}/fields`, {
+      const scope = active.scope;
+      const res = await fetch(`/sign/${scope.token}/fields`, {
         method: 'POST',
-        headers: signerNoticeHeaders(noticeDigest, true),
+        signal: active.controller.signal,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: signerNoticeHeaders(scope.noticeDigest, true),
         body: JSON.stringify({ values: [{ field_id: f.id, value: nextValue }] }),
       });
-      if (!res.ok) {
-        throw new Error(await responseError(res));
-      }
-
-      const data = (await res.json()) as { updated?: Field[] };
-      const updated = data.updated?.find((candidate) => candidate.id === f.id);
-      if (!updated) {
+      active.assertCurrent();
+      const data = await readSignerFieldResponse(res, scope.observation, active.controller.signal);
+      active.assertCurrent();
+      const updates = validateSignerPDFFields(data.updated, scope.observation, pages.length);
+      const updated = updates.find(candidate => candidate.id === f.id);
+      if (!updated || updates.length !== 1) {
         throw new Error('The server did not confirm the saved field.');
       }
+      confirmSignerPDFField(originalField, updated);
 
       const confirmedValue = updated.value ?? emptyValue(f);
       persisted[f.id] = confirmedValue;
@@ -173,13 +200,14 @@
         fields = [...fields];
       }
     } catch (e) {
+      if (!active.current()) return;
       // A failed request may not have reached the server. Revert the visible
       // control to the last confirmed value so the UI and signing gate agree
       // with the durable ceremony state.
       buf[f.id] = previousValue;
       saveErrors[f.id] = errorMessage(e);
     } finally {
-      saving[f.id] = false;
+      if (active.current()) saving[f.id] = false;
     }
   }
 
@@ -193,7 +221,7 @@
   }
 </script>
 
-<div class="pdf-signer">
+<div class="pdf-signer" data-pdf-ready={documentReady && !loading && !error} data-pdf-page-count={pages.length}>
   {#if error}
     <div class="err" role="alert">{error}</div>
   {/if}
@@ -202,10 +230,12 @@
   {/each}
   {#if loading}
     <p class="muted">{$t('pdf.loading')}</p>
-  {:else}
+  {/if}
+  <!-- Canvases must exist while loading, before tick/render begins. -->
     {#each pages as p (p.num)}
-      <div class="page" style="width:{p.w}px">
+      <div class="page" style="width:{p.w}px" aria-label="Document page {p.num}">
         <canvas bind:this={canvasEls[p.num]}></canvas>
+        {#if documentReady && !error}
         <div class="overlay">
           {#each fieldsOnPage(p.num) as f (f.id)}
             {#if f.type === 'signature' && readOnly}
@@ -214,10 +244,12 @@
               <button
                 type="button"
                 class="fld sig"
+                data-field-id={f.id}
+                data-recipient-id={f.recipient_id ?? ''}
                 class:done={signed}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 onclick={() => {
-                  if (!readOnly && recomputeFilled()) onSignatureClick?.();
+                  if (!readOnly && !signed && recomputeFilled() && session?.current()) onSignatureClick?.(session.scope);
                 }}
                 disabled={readOnly || signed || !recomputeFilled()}
                 title={!recomputeFilled() ? $t('sign.fillRequiredTitle') : ''}
@@ -231,11 +263,13 @@
               >
                 <input
                   type="checkbox"
+                  data-field-id={f.id}
+                  data-recipient-id={f.recipient_id ?? ''}
                   checked={buf[f.id] === 'true'}
                   class:save-failed={Boolean(saveErrors[f.id])}
                   aria-invalid={Boolean(saveErrors[f.id])}
                   aria-busy={Boolean(saving[f.id])}
-                  disabled={readOnly || Boolean(saving[f.id])}
+                  disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
                   onchange={(e) => {
                     buf[f.id] = (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false';
                     void saveField(f);
@@ -245,12 +279,14 @@
             {:else if f.type === 'dropdown'}
               <select
                 class="fld inp"
+                data-field-id={f.id}
+                data-recipient-id={f.recipient_id ?? ''}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 bind:value={buf[f.id]}
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={readOnly || Boolean(saving[f.id])}
+                disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               >
                 <option value="">{f.label || 'Select…'}</option>
@@ -261,6 +297,8 @@
             {:else}
               <input
                 class="fld inp"
+                data-field-id={f.id}
+                data-recipient-id={f.recipient_id ?? ''}
                 type={f.type === 'date' ? 'date' : 'text'}
                 placeholder={f.label || f.type}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
@@ -268,15 +306,15 @@
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={readOnly || Boolean(saving[f.id])}
+                disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               />
             {/if}
           {/each}
         </div>
+        {/if}
       </div>
     {/each}
-  {/if}
 </div>
 
 <style>
@@ -290,9 +328,12 @@
     position: relative;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
     border: 1px solid var(--color-border-light, #e5e5e5);
+    max-width: 100%;
   }
   .page canvas {
     display: block;
+    width: 100%;
+    height: auto;
   }
   .overlay {
     position: absolute;

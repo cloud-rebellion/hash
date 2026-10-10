@@ -305,6 +305,11 @@ func (s *Server) handleSignerListFields(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	observation, err := s.captureSignerReadObservation(r, rc)
+	if err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
 	rows, err := s.Queries.ListFieldsByRecipient(r.Context(), generated.ListFieldsByRecipientParams{
 		DocumentID:  rc.Document.ID,
 		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
@@ -320,6 +325,11 @@ func (s *Server) handleSignerListFields(w http.ResponseWriter, r *http.Request) 
 		// via /sign/{token}/sign, not the field-submit path (guarded below).
 		out = append(out, fieldToDTO(f))
 	}
+	if err := s.recheckSignerRead(r, rc, observation); err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
+	setSignerPDFObservationHeaders(w, observation.pdf)
 	writeJSON(w, http.StatusOK, map[string]any{"fields": out, "count": len(out)})
 }
 
@@ -448,6 +458,11 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	originalPDF, err := signerPDFObservationFor(rc)
+	if err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
 	// Only an active document accepts field fills. Without this a recipient with a
 	// still-live token could mutate field values (and fire a viewed/fill event) on a
 	// voided/completed/declined/expired legal record. The query below re-checks the
@@ -503,6 +518,23 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 
 	if err := sign.ValidateLockedRecipientCredential(rc, freshRecipient, lockedDoc, time.Now()); err != nil {
 		writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
+		return
+	}
+	if rc.Recipient.Name != freshRecipient.Name || rc.Recipient.Email != freshRecipient.Email ||
+		rc.Recipient.Role != freshRecipient.Role || rc.Recipient.Locale != freshRecipient.Locale ||
+		rc.Recipient.OrderIndex != freshRecipient.OrderIndex {
+		writeSignerReadError(w, errSignerReadChanged)
+		return
+	}
+	lockedContext := *rc
+	lockedContext.Document = lockedDoc
+	lockedPDF, err := signerPDFObservationFor(&lockedContext)
+	if err != nil || !sameSignerDocumentSource(rc.Document, lockedDoc) || !sameSignerPDFObservation(originalPDF, lockedPDF) {
+		writeSignerReadError(w, errSignerReadChanged)
+		return
+	}
+	if err := validateSignerMaterialization(r.Context(), q, lockedDoc); err != nil {
+		writeSignerReadError(w, errSignerReadChanged)
 		return
 	}
 	if lockedDoc.SourceKind == "pdf" {
@@ -601,6 +633,9 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 	for _, pending := range pendingAudits {
 		s.Audit.Publish(pending)
 	}
+	// This receipt describes the source validated under the retained document
+	// lock. A new lookup after commit cannot retroactively revoke a durable save.
+	setSignerPDFObservationHeaders(w, lockedPDF)
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "count": len(updated)})
 }
 

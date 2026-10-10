@@ -45,7 +45,8 @@ type signerContextResponse struct {
 		Status string    `json:"status"`
 		Locale string    `json:"locale"`
 	} `json:"recipient"`
-	Fonts []string `json:"fonts"`
+	Fonts          []string              `json:"fonts"`
+	PDFObservation *signerPDFObservation `json:"pdf_observation,omitempty"`
 
 	// Privacy is the GDPR Article 13 transparency payload the signer
 	// page renders inline. Surfacing it here (rather than only on a
@@ -158,14 +159,17 @@ func (s *Server) handleSignerContext(w http.ResponseWriter, r *http.Request) {
 	out.Recipient.Role = rc.Recipient.Role
 	out.Recipient.Status = rc.Recipient.Status
 	out.Recipient.Locale = rc.Recipient.Locale
-	privacy, err := s.signerPrivacyNotice(r, rc)
+	observation, err := s.captureSignerReadObservation(r, rc)
 	if err != nil {
-		// A valid signer token without a trustworthy customer-controller
-		// identity must not render a legally misleading Article 13 notice.
-		writeError(w, http.StatusNotFound, "invalid or expired link")
+		writeSignerReadError(w, err)
 		return
 	}
-	out.Privacy = privacy
+	if err := s.recheckSignerRead(r, rc, observation); err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
+	out.Privacy = observation.notice
+	out.PDFObservation = observation.pdf
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -251,11 +255,20 @@ func (s *Server) handleSignerDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "pdf-source documents not yet renderable inline")
 		return
 	}
+	observation, err := s.captureSignerReadObservation(r, rc)
+	if err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
 	// Reuse the same renderer the sender preview uses, so the signer sees
 	// exactly what the sender approved (variables + conditionals applied).
 	html, err := s.Sign.RenderForSigner(r.Context(), rc)
 	if err != nil {
 		writeInternalErrorMsg(w, "render preview", err)
+		return
+	}
+	if err := s.recheckSignerRead(r, rc, observation); err != nil {
+		writeSignerReadError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -560,7 +573,8 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !rc.Document.PdfStorageKey.Valid || rc.Document.PdfStorageKey.String == "" {
+	observation, err := s.captureSignerReadObservation(r, rc)
+	if err != nil || observation.pdf == nil {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
 		return
 	}
@@ -569,6 +583,16 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
+	sum := sha256.Sum256(body)
+	if !bytes.Equal(sum[:], rc.Document.PdfSha256) {
+		writeSignerReadError(w, errSignerReadChanged)
+		return
+	}
+	if err := s.recheckSignerRead(r, rc, observation); err != nil {
+		writeSignerReadError(w, err)
+		return
+	}
+	setSignerPDFObservationHeaders(w, observation.pdf)
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", "inline")
 	_, _ = w.Write(body)

@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { CheckCircle2, FileSignature, ShieldCheck, X } from 'lucide-svelte';
   import SignerFields from '$lib/components/SignerFields.svelte';
   import PdfSignerView from '$lib/components/PdfSignerView.svelte';
   import A13Notice from '$lib/components/A13Notice.svelte';
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
+  import { signerCeremonyKey, validateSignerPDFObservation, type SignerPDFObservation, type SignerPDFScope } from '$lib/signerPDF';
   import { t, setLocale } from '$lib/i18n';
 
   type Privacy = {
@@ -61,6 +62,7 @@
     recipient: { id: string; email: string; name: string; role: string; status: string; locale: string };
     fonts: string[];
     privacy: Privacy;
+    pdf_observation?: SignerPDFObservation;
   };
 
   // Acknowledgement state must never turn the bearer magic-link token into a
@@ -252,10 +254,50 @@
     showAnno = false;
   }
 
-  // v1.2: fillable fields gate. Defaults true so docs without fields
-  // still let the signer through immediately. SignerFields toggles this
-  // to false while a required field is unfilled.
-  let fieldsFilled = $state(true);
+  // v1.2: block-source field filling keeps its existing gate; PDF documents
+  // additionally require a verified, completely rendered current artifact.
+  let fieldsFilled = $state(false);
+  let documentReady = $state(false);
+  let loadedToken = $state('');
+  let viewerScopeKey = $state('');
+  let routeDisposed = false;
+  let acknowledgedScopeKey = '';
+
+  function currentCeremonyKey(): string {
+    if (!ctx || loadedToken !== $page.params.token || routeDisposed) return '';
+    return signerCeremonyKey(loadedToken, ctx.privacy.notice_digest, ctx.document_id, ctx.recipient.id, ctx.pdf_observation);
+  }
+
+  function viewerReady(): boolean {
+    if (!ctx || loadedToken !== $page.params.token || routeDisposed) return false;
+    return ctx.source_kind === 'pdf'
+      ? !!ctx.pdf_observation && fieldsFilled && viewerScopeKey === currentCeremonyKey()
+      : documentReady;
+  }
+
+  function updatePDFGate(filled: boolean, scope: SignerPDFScope) {
+    const key = signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation);
+    if (!key || key !== currentCeremonyKey()) return;
+    fieldsFilled = filled;
+    viewerScopeKey = filled ? key : '';
+  }
+
+  function adoptPDF(scope: SignerPDFScope) {
+    if (signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation) === currentCeremonyKey()) void adopt();
+  }
+
+  $effect.pre(() => {
+    const key = currentCeremonyKey();
+    untrack(() => {
+      if (key !== acknowledgedScopeKey) {
+        acknowledgedScopeKey = key;
+        noticeAcknowledged = false;
+        viewerScopeKey = '';
+        documentReady = false;
+        showAdoptModal = false;
+      }
+    });
+  });
 
   $effect(() => {
     if (ctx?.recipient.name) typedName = ctx.recipient.name;
@@ -295,12 +337,15 @@
     commentLoadRevision++;
     commentBody = '';
     postingComment = false;
-    fieldsFilled = true;
+    fieldsFilled = false;
+    documentReady = false;
+    viewerScopeKey = '';
+    loadedToken = '';
   }
 
   async function load(token: string, signal: AbortSignal) {
     try {
-      const res = await fetch(`/sign/${token}`, { signal });
+      const res = await fetch(`/sign/${token}`, { signal, cache: 'no-store' });
       if (signal.aborted) return;
       if (!res.ok) {
         loadError = 'This link is invalid or has expired.';
@@ -312,6 +357,13 @@
 		loadError = 'The required privacy notice is unavailable.';
 		return;
 	  }
+      if (loaded.source_kind === 'pdf') {
+        loaded.pdf_observation = validateSignerPDFObservation(loaded.pdf_observation, loaded.document_id, loaded.recipient.id);
+        fieldsFilled = false;
+      } else {
+        fieldsFilled = true;
+      }
+      loadedToken = token;
       ctx = loaded;
 
 	  // Legal translations have not all received counsel review. Keep the
@@ -341,22 +393,31 @@
       // render via pdf.js in PdfSignerView, so skip the HTML endpoint (it
       // refuses pdf-source).
       if (loaded.source_kind === 'blocks') {
-        const docRes = await fetch(`/sign/${token}/document`, { signal });
-        if (docRes.ok) {
-          const html = await docRes.text();
-          if (!signal.aborted && token === $page.params.token) documentHTML = html;
-        }
+        const docRes = await fetch(`/sign/${token}/document`, { signal, cache: 'no-store' });
+        if (signal.aborted || token !== $page.params.token) return;
+        if (!docRes.ok) throw new Error('The document could not be loaded. Please reopen your signing link.');
+        const html = await docRes.text();
+        if (signal.aborted || token !== $page.params.token) return;
+        if (!html.trim()) throw new Error('The document is empty. Please contact the sender.');
+        documentHTML = html;
+        documentReady = true;
       }
       if (signal.aborted || token !== $page.params.token) return;
       void loadComments(token, signal);
     } catch (e) {
-      if (!signal.aborted && token === $page.params.token) loadError = (e as Error).message;
+      if (!signal.aborted && token === $page.params.token) {
+        fieldsFilled = false;
+        documentReady = false;
+        viewerScopeKey = '';
+        loadError = (e as Error).message;
+      }
     }
   }
 
   onMount(() => {
 	setLocale('en');
   });
+  onDestroy(() => { routeDisposed = true; });
 
   // SvelteKit keeps this page component alive when only [token] changes.
   // Scope every load to that token and tear down all recipient-specific UI
@@ -364,19 +425,22 @@
   // completion credential or Article 13 state onto the next ceremony.
   $effect(() => {
     const token = $page.params.token;
-    resetRouteState();
-    if (!token) {
-      loadError = 'Missing sign token';
-      return;
-    }
-    clearLegacyA13Acknowledgement(token);
     const controller = new AbortController();
-    void load(token, controller.signal);
+    untrack(() => {
+      resetRouteState();
+      if (!token) {
+        loadError = 'Missing sign token';
+        return;
+      }
+      clearLegacyA13Acknowledgement(token);
+      void load(token, controller.signal);
+    });
     return () => controller.abort();
   });
 
   async function adopt() {
     if (!ctx || changesRequested || requestingChanges) return;
+    if (signing || accepting || declining || !viewerReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined) return;
     if (!typedName.trim()) {
       signError = 'Please type your name first.';
       return;
@@ -404,9 +468,11 @@
 
   async function confirmSign() {
     if (!ctx || changesRequested || requestingChanges) return;
+    if (signing || accepting || declining || !viewerReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined || !typedName.trim()) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
+    const ceremonyKey = currentCeremonyKey();
     if (!token) return;
     signing = true;
     signError = null;
@@ -417,16 +483,16 @@
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ typed_name: typedName, font: chosenFont })
       });
-      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+      if (ceremonyKey !== currentCeremonyKey()) return;
       if (!res.ok) {
         const message = await res.text();
-        if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        if (ceremonyKey === currentCeremonyKey()) {
           signError = message;
         }
         return;
       }
       const body = await res.json();
-      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+      if (ceremonyKey !== currentCeremonyKey()) return;
       if (body.completed) {
         completed = {
           url: typeof body.final_pdf_url === 'string' && body.final_pdf_url
@@ -439,11 +505,11 @@
       }
       showAdoptModal = false;
     } catch (e) {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+      if (ceremonyKey === currentCeremonyKey()) {
         signError = (e as Error).message;
       }
     } finally {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) signing = false;
+      if (ceremonyKey === currentCeremonyKey()) signing = false;
     }
   }
 
@@ -455,9 +521,11 @@
 
   async function accept() {
     if (!ctx || changesRequested || requestingChanges) return;
+    if (signing || accepting || declining || !viewerReady() || !noticeAcknowledged || completed || accepted || declined) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
+    const ceremonyKey = currentCeremonyKey();
     if (!token) return;
     accepting = true;
     signError = null;
@@ -468,13 +536,14 @@
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({})
       });
-      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+      if (ceremonyKey !== currentCeremonyKey()) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (ceremonyKey !== currentCeremonyKey()) return;
         throw new Error(data.error ?? 'Could not accept the document');
       }
       const data = await res.json();
-      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+      if (ceremonyKey !== currentCeremonyKey()) return;
       if (data.completed) {
         completed = {
           url: typeof data.final_pdf_url === 'string' && data.final_pdf_url
@@ -485,11 +554,11 @@
         accepted = true;
       }
     } catch (e) {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+      if (ceremonyKey === currentCeremonyKey()) {
         signError = (e as Error).message;
       }
     } finally {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) accepting = false;
+      if (ceremonyKey === currentCeremonyKey()) accepting = false;
     }
   }
 
@@ -578,11 +647,12 @@
 </svelte:head>
 
 {#if ctx?.privacy}
-  {#key $page.params.token}
+  {@const noticeCeremonyKey = currentCeremonyKey()}
+  {#key noticeCeremonyKey}
     <A13Notice
       privacy={ctx.privacy}
       storageKey={a13AcknowledgementKey(ctx)}
-	  onAcknowledged={acknowledgeCurrentNotice}
+	  onAcknowledged={() => { if (noticeCeremonyKey === currentCeremonyKey()) acknowledgeCurrentNotice(); }}
     />
   {/key}
 {/if}
@@ -638,14 +708,19 @@
     <main class="signer-main">
       <article class="document-frame" aria-label="Current document">
         {#if ctx.source_kind === 'pdf'}
+          {#if ctx.pdf_observation}
+          {#key currentCeremonyKey()}
           <PdfSignerView
             token={$page.params.token ?? ''}
             noticeDigest={ctx.privacy.notice_digest}
+            observation={ctx.pdf_observation}
             signed={!!completed}
-            readOnly={changesRequested || requestingChanges}
-            onFilledChange={(v) => (fieldsFilled = v)}
-            onSignatureClick={adopt}
+            readOnly={changesRequested || requestingChanges || signing || accepting || declining}
+            onFilledChange={updatePDFGate}
+            onSignatureClick={adoptPDF}
           />
+          {/key}
+          {/if}
         {:else}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="doc-page" onmouseup={onDocMouseUp}>
@@ -674,17 +749,20 @@
         {:else if !ctx.requires_signature}
           <h3 class="section-eyebrow">{$t('sign.accept.title')}</h3>
           <p class="text-xs text-text-muted mb-3">{$t('sign.accept.body')}</p>
-          <button class="btn btn-primary w-full" disabled={accepting || requestingChanges} onclick={accept}>
+          <button class="btn btn-primary w-full" disabled={accepting || signing || declining || requestingChanges || !viewerReady() || !noticeAcknowledged} onclick={accept}>
             <CheckCircle2 class="size-4" /> {accepting ? $t('common.loading') : $t('sign.accept.button')}
           </button>
           <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
         {:else}
         {#if ctx.source_kind !== 'pdf'}
+          {@const blockCeremonyKey = currentCeremonyKey()}
+          {#key blockCeremonyKey}
           <SignerFields
             token={$page.params.token ?? ''}
             noticeDigest={ctx.privacy.notice_digest}
-            onChange={(v) => (fieldsFilled = v)}
+            onChange={(v) => { if (blockCeremonyKey === currentCeremonyKey()) fieldsFilled = v; }}
           />
+          {/key}
         {:else}
           <p class="text-xs text-text-muted mb-3">{$t('sign.pdf.fillHint')}</p>
         {/if}
@@ -704,7 +782,7 @@
 
         <button
           class="btn btn-primary w-full"
-          disabled={requestingChanges || !typedName.trim() || !fieldsFilled}
+          disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !noticeAcknowledged || !typedName.trim() || !fieldsFilled}
           onclick={adopt}
           title={!fieldsFilled ? $t('sign.fillRequiredTitle') : ''}
         >
@@ -785,7 +863,7 @@
 
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick={() => (showAdoptModal = false)}>{$t('common.cancel')}</button>
-        <button class="btn btn-primary" disabled={signing} onclick={confirmSign}>
+        <button class="btn btn-primary" disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !fieldsFilled || !noticeAcknowledged || !typedName.trim()} onclick={confirmSign}>
           {signing ? $t('adopt.signing') : $t('adopt.confirm')}
         </button>
       </div>

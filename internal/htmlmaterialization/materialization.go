@@ -36,6 +36,9 @@ type AppendInput struct {
 	PreviousPageCount int32 // exact inspected old PDF pages, required for a legacy origin
 	ActorID           uuid.UUID
 	Summary           string
+	// A nil report records unknown legacy provenance. It never inherits the
+	// previous PDF's report when selecting a new materialization.
+	MetadataRedactionReport json.RawMessage
 }
 
 // HistoricalDocument builds a read-only view of a retained artifact. It checks
@@ -53,6 +56,10 @@ func HistoricalDocument(origin *generated.Document, row *generated.HtmlDocumentM
 	view.PdfStorageKey = pgtype.Text{String: row.PdfKey, Valid: true}
 	view.PdfSha256 = bytes.Clone(row.PdfSha256)
 	view.PdfStorageVersionID = pgtype.Text{String: row.PdfVersionID, Valid: true}
+	view.MetadataRedactionReport = bytes.Clone(row.MetadataRedactionReport)
+	if err := validateMaterializationReport(view.MetadataRedactionReport, row.PdfSha256, row.PageCount); err != nil {
+		return nil, err
+	}
 	view.HtmlReviewedPdfSha256 = nil
 	view.HtmlReviewedBy = pgtype.UUID{}
 	view.HtmlReviewedAt = pgtype.Timestamptz{}
@@ -99,6 +106,15 @@ func Current(ctx context.Context, q Queries, doc *generated.Document) (*generate
 		hex.EncodeToString(row.SourceCommitment) != commitment || hex.EncodeToString(row.OriginCommitment) != origin {
 		return nil, ErrInvalid
 	}
+	// Rows predating persisted report provenance may be NULL. Preserve their
+	// current legacy behavior, but a report retained on a row must be projected
+	// with that exact PDF rather than independently replaced.
+	if len(row.MetadataRedactionReport) > 0 && !bytes.Equal(row.MetadataRedactionReport, doc.MetadataRedactionReport) {
+		return nil, ErrInvalid
+	}
+	if err := validateMaterializationReport(row.MetadataRedactionReport, row.PdfSha256, row.PageCount); err != nil {
+		return nil, err
+	}
 	check := *doc
 	check.HtmlCurrentSourceJson = bytes.Clone(row.SourceJson)
 	rowCommitment, err := htmlsource.Commitment(&check)
@@ -118,6 +134,9 @@ func RegisterOrigin(ctx context.Context, q Queries, doc *generated.Document, pag
 		row, err := Current(ctx, q, doc)
 		return doc, row, err
 	}
+	if err := validateMaterializationReport(doc.MetadataRedactionReport, doc.PdfSha256, pages); err != nil {
+		return nil, nil, err
+	}
 	commitment, err := htmlsource.Commitment(doc)
 	if err != nil {
 		return nil, nil, err
@@ -131,6 +150,7 @@ func RegisterOrigin(ctx context.Context, q Queries, doc *generated.Document, pag
 		DocumentID: doc.ID, OrgID: doc.OrgID, Sequence: 1, OriginCommitment: digest, SourceJson: bytes.Clone(doc.HtmlSourceJson),
 		SourceCommitment: digest, PdfKey: doc.PdfStorageKey.String, PdfSha256: bytes.Clone(doc.PdfSha256), PdfVersionID: doc.PdfStorageVersionID.String,
 		PageCount: pages, Summary: "Original HTML materialization", ChangedSections: changed, CreatedBy: actor,
+		MetadataRedactionReport: bytes.Clone(doc.MetadataRedactionReport),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -146,6 +166,9 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 		!utf8.ValidString(in.Summary) || utf8.RuneCountInString(in.Summary) > 500 || bytes.IndexByte([]byte(in.Summary), 0) >= 0 ||
 		previous.Status != "draft" || candidate.ID != previous.ID || candidate.OrgID != previous.OrgID || candidate.TemplateID != previous.TemplateID {
 		return nil, nil, ErrInvalid
+	}
+	if err := validateMaterializationReport(in.MetadataRedactionReport, candidate.PdfSha256, in.PageCount); err != nil {
+		return nil, nil, err
 	}
 	// Validate every proposed identity/input before writing history.
 	check := *candidate
@@ -206,6 +229,7 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 		ParentCommitment: bytes.Clone(parent.SourceCommitment), OriginCommitment: originDigest, SourceJson: bytes.Clone(in.SourceJSON), SourceCommitment: digest,
 		PdfKey: candidate.PdfStorageKey.String, PdfSha256: bytes.Clone(candidate.PdfSha256), PdfVersionID: candidate.PdfStorageVersionID.String,
 		PageCount: in.PageCount, Summary: in.Summary, ChangedSections: changed, CreatedBy: in.ActorID,
+		MetadataRedactionReport: bytes.Clone(in.MetadataRedactionReport),
 	})
 	if err != nil {
 		return nil, nil, err

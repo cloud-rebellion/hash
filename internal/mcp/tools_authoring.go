@@ -31,7 +31,6 @@ import (
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/requestmeta"
-	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -156,7 +155,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				if err != nil {
 					return nil, err
 				}
-				rep, err := sanitize.SyntheticTemplateReport()
+				rep, err := authoring.PDFTemplateDocumentReport(seed.Template)
 				if err != nil {
 					return nil, err
 				}

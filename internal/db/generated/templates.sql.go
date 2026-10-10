@@ -46,7 +46,7 @@ func (q *Queries) CountTemplates(ctx context.Context, orgID uuid.UUID) (int64, e
 const createBlocksTemplate = `-- name: CreateBlocksTemplate :one
 INSERT INTO templates (org_id, name, source_kind, blocks_json, variables_json, created_by)
 VALUES ($1, $2, 'blocks', $3, $4, $5)
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type CreateBlocksTemplateParams struct {
@@ -86,6 +86,7 @@ func (q *Queries) CreateBlocksTemplate(ctx context.Context, arg CreateBlocksTemp
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
@@ -93,7 +94,7 @@ func (q *Queries) CreateBlocksTemplate(ctx context.Context, arg CreateBlocksTemp
 const createHTMLTemplate = `-- name: CreateHTMLTemplate :one
 INSERT INTO templates (org_id, name, source_kind, html_master_json, variables_json, created_by, html_content_sha256)
 VALUES ($1, $2, 'html', $3, $4, $5, $6)
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type CreateHTMLTemplateParams struct {
@@ -135,6 +136,7 @@ func (q *Queries) CreateHTMLTemplate(ctx context.Context, arg CreateHTMLTemplate
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
@@ -143,10 +145,10 @@ const createPDFTemplate = `-- name: CreatePDFTemplate :one
 INSERT INTO templates (
     org_id, name, source_kind, pdf_storage_key, pdf_sha256,
     pdf_storage_version_id, evidence_version_pin_required,
-    page_count, fields_json, created_by
+    page_count, fields_json, created_by, pdf_sanitization_report
 )
-VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type CreatePDFTemplateParams struct {
@@ -159,6 +161,7 @@ type CreatePDFTemplateParams struct {
 	PageCount                  pgtype.Int4     `json:"page_count"`
 	FieldsJson                 json.RawMessage `json:"fields_json"`
 	CreatedBy                  uuid.UUID       `json:"created_by"`
+	PdfSanitizationReport      []byte          `json:"pdf_sanitization_report"`
 }
 
 func (q *Queries) CreatePDFTemplate(ctx context.Context, arg CreatePDFTemplateParams) (*Template, error) {
@@ -172,6 +175,7 @@ func (q *Queries) CreatePDFTemplate(ctx context.Context, arg CreatePDFTemplatePa
 		arg.PageCount,
 		arg.FieldsJson,
 		arg.CreatedBy,
+		arg.PdfSanitizationReport,
 	)
 	var i Template
 	err := row.Scan(
@@ -194,12 +198,13 @@ func (q *Queries) CreatePDFTemplate(ctx context.Context, arg CreatePDFTemplatePa
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getHTMLTemplate = `-- name: GetHTMLTemplate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates
 WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
 `
 
@@ -231,12 +236,13 @@ func (q *Queries) GetHTMLTemplate(ctx context.Context, arg GetHTMLTemplateParams
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getHTMLTemplateForShare = `-- name: GetHTMLTemplateForShare :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates
 WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
 FOR SHARE
 `
@@ -269,12 +275,13 @@ func (q *Queries) GetHTMLTemplateForShare(ctx context.Context, arg GetHTMLTempla
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getHTMLTemplateForUpdate = `-- name: GetHTMLTemplateForUpdate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates
 WHERE id = $1 AND org_id = $2 AND source_kind = 'html' AND archived_at IS NULL
 FOR UPDATE
 `
@@ -307,12 +314,13 @@ func (q *Queries) GetHTMLTemplateForUpdate(ctx context.Context, arg GetHTMLTempl
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getTemplate = `-- name: GetTemplate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 `
 
 type GetTemplateParams struct {
@@ -343,12 +351,13 @@ func (q *Queries) GetTemplate(ctx context.Context, arg GetTemplateParams) (*Temp
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getTemplateForShare = `-- name: GetTemplateForShare :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 FOR SHARE
 `
@@ -384,12 +393,13 @@ func (q *Queries) GetTemplateForShare(ctx context.Context, arg GetTemplateForSha
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
 
 const getTemplateForUpdate = `-- name: GetTemplateForUpdate :one
-SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256 FROM templates
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report FROM templates
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 FOR UPDATE
 `
@@ -424,6 +434,7 @@ func (q *Queries) GetTemplateForUpdate(ctx context.Context, arg GetTemplateForUp
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
@@ -433,7 +444,8 @@ SELECT id, org_id, name, source_kind, blocks_json, variables_json,
        pdf_storage_key, pdf_sha256, page_count, fields_json, version,
        created_by, created_at, updated_at, archived_at,
        pdf_storage_version_id, evidence_version_pin_required,
-       NULL::jsonb AS html_master_json, html_content_sha256
+       NULL::jsonb AS html_master_json, html_content_sha256,
+       NULL::jsonb AS pdf_sanitization_report
 FROM templates
 WHERE org_id = $1 AND archived_at IS NULL
 ORDER BY updated_at DESC
@@ -466,6 +478,7 @@ type ListTemplatesRow struct {
 	EvidenceVersionPinRequired bool               `json:"evidence_version_pin_required"`
 	HtmlMasterJson             []byte             `json:"html_master_json"`
 	HtmlContentSha256          []byte             `json:"html_content_sha256"`
+	PdfSanitizationReport      []byte             `json:"pdf_sanitization_report"`
 }
 
 // Do not transfer/copy each potentially multi-MB inline-asset master merely to
@@ -500,6 +513,7 @@ func (q *Queries) ListTemplates(ctx context.Context, arg ListTemplatesParams) ([
 			&i.EvidenceVersionPinRequired,
 			&i.HtmlMasterJson,
 			&i.HtmlContentSha256,
+			&i.PdfSanitizationReport,
 		); err != nil {
 			return nil, err
 		}
@@ -519,7 +533,7 @@ SET name = $3,
     version = version + 1,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND source_kind = 'blocks' AND archived_at IS NULL
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type UpdateBlocksTemplateParams struct {
@@ -559,6 +573,7 @@ func (q *Queries) UpdateBlocksTemplate(ctx context.Context, arg UpdateBlocksTemp
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
@@ -574,7 +589,7 @@ SET name = $1::text,
 WHERE id = $5::uuid AND org_id = $6::uuid
   AND source_kind = 'html' AND archived_at IS NULL
   AND version = $7::integer
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type UpdateHTMLTemplateParams struct {
@@ -620,6 +635,7 @@ func (q *Queries) UpdateHTMLTemplate(ctx context.Context, arg UpdateHTMLTemplate
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }
@@ -630,7 +646,7 @@ SET fields_json = $3,
     version = version + 1,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND source_kind = 'pdf' AND archived_at IS NULL
-RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
 `
 
 type UpdatePDFTemplateFieldsParams struct {
@@ -662,6 +678,7 @@ func (q *Queries) UpdatePDFTemplateFields(ctx context.Context, arg UpdatePDFTemp
 		&i.EvidenceVersionPinRequired,
 		&i.HtmlMasterJson,
 		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
 	)
 	return &i, err
 }

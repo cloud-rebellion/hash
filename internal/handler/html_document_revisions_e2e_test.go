@@ -21,8 +21,11 @@ import (
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Actual REST/PG/isolated-PDF-worker protocol coverage. The renderer and
@@ -97,6 +100,21 @@ func revisionStateE2E(t *testing.T, f lifecycleAuthorizationFixture) []byte {
 	return raw
 }
 
+func assertHTMLRevisionReportE2E(t *testing.T, raw json.RawMessage, pdfSHA []byte, pages int32) {
+	t.Helper()
+	var envelope struct {
+		SchemaVersion int               `json:"schema_version"`
+		Items         []json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil || envelope.SchemaVersion != 2 || len(envelope.Items) != 1 {
+		t.Fatal("materialization lacks one observed sanitation report")
+	}
+	measured, err := sanitize.DecodePDFReport(envelope.Items[0])
+	if err != nil || measured.PDF.OutputSHA256 != hex.EncodeToString(pdfSHA) || measured.PDF.PagesAfter != int(pages) {
+		t.Fatal("observed sanitation report does not describe this exact PDF", err)
+	}
+}
+
 func TestHTMLDocumentRevisionRESTPreservesHistoryAndRequiresFreshReviewAndPlacementE2E(t *testing.T) {
 	f, renderer, peer, original, cookie := setupHTMLRevisionE2E(t)
 	renderCountBefore := len(renderer.sources())
@@ -153,6 +171,27 @@ func TestHTMLDocumentRevisionRESTPreservesHistoryAndRequiresFreshReviewAndPlacem
 	}
 	if err := htmlsource.Validate(current, true); !errors.Is(err, htmlsource.ErrReviewRequired) {
 		t.Fatal("changed source reused prior review")
+	}
+	oldRow, err := f.q.GetHTMLDocumentMaterialization(f.ctx, generated.GetHTMLDocumentMaterializationParams{DocumentID: original.ID, OrgID: f.org, Sequence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRow, err := f.q.GetHTMLDocumentMaterialization(f.ctx, generated.GetHTMLDocumentMaterializationParams{DocumentID: original.ID, OrgID: f.org, Sequence: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHTMLRevisionReportE2E(t, original.MetadataRedactionReport, original.PdfSha256, oldRow.PageCount)
+	assertHTMLRevisionReportE2E(t, current.MetadataRedactionReport, current.PdfSha256, currentRow.PageCount)
+	if !bytes.Equal(oldRow.MetadataRedactionReport, original.MetadataRedactionReport) || !bytes.Equal(currentRow.MetadataRedactionReport, current.MetadataRedactionReport) {
+		t.Fatal("immutable report rows differ from their own PDF projections")
+	}
+	var capturedReport json.RawMessage
+	if err := f.pool.QueryRow(f.ctx, `SELECT metadata_redaction_report FROM html_document_materialization_snapshots WHERE document_id=$1 AND org_id=$2 AND materialization_id=$3 AND kind='draft_superseded'`, original.ID, f.org, oldRow.ID).Scan(&capturedReport); err != nil || !bytes.Equal(capturedReport, original.MetadataRedactionReport) { //nolint:rawsql -- exact old report retained before fresh PDF projection
+		t.Fatal("superseded snapshot lost its exact old sanitation report", err)
+	}
+	historical, err := htmlmaterialization.HistoricalDocument(current, oldRow)
+	if err != nil || !bytes.Equal(historical.MetadataRedactionReport, original.MetadataRedactionReport) {
+		t.Fatal("historical PDF inherited the fresh PDF report", err)
 	}
 	fields, err := f.q.ListFieldsByDocument(f.ctx, current.ID)
 	if err != nil || len(fields) != 0 {
@@ -217,6 +256,43 @@ func TestHTMLDocumentRevisionRESTPreservesHistoryAndRequiresFreshReviewAndPlacem
 		t.Fatal("revision lost escaped negotiated wording")
 	}
 	assertImportStorageE2E(t, peer.importStoragePeer, 2, 0, 2)
+}
+
+func TestHTMLDocumentRevisionSanitizationReportDatabaseGuardsE2E(t *testing.T) {
+	f, _, peer, doc, _ := setupHTMLRevisionE2E(t)
+	assertHTMLRevisionReportE2E(t, doc.MetadataRedactionReport, doc.PdfSha256, doc.HtmlCurrentPageCount.Int32)
+	for _, change := range []struct {
+		name string
+		sql  string
+	}{
+		{"current report", `UPDATE documents SET metadata_redaction_report='{}'::jsonb,updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2`},
+		{"immutable report", `UPDATE html_document_materializations SET metadata_redaction_report='{}'::jsonb WHERE document_id=$1 AND org_id=$2`},
+		{"forged snapshot report", `INSERT INTO html_document_materialization_snapshots (
+            document_id,org_id,materialization_id,kind,captured_updated_at,source_json,source_commitment,
+            pdf_key,pdf_sha256,pdf_version_id,page_count,rendered_pdf_key,rendered_pdf_sha256,rendered_pdf_version_id,
+            reviewed_pdf_sha256,reviewed_by,reviewed_at,fields_json,recipients_json,notice_context_json,ceremony_events_json,
+            notice_epoch_at,retain_until,created_by,metadata_redaction_report)
+        SELECT d.id,d.org_id,d.html_current_materialization_id,'draft_superseded',d.updated_at,
+            COALESCE(d.html_current_source_json,d.html_source_json),decode(COALESCE(d.html_current_source_json,d.html_source_json)->>'commitment','hex'),
+            d.pdf_storage_key,d.pdf_sha256,d.pdf_storage_version_id,d.html_current_page_count,
+            d.rendered_pdf_key,d.rendered_pdf_sha,d.rendered_pdf_version_id,d.html_reviewed_pdf_sha256,d.html_reviewed_by,d.html_reviewed_at,
+            c.fields_json,c.recipients_json,c.notice_context_json,c.ceremony_events_json,NULL,NULL,d.sender_id,'{}'::jsonb
+        FROM documents d CROSS JOIN LATERAL hash_html_materialization_snapshot_context(d.id) c
+        WHERE d.id=$1 AND d.org_id=$2`},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			before := revisionStateE2E(t, f)
+			requests := peer.requests.Load()
+			_, err := f.pool.Exec(f.ctx, change.sql, doc.ID, f.org) //nolint:rawsql -- exact owned tamper simulation must be refused atomically
+			var databaseError *pgconn.PgError
+			if !errors.As(err, &databaseError) || databaseError.Code != "23514" {
+				t.Fatal("database accepted sanitation report tampering", err)
+			}
+			if !bytes.Equal(before, revisionStateE2E(t, f)) || requests != peer.requests.Load() {
+				t.Fatal("refused report tampering changed document/history/audit/storage")
+			}
+		})
+	}
 }
 
 func TestHTMLDocumentRevisionRefusesOriginalAuthorityOrSourceChangesDuringRenderE2E(t *testing.T) {

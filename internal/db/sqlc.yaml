@@ -49,6 +49,18 @@ sql:
             go_type:
               type: "RawMessage"
               import: "encoding/json"
+          - column: "templates.pdf_sanitization_report"
+            go_type:
+              type: "RawMessage"
+              import: "encoding/json"
+          - column: "html_document_materializations.metadata_redaction_report"
+            go_type:
+              type: "RawMessage"
+              import: "encoding/json"
+          - column: "html_document_materialization_snapshots.metadata_redaction_report"
+            go_type:
+              type: "RawMessage"
+              import: "encoding/json"
           - column: "eidas_routing_rules.predicate_json"
             go_type:
               type: "RawMessage"

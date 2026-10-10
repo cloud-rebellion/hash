@@ -34,6 +34,42 @@ Run renderers with restricted network access and resource limits, keep parser
 dependencies updated, and verify the actual deployed controls. Local unit
 tests alone do not establish production upload safety.
 
+## PDF metadata evidence
+
+PDF optimization alone does not remove source Info or XMP in the pinned
+pdfcpu version. Intake explicitly clears source Info fields and Metadata
+references/streams, rewrites the file, and verifies the output. Shared metadata
+objects that also serve visual content are refused. The measured policy checks
+source Info, Metadata facilities, object streams, linearization, attachments,
+forms and annotations, while preserving page count, effective page boxes,
+rotation and UserUnit. It does not classify arbitrary XML or page content as
+metadata. New pdfcpu Producer and equal current creation/modification dates may
+be generated; these are reported separately from removed source metadata.
+
+Fresh PDF reports use envelope schema2 and carry the exact source/output SHA-256,
+page and geometry observations, observed removal, prior absence, and generated
+Info. No source metadata values are retained in the report or parser logs.
+Template uploads retain this observation bound to the stored object key,
+SHA-256 and VersionID internally. REST/MCP clones copy the observation from the
+SHARE-locked template; corrupt bindings fail closed. Field-only template edits
+retain the same source observation. HTML revisions preserve reports per
+immutable materialization and snapshot, projecting PDF and report together.
+
+Legacy records without measurements remain explicitly unknown. They cannot
+acquire a fresh cleanup attestation by reuse. Existing signed PDFs, certificate
+payloads and signatures retain their original bytes. New certificates bind the
+measured artifact hashes and state the scope of the intake check; they do not
+certify legal sufficiency, malware safety, final-PDF metadata or printed content.
+
+Migration75 adds nullable provenance columns without backfilling history, and
+refuses destructive rollback once provenance exists. The strict worker protocol
+is version2; older worker responses are refused. Release this schema with the
+matching new app and bundled worker after draining old admission and job
+processing. Old compiled
+SELECT-star readers and snapshot writers are incompatible with the new schema;
+a mixed old/new rolling release is not supported. This coordinated deployment
+and the actual release-host controls still require acceptance.
+
 Document imports, PDF template uploads and MCP `create_pdf_document` share
 process admission: two active imports globally and one per organisation.
 REST admission occurs before body parsing; MCP admission occurs before typed

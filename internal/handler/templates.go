@@ -20,6 +20,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/agreement"
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
@@ -123,9 +124,15 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]templateResponse, 0, len(rows))
 	for _, t := range rows {
-		// The generated thin list projection has the same metadata fields as
-		// Template, with the potentially large HTML master deliberately NULL.
-		response, err := toTemplateResponse((*generated.Template)(t))
+		// Map only public list metadata. Nullable cold JSON projections can
+		// have different generated Go types from a full template row.
+		response, err := toTemplateResponse(&generated.Template{
+			ID: t.ID, OrgID: t.OrgID, Name: t.Name, SourceKind: t.SourceKind,
+			BlocksJson: t.BlocksJson, VariablesJson: t.VariablesJson, FieldsJson: t.FieldsJson,
+			Version: t.Version, CreatedBy: t.CreatedBy, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+			PdfStorageKey: t.PdfStorageKey, PdfSha256: t.PdfSha256, PageCount: t.PageCount,
+			HtmlContentSha256: t.HtmlContentSha256,
+		})
 		if err != nil {
 			writeInternalErrorMsg(w, "template has invalid canonical content", err)
 			return
@@ -313,11 +320,9 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 	templateID := uuid.New()
 	key := path.Join("org", orgID.String(), "templates", templateID.String()+".pdf")
 
-	// Phase 8.7: strip /Info dictionary, XMP, embedded JavaScript,
-	// AcroForm, annotations, and embedded files BEFORE the template
-	// PDF is persisted. pdfcpu rewrites the PDF canonically; failure
-	// here is a hard error so we never silently ship a metadata-rich
-	// PDF that later gets attached to signed agreements.
+	// Remove and verify source metadata in the bounded worker before storage.
+	// Active content is rejected. The report records observed categories and
+	// permitted newly generated Info, rather than claiming blanket GDPR cleanup.
 	cleaned, err := sanitize.CleanWithContext(r.Context(), "template-pdf", "application/pdf", data)
 	if err != nil {
 		if errors.Is(err, malwarescan.ErrUnavailable) {
@@ -348,6 +353,10 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 
 	t, err := s.createTemplateAuthorized(r, userID, orgID,
 		func(ctx context.Context, q *generated.Queries) (*generated.Template, error) {
+			proof, err := authoring.BindPDFTemplateSanitization(cleaned.Report, key, stored.SHA256[:], stored.VersionID, int32(pageCount))
+			if err != nil {
+				return nil, err
+			}
 			return q.CreatePDFTemplate(ctx, generated.CreatePDFTemplateParams{
 				OrgID:                      orgID,
 				Name:                       name,
@@ -358,6 +367,7 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 				PageCount:                  pgtype.Int4{Int32: int32(pageCount), Valid: true},
 				FieldsJson:                 json.RawMessage(`[]`),
 				CreatedBy:                  userID,
+				PdfSanitizationReport:      proof,
 			})
 		},
 		func(t *generated.Template) audit.Entry {

@@ -2,11 +2,11 @@
 INSERT INTO html_document_materializations (
     document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment,
     source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count,
-    summary, changed_sections, created_by
+    summary, changed_sections, created_by, metadata_redaction_report
 ) VALUES (
     sqlc.arg(document_id), sqlc.arg(org_id), sqlc.arg(sequence), sqlc.narg(parent_id), sqlc.narg(parent_commitment), sqlc.arg(origin_commitment),
     sqlc.arg(source_json)::jsonb, sqlc.arg(source_commitment), sqlc.arg(pdf_key), sqlc.arg(pdf_sha256), sqlc.arg(pdf_version_id), sqlc.arg(page_count),
-    sqlc.arg(summary), sqlc.arg(changed_sections)::text[], sqlc.arg(created_by)
+    sqlc.arg(summary), sqlc.arg(changed_sections)::text[], sqlc.arg(created_by), sqlc.narg(metadata_redaction_report)::jsonb
 ) RETURNING *;
 
 -- name: GetHTMLDocumentMaterialization :one
@@ -32,6 +32,7 @@ UPDATE documents d SET
     html_current_materialization_id = m.id, html_current_source_json = m.source_json,
     html_current_materialization_sequence = m.sequence, html_current_page_count = m.page_count,
     pdf_storage_key = m.pdf_key, pdf_sha256 = m.pdf_sha256, pdf_storage_version_id = m.pdf_version_id,
+    metadata_redaction_report = COALESCE(m.metadata_redaction_report, '{}'::jsonb),
     variables_json = m.source_json -> 'values', evidence_version_pins_required = true,
     rendered_pdf_key = NULL, rendered_pdf_sha = NULL, rendered_pdf_version_id = NULL,
     updated_at = clock_timestamp()
@@ -60,6 +61,7 @@ WHERE f.document_id = d.id AND d.id = sqlc.arg(document_id) AND d.org_id = sqlc.
             AND s.source_json IS NOT DISTINCT FROM COALESCE(d.html_current_source_json, d.html_source_json)
             AND s.pdf_key IS NOT DISTINCT FROM d.pdf_storage_key AND s.pdf_sha256 IS NOT DISTINCT FROM d.pdf_sha256
             AND s.pdf_version_id IS NOT DISTINCT FROM d.pdf_storage_version_id
+            AND s.metadata_redaction_report IS NOT DISTINCT FROM d.metadata_redaction_report
             AND s.reviewed_pdf_sha256 IS NOT DISTINCT FROM d.html_reviewed_pdf_sha256
             AND s.reviewed_by IS NOT DISTINCT FROM d.html_reviewed_by AND s.reviewed_at IS NOT DISTINCT FROM d.html_reviewed_at
             AND s.fields_json IS NOT DISTINCT FROM c.fields_json AND s.recipients_json IS NOT DISTINCT FROM c.recipients_json
@@ -67,15 +69,6 @@ WHERE f.document_id = d.id AND d.id = sqlc.arg(document_id) AND d.org_id = sqlc.
     AND NOT EXISTS (SELECT 1 FROM signatures s WHERE s.document_id = d.id)
     AND NOT EXISTS (SELECT 1 FROM recipients r WHERE r.document_id = d.id AND (r.status IN ('signed','accepted') OR r.signed_at IS NOT NULL))
     AND NOT EXISTS (SELECT 1 FROM document_fields filled WHERE filled.document_id = d.id AND (filled.value IS NOT NULL OR filled.completed_at IS NOT NULL));
-
--- name: UpdateHTMLMaterializationRedactionReport :one
-UPDATE documents SET metadata_redaction_report = sqlc.arg(metadata_redaction_report)::jsonb,
-    updated_at = clock_timestamp()
-WHERE id = sqlc.arg(document_id) AND org_id = sqlc.arg(org_id)
-    AND status = 'draft' AND deleted_at IS NULL
-    AND html_current_materialization_id = sqlc.arg(materialization_id)::uuid
-    AND updated_at = sqlc.arg(expected_updated_at)::timestamptz
-RETURNING *;
 
 -- name: CaptureHTMLMaterializationSnapshot :one
 -- Capture BEFORE draft reset/projection. No new-clock retention extension:
@@ -86,7 +79,7 @@ INSERT INTO html_document_materialization_snapshots (
     rendered_pdf_key, rendered_pdf_sha256, rendered_pdf_version_id,
     reviewed_pdf_sha256, reviewed_by, reviewed_at,
     fields_json, recipients_json, notice_context_json, ceremony_events_json,
-    notice_epoch_at, retain_until, created_by
+    notice_epoch_at, retain_until, created_by, metadata_redaction_report
 )
 SELECT d.id, d.org_id, d.html_current_materialization_id, sqlc.arg(kind)::text,
     d.updated_at, COALESCE(d.html_current_source_json, d.html_source_json), sqlc.arg(source_commitment)::bytea,
@@ -98,7 +91,7 @@ SELECT d.id, d.org_id, d.html_current_materialization_id, sqlc.arg(kind)::text,
     CASE WHEN sqlc.arg(kind)::text = 'ceremony_retired' THEN GREATEST(d.finalization_retain_until,
         hash_evidence_retain_until(d.article13_notice_epoch_at, 7),
         (SELECT max(si.retain_until) FROM send_sealing_intents si WHERE si.document_id = d.id AND si.retention_started_at IS NOT NULL)) ELSE NULL END,
-    sqlc.narg(created_by)::uuid
+    sqlc.narg(created_by)::uuid, d.metadata_redaction_report
 FROM documents d
 CROSS JOIN LATERAL hash_html_materialization_snapshot_context(d.id) c
 WHERE d.id = sqlc.arg(document_id) AND d.org_id = sqlc.arg(org_id)

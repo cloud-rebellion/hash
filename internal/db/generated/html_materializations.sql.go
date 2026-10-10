@@ -23,7 +23,7 @@ INSERT INTO html_document_materialization_snapshots (
     rendered_pdf_key, rendered_pdf_sha256, rendered_pdf_version_id,
     reviewed_pdf_sha256, reviewed_by, reviewed_at,
     fields_json, recipients_json, notice_context_json, ceremony_events_json,
-    notice_epoch_at, retain_until, created_by
+    notice_epoch_at, retain_until, created_by, metadata_redaction_report
 )
 SELECT d.id, d.org_id, d.html_current_materialization_id, $1::text,
     d.updated_at, COALESCE(d.html_current_source_json, d.html_source_json), $2::bytea,
@@ -35,7 +35,7 @@ SELECT d.id, d.org_id, d.html_current_materialization_id, $1::text,
     CASE WHEN $1::text = 'ceremony_retired' THEN GREATEST(d.finalization_retain_until,
         hash_evidence_retain_until(d.article13_notice_epoch_at, 7),
         (SELECT max(si.retain_until) FROM send_sealing_intents si WHERE si.document_id = d.id AND si.retention_started_at IS NOT NULL)) ELSE NULL END,
-    $3::uuid
+    $3::uuid, d.metadata_redaction_report
 FROM documents d
 CROSS JOIN LATERAL hash_html_materialization_snapshot_context(d.id) c
 WHERE d.id = $4 AND d.org_id = $5
@@ -43,7 +43,7 @@ WHERE d.id = $4 AND d.org_id = $5
     AND d.updated_at = $6::timestamptz
     AND (($1::text = 'draft_superseded' AND d.status = 'draft')
         OR ($1::text = 'ceremony_retired' AND d.status = 'changes_requested'))
-RETURNING id, document_id, org_id, materialization_id, kind, captured_updated_at, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, rendered_pdf_key, rendered_pdf_sha256, rendered_pdf_version_id, reviewed_pdf_sha256, reviewed_by, reviewed_at, fields_json, recipients_json, notice_context_json, ceremony_events_json, notice_epoch_at, retain_until, created_by, created_at
+RETURNING id, document_id, org_id, materialization_id, kind, captured_updated_at, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, rendered_pdf_key, rendered_pdf_sha256, rendered_pdf_version_id, reviewed_pdf_sha256, reviewed_by, reviewed_at, fields_json, recipients_json, notice_context_json, ceremony_events_json, notice_epoch_at, retain_until, created_by, created_at, metadata_redaction_report
 `
 
 type CaptureHTMLMaterializationSnapshotParams struct {
@@ -94,6 +94,7 @@ func (q *Queries) CaptureHTMLMaterializationSnapshot(ctx context.Context, arg Ca
 		&i.RetainUntil,
 		&i.CreatedBy,
 		&i.CreatedAt,
+		&i.MetadataRedactionReport,
 	)
 	return &i, err
 }
@@ -111,6 +112,7 @@ WHERE f.document_id = d.id AND d.id = $1 AND d.org_id = $2
             AND s.source_json IS NOT DISTINCT FROM COALESCE(d.html_current_source_json, d.html_source_json)
             AND s.pdf_key IS NOT DISTINCT FROM d.pdf_storage_key AND s.pdf_sha256 IS NOT DISTINCT FROM d.pdf_sha256
             AND s.pdf_version_id IS NOT DISTINCT FROM d.pdf_storage_version_id
+            AND s.metadata_redaction_report IS NOT DISTINCT FROM d.metadata_redaction_report
             AND s.reviewed_pdf_sha256 IS NOT DISTINCT FROM d.html_reviewed_pdf_sha256
             AND s.reviewed_by IS NOT DISTINCT FROM d.html_reviewed_by AND s.reviewed_at IS NOT DISTINCT FROM d.html_reviewed_at
             AND s.fields_json IS NOT DISTINCT FROM c.fields_json AND s.recipients_json IS NOT DISTINCT FROM c.recipients_json
@@ -138,7 +140,7 @@ func (q *Queries) ClearUnsignedHTMLMaterializationFields(ctx context.Context, ar
 }
 
 const getCurrentHTMLDocumentMaterialization = `-- name: GetCurrentHTMLDocumentMaterialization :one
-SELECT m.id, m.document_id, m.org_id, m.sequence, m.parent_id, m.parent_commitment, m.origin_commitment, m.source_json, m.source_commitment, m.pdf_key, m.pdf_sha256, m.pdf_version_id, m.page_count, m.summary, m.changed_sections, m.created_by, m.created_at FROM html_document_materializations m JOIN documents d
+SELECT m.id, m.document_id, m.org_id, m.sequence, m.parent_id, m.parent_commitment, m.origin_commitment, m.source_json, m.source_commitment, m.pdf_key, m.pdf_sha256, m.pdf_version_id, m.page_count, m.summary, m.changed_sections, m.created_by, m.created_at, m.metadata_redaction_report FROM html_document_materializations m JOIN documents d
     ON d.html_current_materialization_id = m.id AND d.id = m.document_id AND d.org_id = m.org_id
 WHERE d.id = $1 AND d.org_id = $2
 `
@@ -169,12 +171,13 @@ func (q *Queries) GetCurrentHTMLDocumentMaterialization(ctx context.Context, arg
 		&i.ChangedSections,
 		&i.CreatedBy,
 		&i.CreatedAt,
+		&i.MetadataRedactionReport,
 	)
 	return &i, err
 }
 
 const getHTMLDocumentMaterialization = `-- name: GetHTMLDocumentMaterialization :one
-SELECT id, document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, summary, changed_sections, created_by, created_at FROM html_document_materializations
+SELECT id, document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, summary, changed_sections, created_by, created_at, metadata_redaction_report FROM html_document_materializations
 WHERE document_id = $1 AND org_id = $2 AND sequence = $3
 `
 
@@ -205,6 +208,7 @@ func (q *Queries) GetHTMLDocumentMaterialization(ctx context.Context, arg GetHTM
 		&i.ChangedSections,
 		&i.CreatedBy,
 		&i.CreatedAt,
+		&i.MetadataRedactionReport,
 	)
 	return &i, err
 }
@@ -213,30 +217,31 @@ const insertHTMLDocumentMaterialization = `-- name: InsertHTMLDocumentMaterializ
 INSERT INTO html_document_materializations (
     document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment,
     source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count,
-    summary, changed_sections, created_by
+    summary, changed_sections, created_by, metadata_redaction_report
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7::jsonb, $8, $9, $10, $11, $12,
-    $13, $14::text[], $15
-) RETURNING id, document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, summary, changed_sections, created_by, created_at
+    $13, $14::text[], $15, $16::jsonb
+) RETURNING id, document_id, org_id, sequence, parent_id, parent_commitment, origin_commitment, source_json, source_commitment, pdf_key, pdf_sha256, pdf_version_id, page_count, summary, changed_sections, created_by, created_at, metadata_redaction_report
 `
 
 type InsertHTMLDocumentMaterializationParams struct {
-	DocumentID       uuid.UUID       `json:"document_id"`
-	OrgID            uuid.UUID       `json:"org_id"`
-	Sequence         int32           `json:"sequence"`
-	ParentID         pgtype.UUID     `json:"parent_id"`
-	ParentCommitment []byte          `json:"parent_commitment"`
-	OriginCommitment []byte          `json:"origin_commitment"`
-	SourceJson       json.RawMessage `json:"source_json"`
-	SourceCommitment []byte          `json:"source_commitment"`
-	PdfKey           string          `json:"pdf_key"`
-	PdfSha256        []byte          `json:"pdf_sha256"`
-	PdfVersionID     string          `json:"pdf_version_id"`
-	PageCount        int32           `json:"page_count"`
-	Summary          string          `json:"summary"`
-	ChangedSections  []string        `json:"changed_sections"`
-	CreatedBy        uuid.UUID       `json:"created_by"`
+	DocumentID              uuid.UUID       `json:"document_id"`
+	OrgID                   uuid.UUID       `json:"org_id"`
+	Sequence                int32           `json:"sequence"`
+	ParentID                pgtype.UUID     `json:"parent_id"`
+	ParentCommitment        []byte          `json:"parent_commitment"`
+	OriginCommitment        []byte          `json:"origin_commitment"`
+	SourceJson              json.RawMessage `json:"source_json"`
+	SourceCommitment        []byte          `json:"source_commitment"`
+	PdfKey                  string          `json:"pdf_key"`
+	PdfSha256               []byte          `json:"pdf_sha256"`
+	PdfVersionID            string          `json:"pdf_version_id"`
+	PageCount               int32           `json:"page_count"`
+	Summary                 string          `json:"summary"`
+	ChangedSections         []string        `json:"changed_sections"`
+	CreatedBy               uuid.UUID       `json:"created_by"`
+	MetadataRedactionReport []byte          `json:"metadata_redaction_report"`
 }
 
 func (q *Queries) InsertHTMLDocumentMaterialization(ctx context.Context, arg InsertHTMLDocumentMaterializationParams) (*HtmlDocumentMaterialization, error) {
@@ -256,6 +261,7 @@ func (q *Queries) InsertHTMLDocumentMaterialization(ctx context.Context, arg Ins
 		arg.Summary,
 		arg.ChangedSections,
 		arg.CreatedBy,
+		arg.MetadataRedactionReport,
 	)
 	var i HtmlDocumentMaterialization
 	err := row.Scan(
@@ -276,6 +282,7 @@ func (q *Queries) InsertHTMLDocumentMaterialization(ctx context.Context, arg Ins
 		&i.ChangedSections,
 		&i.CreatedBy,
 		&i.CreatedAt,
+		&i.MetadataRedactionReport,
 	)
 	return &i, err
 }
@@ -349,6 +356,7 @@ UPDATE documents d SET
     html_current_materialization_id = m.id, html_current_source_json = m.source_json,
     html_current_materialization_sequence = m.sequence, html_current_page_count = m.page_count,
     pdf_storage_key = m.pdf_key, pdf_sha256 = m.pdf_sha256, pdf_storage_version_id = m.pdf_version_id,
+    metadata_redaction_report = COALESCE(m.metadata_redaction_report, '{}'::jsonb),
     variables_json = m.source_json -> 'values', evidence_version_pins_required = true,
     rendered_pdf_key = NULL, rendered_pdf_sha = NULL, rendered_pdf_version_id = NULL,
     updated_at = clock_timestamp()
@@ -375,100 +383,6 @@ func (q *Queries) ProjectHTMLDocumentMaterialization(ctx context.Context, arg Pr
 		arg.OrgID,
 		arg.ExpectedUpdatedAt,
 		arg.MaterializationID,
-	)
-	var i Document
-	err := row.Scan(
-		&i.ID,
-		&i.OrgID,
-		&i.TemplateID,
-		&i.Name,
-		&i.Status,
-		&i.RoutingMode,
-		&i.SourceKind,
-		&i.BlocksJson,
-		&i.VariablesJson,
-		&i.RenderedPdfKey,
-		&i.RenderedPdfSha,
-		&i.PdfStorageKey,
-		&i.PdfSha256,
-		&i.FinalPdfKey,
-		&i.FinalPdfSha,
-		&i.AuditCertKey,
-		&i.ExpiresAt,
-		&i.SentAt,
-		&i.CompletedAt,
-		&i.SenderID,
-		&i.Metadata,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ParentEnvelopeID,
-		&i.EnvelopePosition,
-		&i.IsEnvelope,
-		&i.MetadataRedactionReport,
-		&i.RoutingTier,
-		&i.NegotiationEnabled,
-		&i.BilingualTargetLang,
-		&i.LawfulBasis,
-		&i.DeletedAt,
-		&i.DefaultLocale,
-		&i.RequiresSignature,
-		&i.AuditPayloadKey,
-		&i.AuditPayloadSha256,
-		&i.AuditSignatureKey,
-		&i.AuditSignatureSha256,
-		&i.PdfStorageVersionID,
-		&i.RenderedPdfVersionID,
-		&i.FinalPdfVersionID,
-		&i.AuditCertSha256,
-		&i.AuditCertVersionID,
-		&i.AuditPayloadVersionID,
-		&i.AuditSignatureVersionID,
-		&i.EvidenceVersionPinsRequired,
-		&i.CompletionEffectiveAt,
-		&i.CompletionEffectiveAtBound,
-		&i.FinalizationRetainUntil,
-		&i.Article13NoticeEpochAt,
-		&i.Article13NoticeSchema,
-		&i.Article13NoticeEpochV61Committed,
-		&i.HtmlSourceJson,
-		&i.HtmlReviewedPdfSha256,
-		&i.HtmlReviewedBy,
-		&i.HtmlReviewedAt,
-		&i.HtmlCurrentMaterializationID,
-		&i.HtmlCurrentSourceJson,
-		&i.HtmlCurrentPageCount,
-		&i.HtmlCurrentMaterializationSequence,
-		&i.HtmlReviewedMaterializationID,
-		&i.HtmlEffectiveSourceCommitment,
-	)
-	return &i, err
-}
-
-const updateHTMLMaterializationRedactionReport = `-- name: UpdateHTMLMaterializationRedactionReport :one
-UPDATE documents SET metadata_redaction_report = $1::jsonb,
-    updated_at = clock_timestamp()
-WHERE id = $2 AND org_id = $3
-    AND status = 'draft' AND deleted_at IS NULL
-    AND html_current_materialization_id = $4::uuid
-    AND updated_at = $5::timestamptz
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
-`
-
-type UpdateHTMLMaterializationRedactionReportParams struct {
-	MetadataRedactionReport json.RawMessage    `json:"metadata_redaction_report"`
-	DocumentID              uuid.UUID          `json:"document_id"`
-	OrgID                   uuid.UUID          `json:"org_id"`
-	MaterializationID       uuid.UUID          `json:"materialization_id"`
-	ExpectedUpdatedAt       pgtype.Timestamptz `json:"expected_updated_at"`
-}
-
-func (q *Queries) UpdateHTMLMaterializationRedactionReport(ctx context.Context, arg UpdateHTMLMaterializationRedactionReportParams) (*Document, error) {
-	row := q.db.QueryRow(ctx, updateHTMLMaterializationRedactionReport,
-		arg.MetadataRedactionReport,
-		arg.DocumentID,
-		arg.OrgID,
-		arg.MaterializationID,
-		arg.ExpectedUpdatedAt,
 	)
 	var i Document
 	err := row.Scan(

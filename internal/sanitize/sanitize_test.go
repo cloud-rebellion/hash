@@ -71,8 +71,10 @@ func TestClean_NilInputErrors(t *testing.T) {
 }
 
 func TestClean_PDFAllowsStaticDocument(t *testing.T) {
-	res, err := Clean("template-pdf", "application/pdf", buildTestPDF(t, 1))
+	raw := buildTestPDF(t, 1)
+	res, err := Clean("template-pdf", "application/pdf", raw)
 	if err != nil {
+		logSyntheticPDFInfoReferences(t, raw)
 		t.Fatalf("clean static PDF: %v", err)
 	}
 	if !bytes.HasPrefix(res.Bytes, []byte("%PDF-")) {
@@ -263,8 +265,10 @@ func TestSyntheticTemplateReportShape(t *testing.T) {
 	if len(raw) == 0 {
 		t.Fatal("expected non-empty report")
 	}
-	// MergeReports + a fresh empty input should produce a v1 report
-	// with exactly one item.
+	if !strings.Contains(string(raw), `"provenance":"legacy-unknown"`) || !strings.Contains(string(raw), `"stripped":[]`) || strings.Contains(string(raw), `"pdf":`) {
+		t.Fatalf("legacy template acquired an unmeasured cleanup claim: %s", raw)
+	}
+	// An unobserved legacy item stays unknown when another asset is appended.
 	merged, err := MergeReports(raw, Report{Asset: "logo", Method: "image-reencode"})
 	if err != nil {
 		t.Fatalf("merge: %v", err)

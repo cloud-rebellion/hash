@@ -38,6 +38,7 @@ func (q *memoryQueries) GetCurrentHTMLDocumentMaterialization(context.Context, g
 func (q *memoryQueries) InsertHTMLDocumentMaterialization(_ context.Context, p generated.InsertHTMLDocumentMaterializationParams) (*generated.HtmlDocumentMaterialization, error) {
 	q.writes++
 	row := &generated.HtmlDocumentMaterialization{ID: uuid.New(), DocumentID: p.DocumentID, OrgID: p.OrgID, Sequence: p.Sequence, ParentID: p.ParentID, ParentCommitment: p.ParentCommitment, OriginCommitment: p.OriginCommitment, SourceJson: p.SourceJson, SourceCommitment: p.SourceCommitment, PdfKey: p.PdfKey, PdfSha256: p.PdfSha256, PdfVersionID: p.PdfVersionID, PageCount: p.PageCount}
+	row.MetadataRedactionReport = bytes.Clone(p.MetadataRedactionReport)
 	q.rows[row.ID] = row
 	return row, nil
 }
@@ -52,6 +53,10 @@ func (q *memoryQueries) ProjectHTMLDocumentMaterialization(_ context.Context, p 
 	doc.PdfStorageKey = pgtype.Text{String: row.PdfKey, Valid: true}
 	doc.PdfSha256 = bytes.Clone(row.PdfSha256)
 	doc.PdfStorageVersionID = pgtype.Text{String: row.PdfVersionID, Valid: true}
+	doc.MetadataRedactionReport = bytes.Clone(row.MetadataRedactionReport)
+	if len(doc.MetadataRedactionReport) == 0 {
+		doc.MetadataRedactionReport = json.RawMessage(`{}`)
+	}
 	var s struct {
 		Values json.RawMessage `json:"values"`
 	}

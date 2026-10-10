@@ -504,52 +504,54 @@ type Event struct {
 }
 
 type HtmlDocumentMaterialization struct {
-	ID               uuid.UUID          `json:"id"`
-	DocumentID       uuid.UUID          `json:"document_id"`
-	OrgID            uuid.UUID          `json:"org_id"`
-	Sequence         int32              `json:"sequence"`
-	ParentID         pgtype.UUID        `json:"parent_id"`
-	ParentCommitment []byte             `json:"parent_commitment"`
-	OriginCommitment []byte             `json:"origin_commitment"`
-	SourceJson       json.RawMessage    `json:"source_json"`
-	SourceCommitment []byte             `json:"source_commitment"`
-	PdfKey           string             `json:"pdf_key"`
-	PdfSha256        []byte             `json:"pdf_sha256"`
-	PdfVersionID     string             `json:"pdf_version_id"`
-	PageCount        int32              `json:"page_count"`
-	Summary          string             `json:"summary"`
-	ChangedSections  []string           `json:"changed_sections"`
-	CreatedBy        uuid.UUID          `json:"created_by"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ID                      uuid.UUID          `json:"id"`
+	DocumentID              uuid.UUID          `json:"document_id"`
+	OrgID                   uuid.UUID          `json:"org_id"`
+	Sequence                int32              `json:"sequence"`
+	ParentID                pgtype.UUID        `json:"parent_id"`
+	ParentCommitment        []byte             `json:"parent_commitment"`
+	OriginCommitment        []byte             `json:"origin_commitment"`
+	SourceJson              json.RawMessage    `json:"source_json"`
+	SourceCommitment        []byte             `json:"source_commitment"`
+	PdfKey                  string             `json:"pdf_key"`
+	PdfSha256               []byte             `json:"pdf_sha256"`
+	PdfVersionID            string             `json:"pdf_version_id"`
+	PageCount               int32              `json:"page_count"`
+	Summary                 string             `json:"summary"`
+	ChangedSections         []string           `json:"changed_sections"`
+	CreatedBy               uuid.UUID          `json:"created_by"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	MetadataRedactionReport json.RawMessage    `json:"metadata_redaction_report"`
 }
 
 type HtmlDocumentMaterializationSnapshot struct {
-	ID                   uuid.UUID          `json:"id"`
-	DocumentID           uuid.UUID          `json:"document_id"`
-	OrgID                uuid.UUID          `json:"org_id"`
-	MaterializationID    pgtype.UUID        `json:"materialization_id"`
-	Kind                 string             `json:"kind"`
-	CapturedUpdatedAt    pgtype.Timestamptz `json:"captured_updated_at"`
-	SourceJson           json.RawMessage    `json:"source_json"`
-	SourceCommitment     []byte             `json:"source_commitment"`
-	PdfKey               string             `json:"pdf_key"`
-	PdfSha256            []byte             `json:"pdf_sha256"`
-	PdfVersionID         string             `json:"pdf_version_id"`
-	PageCount            pgtype.Int4        `json:"page_count"`
-	RenderedPdfKey       pgtype.Text        `json:"rendered_pdf_key"`
-	RenderedPdfSha256    []byte             `json:"rendered_pdf_sha256"`
-	RenderedPdfVersionID pgtype.Text        `json:"rendered_pdf_version_id"`
-	ReviewedPdfSha256    []byte             `json:"reviewed_pdf_sha256"`
-	ReviewedBy           pgtype.UUID        `json:"reviewed_by"`
-	ReviewedAt           pgtype.Timestamptz `json:"reviewed_at"`
-	FieldsJson           json.RawMessage    `json:"fields_json"`
-	RecipientsJson       json.RawMessage    `json:"recipients_json"`
-	NoticeContextJson    json.RawMessage    `json:"notice_context_json"`
-	CeremonyEventsJson   json.RawMessage    `json:"ceremony_events_json"`
-	NoticeEpochAt        pgtype.Timestamptz `json:"notice_epoch_at"`
-	RetainUntil          pgtype.Timestamptz `json:"retain_until"`
-	CreatedBy            pgtype.UUID        `json:"created_by"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	ID                      uuid.UUID          `json:"id"`
+	DocumentID              uuid.UUID          `json:"document_id"`
+	OrgID                   uuid.UUID          `json:"org_id"`
+	MaterializationID       pgtype.UUID        `json:"materialization_id"`
+	Kind                    string             `json:"kind"`
+	CapturedUpdatedAt       pgtype.Timestamptz `json:"captured_updated_at"`
+	SourceJson              json.RawMessage    `json:"source_json"`
+	SourceCommitment        []byte             `json:"source_commitment"`
+	PdfKey                  string             `json:"pdf_key"`
+	PdfSha256               []byte             `json:"pdf_sha256"`
+	PdfVersionID            string             `json:"pdf_version_id"`
+	PageCount               pgtype.Int4        `json:"page_count"`
+	RenderedPdfKey          pgtype.Text        `json:"rendered_pdf_key"`
+	RenderedPdfSha256       []byte             `json:"rendered_pdf_sha256"`
+	RenderedPdfVersionID    pgtype.Text        `json:"rendered_pdf_version_id"`
+	ReviewedPdfSha256       []byte             `json:"reviewed_pdf_sha256"`
+	ReviewedBy              pgtype.UUID        `json:"reviewed_by"`
+	ReviewedAt              pgtype.Timestamptz `json:"reviewed_at"`
+	FieldsJson              json.RawMessage    `json:"fields_json"`
+	RecipientsJson          json.RawMessage    `json:"recipients_json"`
+	NoticeContextJson       json.RawMessage    `json:"notice_context_json"`
+	CeremonyEventsJson      json.RawMessage    `json:"ceremony_events_json"`
+	NoticeEpochAt           pgtype.Timestamptz `json:"notice_epoch_at"`
+	RetainUntil             pgtype.Timestamptz `json:"retain_until"`
+	CreatedBy               pgtype.UUID        `json:"created_by"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	MetadataRedactionReport json.RawMessage    `json:"metadata_redaction_report"`
 }
 
 type HtmlTemplateRevision struct {
@@ -732,6 +734,7 @@ type Template struct {
 	EvidenceVersionPinRequired bool               `json:"evidence_version_pin_required"`
 	HtmlMasterJson             []byte             `json:"html_master_json"`
 	HtmlContentSha256          []byte             `json:"html_content_sha256"`
+	PdfSanitizationReport      json.RawMessage    `json:"pdf_sanitization_report"`
 }
 
 type User struct {

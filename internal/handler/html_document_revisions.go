@@ -253,7 +253,9 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 	if cleaned.Report.UnsupportedT || pages < 1 || pages > sanitize.MaxPDFPages || len(cleaned.Bytes) == 0 || len(cleaned.Bytes) > sanitize.MaxPDFBytes {
 		return nil, 0, 0, errHTMLDocumentRevisionConflict
 	}
-	report, err := sanitize.MergeReports(doc.MetadataRedactionReport, cleaned.Report)
+	// The immutable old row/snapshot retains its own report. This fresh report
+	// describes only the exact newly cleaned PDF selected by this revision.
+	report, err := sanitize.MergeReports(nil, cleaned.Report)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -296,7 +298,7 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 		return nil, 0, 0, err
 	}
 	q := generated.New(tx)
-	updated, row, err := htmlmaterialization.Append(commitCtx, q, guard.Document, &candidate, htmlmaterialization.AppendInput{SourceJSON: source, PageCount: int32(pages), PreviousPageCount: previousPages, ActorID: actor.UserID, Summary: strings.TrimSpace(in.Summary)})
+	updated, row, err := htmlmaterialization.Append(commitCtx, q, guard.Document, &candidate, htmlmaterialization.AppendInput{SourceJSON: source, PageCount: int32(pages), PreviousPageCount: previousPages, ActorID: actor.UserID, Summary: strings.TrimSpace(in.Summary), MetadataRedactionReport: report})
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -312,10 +314,6 @@ func (s *Server) reviseHTMLDocument(ctx context.Context, actor authoring.Actor, 
 		return nil, 0, 0, err
 	}
 	if err := htmlsource.ValidateContractParties(updated, currentRecipients); err != nil {
-		return nil, 0, 0, err
-	}
-	updated, err = q.UpdateHTMLMaterializationRedactionReport(commitCtx, generated.UpdateHTMLMaterializationRedactionReportParams{DocumentID: id, OrgID: actor.OrgID, MaterializationID: row.ID, ExpectedUpdatedAt: updated.UpdatedAt, MetadataRedactionReport: report})
-	if err != nil {
 		return nil, 0, 0, err
 	}
 	if _, err := versions.New(q).Snapshot(commitCtx, versions.SnapshotInput{DocumentID: id, OrgID: actor.OrgID, Name: updated.Name, SourceKind: updated.SourceKind, VariablesJS: updated.VariablesJson, HTMLSourceJSON: source, HTMLMaterializationID: updated.HtmlCurrentMaterializationID, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "HTML contract text revised"}); err != nil {

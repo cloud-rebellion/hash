@@ -3335,12 +3335,10 @@ func (e *Engine) renderAuditCertificateWithManifest(ctx context.Context, doc *ge
 		}
 	}
 
-	// Phase 8.7: surface the metadata-redaction report so signers + court
-	// reviewers can see what PII the sanitizer stripped at upload time.
-	// Embedded before the ed25519 signature so the signature covers the
-	// report (a tampered report changes the cert payload and breaks
-	// verification). Empty / no-items reports emit nothing so unmigrated
-	// documents render unchanged.
+	// Bind measured source-intake observations and their artifact digests in
+	// the signed payload. Historical/unmeasured records remain explicitly
+	// unknown; this section does not certify legal sufficiency or final-PDF
+	// metadata. Stored historical certificates retain their original bytes.
 	if section := renderRedactionReportSection(doc.MetadataRedactionReport); section != "" {
 		sb.WriteString(section)
 	}

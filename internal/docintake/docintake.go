@@ -3,7 +3,7 @@
 
 // Package docintake holds the one-step "designed proposal -> signable
 // pdf-source document" intake shared by the REST import handler and the MCP
-// ingest tool, so both take exactly the same GDPR-safe clean + store + attest
+// ingest tool, so both take exactly the same verified clean + store + record
 // path before the (unchanged) field-designer + sign/stamp/seal flow runs.
 package docintake
 
@@ -136,7 +136,7 @@ func createPDFSourceDocument(ctx context.Context, q documentQueries, st objectSt
 		}
 		return nil, 0, OwnedPDFSource{}, fmt.Errorf("create PDF document: %w", err)
 	}
-	// Attest the GDPR-safe cleaning on the document so the audit cert can
+	// Record the measured source cleaning on the document so the audit cert can
 	// reference it without a template lookup.
 	rep, rerr := sanitize.MergeReports(nil, cleaned.Report)
 	if rerr != nil {

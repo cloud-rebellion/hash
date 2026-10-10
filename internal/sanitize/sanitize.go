@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 // Copyright (c) Bright Interaction
 
-// Package sanitize implements Phase 8.7: a GDPR-safe upload pipeline.
+// Package sanitize implements the bounded upload cleaning pipeline.
 //
 // Every blob users upload (PDF templates, branding logos, embedded images)
 // gets routed through Clean(raw, contentType) BEFORE it reaches MinIO.
-// The cleaner strips:
+// The cleaner removes or rejects these PDF facilities and verifies its output:
 //
-//	PDFs:   /Info dictionary (author, software, creator, dates), XMP
-//	        metadata stream, embedded JavaScript, /AcroForm forms,
-//	        /EmbeddedFiles attachments, optional content (hidden layers),
-//	        annotations/comments.
+//	PDFs:   source /Info fields, XMP metadata, /AcroForm forms,
+//	        /EmbeddedFiles attachments, annotations/comments and active content.
+//	        The PDF writer may generate its own Producer and processing dates;
+//	        these are verified and reported separately from removed source data.
 //	Images: EXIF, GPS, ICC profiles, thumbnails, edit history. Achieved
 //	        by decoding with the stdlib image package and re-encoding
 //	        through image/jpeg or image/png, both of which produce metadata-
@@ -47,13 +47,15 @@ import (
 // sanitizer surfaces it to callers so the audit cert can serialize it +
 // the log can spot anomalies (e.g. an unexpectedly metadata-rich PDF).
 type Report struct {
-	Asset        string   `json:"asset"`        // human-friendly source label, e.g. "template-pdf", "logo"
-	ContentType  string   `json:"content_type"` // canonical mime
-	Method       string   `json:"method"`       // 'pdfcpu' | 'image-reencode' | 'svg-strip' | 'passthrough'
-	Stripped     []string `json:"stripped"`     // field labels: 'author', 'exif', 'gps', 'javascript', etc
-	BytesBefore  int64    `json:"bytes_before"`
-	BytesAfter   int64    `json:"bytes_after"`
-	UnsupportedT bool     `json:"unsupported_type,omitempty"` // true if the type was passed through unchanged
+	Asset        string    `json:"asset"`        // human-friendly source label, e.g. "template-pdf", "logo"
+	ContentType  string    `json:"content_type"` // canonical mime
+	Method       string    `json:"method"`       // 'pdfcpu' | 'image-reencode' | 'svg-strip' | 'passthrough'
+	Stripped     []string  `json:"stripped"`     // field labels: 'author', 'exif', 'gps', 'javascript', etc
+	BytesBefore  int64     `json:"bytes_before"`
+	BytesAfter   int64     `json:"bytes_after"`
+	UnsupportedT bool      `json:"unsupported_type,omitempty"` // true if the type was passed through unchanged
+	Provenance   string    `json:"provenance,omitempty"`
+	PDF          *PDFProof `json:"pdf,omitempty"`
 }
 
 // Result wraps the cleaned bytes + report so callers can write to storage
@@ -145,91 +147,80 @@ func (b *boundedPDFBuffer) Bytes() []byte { return b.buffer.Bytes() }
 func (b *boundedPDFBuffer) Len() int      { return b.buffer.Len() }
 func (b *boundedPDFBuffer) Reset()        { b.buffer.Reset() }
 
-// cleanPDF runs the raw PDF through pdfcpu's optimizer with a config
-// that drops every metadata-bearing facility. Pdfcpu rewrites the PDF
-// in canonical form, so XMP streams + the /Info dictionary disappear in
-// the output; we explicitly enumerate what we expect to be gone in the
-// Report so the audit-cert reader can match it against known categories.
-//
-// pdfcpu's API is byte-slice in, byte-slice out via in-memory buffers.
+// cleanPDF observes the source before validation can repair it, explicitly
+// removes metadata, then verifies the rewritten bytes. Optimize alone does
+// not remove source Info fields or XMP in the pinned pdfcpu version.
 func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 	if len(raw) > MaxPDFBytes {
 		return Result{}, ErrPDFTooLarge
 	}
-	pages, err := pageCountInProcess(raw)
+	ctx, before, geometryBefore, err := observePDF(raw)
 	if err != nil {
-		return Result{}, fmt.Errorf("pdf preflight: %w", err)
+		return Result{}, err
 	}
-	if pages > MaxPDFPages {
-		return Result{}, fmt.Errorf("%w: %d pages exceeds %d", ErrTooManyPages, pages, MaxPDFPages)
+	pages := ctx.PageCount
+	if err := removePDFMetadata(ctx); err != nil {
+		return Result{}, err
 	}
-	in := bytes.NewReader(raw)
+	if err := pdfapi.OptimizeContext(ctx); err != nil {
+		return Result{}, errors.New("sanitize: PDF optimization failed")
+	}
 	var out boundedPDFBuffer
-
-	conf := model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed
-	conf.WriteObjectStream = false
-	conf.WriteXRefStream = false
-	conf.Eol = pdftypes.EolLF
-	// Optimize is the catch-all that rewrites the file canonically.
-	if err := pdfapi.Optimize(in, &out, conf); err != nil {
-		// If optimize fails on a malformed PDF, fall back to passing
-		// the bytes through but flag the failure so the caller can
-		// decide to reject. We deliberately do NOT silently let
-		// metadata-bearing PDFs through.
-		return Result{
-			Bytes: raw,
-			Report: Report{
-				Asset:        asset,
-				ContentType:  ct,
-				Method:       "passthrough",
-				BytesBefore:  int64(len(raw)),
-				BytesAfter:   int64(len(raw)),
-				UnsupportedT: true,
-				Stripped:     []string{fmt.Sprintf("ERROR:%s", err.Error())},
-			},
-		}, fmt.Errorf("pdf optimize: %w", err)
+	if err := pdfapi.WriteContext(ctx, &out); err != nil {
+		if out.limitExceeded {
+			return Result{}, ErrPDFTooLarge
+		}
+		return Result{}, errors.New("sanitize: PDF rewrite failed")
 	}
-
-	cleaned := out.Bytes()
-	// Pdfcpu's optimize strips XMP + /Info as part of the canonical
-	// rewrite. Enumerate the categories we KNOW are gone (vs ones we'd
-	// need an additional pass for) so the report is honest.
-	stripped := []string{
-		"info_dictionary", // /Info: author, creator, producer, dates
-		"xmp_metadata",    // XMP stream
-		"object_streams",  // disabled to avoid carrying provenance
-		"linearization",   // hints can encode upload-time info
-	}
-	// Additional removal passes for JS + forms + attachments would go
-	// here. pdfcpu has RemoveAttachmentsFile + RemoveForm; calling them
-	// requires resetting the reader, so we do those as a second pass.
-	extra, err := secondPassStrip(cleaned, &out)
+	_, err = secondPassStrip(out.Bytes(), &out)
 	if err != nil {
-		return Result{}, fmt.Errorf("PDF cleanup: %w", err)
+		return Result{}, err
 	}
-	stripped = append(stripped, extra...)
+	// Removal commands can regenerate object streams and Info. A final controlled
+	// rewrite enforces the same policy regardless of which command succeeded.
+	ctx, _, _, err = observePDF(out.Bytes())
+	if err != nil {
+		return Result{}, err
+	}
+	if err := removePDFMetadata(ctx); err != nil {
+		return Result{}, err
+	}
+	out.Reset()
+	if err := pdfapi.WriteContext(ctx, &out); err != nil {
+		if out.limitExceeded {
+			return Result{}, ErrPDFTooLarge
+		}
+		return Result{}, errors.New("sanitize: final PDF rewrite failed")
+	}
+	verified, after, geometryAfter, err := observePDF(out.Bytes())
+	if err != nil {
+		return Result{}, err
+	}
+	if verified.PageCount != pages || geometryBefore != geometryAfter {
+		return Result{}, errors.New("sanitize: PDF page geometry changed")
+	}
+	if err := verifyGeneratedInfo(verified); err != nil {
+		return Result{}, err
+	}
 
 	// Defence in depth: assert that no active construct survived or was
 	// introduced by a rewrite pass. Never return bytes we have not checked.
 	active, err := activePDFFeatures(out.Bytes())
 	if err != nil {
-		return Result{}, fmt.Errorf("verify sanitized PDF active content: %w", err)
+		return Result{}, errors.New("sanitize: sanitized PDF verification failed")
 	}
 	if len(active) > 0 {
 		return Result{}, fmt.Errorf("%w after rewrite: %s", ErrActivePDFContent, strings.Join(active, ", "))
 	}
 
+	proof := newPDFProof(raw, out.Bytes(), pages, before, after, geometryBefore, geometryAfter)
+	report := Report{Asset: asset, ContentType: ct, Method: "pdfcpu", Stripped: append([]string{}, proof.Removed...), BytesBefore: int64(len(raw)), BytesAfter: int64(out.Len()), Provenance: "observed", PDF: proof}
+	if err := ValidatePDFReport(report); err != nil {
+		return Result{}, err
+	}
 	return Result{
-		Bytes: out.Bytes(),
-		Report: Report{
-			Asset:       asset,
-			ContentType: ct,
-			Method:      "pdfcpu",
-			Stripped:    stripped,
-			BytesBefore: int64(len(raw)),
-			BytesAfter:  int64(out.Len()),
-		},
+		Bytes:  out.Bytes(),
+		Report: report,
 	}, nil
 }
 
@@ -539,6 +530,9 @@ func MergeReports(existing []byte, add Report) ([]byte, error) {
 	}
 	if w.SchemaVersion == 0 {
 		w.SchemaVersion = 1
+	}
+	if add.PDF != nil || add.Provenance != "" {
+		w.SchemaVersion = 2
 	}
 	w.Items = append(w.Items, add)
 	return jsonMarshalLite(w)

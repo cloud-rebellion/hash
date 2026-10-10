@@ -730,7 +730,15 @@ func htmlMigrationPartsE2E(t *testing.T) (string, string) {
 	if len(dependentParts) != 2 {
 		t.Fatal("HTML materialization migration requires Up/Down")
 	}
-	return parts[0] + "\n" + dependentParts[0], dependentParts[1] + "\n" + parts[1]
+	provenance, err := os.ReadFile("../db/migrations/00075_pdf_sanitization_provenance.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenanceParts := strings.SplitN(string(provenance), "-- +goose Down", 2)
+	if len(provenanceParts) != 2 {
+		t.Fatal("PDF provenance migration requires Up/Down")
+	}
+	return parts[0] + "\n" + dependentParts[0] + "\n" + provenanceParts[0], provenanceParts[1] + "\n" + dependentParts[1] + "\n" + parts[1]
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {

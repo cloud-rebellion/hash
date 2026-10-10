@@ -400,6 +400,17 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 	if err := os.MkdirAll(artifacts, 0700); err != nil {
 		t.Fatal("create private PDF QA artifacts")
 	}
+	var intake struct {
+		SchemaVersion int               `json:"schema_version"`
+		Items         []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(current.MetadataRedactionReport, &intake); err != nil || intake.SchemaVersion != 2 || len(intake.Items) != 1 {
+		t.Fatal("completed source lost its measured intake report")
+	}
+	measured, err := sanitize.DecodePDFReport(intake.Items[0])
+	if err != nil || measured.PDF.OutputSHA256 != hex.EncodeToString(current.PdfSha256) || measured.PDF.PagesAfter != pages {
+		t.Fatal("completed intake proof differs from exact reviewed source")
+	}
 	outputs := []struct {
 		name, key, version string
 		digest             []byte
@@ -422,7 +433,7 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 		sum := sha256.Sum256(body)
 		artifactHashes[output.name] = hex.EncodeToString(sum[:])
 	}
-	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "scope": "Actual Go HTTPS/PostgreSQL/source worker, exact Chromium renderer and built browser signing. Participants, S3/retention, certificate key and delivery outbox are synthetic; no SMTP/provider/production/legal acceptance.", "document_id": doc.ID, "source_commitment": commitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "page_count": pages, "signature_count": len(signatures), "autosave_confirmed": true, "manual_signature_fields": true, "automatic_branded_page_support": false, "renderer_version": strings.TrimSpace(string(version)), "artifact_sha256": artifactHashes}, "", "  ")
+	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "scope": "Actual Go HTTPS/PostgreSQL/source worker, exact Chromium renderer and built browser signing. Participants, S3/retention, certificate key and delivery outbox are synthetic; no SMTP/provider/production/legal acceptance.", "document_id": doc.ID, "source_commitment": commitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "page_count": pages, "signature_count": len(signatures), "autosave_confirmed": true, "manual_signature_fields": true, "automatic_branded_page_support": false, "renderer_version": strings.TrimSpace(string(version)), "artifact_sha256": artifactHashes, "sanitization_report": current.MetadataRedactionReport}, "", "  ")
 	if err := os.WriteFile(filepath.Join(artifacts, "backend-receipt.json"), append(receipt, '\n'), 0600); err != nil {
 		t.Fatal("write safe signer browser backend receipt")
 	}

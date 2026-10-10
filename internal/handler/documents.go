@@ -25,7 +25,6 @@ import (
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
-	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -231,7 +230,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
-			rep, err := sanitize.SyntheticTemplateReport()
+			rep, err := authoring.PDFTemplateDocumentReport(seed.Template)
 			if err != nil {
 				return err
 			}

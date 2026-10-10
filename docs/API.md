@@ -731,7 +731,10 @@ storage run outside database locks. The original credential, live author and
 observed document/source are rechecked before committing. Successful revisions
 append immutable history, archive the prior review, layout and party context,
 switch the current materialization and clear unsigned fields and review. Old
-coordinates are not reused. Captured signature, acceptance or field evidence,
+coordinates are not reused. Each immutable PDF materialization and captured
+snapshot retains its own source-sanitization report; the current PDF/report
+projection changes atomically. Legacy unmeasured history stays unknown.
+Captured signature, acceptance or field evidence,
 unfinished sealing and pending privacy work refuse a revision. A changed source
 requires fresh human review and fresh signature placement, including when the
 new PDF digest is identical. Success is 201 with `document`,

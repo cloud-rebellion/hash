@@ -7,9 +7,9 @@ RETURNING *;
 INSERT INTO templates (
     org_id, name, source_kind, pdf_storage_key, pdf_sha256,
     pdf_storage_version_id, evidence_version_pin_required,
-    page_count, fields_json, created_by
+    page_count, fields_json, created_by, pdf_sanitization_report
 )
-VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9, sqlc.narg(pdf_sanitization_report)::jsonb)
 RETURNING *;
 
 -- name: GetTemplate :one
@@ -72,7 +72,8 @@ SELECT id, org_id, name, source_kind, blocks_json, variables_json,
        pdf_storage_key, pdf_sha256, page_count, fields_json, version,
        created_by, created_at, updated_at, archived_at,
        pdf_storage_version_id, evidence_version_pin_required,
-       NULL::jsonb AS html_master_json, html_content_sha256
+       NULL::jsonb AS html_master_json, html_content_sha256,
+       NULL::jsonb AS pdf_sanitization_report
 FROM templates
 WHERE org_id = $1 AND archived_at IS NULL
 ORDER BY updated_at DESC

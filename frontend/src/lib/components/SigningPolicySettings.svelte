@@ -136,4 +136,7 @@
   {/if}
 </div>
 
-<style>.input { padding: .65rem .75rem; border: 1px solid var(--color-border-light); border-radius: .375rem; background: var(--color-bg-elevated); display: block; }</style>
+<style>
+  [data-signing-policies] { min-width: 0; overflow-wrap: anywhere; }
+  .input { min-width: 0; max-width: 100%; padding: .65rem .75rem; border: 1px solid var(--color-border-light); border-radius: .375rem; background: var(--color-bg-elevated); display: block; }
+</style>

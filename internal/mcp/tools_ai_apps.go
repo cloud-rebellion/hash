@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/aiapps"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
@@ -55,26 +58,14 @@ func registerAIAppsTools(s *Server, d Deps) {
 				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 					return nil, err
 				}
-				if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
-					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, errors.New("document not found")
-					}
-					return nil, err
-				}
-				res, err := d.Clarifier.Clarify(r.Context(), aiapps.ClarifyInput{
-					OrgID:              u.OrgID,
-					DocumentID:         id,
-					UserID:             &u.UserID,
-					Locale:             p.Locale,
-					ClauseText:         p.ClauseText,
-					SurroundingContext: p.SurroundingContext,
-					LegalContext:       p.LegalContext,
-					Question:           p.Question,
-				})
-				if err != nil {
-					return nil, err
-				}
-				return res, nil
+				return runAIAppCompletion(r.Context(), d, id, "clarify_clause", d.Clarifier.Runtime,
+					func(ctx context.Context, runtime *ai.Runtime, _ *generated.Document) (aiapps.ClarifyResult, error) {
+						return (&aiapps.Clarifier{Runtime: runtime}).Clarify(ctx, aiapps.ClarifyInput{
+							OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID, Locale: p.Locale, ClauseText: p.ClauseText,
+							SurroundingContext: p.SurroundingContext, LegalContext: p.LegalContext, Question: p.Question,
+						})
+					}, nil,
+				)
 			},
 		})
 	}
@@ -111,39 +102,17 @@ func registerAIAppsTools(s *Server, d Deps) {
 				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 					return nil, err
 				}
-				doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("document not found")
-				}
-				if err != nil {
-					return nil, err
-				}
-				tree, err := blocks.ParseTree(doc.BlocksJson)
-				if err != nil {
-					return nil, err
-				}
-				var target *blocks.Block
-				for i := range tree.Blocks {
-					if tree.Blocks[i].ID == p.BlockID {
-						target = &tree.Blocks[i]
-						break
-					}
-				}
-				if target == nil {
-					return nil, errors.New("block_id not in document tree")
-				}
-				res, err := d.Negotiator.SuggestCounter(r.Context(), aiapps.CounterInput{
-					OrgID:          u.OrgID,
-					DocumentID:     id,
-					UserID:         &u.UserID,
-					OriginalClause: target.Text,
-					Concern:        p.Concern,
-					RedLines:       p.RedLines,
-				})
-				if err != nil {
-					return nil, err
-				}
-				return res, nil
+				return runAIAppCompletion(r.Context(), d, id, "suggest_counter_clause", d.Negotiator.Runtime,
+					func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.CounterResult, error) {
+						target, err := authoring.AIAppBlock(doc, p.BlockID)
+						if err != nil {
+							return aiapps.CounterResult{}, err
+						}
+						return (&aiapps.Negotiator{Runtime: runtime}).SuggestCounter(ctx, aiapps.CounterInput{
+							OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID, OriginalClause: target.Text, Concern: p.Concern, RedLines: p.RedLines,
+						})
+					}, nil,
+				)
 			},
 		})
 
@@ -186,13 +155,6 @@ func registerAIAppsTools(s *Server, d Deps) {
 				default:
 					return nil, errors.New("proposal_kind must be edit | reject | counter | block_lock")
 				}
-				doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("document not found")
-				}
-				if err != nil {
-					return nil, err
-				}
 				parent := pgtype.UUID{}
 				if p.ParentID != "" {
 					pid, err := uuid.Parse(p.ParentID)
@@ -201,9 +163,24 @@ func registerAIAppsTools(s *Server, d Deps) {
 					}
 					parent = pgtype.UUID{Bytes: pid, Valid: true}
 				}
-				row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-					func(q *generated.Queries) (*generated.DocumentProposal, error) {
-						return q.InsertProposal(r.Context(), generated.InsertProposalParams{
+				row, err := commitAIAppMutation(r.Context(), d, id,
+					func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
+						if _, err := authoring.AIAppBlock(doc, p.BlockID); err != nil {
+							return nil, err
+						}
+						if parent.Valid {
+							row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: uuid.UUID(parent.Bytes), OrgID: u.OrgID, DocumentID: doc.ID})
+							if errors.Is(err, pgx.ErrNoRows) {
+								return nil, authoring.ErrAIProposalNotFound
+							}
+							if err != nil {
+								return nil, err
+							}
+							if row.BlockID != p.BlockID {
+								return nil, authoring.ErrAIProposalBlockMismatch
+							}
+						}
+						return q.InsertProposal(ctx, generated.InsertProposalParams{
 							DocumentID:   doc.ID,
 							OrgID:        u.OrgID,
 							ProposedBy:   pgtype.UUID{Bytes: u.UserID, Valid: true},
@@ -218,7 +195,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 					},
 					func(row *generated.DocumentProposal) audit.Entry {
 						return audit.Entry{
-							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
+							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
 							Kind: "negotiation.proposed",
 							Payload: map[string]any{
 								"via": "mcp", "tool": "propose_counter_clause",
@@ -228,7 +205,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 					},
 				)
 				if err != nil {
-					return nil, err
+					return nil, aiAppMutationError(err)
 				}
 				return proposalRow(row), nil
 			},
@@ -237,7 +214,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 		s.RegisterTool(ToolDef{
 			Name:        "set_proposal_status",
 			Write:       true,
-			Description: "Move a proposal between pending / accepted / rejected / superseded. Sender + recipient sides both call this; the audit log captures which side did it.",
+			Description: "Move a proposal between pending / accepted / rejected / superseded as the authorized sender or owner. The audit captures the original actor; accepting a proposal does not apply contract text.",
 			InputSchema: schemaObject(map[string]any{
 				"proposal_id": stringSchema("proposal uuid"),
 				"status":      stringSchema("pending | accepted | rejected | superseded"),
@@ -272,9 +249,19 @@ func registerAIAppsTools(s *Server, d Deps) {
 				default:
 					return nil, errors.New("status must be pending | accepted | rejected | superseded")
 				}
-				row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-					func(q *generated.Queries) (*generated.DocumentProposal, error) {
-						return q.SetProposalStatus(r.Context(), generated.SetProposalStatusParams{
+				row, err := commitAIAppMutation(r.Context(), d, ownerDoc,
+					func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
+						row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: id, OrgID: u.OrgID, DocumentID: doc.ID})
+						if errors.Is(err, pgx.ErrNoRows) {
+							return nil, authoring.ErrAIProposalNotFound
+						}
+						if err != nil {
+							return nil, err
+						}
+						if _, err := authoring.AIAppBlock(doc, row.BlockID); err != nil {
+							return nil, err
+						}
+						return q.SetProposalStatus(ctx, generated.SetProposalStatusParams{
 							ID: id, OrgID: u.OrgID, Status: p.Status,
 						})
 					},
@@ -287,7 +274,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 					},
 				)
 				if err != nil {
-					return nil, err
+					return nil, aiAppMutationError(err)
 				}
 				return proposalRow(row), nil
 			},
@@ -362,36 +349,23 @@ func registerAIAppsTools(s *Server, d Deps) {
 				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 					return nil, err
 				}
-				doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-				if err != nil {
-					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, errors.New("document not found")
-					}
-					return nil, err
-				}
-				tree, err := blocks.ParseTree(doc.BlocksJson)
-				if err != nil {
-					return nil, err
-				}
-				res, err := d.RiskAnalyzer.Analyze(r.Context(), aiapps.AnalyzeInput{
-					OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID,
-					Locale: p.Locale, Blocks: tree.Blocks, SenderContext: p.SenderContext,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if d.Audit != nil {
-					_, _ = d.Audit.Log(r.Context(), audit.Entry{
-						OrgID: u.OrgID, DocumentID: &id, ActorUserID: &u.UserID,
-						Kind: "risk.analyzed",
-						Payload: map[string]any{
-							"findings_count": len(res.Findings),
-							"shield_active":  res.ShieldActive,
-							"via":            "mcp",
-						},
-					})
-				}
-				return res, nil
+				return runAIAppCompletion(r.Context(), d, id, "run_risk_analysis", d.RiskAnalyzer.Runtime,
+					func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.AnalyzeResult, error) {
+						tree, err := blocks.ParseTree(doc.BlocksJson)
+						if err != nil {
+							return aiapps.AnalyzeResult{}, err
+						}
+						return (&aiapps.RiskAnalyzer{Runtime: runtime}).Analyze(ctx, aiapps.AnalyzeInput{
+							OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID, Locale: p.Locale, Blocks: tree.Blocks, SenderContext: p.SenderContext,
+						})
+					},
+					func(res aiapps.AnalyzeResult) audit.Entry {
+						return audit.Entry{
+							OrgID: u.OrgID, DocumentID: &id, ActorUserID: &u.UserID, Kind: "risk.analyzed",
+							Payload: map[string]any{"findings_count": len(res.Findings), "shield_active": res.ShieldActive, "via": "mcp"},
+						}
+					},
+				)
 			},
 		})
 	}
@@ -427,20 +401,13 @@ func registerAIAppsTools(s *Server, d Deps) {
 				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 					return nil, err
 				}
-				if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
-					if errors.Is(err, pgx.ErrNoRows) {
-						return nil, errors.New("document not found")
-					}
-					return nil, err
-				}
-				res, err := d.Bilingual.Check(r.Context(), aiapps.EquivalenceInput{
-					OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID,
-					LangA: p.LangA, ClauseA: p.ClauseA, LangB: p.LangB, ClauseB: p.ClauseB,
-				})
-				if err != nil {
-					return nil, err
-				}
-				return res, nil
+				return runAIAppCompletion(r.Context(), d, id, "check_bilingual_equivalence", d.Bilingual.Runtime,
+					func(ctx context.Context, runtime *ai.Runtime, _ *generated.Document) (aiapps.EquivalenceResult, error) {
+						return (&aiapps.Bilingual{Runtime: runtime}).Check(ctx, aiapps.EquivalenceInput{
+							OrgID: u.OrgID, DocumentID: id, UserID: &u.UserID, LangA: p.LangA, ClauseA: p.ClauseA, LangB: p.LangB, ClauseB: p.ClauseB,
+						})
+					}, nil,
+				)
 			},
 		})
 	}
@@ -466,4 +433,57 @@ func proposalRow(p *generated.DocumentProposal) map[string]any {
 		out["parent_id"] = uuid.UUID(p.ParentID.Bytes).String()
 	}
 	return out
+}
+
+func commitAIAppMutation[T any](ctx context.Context, d Deps, id uuid.UUID,
+	mutate func(context.Context, *generated.Queries, *generated.Document) (T, error), event func(T) audit.Entry,
+) (T, error) {
+	var zero T
+	actor, err := aiAppActor(ctx, id)
+	if err != nil {
+		return zero, err
+	}
+	return authoring.CommitNegotiationMutation(ctx, aiAppDependencies(d), actor, id, mutate, event)
+}
+
+func runAIAppCompletion[T any](ctx context.Context, d Deps, id uuid.UUID, tool string, runtime *ai.Runtime,
+	complete func(context.Context, *ai.Runtime, *generated.Document) (T, error), event func(T) audit.Entry,
+) (T, error) {
+	var zero T
+	actor, err := aiAppActor(ctx, id)
+	if err != nil {
+		return zero, aiAppMutationError(err)
+	}
+	result, err := authoring.CompleteDocumentAI(ctx, aiAppDependencies(d), authoring.AIAppRequest{Actor: actor, DocumentID: id, Via: "mcp", Action: tool}, runtime, complete, event)
+	if err != nil {
+		return zero, aiAppMutationError(err)
+	}
+	return result, nil
+}
+
+func aiAppDependencies(d Deps) authoring.AIAppDeps {
+	return authoring.AIAppDeps{Pool: d.Pool, Queries: d.Queries, Audit: d.Audit}
+}
+
+func aiAppActor(ctx context.Context, id uuid.UUID) (authoring.Actor, error) {
+	authorize, err := auth.APIKeyTransactionAuthorization(ctx, id, mcpScopeWriteAuthoring)
+	if err != nil {
+		return authoring.Actor{}, err
+	}
+	u, ok := auth.FromContext(ctx)
+	if !ok {
+		return authoring.Actor{}, auth.ErrMutationPermissionRevoked
+	}
+	return authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, nil
+}
+
+func aiAppMutationError(err error) error {
+	for _, safe := range []error{auth.ErrMutationCredentialExpired, auth.ErrMutationPermissionRevoked, authoring.ErrDocumentNotFound,
+		authoring.ErrDocumentHasEvidence, authoring.ErrPrivacyReviewChanging, authoring.ErrPendingPrivacyReview,
+		authoring.ErrAIAppDocumentClosed, authoring.ErrAIProposalNotFound, authoring.ErrAIProposalBlockMismatch, authoring.ErrAIBlockNotFound} {
+		if errors.Is(err, safe) {
+			return safe
+		}
+	}
+	return errors.New("AI or negotiation operation failed")
 }

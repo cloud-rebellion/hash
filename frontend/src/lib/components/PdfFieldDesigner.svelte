@@ -12,8 +12,8 @@
   } from '$lib/api/client';
   import { PenLine, Type, Calendar, CheckSquare, Trash2, Signature } from 'lucide-svelte';
 
-  type Props = { documentID: string; recipientRevision?: number };
-  let { documentID, recipientRevision = 0 }: Props = $props();
+  type Props = { documentID: string; recipientRevision?: number; onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void };
+  let { documentID, recipientRevision = 0, onSignatureFieldsChange }: Props = $props();
 
   type PageInfo = { num: number; w: number; h: number; scale: number };
 
@@ -30,6 +30,13 @@
   let disposed = false;
   let activePdf: PdfDoc | null = null;
   const current = (target: string) => !disposed && documentID === target;
+
+  function emitSignatureFields() {
+    onSignatureFieldsChange?.(fields.filter((f) => f.type === 'signature' && f.required).map((f) => ({
+      role: recipients.find((r) => r.id === f.recipient_id)?.role ?? 'unassigned',
+      label: f.label ?? 'Signature',
+    })));
+  }
 
   // Tool palette.
   const TOOLS = [
@@ -75,6 +82,7 @@
       }
       recipients = recs;
       fields = fs;
+      emitSignatureFields();
       if (!recs.some((r) => r.id === recipientID)) recipientID = recs[0]?.id ?? '';
       appliedRecipientRevision = revision;
     } catch (e) {
@@ -108,6 +116,7 @@
       }
       recipients = recs;
       fields = fs;
+      emitSignatureFields();
       if (recs.length) recipientID = recs[0].id;
 
       const infos: PageInfo[] = [];
@@ -211,7 +220,7 @@
     error = null;
     try {
       const created = await addField(target, input);
-      if (current(target)) fields = [...fields, created];
+      if (current(target)) { fields = [...fields, created]; emitSignatureFields(); }
     } catch (e) {
       if (current(target)) error = (e as Error).message;
     } finally {
@@ -230,7 +239,7 @@
     error = null;
     try {
       await deleteField(f.id);
-      if (current(target)) fields = fields.filter((x) => x.id !== f.id);
+      if (current(target)) { fields = fields.filter((x) => x.id !== f.id); emitSignatureFields(); }
     } catch (e) {
       if (current(target)) error = (e as Error).message;
     } finally {

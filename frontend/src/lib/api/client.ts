@@ -163,6 +163,7 @@ export async function createDocumentFromTemplate(
   name: string,
   templateID: string,
   sourceKind: 'blocks' | 'pdf',
+  layout?: { expected_template_version: number; parties: PDFPartyBinding[] },
 ): Promise<DocumentResponse> {
   // Omit blocks_json/variables_json so the server seeds both from the template
   // (it copies them when the request leaves them empty).
@@ -170,7 +171,22 @@ export async function createDocumentFromTemplate(
     name,
     source_kind: sourceKind,
     template_id: templateID,
+    ...layout,
   });
+}
+
+export interface PDFPartyBinding {
+  role: string;
+  name: string;
+  email: string;
+  locale?: string;
+}
+
+export async function savePDFSigningTemplate(
+  documentID: string,
+  input: { name: string; expected_updated_at: string; expected_field_ids: string[]; parties: { recipient_id: string; role: string; label: string }[] },
+): Promise<TemplateResponse> {
+  return request('POST', `/api/v1/documents/${documentID}/pdf-template`, input);
 }
 
 export interface ImportResult {
@@ -466,6 +482,7 @@ export interface BillingInvoice {
 export async function listBillingPlans(): Promise<{
   plans: BillingPlan[];
   billing_enabled: boolean;
+  payments_enabled?: boolean;
   provider?: string;
 }> {
   return request('GET', '/api/v1/billing/plans');
@@ -475,6 +492,7 @@ export async function getBillingSubscription(): Promise<{
   plan?: BillingPlan;
   subscription?: BillingSubscription;
   billing_enabled: boolean;
+  payments_enabled?: boolean;
 }> {
   return request('GET', '/api/v1/billing/subscription');
 }

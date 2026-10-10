@@ -4,16 +4,19 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/envelopes"
 )
@@ -30,7 +33,7 @@ func registerEnvelopeTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "create_envelope",
 		Write:       true,
-		Description: "Create a new envelope from existing draft documents. The first child_id (after promote) becomes the envelope shell; remaining IDs attach as children in order. Returns the envelope document.",
+		Description: "Create a new envelope from existing draft documents. A fresh empty envelope shell is created and all child_ids attach in the supplied order. Returns the envelope document.",
 		InputSchema: schemaObject(map[string]any{
 			"name": stringSchema("envelope title shown on the cert + signer page"),
 			"child_ids": map[string]any{
@@ -62,58 +65,45 @@ func registerEnvelopeTools(s *Server, d Deps) {
 				}
 				ids = append(ids, id)
 			}
-			if d.Pool == nil || d.Audit == nil {
-				return nil, errors.New("atomic audit dependencies unavailable")
+			if err := validateEnvelopeIDs(ids); err != nil {
+				return nil, err
 			}
-			tx, err := d.Pool.Begin(r.Context())
+			envDoc, err := commitEnvelopeMutation(r.Context(), d, uuid.Nil, ids,
+				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
+					if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+						return nil, err
+					}
+					env, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
+						OrgID: u.OrgID, Name: p.Name, BlocksJson: []byte(`{"version":1,"blocks":[]}`), VariablesJson: []byte(`{}`), SenderID: u.UserID,
+					})
+					if err != nil {
+						return nil, err
+					}
+					if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+						return nil, err
+					}
+					engine := envelopes.New(q)
+					envDoc, err := engine.PromoteToEnvelope(ctx, env.ID, u.OrgID)
+					if err != nil {
+						return nil, envelopeTargetError(err)
+					}
+					for i, cid := range ids {
+						if _, err := engine.Attach(ctx, envDoc.ID, cid, u.OrgID, int32(i+1)); err != nil {
+							return nil, envelopeTargetError(err)
+						}
+					}
+					return envDoc, nil
+				},
+				func(row *generated.Document) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &row.ID, Kind: audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "create_envelope", "child_count": len(ids)},
+					}
+				},
+			)
 			if err != nil {
-				return nil, err
+				return nil, envelopeMutationError(err)
 			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			q := d.Queries.WithTx(tx)
-			if err := d.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				return nil, err
-			}
-			engine := envelopes.New(q)
-			// Create a fresh blocks-source document to act as the envelope
-			// shell. Empty block tree is fine; the cert + signer pages
-			// pull content from children, not from the envelope.
-			env, err := q.CreateBlocksDocument(r.Context(), generated.CreateBlocksDocumentParams{
-				OrgID:         u.OrgID,
-				Name:          p.Name,
-				BlocksJson:    []byte(`{"version":1,"blocks":[]}`),
-				VariablesJson: []byte(`{}`),
-				SenderID:      u.UserID,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				return nil, err
-			}
-			// Promote the new doc to envelope.
-			envDoc, err := engine.PromoteToEnvelope(r.Context(), env.ID, u.OrgID)
-			if err != nil {
-				return nil, err
-			}
-			// Attach children in supplied order.
-			for i, cid := range ids {
-				if _, err := engine.Attach(r.Context(), envDoc.ID, cid, u.OrgID, int32(i+1)); err != nil {
-					return nil, err
-				}
-			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envDoc.ID,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "create_envelope", "child_count": len(ids)},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
 			return envelopeRow(envDoc), nil
 		},
 	})
@@ -140,23 +130,20 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Document, error) {
-					return envelopes.New(q).PromoteToEnvelope(r.Context(), id, u.OrgID)
+			row, err := commitEnvelopeMutation(r.Context(), d, id, nil,
+				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
+					row, err := envelopes.New(q).PromoteToEnvelope(ctx, id, u.OrgID)
+					return row, envelopeTargetError(err)
 				},
 				func(*generated.Document) audit.Entry {
 					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
-						Kind:    audit.KindDocumentUpdated,
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated,
 						Payload: map[string]any{"via": "mcp", "tool": "promote_to_envelope"},
 					}
 				},
 			)
 			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("document not eligible (must be draft + blocks-source + not a child)")
-				}
-				return nil, err
+				return nil, envelopeMutationError(err)
 			}
 			return envelopeRow(row), nil
 		},
@@ -197,20 +184,20 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), childID); err != nil {
 				return nil, err
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Document, error) {
-					return envelopes.New(q).Attach(r.Context(), envID, childID, u.OrgID, p.Position)
+			row, err := commitEnvelopeMutation(r.Context(), d, envID, []uuid.UUID{childID},
+				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
+					row, err := envelopes.New(q).Attach(ctx, envID, childID, u.OrgID, p.Position)
+					return row, envelopeTargetError(err)
 				},
 				func(*generated.Document) audit.Entry {
 					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID,
-						Kind:    audit.KindDocumentUpdated,
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
 						Payload: map[string]any{"via": "mcp", "tool": "attach_to_envelope", "child_id": childID.String()},
 					}
 				},
 			)
 			if err != nil {
-				return nil, err
+				return nil, envelopeMutationError(err)
 			}
 			return envelopeRow(row), nil
 		},
@@ -238,21 +225,40 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.Document, error) {
-					return envelopes.New(q).Detach(r.Context(), id, u.OrgID)
+			child, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, authoring.ErrDocumentNotFound
+			}
+			if err != nil {
+				return nil, envelopeMutationError(err)
+			}
+			if !child.ParentEnvelopeID.Valid {
+				return nil, errEnvelopeTargetIneligible
+			}
+			envID := uuid.UUID(child.ParentEnvelopeID.Bytes)
+			// Detaching changes the parent's instrument membership too. A token
+			// bound only to a child cannot authorize its sibling envelope.
+			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
+				return nil, err
+			}
+			row, err := commitEnvelopeMutation(r.Context(), d, envID, []uuid.UUID{id},
+				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) (*generated.Document, error) {
+					current := docs[id]
+					if current == nil || !current.ParentEnvelopeID.Valid || uuid.UUID(current.ParentEnvelopeID.Bytes) != envID {
+						return nil, errEnvelopeTargetIneligible
+					}
+					row, err := envelopes.New(q).Detach(ctx, id, u.OrgID)
+					return row, envelopeTargetError(err)
 				},
-				func(row *generated.Document) audit.Entry {
-					docID := row.ID
+				func(*generated.Document) audit.Entry {
 					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID,
-						Kind:    audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "detach_from_envelope"},
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "detach_from_envelope", "child_id": id.String()},
 					}
 				},
 			)
 			if err != nil {
-				return nil, err
+				return nil, envelopeMutationError(err)
 			}
 			return envelopeRow(row), nil
 		},
@@ -293,32 +299,35 @@ func registerEnvelopeTools(s *Server, d Deps) {
 				}
 				ids = append(ids, id)
 			}
-			if d.Pool == nil || d.Audit == nil {
-				return nil, errors.New("atomic audit dependencies unavailable")
+			if err := validateEnvelopeIDs(ids); err != nil {
+				return nil, err
 			}
-			tx, err := d.Pool.Begin(r.Context())
+			kids, err := commitEnvelopeMutation(r.Context(), d, envID, ids,
+				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) ([]*generated.Document, error) {
+					if !docs[envID].IsEnvelope || docs[envID].ParentEnvelopeID.Valid {
+						return nil, errEnvelopeTargetIneligible
+					}
+					for _, id := range ids {
+						child := docs[id]
+						if child == nil || !child.ParentEnvelopeID.Valid || uuid.UUID(child.ParentEnvelopeID.Bytes) != envID {
+							return nil, errEnvelopeTargetIneligible
+						}
+					}
+					engine := envelopes.New(q)
+					if err := engine.Reorder(ctx, envID, u.OrgID, ids); err != nil {
+						return nil, envelopeTargetError(err)
+					}
+					return engine.Children(ctx, envID, u.OrgID)
+				},
+				func([]*generated.Document) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "reorder_envelope_children", "count": len(ids)},
+					}
+				},
+			)
 			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			if err := envelopes.New(d.Queries.WithTx(tx)).Reorder(r.Context(), envID, u.OrgID, ids); err != nil {
-				return nil, err
-			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "reorder_envelope_children", "count": len(ids)},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
-			kids, err := d.Envelopes.Children(r.Context(), envID, u.OrgID)
-			if err != nil {
-				return nil, err
+				return nil, envelopeMutationError(err)
 			}
 			out := make([]map[string]any, 0, len(kids))
 			for _, c := range kids {
@@ -437,3 +446,130 @@ func envelopeRow(d *generated.Document) map[string]any {
 
 // guard against the import dropping if the file briefly looks empty.
 var _ = envelopes.Engine{}
+
+var errEnvelopeTargetIneligible = errors.New("document not eligible for envelope mutation")
+
+func validateEnvelopeIDs(ids []uuid.UUID) error {
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if id == uuid.Nil || seen[id] {
+			return errors.New("child IDs must be distinct nonzero UUIDs")
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+// Translate only the target statement's no-row result. An audit no-row result
+// must remain a failed transaction, never become a missing document response.
+func envelopeTargetError(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errEnvelopeTargetIneligible
+	}
+	return err
+}
+
+// Envelope membership is authoring of the whole instrument. Lock its root
+// before its children, as send does, then validate every affected draft's
+// evidence/privacy state. The original key and member remain locked until the
+// audit and last authorization check commit together.
+func commitEnvelopeMutation[T any](parent context.Context, d Deps, root uuid.UUID, requested []uuid.UUID,
+	mutate func(context.Context, *generated.Queries, map[uuid.UUID]*generated.Document) (T, error), event func(T) audit.Entry,
+) (T, error) {
+	var zero T
+	if d.Pool == nil || d.Audit == nil {
+		return zero, errors.New("atomic audit dependencies unavailable")
+	}
+	authorize, err := auth.APIKeyTransactionAuthorization(parent, root, mcpScopeWriteAuthoring)
+	if err != nil {
+		return zero, err
+	}
+	u, ok := auth.FromContext(parent)
+	if !ok {
+		return zero, auth.ErrMutationPermissionRevoked
+	}
+	ctx, cancel := context.WithTimeout(parent, authoring.MutationTimeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return zero, err
+	}
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	q := generated.New(tx)
+	actor := authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}
+	docs := make(map[uuid.UUID]*generated.Document)
+	guards := []*authoring.DraftGuard{}
+	ids := append([]uuid.UUID(nil), requested...)
+	if root != uuid.Nil {
+		guard, err := authoring.LockDraft(ctx, tx, actor, root)
+		if err != nil {
+			return zero, err
+		}
+		docs[root], guards = guard.Document, append(guards, guard)
+		if guard.Document.IsEnvelope {
+			kids, err := envelopes.New(q).Children(ctx, root, u.OrgID)
+			if err != nil {
+				return zero, err
+			}
+			for _, child := range kids {
+				ids = append(ids, child.ID)
+			}
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	for _, id := range ids {
+		if _, locked := docs[id]; locked {
+			continue
+		}
+		guard, err := authoring.LockDraft(ctx, tx, actor, id)
+		if err != nil {
+			return zero, err
+		}
+		docs[id], guards = guard.Document, append(guards, guard)
+	}
+	var member *authoring.MemberGuard
+	if root == uuid.Nil {
+		member, err = authoring.LockAuthor(ctx, tx, actor)
+		if err != nil {
+			return zero, err
+		}
+	}
+	value, err := mutate(ctx, q, docs)
+	if err != nil {
+		return zero, err
+	}
+	entry := event(value)
+	if entry.OrgID != u.OrgID || entry.ActorUserID == nil || *entry.ActorUserID != u.UserID {
+		return zero, auth.ErrMutationPermissionRevoked
+	}
+	pending, err := d.Audit.LogTx(ctx, tx, entry)
+	if err != nil {
+		return zero, err
+	}
+	for _, guard := range guards {
+		if err := guard.Recheck(ctx); err != nil {
+			return zero, err
+		}
+	}
+	if member != nil {
+		if err := member.Recheck(ctx); err != nil {
+			return zero, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return zero, err
+	}
+	d.Audit.Publish(pending)
+	return value, nil
+}
+
+func envelopeMutationError(err error) error {
+	for _, safe := range []error{auth.ErrMutationCredentialExpired, auth.ErrMutationPermissionRevoked,
+		authoring.ErrDocumentNotFound, authoring.ErrDocumentNotDraft, authoring.ErrDocumentHasEvidence,
+		authoring.ErrPrivacyReviewChanging, authoring.ErrPendingPrivacyReview, errEnvelopeTargetIneligible} {
+		if errors.Is(err, safe) {
+			return safe
+		}
+	}
+	return errors.New("envelope mutation failed")
+}

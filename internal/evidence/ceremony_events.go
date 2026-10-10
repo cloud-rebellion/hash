@@ -409,6 +409,28 @@ func recipientEventRequiresNotice(row *generated.Event, payload map[string]json.
 		"clarifier.requested",
 		"clarifier.answered":
 		return true, nil
+	case "ai.requested", "ai.completed":
+		// Staff and public-recipient processing share accounting kinds. A
+		// recipient request/cost record must retain the exact acknowledged
+		// notice; staff records have no signer acknowledgement to fabricate.
+		var via string
+		if err := json.Unmarshal(payload["via"], &via); err != nil {
+			return false, errors.New("AI accounting event has no canonical actor attribution")
+		}
+		switch via {
+		case "signer":
+			if !row.RecipientID.Valid || row.ActorUserID.Valid {
+				return false, errors.New("signer AI accounting event requires a recipient and no staff actor")
+			}
+			return true, nil
+		case "rest", "mcp":
+			if row.RecipientID.Valid || !row.ActorUserID.Valid {
+				return false, errors.New("staff AI accounting event requires a staff actor and no recipient")
+			}
+			return false, nil
+		default:
+			return false, errors.New("AI accounting event has unsupported actor attribution")
+		}
 	case audit.KindChangesRequested:
 		if row.RecipientID.Valid {
 			return true, nil

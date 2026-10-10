@@ -47,7 +47,8 @@ func awaitSessionOperationLockE2E(t *testing.T, ctx context.Context, pool *pgxpo
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE $1 AND wait_event=$2 AND state='active'`, "%"+query+"%", event).Scan(&count); err != nil {
+		application := pool.Config().ConnConfig.RuntimeParams["application_name"]
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE $1 AND wait_event=$2 AND state='active' AND ($3='' OR application_name=$3)`, "%"+query+"%", event, application).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count > 0 {

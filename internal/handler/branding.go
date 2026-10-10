@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -20,14 +22,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/storage"
 )
 
 // brandingInput is the wire shape for upsert. All fields optional; any
-// missing field defaults to the system palette.
+// missing field preserves the current value, or the system default for a new row.
 type brandingInput struct {
 	PrimaryHex     string `json:"primary_hex"`
 	AccentHex      string `json:"accent_hex"`
@@ -102,54 +106,75 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, field+": "+err.Error())
 		return
 	}
+	for _, font := range []struct {
+		name  string
+		value *string
+	}{
+		{"font_heading", &in.FontHeading}, {"font_body", &in.FontBody},
+	} {
+		if *font.value != "" {
+			normalized, err := branding.NormaliseFontFamily(*font.value)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, font.name+": "+err.Error())
+				return
+			}
+			*font.value = normalized
+		}
+	}
 	in.LogoURL = strings.TrimSpace(in.LogoURL)
 	if err := branding.ValidateLogoURLForEnvironment(s.Environment, in.LogoURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	def := branding.DefaultBranding()
-	merged := mergeBrandingInput(def, in)
-	normalizedFont, err := branding.NormaliseFontFamily(merged.FontHeading)
+	actor, err := s.sessionOwnerActor(r, sess)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "font_heading: "+err.Error())
+		s.writeDraftAuthoringError(w, "authorize branding update", err)
 		return
 	}
-	merged.FontHeading = normalizedFont
-	normalizedFont, err = branding.NormaliseFontFamily(merged.FontBody)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "font_body: "+err.Error())
-		return
-	}
-	merged.FontBody = normalizedFont
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.OrgBranding, error) {
-			return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
-				OrgID:          sess.OrgID,
-				PrimaryHex:     merged.PrimaryHex,
-				AccentHex:      merged.AccentHex,
-				SurfaceHex:     merged.SurfaceHex,
-				TextHex:        merged.TextHex,
-				MutedHex:       merged.MutedHex,
-				LogoUrl:        merged.LogoURL,
-				LogoAlt:        merged.LogoAlt,
-				FontHeading:    merged.FontHeading,
-				FontBody:       merged.FontBody,
-				SignatureColor: merged.SignatureColor,
+	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (*generated.OrgBranding, error) {
+			base := branding.DefaultBranding()
+			current, err := q.GetOrgBranding(ctx, sess.OrgID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, err
+			}
+			if err == nil {
+				base = brandingFromOrgRow(current)
+			}
+			merged := mergeBrandingInput(base, in)
+			merged.LogoURL = strings.TrimSpace(merged.LogoURL)
+			if err := branding.ValidateLogoURLForEnvironment(s.Environment, merged.LogoURL); err != nil {
+				return nil, fmt.Errorf("%w: %s", errOwnerMutationInput, err)
+			}
+			merged.FontHeading, err = branding.NormaliseFontFamily(merged.FontHeading)
+			if err != nil {
+				return nil, fmt.Errorf("%w: font_heading: %s", errOwnerMutationInput, err)
+			}
+			merged.FontBody, err = branding.NormaliseFontFamily(merged.FontBody)
+			if err != nil {
+				return nil, fmt.Errorf("%w: font_body: %s", errOwnerMutationInput, err)
+			}
+			return q.UpsertOrgBranding(ctx, generated.UpsertOrgBrandingParams{
+				OrgID: sess.OrgID, PrimaryHex: merged.PrimaryHex, AccentHex: merged.AccentHex,
+				SurfaceHex: merged.SurfaceHex, TextHex: merged.TextHex, MutedHex: merged.MutedHex,
+				LogoUrl: merged.LogoURL, LogoAlt: merged.LogoAlt, FontHeading: merged.FontHeading,
+				FontBody: merged.FontBody, SignatureColor: merged.SignatureColor,
 			})
 		},
 		func(*generated.OrgBranding) audit.Entry {
 			return audit.Entry{
-				OrgID:       sess.OrgID,
-				ActorUserID: &sess.UserID,
-				Kind:        audit.KindDocumentUpdated,
-				IP:          firstIPFromHeader(r),
-				UserAgent:   r.UserAgent(),
-				Payload:     map[string]any{"via": "rest", "tool": "upsert_org_branding"},
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID, Kind: audit.KindDocumentUpdated,
+				IP: firstIPFromHeader(r), UserAgent: r.UserAgent(),
+				Payload: map[string]any{"via": "rest", "tool": "upsert_org_branding"},
 			}
 		},
 	)
 	if err != nil {
-		writeInternalError(w, err)
+		if errors.Is(err, errOwnerMutationInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeDraftAuthoringError(w, "update branding", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, brandingFromOrgRow(row))
@@ -249,30 +274,63 @@ func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "logo must be png, jpg, or svg")
 		return
 	}
-	key := fmt.Sprintf("branding/%s/logo%s", sess.OrgID.String(), ext)
+	actor, err := s.sessionOwnerActor(r, sess)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize logo upload", err)
+		return
+	}
+	// Unique asset identities keep a rejected edit from replacing the logo
+	// already used by another document. Legacy stable URLs remain readable.
+	assetID := uuid.New()
+	key := fmt.Sprintf("branding/%s/%s%s", sess.OrgID.String(), assetID, ext)
 	ctype := contentTypeOf(ext)
-
-	// Phase 8.7: strip EXIF/GPS/ICC/XMP before the logo touches MinIO.
-	// A logo uploaded straight from a phone camera typically carries
-	// the photographer's GPS coords and device serial; we don't want
-	// either embedded in every signed PDF we ship.
-	cleaned, err := sanitize.CleanWithContext(r.Context(), "logo", ctype, raw)
+	var stored storage.StoredObject
+	committed := false
+	defer func() {
+		if committed || stored.VersionID == "" {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		if err := s.Storage.DeleteVersion(cleanupCtx, key, stored.VersionID, stored.SHA256[:]); err != nil {
+			// Compensation failure must remain visible to operators; never delete
+			// another object merely because exact-version cleanup was refused.
+			slog.Error("logo upload compensation failed", "org_id", sess.OrgID, "key", key, "error", err)
+		}
+	}()
+	_, err = authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, _ *generated.Queries) (uuid.UUID, error) {
+			cleaned, err := sanitize.CleanWithContext(ctx, "logo", ctype, raw)
+			if err != nil {
+				if errors.Is(err, malwarescan.ErrUnavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return uuid.Nil, err
+				}
+				return uuid.Nil, fmt.Errorf("%w: sanitize logo: %s", errOwnerMutationInput, err)
+			}
+			stored, err = s.Storage.PutVersioned(ctx, key, ctype, cleaned.Bytes)
+			return assetID, err
+		},
+		func(uuid.UUID) audit.Entry {
+			return audit.Entry{OrgID: sess.OrgID, ActorUserID: &sess.UserID, Kind: "branding.logo_uploaded", IP: clientIP(r),
+				Payload: map[string]any{"asset_id": assetID, "content_type": ctype}}
+		},
+	)
 	if err != nil {
 		if errors.Is(err, malwarescan.ErrUnavailable) {
 			writeScanError(w, err)
 			return
 		}
-		writeError(w, http.StatusBadRequest, "sanitize logo: "+err.Error())
+		if errors.Is(err, errOwnerMutationInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeDraftAuthoringError(w, "upload branding logo", err)
 		return
 	}
-	if _, err := s.Storage.Put(r.Context(), key, ctype, cleaned.Bytes); err != nil {
-		writeInternalErrorMsg(w, "storage put", err)
-		return
-	}
-	// Logos are served through Hash (GET /branding/logo/{org_id}) so the
-	// URL stays stable for recipients who open old documents.
-	logoURL := strings.TrimRight(s.PublicURL, "/") + "/branding/logo/" + sess.OrgID.String() + ext
+	committed = true
+	logoURL := strings.TrimRight(s.PublicURL, "/") + "/branding/logo/" + sess.OrgID.String() + "-" + assetID.String() + ext
 	writeJSON(w, http.StatusOK, map[string]any{"logo_url": logoURL, "key": key})
+
 }
 
 // GET /branding/logo/{org_id}{ext}  (public, no auth)
@@ -293,6 +351,14 @@ func (s *Server) handleGetBrandingLogo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	idPart := param[:dot]
+	assetPart := ""
+	if len(idPart) == 73 && idPart[36] == '-' {
+		assetPart, idPart = idPart[37:], idPart[:36]
+		if _, err := uuid.Parse(assetPart); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid logo asset id")
+			return
+		}
+	}
 	extPart := strings.ToLower(param[dot:])
 	orgID, err := uuid.Parse(idPart)
 	if err != nil {
@@ -304,6 +370,9 @@ func (s *Server) handleGetBrandingLogo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := fmt.Sprintf("branding/%s/logo%s", orgID.String(), extPart)
+	if assetPart != "" {
+		key = fmt.Sprintf("branding/%s/%s%s", orgID.String(), assetPart, extPart)
+	}
 	raw, err := s.Storage.Get(r.Context(), key)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "logo not found")

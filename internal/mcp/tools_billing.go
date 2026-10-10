@@ -46,13 +46,13 @@ func registerBillingTools(s *Server, d Deps) {
 					"features":                json.RawMessage(p.FeaturesJson),
 				})
 			}
-			return map[string]any{"plans": out, "count": len(out), "provider": d.Billing.Provider.Name()}, nil
+			return map[string]any{"plans": out, "count": len(out), "provider": d.Billing.Provider.Name(), "payments_enabled": d.Billing.PaymentsEnabled()}, nil
 		},
 	})
 
 	s.RegisterTool(ToolDef{
 		Name:        "get_org_subscription",
-		Description: "Return the calling org's current billing subscription + plan: status, provider, period dates, cancel-at-period-end flag. Returns the free plan implied when no row exists. Useful for an agent that wants to gate behavior on plan features before suggesting a workflow.",
+		Description: "Return the calling org's current billing subscription + plan: status, provider, period dates, cancel-at-period-end flag. In SaaS mode, returns the free plan when no entitled subscription exists. Internal operator mode returns its approved entitlement, with no subscription. Useful for an agent that wants to gate behavior on plan features before suggesting a workflow.",
 		InputSchema: schemaObject(map[string]any{}, nil),
 		Handler: func(r *http.Request, _ json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
@@ -60,7 +60,7 @@ func registerBillingTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			out := map[string]any{}
+			out := map[string]any{"provider": d.Billing.Provider.Name(), "payments_enabled": d.Billing.PaymentsEnabled(), "subscription": nil}
 			if plan != nil {
 				out["plan"] = map[string]any{
 					"slug":                    plan.Slug,
@@ -90,7 +90,7 @@ func registerBillingTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "list_billing_invoices",
-		Description: "Return the calling org's most recent billing invoices (default 50). Each row carries provider_payment_id, status, amount_cents, hosted invoice URL.",
+		Description: "Return the calling org's most recent billing invoices (default 50). Each row carries provider_payment_id, status, amount_cents, hosted invoice URL. Internal operator mode returns no payment invoices.",
 		InputSchema: schemaObject(map[string]any{
 			"limit": intSchema("max invoices (default 50, max 200)", 1, 200, 50),
 		}, nil),
@@ -107,6 +107,9 @@ func registerBillingTools(s *Server, d Deps) {
 			}
 			if p.Limit > 200 {
 				p.Limit = 200
+			}
+			if d.Billing.OperatorMode() {
+				return map[string]any{"invoices": []any{}, "count": 0, "provider": d.Billing.Provider.Name(), "payments_enabled": false}, nil
 			}
 			rows, err := d.Queries.ListBillingInvoicesForOrg(r.Context(), generated.ListBillingInvoicesForOrgParams{
 				OrgID: u.OrgID,
@@ -134,7 +137,7 @@ func registerBillingTools(s *Server, d Deps) {
 				}
 				out = append(out, entry)
 			}
-			return map[string]any{"invoices": out, "count": len(out)}, nil
+			return map[string]any{"invoices": out, "count": len(out), "provider": d.Billing.Provider.Name(), "payments_enabled": d.Billing.PaymentsEnabled()}, nil
 		},
 	})
 }

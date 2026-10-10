@@ -17,6 +17,7 @@
   let subscription = $state<BillingSubscription | null>(null);
   let invoices = $state<BillingInvoice[]>([]);
   let billingEnabled = $state(false);
+  let paymentsEnabled = $state(false);
   let provider = $state<string>('disabled');
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -54,6 +55,7 @@
 
       plans = plansRes.plans;
       billingEnabled = enabled;
+      paymentsEnabled = enabled && plansRes.payments_enabled !== false;
       provider = typeof plansRes.provider === 'string'
         ? plansRes.provider
         : (enabled ? 'unknown' : 'disabled');
@@ -71,7 +73,7 @@
   }
 
   async function checkout(plan: BillingPlan) {
-    if (!billingEnabled || checkoutPlanSlug !== null) return;
+    if (!paymentsEnabled || checkoutPlanSlug !== null) return;
     error = null;
     checkoutPlanSlug = plan.slug;
     try {
@@ -188,6 +190,9 @@
   <header class="mb-8">
     <p class="page-eyebrow mb-2">Settings</p>
     <h1 class="page-title">Billing &amp; plan</h1>
+    {#if !loading && error === null && provider === 'operator'}
+      <p class="text-text-muted text-sm mt-2">Internal operator mode. Your approved plan limits and features apply; payments and subscriptions are managed outside Hash. Contact your operator to change access.</p>
+    {/if}
     {#if !loading && error === null && !billingEnabled}
       <p class="text-text-muted text-sm mt-2">Billing is not enabled on this Hash instance.</p>
     {/if}
@@ -216,11 +221,13 @@
                   · <span class="text-warn">cancel scheduled</span>
                 {/if}
               </p>
+            {:else if provider === 'operator'}
+              <p class="text-text-muted text-sm mt-2">Approved internal entitlement. Quotas reset each UTC calendar month.</p>
             {:else}
               <p class="text-text-muted text-sm mt-2">No active paid subscription. You are on the free tier.</p>
             {/if}
           </div>
-          {#if canCancel(subscription)}
+          {#if paymentsEnabled && canCancel(subscription)}
             <button class="btn btn-secondary" onclick={cancel} disabled={cancelling} aria-busy={cancelling}>
               {cancelling ? 'Scheduling cancellation…' : 'Cancel at period end'}
             </button>
@@ -235,7 +242,7 @@
       </section>
     {/if}
 
-    {#if billingEnabled}
+    {#if paymentsEnabled}
       <section class="mb-8">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-base font-medium flex items-center gap-2"><Sparkles class="size-4" /> Plans</h3>

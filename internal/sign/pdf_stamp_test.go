@@ -48,7 +48,7 @@ func TestBuildPageOverlayHTML(t *testing.T) {
 	html := buildPageOverlayHTML([]stampItem{
 		{XPct: 10, YPct: 20, WPct: 30, HPct: 5, HTML: "Jane &amp; Co"},
 	})
-	for _, want := range []string{"left:10.000%", "top:20.000%", "width:30.000%", "Jane &amp; Co"} {
+	for _, want := range []string{"left:10.0000%", "top:20.0000%", "width:30.0000%", "Jane &amp; Co"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("overlay html missing %q\n%s", want, html)
 		}
@@ -56,6 +56,15 @@ func TestBuildPageOverlayHTML(t *testing.T) {
 	// signature CSS is injected so cursive signature spans render in the PDF.
 	if !strings.Contains(html, "@font-face") && !strings.Contains(html, "hash-signature") {
 		t.Errorf("overlay html missing signature css")
+	}
+}
+
+func TestBuildPageOverlayHTMLPreservesSmallestStoredCoordinatePrecision(t *testing.T) {
+	html := buildPageOverlayHTML([]stampItem{{XPct: 12.3456, YPct: 23.4567, WPct: 0.0001, HPct: 0.0001, HTML: "Signature"}})
+	for _, want := range []string{"@page{margin:0}", "left:12.3456%", "top:23.4567%", "width:0.0001%", "height:0.0001%"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("overlay lost the stored coordinate commitment %q", want)
+		}
 	}
 }
 

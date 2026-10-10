@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 )
 
@@ -52,5 +53,17 @@ func TestWriteSendErrorReportsUnsupportedBrandingLogoAsConflict(t *testing.T) {
 
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}
+
+func TestWriteSendErrorReportsUnverifiedSourceWithoutUpstreamDetails(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).writeSendError(recorder, fmt.Errorf("%w: upstream credential=synthetic-private-marker", resolver.ErrSourceFreshness))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "retry sending") || strings.Contains(body, "synthetic-private-marker") {
+		t.Fatalf("response must offer a safe retry without upstream details: %s", body)
 	}
 }

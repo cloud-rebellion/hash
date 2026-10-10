@@ -159,3 +159,14 @@ SELECT COUNT(*) FROM recipients
 WHERE document_id = $1
   AND role <> 'cc'
   AND status NOT IN ('accepted','declined');
+
+-- name: GetRecipientForShare :one
+-- Callers lock the parent document first. Keep the exact admitted recipient
+-- credential stable across bounded external processing without blocking the
+-- foreign-key KEY SHARE locks used by independently committed cost evidence.
+SELECT r.* FROM recipients r
+JOIN documents d ON d.id = r.document_id
+WHERE r.id = sqlc.arg(id)
+  AND r.document_id = sqlc.arg(document_id)
+  AND d.org_id = sqlc.arg(org_id)
+FOR SHARE OF r;

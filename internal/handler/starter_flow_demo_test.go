@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -56,12 +57,23 @@ func TestStarterAndDocFromTemplate(t *testing.T) {
 	}
 	defer pool.Close()
 	q := generated.New(pool)
-	srv := &Server{Queries: q, Audit: audit.New(q, pool)}
+	cookies, err := auth.NewSignedCookie(strings.Repeat("4b", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{Pool: pool, Queries: q, Audit: audit.New(q, pool), Cookies: cookies}
 
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "Starter Test AB", Plan: "pro"})
 	if err != nil {
 		t.Fatalf("org: %v", err)
 	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM orgs WHERE id=$1`, org.ID); err != nil { //nolint:rawsql -- disposable demo tenant
+			t.Error(err)
+		}
+	}()
 	user, err := q.CreateUser(ctx, generated.CreateUserParams{
 		OrgID: org.ID, Email: uuid.NewString() + "@demo.example", Name: "Tester", Role: "owner",
 		ZitadelSub: pgtype.Text{String: uuid.NewString(), Valid: true},
@@ -74,11 +86,17 @@ func TestStarterAndDocFromTemplate(t *testing.T) {
 	authCtx = context.WithValue(authCtx, auth.OrgIDKey, org.ID)
 	authCtx = context.WithValue(authCtx, auth.RoleKey, "owner")
 	authCtx = context.WithValue(authCtx, auth.EmailKey, user.Email)
+	payload, err := json.Marshal(auth.SessionPayload{UserID: user.ID, Generation: user.SessionGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := cookies.Mint(payload, time.Hour)
 
 	// 1. Seed the starter as a template.
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/starter", strings.NewReader(`{"key":"services-agreement-sv"}`)).WithContext(authCtx)
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
 	srv.handleCreateStarterTemplate(rr, req)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("seed starter: got %d, body %s", rr.Code, rr.Body.String())
@@ -99,6 +117,7 @@ func TestStarterAndDocFromTemplate(t *testing.T) {
 	body := `{"name":"Avtal X","source_kind":"blocks","template_id":"` + tpl.ID + `"}`
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/documents", strings.NewReader(body)).WithContext(authCtx)
 	req2.Header.Set("Content-Type", "application/json")
+	req2.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
 	srv.handleCreateDocument(rr2, req2)
 	if rr2.Code != http.StatusCreated {
 		t.Fatalf("create doc: got %d, body %s", rr2.Code, rr2.Body.String())

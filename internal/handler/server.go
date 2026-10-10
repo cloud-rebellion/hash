@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,6 +43,7 @@ import (
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -256,7 +258,7 @@ func (s *Server) Routes() http.Handler {
 	// v1.1 billing webhook receiver. Path includes a per-instance
 	// secret so Mollie's URL-based authentication works; the provider
 	// re-verifies the payment via api.mollie.com.
-	if s.Billing != nil {
+	if s.Billing.PaymentsEnabled() {
 		r.Post("/webhooks/billing/{secret}", s.handleBillingWebhook)
 		// Convenience: webhooks without a secret hit a 404; bare
 		// /webhooks/billing returns a 401 so clueless POSTs without
@@ -264,6 +266,13 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/webhooks/billing", func(w http.ResponseWriter, _ *http.Request) {
 			writeError(w, http.StatusUnauthorized, "billing webhook requires path secret")
 		})
+	} else if s.Billing.OperatorMode() {
+		// Explicit denial prevents retired payment callbacks falling into SPA.
+		disabled := func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusNotFound, "payment collection disabled on this instance")
+		}
+		r.Post("/webhooks/billing/{secret}", disabled)
+		r.Post("/webhooks/billing", disabled)
 	}
 
 	// Explicit tombstone prevents retired provider callbacks from falling
@@ -465,6 +474,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/{id}/events", s.handleListEvents)
 			r.Get("/{id}/recipients", s.handleListRecipients)
 			r.Post("/{id}/recipients", s.handleCreateRecipient)
+			r.Post("/{id}/pdf-template", s.handleSavePDFTemplate)
 			r.Patch("/{id}/recipients/{rid}", s.handleUpdateRecipient)
 			r.Delete("/{id}/recipients/{rid}", s.handleDeleteRecipient)
 
@@ -785,7 +795,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		OK   bool   `json:"ok"`
 		Err  string `json:"err,omitempty"`
 	}
-	checks := make([]depCheck, 0, 4)
+	checks := make([]depCheck, 0, 5)
 	overall := true
 	check := func(name string, fn func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
@@ -803,6 +813,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	check("postgres", s.Pool.Ping)
 	check("malware", malwarescan.CheckActive)
+	check("pdf_parser", sanitize.CheckPDFWorker)
 	if s.Storage != nil {
 		check("storage", s.Storage.Ping)
 	}
@@ -847,22 +858,21 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeInternalError logs the underlying error server-side and returns a generic
-// 500 body. Raw pgx/SQL error strings (SQLSTATE, column/constraint names) and
-// connection errors ("dial tcp host:port") must never reach the client - any
-// API/MCP/curl caller, proxy log, or browser devtools would otherwise see schema
-// internals + internal hostnames. Use for UNEXPECTED failures; keep the typed
-// 4xx branches (quota/eidas/not-found/permission) exactly as-is.
+// writeInternalError logs only a fixed operation and the concrete error type,
+// then returns a generic 500 body. Error diagnostics can contain private data,
+// credentials, URLs and database details, so they must not enter logs or replies.
+// Keep typed 4xx branches (quota/eidas/not-found/permission) unchanged.
 func writeInternalError(w http.ResponseWriter, err error) {
-	slog.Error("internal error serving request", "err", err)
+	slog.Error("internal error serving request", "operation", "writeInternalError", "error_type", fmt.Sprintf("%T", err))
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 }
 
 // writeInternalErrorMsg is writeInternalError with a safe, operator-authored
-// public message (e.g. "create document failed"). The raw err is logged
-// server-side only; it never reaches the client body.
+// public message (e.g. "create document failed"). Logs retain only the fixed
+// helper operation and concrete error type; the approved public message stays
+// in the response body.
 func writeInternalErrorMsg(w http.ResponseWriter, publicMsg string, err error) {
-	slog.Error("internal error serving request", "msg", publicMsg, "err", err)
+	slog.Error("internal error serving request", "operation", "writeInternalErrorMsg", "error_type", fmt.Sprintf("%T", err))
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": publicMsg})
 }
 

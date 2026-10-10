@@ -54,15 +54,16 @@
 {#if showChrome}
   <div class="min-h-screen flex flex-col">
     <header class="border-b border-border-light bg-surface">
-      <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between gap-6">
+      <div class="max-w-6xl mx-auto px-6 min-h-14 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-6">
         <a href="/dashboard" class="flex items-center gap-2 shrink-0">
           <FileSignature class="size-5 text-accent" />
           <span class="font-display text-lg font-extralight tracking-tight">Hash</span>
         </a>
-        <nav class="flex items-center gap-1 flex-1">
+        <nav class="order-last basis-full sm:order-none sm:basis-auto flex items-center justify-center sm:justify-start gap-1 sm:flex-1">
           {#each navItems as item}
             <a
               href={item.href}
+              aria-label={item.label}
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors {isActive(item.href)
                 ? 'bg-accent/10 text-accent font-medium'
                 : 'text-text-muted hover:text-text hover:bg-border-light/40'}"

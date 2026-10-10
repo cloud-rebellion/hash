@@ -50,9 +50,18 @@ func setupVariableBindingAuthorizationE2E(t *testing.T, role string) variableBin
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.q.UpdateVariableBindingResolved(f.ctx, generated.UpdateVariableBindingResolvedParams{DocumentID: f.doc.ID, VariableName: "customer", LastValue: "Original observation"}); err != nil {
-		t.Fatal(err)
+	bindings, err := f.q.ListVariableBindings(f.ctx, f.doc.ID)
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("fixture bindings: %v %v", bindings, err)
 	}
+	binding := bindings[0]
+	if rows, err := f.q.UpdateVariableBindingResolved(f.ctx, generated.UpdateVariableBindingResolvedParams{
+		DocumentID: f.doc.ID, OrgID: f.org, VariableName: "customer", LastValue: "Original observation",
+		ExpectedDocumentUpdatedAt: f.doc.UpdatedAt, ExpectedBindingCreatedAt: binding.CreatedAt, ExpectedBindingUpdatedAt: binding.UpdatedAt,
+	}); err != nil || rows != 1 {
+		t.Fatalf("fixture observation rows=%d err=%v", rows, err)
+	}
+
 	source := &bindingAuthorizationSource{refs: make(chan resolver.Ref, 16)}
 	f.s.Resolver = resolver.New(f.q, source)
 	return variableBindingAuthorizationFixture{f, source}

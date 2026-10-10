@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 )
 
@@ -122,6 +123,8 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		})
 	case errors.Is(err, billing.ErrEntitlementUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
+	case errors.Is(err, resolver.ErrSourceFreshness):
+		writeError(w, http.StatusServiceUnavailable, "Current CRM information could not be verified. Check the connection and retry sending.")
 	default:
 		var guardErr *eidas.GuardError
 		if errors.As(err, &guardErr) {

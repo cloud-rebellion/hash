@@ -13,9 +13,10 @@ storage to remove metadata.
 PDF intake rewrites content through pdfcpu and rejects detected active PDF
 actions, JavaScript, XFA, and rich-media facilities. The one-step document
 and template imports reject PDFs exceeding 500 pages before optimization.
-Counting pages still requires parsing untrusted PDF bytes. Parsing and rewriting run
-inside the application process; these controls do not establish a complete
-malware scan or protection against every parser vulnerability.
+Counting pages still requires parsing untrusted PDF bytes. Intake parsing and
+rewriting now use the bundled isolated Linux worker described below. These
+controls do not establish a complete malware scan or protection against every
+parser vulnerability.
 
 The HTTP server requires a private local ClamD Unix socket outside explicit
 development. Uploads require an explicit clean verdict before parsing,
@@ -60,8 +61,9 @@ input, not expanded PDF object streams or optimizer allocations.
 
 PDF optimization and secondary cleanup write through bounded output buffers.
 Writes that would exceed50MiB are refused before copying into the buffer.
-This limits logical output size and buffer growth, not the parser's internal
-object graph, decompressed streams, aggregate resident memory or CPU time.
+This limits logical output size and buffer growth. The worker separately bounds
+execution and address space; aggregate resident memory still needs measured
+deployment limits.
 Output-limit failures in cleanup passes reject the upload. Other optional
 cleanup errors retain the previous fallback behavior.
 
@@ -94,3 +96,55 @@ before canonical validation, and is not a process-level CPU/memory sandbox.
 Canonical HTML/Markdown replacement imports (REST and MCP) use checked conversion: source is capped at 1 MiB, HTML is capped at 20,000 tokenizer tokens before DOM construction, and the resulting canonical tree must pass the shared 10,000-block/64-level limits. Rejection returns an error and never substitutes a partial tree. HTML conversion helpers traverse the DOM iteratively. These limits complement shared admission and malware scanning; they do not provide process isolation or a hard CPU/memory deadline for the underlying parser. The separate HTML-to-PDF proposal renderer remains governed by its own request and renderer controls.
 
 The Gotenberg client applies one 60-second context budget to render admission, all retry attempts, and retry backoff. A shorter caller deadline takes precedence. This bounds Hash's wait and request lifetime; cancellation alone does not prove that Chromium has stopped work remotely. Live renderer cancellation and resource isolation still require acceptance evidence.
+
+## Isolated PDF intake worker
+
+Production server and background worker require the bundled
+`/usr/local/bin/hash-pdf-worker`; `HASH_PDF_WORKER` may select an approved absolute
+executable path. Explicit development may omit it. Configured or production
+failures never fall back to in-process parsing. Startup probes a real synthetic
+PDF rewrite/page count under the installed policy. `/health` checks `pdf_parser`
+without customer data. Success and failure are cached for ten seconds, and
+concurrent health calls share one probe with a one-second budget independent of
+request cancellation. Health traffic cannot start a parser for every request;
+occupied slots retain the previous readiness result. Processing capacity returns
+429 with Retry-After; worker failure or deadline returns 503 on REST PDF intake,
+including failure of the separate page-count admission after a successful clean.
+
+Each clean or count starts a fresh child with only bounded stdin/stdout pipes,
+discarded stderr, a fixed environment without service credentials and no extra
+file descriptors. No PDF temporary files or user font/config directories are
+used. Linux amd64/arm64 are the supported sandbox architectures. Before stdin is
+read, hard limits cap CPU at10 seconds, address space at2GiB, open descriptors
+at64, and core/file output at zero. A384MiB Go GC target complements the hard
+address-space limit; neither is a384MiB resident-memory guarantee. The parent
+applies a15-second wall deadline, respects shorter caller deadlines, kills and
+waits for canceled children and bounds pipe teardown. Two immediate process
+slots provide shared clean/count admission; no unbounded queue is introduced.
+
+The ABI-checked Linux syscall allowlist is synchronized across all Go threads.
+It permits the runtime's memory, timer/poller and own-thread signal operations;
+file opens, sockets, exec, ptrace and signals to another process are denied.
+All `fcntl` commands are denied too: pipe ownership and asynchronous I/O can
+otherwise signal a same-UID parent despite blocking kill syscalls. A disposable
+parent/child regression demonstrated that gap before the restriction; the final
+real parser probe and PDF intake still work with it denied.
+Failed policy installation, including positive TSYNC failure, aborts the child.
+Seccomp is one boundary within this design, not a universal exploit-proof
+sandbox; see the [Linux kernel guidance](https://docs.kernel.org/userspace-api/seccomp_filter.html).
+
+Native regressions exercise a real protocol child, invalid/truncated/overflow
+output, credential exclusion, bounded concurrent admission, cancellation,
+reaping and capacity reuse. Linux arm64 checks in a read-only, network-isolated,
+non-root container exercise file/socket/exec/parent-signal denials and the hard
+mapping limit on additional runtime threads. The existing BeAuto PDF also
+sanitized and retained its 12-page count with Go 1.26.9. Required CI explicitly runs the Linux
+resource/syscall tests without race instrumentation (its virtual shadow memory
+would exceed the child's production limit); the ordinary package suite still
+runs with the race detector.
+
+This boundary covers the sanitizer and shared page counter. Signing watermark
+and merge, evidence attachment/extraction and HTML parsers still have separate
+in-process calls. Full exact-image Linux amd64 acceptance, parser attack corpus,
+aggregate parent/child RSS and concurrency headroom, real scanner and recovery
+acceptance remain required before production readiness is claimed.

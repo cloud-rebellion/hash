@@ -45,6 +45,7 @@ import (
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
@@ -60,7 +61,7 @@ var (
 	ErrNoSigners                 = errors.New("document needs at least one signer recipient before send")
 	ErrNoRecipients              = errors.New("document needs at least one recipient before send")
 	ErrNoSignatureFields         = errors.New("signature-required blocks document needs at least one signature field")
-	ErrInvalidPDFSignatureField  = errors.New("signature-required PDF needs a valid placed signature field assigned to its sole signer")
+	ErrInvalidPDFSignatureField  = errors.New("signature-required PDF needs valid required placed fields for every distinct signing party")
 	ErrMissingSignerForRole      = errors.New("a signature field has no recipient assigned to its role")
 	ErrAmbiguousSignerForRole    = errors.New("a signature field role must have exactly one recipient")
 	ErrEnvelopeRequiresSignature = errors.New("envelopes must require signatures")
@@ -1346,7 +1347,7 @@ func inspectSendSourcePDF(ctx context.Context, store EvidenceRetainer, doc *gene
 	if subtle.ConstantTimeCompare(sum[:], doc.PdfSha256) != 1 {
 		return 0, errors.New("send PDF: source digest does not match recorded intake hash")
 	}
-	pageCount, err := sanitize.PageCount(body)
+	pageCount, err := sanitize.PageCountWithContext(ctx, body)
 	if err != nil || pageCount < 1 {
 		if err == nil {
 			err = errors.New("PDF has no pages")
@@ -1466,10 +1467,8 @@ type documentFreezer interface {
 }
 
 type preparedBindingObservation struct {
-	documentID   uuid.UUID
-	variableName string
-	value        string
-	failed       bool
+	resolved *generated.UpdateVariableBindingResolvedParams
+	failed   *generated.UpdateVariableBindingErrorParams
 }
 
 // sendBindingPreparation stages resolver observations without modifying the
@@ -1500,19 +1499,19 @@ func (p *sendBindingPreparation) ListVariableBindings(ctx context.Context, docum
 	return bindings, nil
 }
 
-func (p *sendBindingPreparation) UpdateVariableBindingResolved(ctx context.Context, arg generated.UpdateVariableBindingResolvedParams) error {
+func (p *sendBindingPreparation) StageVariableBindingResolved(ctx context.Context, arg generated.UpdateVariableBindingResolvedParams) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p.observations = append(p.observations, preparedBindingObservation{documentID: arg.DocumentID, variableName: arg.VariableName, value: arg.LastValue})
+	p.observations = append(p.observations, preparedBindingObservation{resolved: &arg})
 	return nil
 }
 
-func (p *sendBindingPreparation) UpdateVariableBindingError(ctx context.Context, arg generated.UpdateVariableBindingErrorParams) error {
+func (p *sendBindingPreparation) StageVariableBindingError(ctx context.Context, arg generated.UpdateVariableBindingErrorParams) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p.observations = append(p.observations, preparedBindingObservation{documentID: arg.DocumentID, variableName: arg.VariableName, value: arg.LastError, failed: true})
+	p.observations = append(p.observations, preparedBindingObservation{failed: &arg})
 	return nil
 }
 
@@ -1535,18 +1534,20 @@ func (p *sendBindingPreparation) verifyAndPersist(ctx context.Context, q *genera
 		}
 	}
 	for _, observation := range p.observations {
+		var rows int64
 		var err error
-		if observation.failed {
-			err = q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
-				DocumentID: observation.documentID, VariableName: observation.variableName, LastError: observation.value,
-			})
+		if observation.failed != nil {
+			rows, err = q.UpdateVariableBindingError(ctx, *observation.failed)
+		} else if observation.resolved != nil {
+			rows, err = q.UpdateVariableBindingResolved(ctx, *observation.resolved)
 		} else {
-			err = q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
-				DocumentID: observation.documentID, VariableName: observation.variableName, LastValue: observation.value,
-			})
+			return errors.New("send preparation: empty binding observation")
 		}
 		if err != nil {
 			return fmt.Errorf("persist send binding observation: %w", err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("%w: binding observation revision changed", ErrDraftChangedDuringSend)
 		}
 	}
 	return nil
@@ -1744,9 +1745,13 @@ func validateSendRecipients(doc *generated.Document, envelopeRoles []string, rec
 			return fmt.Errorf("send document: signer roles: %w", err)
 		}
 	} else if doc.RequiresSignature {
-		// PDF field assignment is not represented in BlocksJson. Its legacy
-		// signing ceremony has one canonical signing role.
-		requiredRoles = []string{"signer"}
+		// Preflight checks recipient uniqueness; the locked PDF-field check
+		// below independently requires a visible signature for every party.
+		for _, rec := range recs {
+			if recipientEligibleForSend(rec) {
+				requiredRoles = append(requiredRoles, rec.Role)
+			}
+		}
 	}
 
 	if !doc.RequiresSignature {
@@ -1948,97 +1953,18 @@ func validatePDFSignatureFields(doc *generated.Document, recs []*generated.Recip
 		return nil
 	}
 
-	var signer *generated.Recipient
+	if pageCount < 1 {
+		return fmt.Errorf("%w: source page count is unavailable", ErrInvalidPDFSignatureField)
+	}
 	for _, rec := range recs {
-		if rec == nil || rec.Role != "signer" || !recipientEligibleForSend(rec) {
-			continue
-		}
-		if signer != nil {
-			return fmt.Errorf("%w: multiple eligible signer recipients", ErrInvalidPDFSignatureField)
-		}
-		signer = rec
-	}
-	if signer == nil {
-		return fmt.Errorf("%w: no eligible signer recipient", ErrInvalidPDFSignatureField)
-	}
-
-	recipientsByID := make(map[uuid.UUID]*generated.Recipient, len(recs))
-	for _, rec := range recs {
-		if rec != nil {
-			recipientsByID[rec.ID] = rec
+		if rec == nil || !recipientEligibleForSend(rec) {
+			return fmt.Errorf("%w: PDF party is not eligible for send", ErrInvalidPDFSignatureField)
 		}
 	}
-
-	signatureFields := 0
-	for i, field := range fields {
-		if field == nil {
-			return fmt.Errorf("%w: field %d is nil", ErrInvalidPDFSignatureField, i+1)
-		}
-		if field.DocumentID != doc.ID {
-			return fmt.Errorf("%w: field %s belongs to another document", ErrInvalidPDFSignatureField, field.ID)
-		}
-		// Every designer field can become visible legal content. Validate its
-		// page and geometry now, including optional non-signature fields, so a
-		// later fill cannot strand finalization on an impossible stamp target.
-		if !validPDFFieldPlacement(field, pageCount) {
-			return fmt.Errorf("%w: field %s has invalid page geometry", ErrInvalidPDFSignatureField, field.ID)
-		}
-		// Every field that can be stamped into the final PDF belongs to the sole
-		// required signer. Allowing an optional NULL/CC/approver-owned field would
-		// let a non-signing recipient alter visible contract bytes while the signer
-		// evidence is already captured and finalization is pending.
-		if !field.RecipientID.Valid || uuid.UUID(field.RecipientID.Bytes) != signer.ID {
-			return fmt.Errorf("%w: field %s is not owned by the sole signer", ErrInvalidPDFSignatureField, field.ID)
-		}
-		if field.Type != "signature" {
-			continue
-		}
-		signatureFields++
-		if !field.Required {
-			return fmt.Errorf("%w: field %s is optional", ErrInvalidPDFSignatureField, field.ID)
-		}
-		if !field.RecipientID.Valid {
-			return fmt.Errorf("%w: field %s has no recipient", ErrInvalidPDFSignatureField, field.ID)
-		}
-		ownerID := uuid.UUID(field.RecipientID.Bytes)
-		owner, ok := recipientsByID[ownerID]
-		if !ok || owner.Role != "signer" || owner.ID != signer.ID || !recipientEligibleForSend(owner) {
-			role := "unknown"
-			if ok {
-				role = owner.Role
-			}
-			return fmt.Errorf("%w: field %s is assigned to %s recipient %s", ErrInvalidPDFSignatureField, field.ID, role, ownerID)
-		}
-	}
-	if signatureFields == 0 {
-		return fmt.Errorf("%w: no signature field", ErrInvalidPDFSignatureField)
+	if _, err := pdflayout.RequiredRoles(doc, recs, fields, pageCount); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPDFSignatureField, err)
 	}
 	return nil
-}
-
-func validPDFFieldPlacement(field *generated.DocumentField, pageCount int) bool {
-	if field == nil || pageCount < 1 || field.Page < 1 || int(field.Page) > pageCount {
-		return false
-	}
-	x, xok := finiteNumeric(field.XPct)
-	y, yok := finiteNumeric(field.YPct)
-	w, wok := finiteNumeric(field.WPct)
-	h, hok := finiteNumeric(field.HPct)
-	if !xok || !yok || !wok || !hok {
-		return false
-	}
-	return x >= 0 && y >= 0 && w > 0 && h > 0 && x < 100 && y < 100 && x+w <= 100 && y+h <= 100
-}
-
-func finiteNumeric(value pgtype.Numeric) (float64, bool) {
-	if !value.Valid || value.Int == nil || value.NaN || value.InfinityModifier != pgtype.Finite {
-		return 0, false
-	}
-	converted, err := value.Float64Value()
-	if err != nil || !converted.Valid || math.IsNaN(converted.Float64) || math.IsInf(converted.Float64, 0) {
-		return 0, false
-	}
-	return converted.Float64, true
 }
 
 // verifyPreparedEnvelopeChildren catches membership or content changes that

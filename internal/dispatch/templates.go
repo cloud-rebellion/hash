@@ -61,13 +61,14 @@ type TemplateContext struct {
 	DenyURL        string // one-click deny link (signed action token)
 
 	// Quota warning fields. Empty for non-billing templates.
-	QuotaKind     string // "documents" or "recipients"
-	QuotaUsed     int
-	QuotaLimit    int
-	QuotaPct      int    // 80, 90, etc., already rounded
-	PeriodResetAt string // human-readable date
-	UpgradeURL    string // dashboard link to upgrade plan
-	PlanName      string
+	QuotaKind        string // "documents" or "recipients"
+	QuotaUsed        int
+	QuotaLimit       int
+	QuotaPct         int    // 80, 90, etc., already rounded
+	PeriodResetAt    string // human-readable date
+	UpgradeURL       string // dashboard link to upgrade plan
+	PlanName         string
+	InternalOperator bool // internal quota warning: contact operator, no purchases
 }
 
 // Render returns (subject, html, text) for the given kind + ctx. Errors only
@@ -518,10 +519,10 @@ const quotaWarning80HTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Plan usage</p>
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.OrgName}} is at {{.QuotaPct}}% of the {{.PlanName}} {{.QuotaKind}} quota</h1>
-<p>You've used <strong>{{.QuotaUsed}} of {{.QuotaLimit}}</strong> {{.QuotaKind}} this billing period. The counter resets on <strong>{{.PeriodResetAt}}</strong>.</p>
-<p>Hitting the cap pauses new sends until the next period. Upgrade now to avoid an interruption.</p>
+<p>You've used <strong>{{.QuotaUsed}} of {{.QuotaLimit}}</strong> {{.QuotaKind}} this {{if .InternalOperator}}calendar month{{else}}billing period{{end}}. The counter resets on <strong>{{.PeriodResetAt}}</strong>.</p>
+<p>Hitting the cap pauses new sends until the next period. {{if .InternalOperator}}Contact your operator to review capacity before the limit is reached.{{else}}Upgrade now to avoid an interruption.{{end}}</p>
 {{if .UpgradeURL}}<p style="margin: 24px 0;"><a href="{{.UpgradeURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Review plan</a></p>{{end}}
-<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash. You'll receive at most one of these per billing period.</p>
+<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash. You'll receive at most one of these per {{if .InternalOperator}}calendar month{{else}}billing period{{end}}.</p>
 </body></html>`
 
 const quotaWarning80Text = `{{.OrgName}} is at {{.QuotaPct}}% of the {{.PlanName}} {{.QuotaKind}} quota.
@@ -529,5 +530,6 @@ const quotaWarning80Text = `{{.OrgName}} is at {{.QuotaPct}}% of the {{.PlanName
 Used: {{.QuotaUsed}} of {{.QuotaLimit}} {{.QuotaKind}} this period.
 Period resets: {{.PeriodResetAt}}
 
-Review or upgrade: {{.UpgradeURL}}
+{{if .InternalOperator}}Contact your operator to review capacity.
+Review internal plan: {{.UpgradeURL}}{{else}}Review or upgrade: {{.UpgradeURL}}{{end}}
 `

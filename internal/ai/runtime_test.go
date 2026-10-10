@@ -5,6 +5,9 @@ package ai
 
 import (
 	"context"
+	"errors"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/google/uuid"
 	"strings"
 	"testing"
 )
@@ -115,8 +118,9 @@ func TestCache(t *testing.T) {
 	rt := New(nil, shield, NoopEmbedder{}, provider)
 	cacheKey := "k1"
 	req := Request{User: "Q"}
+	org, doc, user := uuid.New(), uuid.New(), uuid.New()
 	for i := 0; i < 3; i++ {
-		_, err := rt.Complete(context.Background(), req, CompleteOptions{CacheKey: cacheKey})
+		_, err := rt.Complete(context.Background(), req, CompleteOptions{CacheKey: cacheKey, OrgID: org, DocumentID: &doc, UserID: &user})
 		if err != nil {
 			t.Fatalf("complete: %v", err)
 		}
@@ -148,4 +152,107 @@ func (f stubProviderFunc) Model() string    { return "stub-model" }
 func (f stubProviderFunc) Endpoint() string { return "" }
 func (f stubProviderFunc) Complete(_ context.Context, req Request) (Response, error) {
 	return f(req)
+}
+
+func TestRuntimeCacheScopesAndOptions(t *testing.T) {
+	calls := 0
+	p := stubProviderFunc(func(Request) (Response, error) { calls++; return Response{Text: "answer"}, nil })
+	rt := New(nil, NoopShield{}, nil, p)
+	org, doc, user := uuid.New(), uuid.New(), uuid.New()
+	opts := CompleteOptions{OrgID: org, DocumentID: &doc, UserID: &user, CacheKey: "same"}
+	req := Request{User: "same", PromptName: "test", PromptVersion: 1, MaxTokens: 32, Temperature: 0.1}
+	complete := func(o CompleteOptions, r Request) {
+		t.Helper()
+		if _, err := rt.Complete(context.Background(), r, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete(opts, req)
+	complete(opts, req)
+	if calls != 1 {
+		t.Fatal("same scoped cache miss")
+	}
+	changed := opts
+	changed.OrgID = uuid.New()
+	complete(changed, req)
+	otherDoc := uuid.New()
+	changed = opts
+	changed.DocumentID = &otherDoc
+	complete(changed, req)
+	otherUser := uuid.New()
+	changed = opts
+	changed.UserID = &otherUser
+	complete(changed, req)
+	changed = opts
+	changed.KnownPII = []string{"Named guarantor"}
+	complete(changed, req)
+	changedReq := req
+	changedReq.MaxTokens++
+	complete(opts, changedReq)
+	changedReq = req
+	changedReq.Temperature = 0.5
+	complete(opts, changedReq)
+	changedReq = req
+	changedReq.PromptVersion++
+	complete(opts, changedReq)
+	if calls != 8 {
+		t.Fatalf("unsafe cache reuse calls=%d", calls)
+	}
+	rt.ResolveOrgProvider = func(context.Context, uuid.UUID, *generated.Queries) (Provider, bool, error) { return p, true, nil }
+	complete(opts, req)
+	complete(opts, req)
+	if calls != 10 {
+		t.Fatal("mutable BYOAI incorrectly cached")
+	}
+}
+
+func TestAuditedRequestRequiresUsageAndDoesNotReuseCache(t *testing.T) {
+	calls, audits := 0, 0
+	rt := New(nil, NoopShield{}, nil, stubProviderFunc(func(Request) (Response, error) {
+		calls++
+		return Response{Text: "answer", InputTokens: 4, OutputTokens: 3}, nil
+	}))
+	org, doc, user := uuid.New(), uuid.New(), uuid.New()
+	opts := CompleteOptions{OrgID: org, DocumentID: &doc, UserID: &user, CacheKey: "same"}
+	scoped := rt.ForAuditedRequest(nil, func(_ context.Context, p generated.InsertAICompletionAuditParams) error {
+		audits++
+		if p.OrgID != org || !p.DocumentID.Valid || uuid.UUID(p.DocumentID.Bytes) != doc || p.InputTokens != 4 || p.OutputTokens != 3 || !p.Success {
+			t.Fatal("usage attribution changed")
+		}
+		return nil
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := scoped.Complete(context.Background(), Request{User: "same"}, opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 || audits != 2 || rt.Cache == nil {
+		t.Fatal("audited request cached or mutated global runtime")
+	}
+	refusal := rt.ForAuditedRequest(nil, func(context.Context, generated.InsertAICompletionAuditParams) error {
+		return errors.New("private upstream credential")
+	})
+	if result, err := refusal.Complete(context.Background(), Request{User: "same"}, opts); !errors.Is(err, ErrCompletionAudit) || result.Text != "" || strings.Contains(err.Error(), "private upstream") {
+		t.Fatal("usage failure disclosed completion/diagnostic")
+	}
+}
+
+func TestAuditedRequestProviderLookupUsesBoundQueriesAndFailsClosed(t *testing.T) {
+	calls := 0
+	rt := New(nil, NoopShield{}, nil, stubProviderFunc(func(Request) (Response, error) {
+		calls++
+		return Response{Text: "unsafe fallback"}, nil
+	}))
+	requestQueries := generated.New(nil)
+	rt.ResolveOrgProvider = func(_ context.Context, _ uuid.UUID, q *generated.Queries) (Provider, bool, error) {
+		if q != requestQueries {
+			t.Fatal("audited request used pooled provider lookup")
+		}
+		return nil, false, errors.New("private provider credential database failure")
+	}
+	scoped := rt.ForAuditedRequest(requestQueries, func(context.Context, generated.InsertAICompletionAuditParams) error { return nil })
+	_, err := scoped.Complete(context.Background(), Request{User: "private clause"}, CompleteOptions{OrgID: uuid.New()})
+	if err == nil || err.Error() != "AI organization provider unavailable" || calls != 0 {
+		t.Fatalf("failed BYOAI lookup fell back/disclosed: calls%d err%v", calls, err)
+	}
 }

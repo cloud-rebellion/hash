@@ -238,6 +238,26 @@ func (q *Queries) GetOrg(ctx context.Context, id uuid.UUID) (*Org, error) {
 	return &i, err
 }
 
+const getOrgForOwnerMutation = `-- name: GetOrgForOwnerMutation :one
+SELECT id, name, plan, created_at, updated_at, change_approval_mode FROM orgs WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// Serialize tenant settings before locking the live owner and credential.
+// Non-key locking permits audit inserts' foreign-key KEY SHARE locks.
+func (q *Queries) GetOrgForOwnerMutation(ctx context.Context, id uuid.UUID) (*Org, error) {
+	row := q.db.QueryRow(ctx, getOrgForOwnerMutation, id)
+	var i Org
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Plan,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ChangeApprovalMode,
+	)
+	return &i, err
+}
+
 const getUser = `-- name: GetUser :one
 SELECT id, org_id, email, name, role, zitadel_sub, created_at, session_generation FROM users WHERE id = $1
 `

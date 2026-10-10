@@ -463,8 +463,7 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 		// The transaction sees its own new document and recipients. Enforcing
 		// quota before commit makes a 402/entitlement outage roll back every PII,
 		// audit, and idempotency write instead of stranding an unreported draft.
-		transactionalBilling := billing.New(q, billingEngine.Provider, billingEngine.PublicURL, billingEngine.WebhookURL)
-		if err := transactionalBilling.EnforceDocumentQuota(ctx, input.User.OrgID); err != nil {
+		if err := billingEngine.EnforceDocumentQuotaMutation(ctx, q, input.User.OrgID); err != nil {
 			return nil, false, fmt.Errorf("enforce automation signature request quota: %w", err)
 		}
 	}

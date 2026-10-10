@@ -70,12 +70,16 @@ func (g *Gotenberg) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := g.HTTP.Do(req)
+	// Readiness belongs to this exact endpoint. A redirect to a login page or
+	// another service must not turn a broken renderer route into a healthy one.
+	client := *g.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("gotenberg /health returned %d", resp.StatusCode)
 	}
 	return nil

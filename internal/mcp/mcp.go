@@ -27,7 +27,7 @@ import (
 
 // sanitizeToolError keeps a tool's operator-authored validation message
 // (not-found / bad-uuid / permission / quota) but replaces a raw pgx/SQL or
-// connection error with a generic string, logging the real one server-side.
+// connection error with a generic string, logging only its error type.
 // The REST surface enforces the same discipline (writeInternalError); without
 // this an agent would see SQLSTATE + column/constraint names or "dial tcp
 // host:port" internal hostnames in result.content on any DB fault.
@@ -44,7 +44,7 @@ func sanitizeToolError(err error) string {
 	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pgErr) || errors.As(err, &connErr) ||
 		strings.Contains(msg, "dial tcp") || strings.Contains(msg, "SQLSTATE") ||
 		strings.Contains(msg, "host=") || strings.Contains(msg, "connection refused") {
-		slog.Error("mcp tool internal error", "err", err)
+		slog.Error("mcp tool internal error", "error_type", fmt.Sprintf("%T", err))
 		return "internal error"
 	}
 	return msg
@@ -200,6 +200,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeRPCError(w, nil, codeParseError, "read body: "+err.Error(), nil)
+		return
+	}
+	// Validate original bytes before encoding/json can replace malformed text.
+	// This covers identifiers, nested arguments and extension fields alike.
+	if err := validateJSONUnicode(body); err != nil {
+		writeRPCError(w, nil, codeParseError, err.Error(), nil)
 		return
 	}
 	var req request
@@ -488,6 +494,9 @@ func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, message 
 func MustParseArgs(raw json.RawMessage, into any) error {
 	if len(raw) == 0 {
 		return nil
+	}
+	if err := validateJSONUnicode(raw); err != nil {
+		return fmt.Errorf("invalid arguments: %w", err)
 	}
 	if err := json.Unmarshal(raw, into); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)

@@ -1,9 +1,9 @@
 
 # Hash API guide
 
-Updated 2026-10-05 for the local candidate. Browser routes require a sender session
-cookie; recovery and archive operations additionally require a current owner
-role. Session generation, live role and expiry are checked at the operation
+Updated 2026-10-10 for the local candidate. Browser routes require a session
+cookie; document writes require a sender or owner, while recovery, archive and
+organization-setting writes require a current owner. Session generation, live role and expiry are checked at the operation
 boundary. Mutations use the application's same-origin protection; responses
 use `no-store`. See [route inventory](API-ROUTES.md) for middleware and the wider
 API surface. This guide is not a complete OpenAPI contract for that surface.
@@ -112,6 +112,86 @@ checks before commit. Membership changes require a live owner, preserve the last
 owner, and serialize organization changes with `FOR NO KEY UPDATE` so pending
 user authorization and audit foreign-key checks can complete without a lock cycle.
 
+## Document creation
+
+`POST /api/v1/documents` and MCP `create_document` create drafts from block
+content or an existing PDF template. Both require a live sender or owner;
+REST retains the original signed session and MCP retains the originally
+verified organization-wide key with `write:authoring`. A document-scoped key
+cannot create another document. Quota and operator-entitlement checks remain
+part of the same transaction.
+
+Creation uses READ COMMITTED with a ten-second deadline. It acquires the
+organization quota lock, locks any referenced active tenant template, and
+then verifies the live member and original credential. The template remains
+locked while defaults/source pins are copied, quota is enforced and the audit
+is appended. A final credential check precedes commit and event publication.
+Expiry, demotion, logout/key revocation, quota refusal or persistence failure
+roll back the draft, optional version snapshot and audit together.
+
+Every supplied `template_id` must identify an unarchived template in the
+caller's organization with the requested `source_kind`, even when both
+`blocks_json` and `variables_json` are explicit. For block documents, omitted
+content and variables copy the current locked template defaults. Explicit
+values replace that component; an empty block tree or `{}` variables remain
+explicit overrides. Without a block template, omitted components default to
+an empty version-one tree and `{}`. Block IDs are normalized once for storage.
+Variables must be a JSON object containing only string values; `null`, arrays,
+numbers and null-valued members are refused.
+
+PDF creation requires a PDF template and retains its exact storage key, digest,
+version ID and evidence-pin policy. Its declared variable defaults or explicit
+`variables_json` populate document data using the same string-map validation.
+This does not replace text in the already-rendered PDF. A version-one named-party
+signature layout materializes fresh recipients and positioned fields in the
+same transaction; creation never copies a previous document's recipient UUIDs.
+
+## Reusable PDF signing layouts
+
+From an editable PDF draft, `POST /api/v1/documents/{id}/pdf-template` accepts:
+
+```json
+{
+  "name": "Approved service contract layout",
+  "expected_updated_at": "2026-10-10T09:00:00Z",
+  "expected_field_ids": ["observed signature field UUIDs"],
+  "parties": [
+    {"recipient_id": "current field owner UUID", "role": "provider", "label": "Provider"},
+    {"recipient_id": "current field owner UUID", "role": "client", "label": "Client"}
+  ]
+}
+```
+
+The server verifies the exact PDF object/version/digest and isolated page count,
+then reads the locked draft's fresh recipients and fields. The observation and
+complete party mapping must match. Signature fields must be required and fit
+within the verified source pages. The stored `fields_json` is an explicit
+`{version:1, parties:[{role,label}], fields:[{party_role,type,page,x_pct,y_pct,w_pct,h_pct,required,label}]}`
+layout containing no recipient UUIDs, names, emails, tokens or captured values.
+This version supports signature fields only. The fixed printed PDF text remains
+the approved source content; variable data does not rewrite it.
+
+REST document creation and MCP `create_document` require
+`expected_template_version` and a complete `parties` array when that template
+has a version-one layout. Each binding supplies `role`, fresh `name` and `email`,
+and optional `locale`. The locked template revision must match. Every party
+gets a fresh recipient UUID, token hash and assigned fields, with recipient
+quotas enforced and canonical creation events committed atomically. Layout
+documents default to parallel routing. Declared roles must be distinct; role
+identity is separate from a person's email address. Historical array-shaped
+templates retain their existing blank-designer creation behaviour.
+
+The sender UI provides PDF **Save as template**, named party slots and the
+template library's fresh-party form. A rejected save or stale template keeps the
+form for review. New PDF template field updates validate the versioned layout;
+unversioned nonempty arrays are refused with conversion guidance.
+
+REST returns201 with the draft. Missing/foreign/archived templates return404,
+wrong source or invalid input400, expired credentials401 and revoked authority403.
+Existing quota/entitlement errors keep their billing statuses; unexpected
+database/audit errors return generic500. MCP reports refusals as tool errors.
+No invitation is queued by creation; review and Send remain separate operations.
+
 ## Document, block and variable-binding authoring
 
 Document PATCH, every block mutation/import, MCP `set_variables`, binding
@@ -166,9 +246,113 @@ overhead. Admission validates these inputs without fetching a CRM/scanner source
 while database locks are held.
 
 Binding authoring preserves existing resolver observations and delete
-idempotence. Resolver previews, real CRM correctness and deployed integration
-acceptance require separate verification; these mutation guards do not establish
-those read/fetch properties.
+idempotence. Read-only preview and send-time observation rules are described
+under [document previews](#document-previews). Real CRM record/mapping correctness
+and deployed integration acceptance still require separate verification.
+
+## Template and metadata authorization
+
+REST block/starter/PDF template creation, update and archive retain the original
+signed session and live sender/owner membership through commit. Update/archive
+lock the current unarchived tenant template before filling omitted values.
+Expired/revoked authorization returns401/403; missing, foreign or archived
+templates return404. Audit/mutation failures return generic500 and roll back.
+The organization template library remains shared among authorized senders and
+owners. PDF templates require a positive page count before any object write.
+
+MCP `set_expiry` uses `write:workflow`; `attach_metadata` uses `write:authoring`.
+Both require an editable undeleted draft, the original admitted key/document
+scope, live sender/owner, no retained evidence/sealing state and no pending
+privacy fence. Credential expiry after an audit wait rolls back the entire
+change. Clearing expiry remains supported. Neither tool consumes a document
+token a second time. REST soft deletion similarly rechecks the original cookie
+after audit and uses detached bounded rollback if canceled.
+
+## Owner settings and organization credentials
+
+REST change-approval mode, branding and logo uploads, AI-provider settings,
+API-key creation/deletion and webhook creation/deletion retain the original
+signed session and require a live owner inside the transaction. These routes
+serialize organization writes, retain the current owner through audit and
+check the same credential immediately before commit. Sender permission does
+not authorize these settings. MCP `set_org_branding`, `create_webhook` and
+`delete_webhook` apply the same owner boundary to their original
+organization-wide `write:authoring` key. REST/MCP eIDAS agreement and compliance
+baseline/status writes apply the same retained owner boundary. REST manual
+compliance-feed checks perform network work before committing the tenant flag
+updates and their run audit atomically under fresh owner authorization. Missing
+audit rows are internal failures, not missing resources. Routing-tier changes
+retain sender-or-owner permission and the current draft/document boundary.
+
+Omitted branding and AI-provider values are resolved from the current row after
+the organization lock, preserving a concurrent change that committed before
+this operation. Effective merged fonts, logo URLs and provider settings are
+validated again. A newly minted API key or webhook signing secret is returned
+only after its row and audit commit successfully. Unexpected mutation/audit
+failure rolls back, returns a generic error and discloses no new credential.
+Logo uploads use unique asset identities; failed transactions compensate the
+exact uploaded version/digest rather than replacing or deleting an older logo.
+Custom logo uploads remain restricted to development; production support needs
+its separate implementation and acceptance work.
+
+REST reports HTTP 401 for expired credentials and HTTP 403 for revoked membership,
+session or role. Input validation retains HTTP 400; genuine missing key/webhook
+targets return HTTP 404. MCP failures retain its normal tool-error envelope.
+Audit failure is distinct from a missing target and rolls the mutation back.
+Shared audit, REST internal-error and MCP database-error logs record safe error
+types rather than arbitrary database diagnostics, which can contain document
+text or credentials. Webhook deletion removes endpoint delivery-attempt rows;
+organization audit events remain.
+
+## AI requests and negotiation metadata
+
+Staff REST proposal/settings writes and their MCP counterparts retain the
+original signed session or admitted scoped key. They lock the current document
+and any parent envelope before checking the live sender/owner, active document
+state and privacy fences. Proposals must reference the current block; a parent
+proposal must belong to the same document and block. These metadata operations
+do not apply new prose to frozen contract content. Terminal or sealing documents
+and pending privacy review are refused.
+
+Paid AI operations first commit an authorized `ai.requested` receipt, then
+reacquire current document and credential authority before provider dispatch.
+Usage rows refer to that exact receipt. Provider-reported usage and `ai.completed` cost
+evidence persist independently of the result transaction, including when a
+credential expires, the caller cancels or the result audit fails. Result delivery
+requires the original credential again after provider and audit waits. A cost
+receipt is not proof that a person saw or approved the result.
+
+Public `POST /sign/{token}/clarify` retains the admitted magic link, its original
+and current deadlines, current active ceremony and the exact acknowledged
+Article 13 notice. Its request/cost events identify the actual recipient with no
+staff actor. It does not manufacture a notice acknowledgement. Rotation, notice
+epoch changes, privacy holds and late expiry prevent dispatch or result delivery.
+The corresponding request outcome and provider-reported usage remain recorded
+if dispatch occurred.
+
+Audited requests disable completion-cache reuse and resolve BYOAI settings through
+their request transaction. Provider lookup/decryption errors refuse the operation
+instead of falling back to a different provider. The existing configured Shield
+processing remains in the request path. Raw provider/database diagnostics are
+excluded from public errors and usage/audit payloads.
+
+Durable AI requests are conservatively serialized per actual application database
+pool. Waiting requests hold no database connection; an admitted request reserves
+an accounting connection before authorization locks. Pools with fewer than two
+connections refuse these operations before dispatch. The normal singleton worker
+lease needs its own connection as well. This bound protects cost persistence;
+production AI throughput and queue behavior still need workload acceptance.
+
+## MCP envelope authoring
+
+`create_envelope`, `promote_to_envelope`, `attach_to_envelope`,
+`detach_from_envelope` and `reorder_envelope_children` use the original
+`write:authoring` credential and live sender/owner through parent, quota and audit
+waits. Family topology is checked under parent-first draft locks, with retained
+evidence and privacy fences. Attaching or detaching a child requires access to
+the envelope itself; a child-only key cannot authorize its parent. Successful
+mutations and their audit commit together. Refusal preserves topology, quota
+state and audit history, and does not consume a one-use token again.
 
 ## Recipient authoring
 
@@ -278,6 +462,29 @@ rolls back rows, field values and audit state. Unexpected database/audit failure
 return generic REST 500 or MCP `internal error`, with technical details confined
 to server logs. Genuine scoped absence keeps its readable tool error.
 
+## Standalone PDF signing parties
+
+A signature-required PDF needs one recipient per signing role and at least one
+required placed signature field for each party. New named-party ceremonies use
+signature fields only and support parallel or sequential routing. The legacy
+single `signer` ceremony still supports its assigned fillable fields. Visible
+values cannot be filled after any party has captured a signature.
+
+Send, signature capture, finalization and finalization retries resolve required
+parties from the current document-owned fields. Completion requires every party's
+captured signature bound to that exact recipient and one of its required fields;
+recipient status alone cannot authorize completion. Original magic-link hashes
+and both admitted/current document and recipient deadlines are checked again
+after document/audit waits and before capture commits. Extending a deadline does
+not rescue a request whose original admission has expired; the client must begin
+a fresh authorized request.
+
+Finalization verifies the committed source object/version/digest, preserves its
+page geometry and stamps signatures at the designed page percentages. The
+separate audit certificate binds the final PDF digest and canonical ceremony
+event set. Storage-provider retention, backup and independent restore acceptance
+remain release gates.
+
 ## Negotiation comments and change resolution
 
 `GET /api/v1/documents/{id}/comments` returns `{comments}`. Each comment includes
@@ -345,6 +552,32 @@ require a session and organization-scoped document access; responses remain
 frame denial. HTML previews prohibit scripts, network writes and forms and use
 a sandbox; the editor also applies a restrictive iframe sandbox. See the
 [CSP framing and sandbox specification](https://w3c.github.io/webappsec-csp/#directive-frame-ancestors).
+
+`GET /api/v1/documents/{id}/resolve-preview` and MCP
+`preview_resolved_variables` return the variable map, per-binding report and
+`frozen` flag. These and HTML preview do not persist `last_value`, `last_error`,
+`last_resolved_at` or binding timestamps. Draft previews may use the bounded
+in-memory cache and configured fallback; a preview is not a send-time freshness
+receipt. Non-draft resolution uses only frozen document variables, with no live
+CRM fetch and no agent override of those frozen values.
+
+After external source/branding waits, a short READ COMMITTED check verifies the
+same document status/timestamp, complete binding definitions and original read
+credential under tenant/member locks. Viewers retain read access. Deleted/foreign
+documents return404; changed document/binding snapshots409; expired credentials401;
+revoked access403. MCP reports corresponding tool errors and does not consume a
+second document-token use. External fetches do not hold document row locks.
+Refresh and review after409 instead of displaying a mixed snapshot.
+
+Send bypasses preview cache values and requires a successful current response
+for every CRM deal/contact binding. Missing source, fetch failure or invalidation
+during fetch fails closed; a static value or fallback cannot substitute for CRM
+data at this boundary. REST Send returns503 when current CRM information cannot
+be verified. Binding observations are staged in memory and written only inside
+the authorized freeze transaction, with both document and binding revision
+predicates. A changed draft/binding returns409 and leaves no partial observations,
+frozen variables, audit or invitation. Review actual CRM identifiers, tenant
+mapping and required data before enabling a workflow.
 
 Preview displays saved content. A draft block editor remains mounted while its
 preview is visible, preserving unsaved edits and the dirty navigation guard.

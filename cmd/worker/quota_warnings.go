@@ -39,6 +39,15 @@ func (w *worker) loopQuotaWarnings(ctx context.Context) {
 }
 
 func (w *worker) runQuotaWarningsOnce(ctx context.Context) {
+	if w.billing.OperatorMode() {
+		for _, orgID := range w.billing.OperatorOrgIDs() {
+			if ctx.Err() != nil {
+				return
+			}
+			w.sendOperatorQuotaWarning(ctx, orgID)
+		}
+		return
+	}
 	rows, err := w.queries.ListSubscriptionsOverQuotaWarning(ctx, quotaWarningThreshold)
 	if err != nil {
 		slog.Warn("quota_warnings: list", "err", err)

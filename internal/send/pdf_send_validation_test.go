@@ -84,8 +84,6 @@ func TestValidatePDFSignatureFieldsRequiresPlacedFieldForSoleSigner(t *testing.T
 	doc := &generated.Document{ID: docID, SourceKind: "pdf", RequiresSignature: true}
 	recipients := []*generated.Recipient{
 		{ID: signerID, DocumentID: docID, Role: "signer", Status: "pending"},
-		{ID: approverID, DocumentID: docID, Role: "approver", Status: "pending"},
-		{ID: ccID, DocumentID: docID, Role: "cc", Status: "pending"},
 	}
 	field := func(owner uuid.UUID) *generated.DocumentField {
 		return &generated.DocumentField{

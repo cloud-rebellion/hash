@@ -5,6 +5,7 @@ package sanitize
 
 import (
 	"bytes"
+	"context"
 	"errors"
 
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
@@ -17,6 +18,29 @@ import (
 // unreadable input so callers can fall back to a 0 placeholder rather than
 // persist a wrong count.
 func PageCount(raw []byte) (int, error) {
+	return PageCountWithContext(context.Background(), raw)
+}
+
+// PageCountWithContext uses the isolated parser when configured by the server
+// or worker. A caller deadline also covers process admission and teardown.
+func PageCountWithContext(ctx context.Context, raw []byte) (int, error) {
+	if len(raw) > MaxPDFBytes {
+		return 0, ErrPDFTooLarge
+	}
+	if worker := activePDFWorker.Load(); worker != nil {
+		response, _, err := worker.run(ctx, pdfWorkerRequest{Operation: "pages", Length: len(raw)}, raw)
+		if err != nil {
+			return 0, err
+		}
+		return response.Pages, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return pageCountInProcess(raw)
+}
+
+func pageCountInProcess(raw []byte) (int, error) {
 	if len(raw) == 0 {
 		return 0, errors.New("sanitize: empty pdf")
 	}

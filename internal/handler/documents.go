@@ -20,6 +20,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/sign"
@@ -102,12 +103,14 @@ func uuidFromBytes(b [16]byte) uuid.UUID { return uuid.UUID(b) }
 // variables; pdf path expects template_id pointing to a pdf-source template
 // or a fresh upload (multi-step UX, week 2).
 type createDocumentInput struct {
-	Name          string          `json:"name"`
-	TemplateID    string          `json:"template_id,omitempty"`
-	SourceKind    string          `json:"source_kind"`
-	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON json.RawMessage `json:"variables_json,omitempty"`
-	ExpiresAt     string          `json:"expires_at,omitempty"`
+	Name                    string              `json:"name"`
+	TemplateID              string              `json:"template_id,omitempty"`
+	SourceKind              string              `json:"source_kind"`
+	BlocksJSON              json.RawMessage     `json:"blocks_json,omitempty"`
+	VariablesJSON           json.RawMessage     `json:"variables_json,omitempty"`
+	ExpiresAt               string              `json:"expires_at,omitempty"`
+	ExpectedTemplateVersion *int32              `json:"expected_template_version,omitempty"`
+	Parties                 []pdflayout.Binding `json:"parties,omitempty"`
 }
 
 func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +119,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in createDocumentInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -126,6 +129,10 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.SourceKind != "blocks" && in.SourceKind != "pdf" {
 		writeError(w, http.StatusBadRequest, "source_kind must be blocks or pdf")
+		return
+	}
+	if in.SourceKind != "pdf" && (len(in.Parties) > 0 || in.ExpectedTemplateVersion != nil) {
+		writeError(w, http.StatusBadRequest, "party bindings require a PDF template")
 		return
 	}
 
@@ -149,153 +156,154 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		expiresAt = pgtype.Timestamptz{Time: t, Valid: true}
 	}
 
-	switch in.SourceKind {
-	case "blocks":
-		blocks := in.BlocksJSON
-		vars := in.VariablesJSON
-		// Instantiate from a blocks template: copy its content + variable
-		// defaults into the new document so "New document" actually seeds the
-		// agreement. The request can still override either by sending its own.
-		if templateID.Valid && (len(blocks) == 0 || len(vars) == 0) {
-			tpl, terr := s.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{ID: uuid.UUID(templateID.Bytes), OrgID: u.OrgID})
-			if terr != nil {
-				writeError(w, http.StatusBadRequest, "template not found")
-				return
+	authorize, err := s.sessionDraftAuthorization(r, u.OrgID, u.UserID)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize document creation", err)
+		return
+	}
+	if s.Pool == nil || s.Audit == nil {
+		writeInternalErrorMsg(w, "create document failed", errors.New("document creation dependencies unavailable"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		writeInternalErrorMsg(w, "begin document creation", err)
+		return
+	}
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	q := generated.New(tx)
+	var doc *generated.Document
+	var guard *authoring.MemberGuard
+	var layoutEvents []audit.PendingEvent
+	create := func() error {
+		switch in.SourceKind {
+		case "blocks":
+			if err := s.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+				return err
 			}
-			if tpl.SourceKind != "blocks" {
-				writeError(w, http.StatusBadRequest, "template is not a blocks template")
-				return
+			seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, templateID, in.SourceKind, in.BlocksJSON, in.VariablesJSON)
+			if err != nil {
+				return err
 			}
-			if len(blocks) == 0 && len(tpl.BlocksJson) > 0 {
-				blocks = tpl.BlocksJson
+			guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+			if err != nil {
+				return err
 			}
-			if len(vars) == 0 && len(tpl.VariablesJson) > 0 {
-				vars = tpl.VariablesJson
+			doc, err = q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
+				OrgID: u.OrgID, TemplateID: templateID, Name: in.Name,
+				BlocksJson: seed.BlocksJSON, VariablesJson: seed.VariablesJSON,
+				SenderID: u.UserID, ExpiresAt: expiresAt,
+			})
+			if err != nil {
+				return err
 			}
-		}
-		if len(blocks) == 0 {
-			blocks = json.RawMessage(`{"version":1,"blocks":[]}`)
-		}
-		normalizedBlocks, err := blockschema.NormalizeTreeJSON(blocks)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid blocks_json: "+err.Error())
-			return
-		}
-		blocks = normalizedBlocks
-		if len(vars) == 0 {
-			vars = json.RawMessage(`{}`)
-		}
-		if _, err := blockschema.ParseVariableValues(vars); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid variables_json: "+err.Error())
-			return
-		}
-		d, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-			func(q *generated.Queries) (*generated.Document, error) {
-				if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-					return nil, err
-				}
-				doc, err := q.CreateBlocksDocument(r.Context(), generated.CreateBlocksDocumentParams{
-					OrgID:         u.OrgID,
-					TemplateID:    templateID,
-					Name:          in.Name,
-					BlocksJson:    blocks,
-					VariablesJson: vars,
-					SenderID:      u.UserID,
-					ExpiresAt:     expiresAt,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-					return nil, err
-				}
-				return doc, nil
-			},
-			func(d *generated.Document) audit.Entry {
-				return audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
-					Kind:    audit.KindDocumentCreated,
-					Payload: map[string]any{"name": d.Name, "source_kind": "blocks"},
-				}
-			},
-		)
-		if err != nil {
-			if s.writeAuthoringQuotaError(w, err) {
-				return
+			return s.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID)
+		case "pdf":
+			if err := s.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+				return err
 			}
-			writeInternalErrorMsg(w, "create document failed", err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, toDocumentResponse(d))
-	case "pdf":
-		// For week 1 the PDF path requires an existing template (so we have
-		// the storage key + sha already). Free-PDF document uploads come in
-		// week 2 with the field designer.
-		if !templateID.Valid {
-			writeError(w, http.StatusBadRequest, "template_id required for source_kind=pdf in v1")
-			return
-		}
-		tpl, err := s.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{
-			ID: uuidFromBytes(templateID.Bytes), OrgID: u.OrgID,
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "template not found")
-			return
-		}
-		if err != nil || tpl.SourceKind != "pdf" || !tpl.PdfStorageKey.Valid {
-			writeError(w, http.StatusBadRequest, "template is not a pdf-source template")
-			return
-		}
-		rep, repErr := sanitize.SyntheticTemplateReport()
-		if repErr != nil {
-			writeInternalErrorMsg(w, "create metadata redaction report", repErr)
-			return
-		}
-		d, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-			func(q *generated.Queries) (*generated.Document, error) {
-				if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-					return nil, err
-				}
-				d, err := q.CreatePDFDocument(r.Context(), generated.CreatePDFDocumentParams{
-					OrgID:                       u.OrgID,
-					TemplateID:                  templateID,
-					Name:                        in.Name,
-					PdfStorageKey:               tpl.PdfStorageKey,
-					PdfSha256:                   tpl.PdfSha256,
-					PdfStorageVersionID:         tpl.PdfStorageVersionID,
-					EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
-					SenderID:                    u.UserID,
-					ExpiresAt:                   expiresAt,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if err := q.UpdateMetadataRedactionReport(r.Context(), generated.UpdateMetadataRedactionReportParams{
-					ID: d.ID, MetadataRedactionReport: rep,
-				}); err != nil {
-					return nil, err
-				}
-				if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-					return nil, err
-				}
-				return d, nil
-			},
-			func(d *generated.Document) audit.Entry {
-				return audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
-					Kind:    audit.KindDocumentCreated,
-					Payload: map[string]any{"name": d.Name, "source_kind": "pdf"},
-				}
-			},
-		)
-		if err != nil {
-			if s.writeAuthoringQuotaError(w, err) {
-				return
+			seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, templateID, in.SourceKind, nil, in.VariablesJSON)
+			if err != nil {
+				return err
 			}
-			writeInternalErrorMsg(w, "create document failed", err)
-			return
+			guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+			if err != nil {
+				return err
+			}
+			rep, err := sanitize.SyntheticTemplateReport()
+			if err != nil {
+				return err
+			}
+			tpl := seed.Template
+			layout, parties, err := pdflayout.Prepare(tpl, in.ExpectedTemplateVersion, in.Parties)
+			if err != nil {
+				return err
+			}
+			doc, err = q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
+				OrgID: u.OrgID, TemplateID: templateID, Name: in.Name,
+				PdfStorageKey: tpl.PdfStorageKey, PdfSha256: tpl.PdfSha256,
+				PdfStorageVersionID: tpl.PdfStorageVersionID, EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
+				SenderID: u.UserID, ExpiresAt: expiresAt,
+			})
+			if err != nil {
+				return err
+			}
+			if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{ID: doc.ID, MetadataRedactionReport: rep}); err != nil {
+				return err
+			}
+			// The redaction report updates the row's timestamp. Resolve the
+			// transaction's own new row before the guarded values update.
+			doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: u.OrgID})
+			if err != nil {
+				return err
+			}
+			// Preserve declared values for PDF designs too. This populates
+			// contract data; it does not rewrite already-rendered PDF bytes.
+			doc, err = q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
+				ID: doc.ID, OrgID: u.OrgID, VariablesJson: seed.VariablesJSON, ExpectedUpdatedAt: doc.UpdatedAt,
+			})
+			if err != nil {
+				return err
+			}
+			if err := s.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+				return err
+			}
+			layoutEvents, err = pdflayout.Materialize(ctx, tx, q, s.Billing, s.Audit, doc, u.UserID, layout, parties, "rest")
+			return err
 		}
-		writeJSON(w, http.StatusCreated, toDocumentResponse(d))
+		return authoring.ErrCreationInput
+	}
+	if err := create(); err != nil {
+		s.writeDocumentCreationError(w, err)
+		return
+	}
+	creationPayload := map[string]any{"name": doc.Name, "source_kind": doc.SourceKind}
+	if len(layoutEvents) > 0 {
+		creationPayload["template_id"] = in.TemplateID
+		creationPayload["template_version"] = *in.ExpectedTemplateVersion
+		creationPayload["layout_version"] = 1
+		creationPayload["party_count"] = len(in.Parties)
+	}
+	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
+		Kind:    audit.KindDocumentCreated,
+		Payload: creationPayload,
+	})
+	if err != nil {
+		writeInternalErrorMsg(w, "audit document creation", err)
+		return
+	}
+	if err := guard.Recheck(ctx); err != nil {
+		s.writeDocumentCreationError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeInternalErrorMsg(w, "commit document creation", err)
+		return
+	}
+	for _, event := range layoutEvents {
+		s.Audit.Publish(event)
+	}
+	s.Audit.Publish(pending)
+	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
+}
+
+func (s *Server) writeDocumentCreationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, pdflayout.ErrPrecondition):
+		writeError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, pdflayout.ErrInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, authoring.ErrCreationTemplateNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, authoring.ErrCreationInput):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		if !s.writeAuthoringQuotaError(w, err) {
+			s.writeDraftAuthoringError(w, "create document failed", err)
+		}
 	}
 }
 
@@ -729,11 +737,31 @@ func (s *Server) handleSetChangeApprovalMode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "mode must be accept or auto_apply")
 		return
 	}
-	if _, err := s.Queries.SetOrgChangeApprovalMode(r.Context(), generated.SetOrgChangeApprovalModeParams{ID: u.OrgID, ChangeApprovalMode: in.Mode}); err != nil {
-		writeError(w, http.StatusInternalServerError, "update setting failed")
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize change approval setting", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"change_approval_mode": in.Mode})
+	var previous string
+	updated, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (*generated.Org, error) {
+			current, err := q.GetOrg(ctx, u.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			previous = current.ChangeApprovalMode
+			return q.SetOrgChangeApprovalMode(ctx, generated.SetOrgChangeApprovalModeParams{ID: u.OrgID, ChangeApprovalMode: in.Mode})
+		},
+		func(updated *generated.Org) audit.Entry {
+			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: "org.change_approval_mode_changed", IP: clientIP(r),
+				Payload: map[string]any{"from": previous, "to": updated.ChangeApprovalMode}}
+		},
+	)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "update change approval setting", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"change_approval_mode": updated.ChangeApprovalMode})
 }
 
 // handleReviseDocument reopens a document that a signer paused with a change
@@ -896,18 +924,15 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil || s.Cookies == nil {
-		writeError(w, http.StatusUnauthorized, "session required")
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
 		return
 	}
-	payload, err := s.Cookies.Verify(cookie.Value)
-	var session auth.SessionPayload
-	if err != nil || json.Unmarshal(payload, &session) != nil || session.UserID != u.UserID {
-		writeError(w, http.StatusUnauthorized, "session invalid")
+	if s.Pool == nil || s.Queries == nil || s.Audit == nil {
+		writeInternalErrorMsg(w, "delete document unavailable", errors.New("atomic document deletion dependencies unavailable"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 	defer cancel()
 	// The fresh privacy predicate must see requests committed before acquiring
 	// the parent/shared organization fence, regardless of connection defaults.
@@ -916,7 +941,7 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
 	q := s.Queries.WithTx(tx)
 	doc, err := q.GetDocumentForPrivacyUpdate(ctx, generated.GetDocumentForPrivacyUpdateParams{DocumentID: id, OrgID: u.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -931,15 +956,12 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "only draft documents can be deleted")
 		return
 	}
-	var role string
-	var generation int64
-	err = tx.QueryRow(ctx, `SELECT role,session_generation FROM users WHERE id=$1 AND org_id=$2 FOR SHARE`, u.UserID, u.OrgID).Scan(&role, &generation)
-	if err != nil || (role != string(auth.RoleSender) && role != string(auth.RoleOwner)) || session.Generation != generation {
-		writeError(w, http.StatusForbidden, "document deletion permission or session revoked")
-		return
-	}
-	if _, err := s.Cookies.Verify(cookie.Value); err != nil {
-		writeError(w, http.StatusUnauthorized, "session expired while awaiting deletion authorization")
+	// Keep the privacy parent query here: it includes an already-soft-deleted
+	// draft so retries remain idempotent. The shared member guard then retains
+	// live authorization and the original signed session through commit.
+	guard, err := authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize document deletion", err)
 		return
 	}
 	if doc.DeletedAt.Valid {
@@ -985,8 +1007,8 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	if _, err := s.Cookies.Verify(cookie.Value); err != nil {
-		writeError(w, http.StatusUnauthorized, "session expired before document deletion committed")
+	if err := guard.Recheck(ctx); err != nil {
+		s.writeDraftAuthoringError(w, "reauthorize document deletion", err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {

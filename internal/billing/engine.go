@@ -18,10 +18,11 @@ import (
 )
 
 type Engine struct {
-	Queries    *generated.Queries
-	Provider   Provider
-	PublicURL  string
-	WebhookURL string
+	Queries       *generated.Queries
+	Provider      Provider
+	PublicURL     string
+	WebhookURL    string
+	operatorPlans map[uuid.UUID]string
 }
 
 func New(q *generated.Queries, provider Provider, publicURL, webhookURL string) *Engine {
@@ -32,10 +33,16 @@ func New(q *generated.Queries, provider Provider, publicURL, webhookURL string) 
 }
 
 func (e *Engine) ListPlans(ctx context.Context) ([]*generated.BillingPlan, error) {
+	if e.OperatorMode() {
+		return []*generated.BillingPlan{}, nil
+	}
 	return e.Queries.ListActiveBillingPlans(ctx)
 }
 
 func (e *Engine) GetSubscription(ctx context.Context, orgID uuid.UUID) (*generated.OrgSubscription, error) {
+	if e.OperatorMode() {
+		return nil, ErrSubscriptionNone
+	}
 	row, err := e.Queries.GetOrgSubscription(ctx, orgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSubscriptionNone
@@ -62,7 +69,7 @@ type PreparedCheckout struct {
 }
 
 func (e *Engine) PrepareCheckout(ctx context.Context, in StartCheckoutInput) (PreparedCheckout, error) {
-	if e == nil || e.Provider == nil || e.Queries == nil {
+	if e == nil || !e.PaymentsEnabled() || e.Queries == nil {
 		return PreparedCheckout{}, ErrDisabled
 	}
 	if in.OrgID == uuid.Nil || in.PlanSlug == "" || !validInterval(in.Interval) {
@@ -157,6 +164,9 @@ func PersistPreparedCheckout(ctx context.Context, q *generated.Queries, prepared
 // moved to creating_payment before POST; a retry then asks the provider to
 // reconcile by activation metadata before issuing another POST.
 func (e *Engine) CompletePreparedCheckout(ctx context.Context, prepared PreparedCheckout) (string, error) {
+	if !e.PaymentsEnabled() {
+		return "", ErrDisabled
+	}
 	checkout, err := e.Queries.GetBillingCheckoutByKey(ctx, prepared.ActivationKey)
 	if err != nil {
 		return "", err
@@ -242,6 +252,9 @@ func (e *Engine) StartCheckout(ctx context.Context, in StartCheckoutInput) (stri
 }
 
 func (e *Engine) PrepareCancellation(ctx context.Context, orgID uuid.UUID) (generated.SetSubscriptionCancelAtPeriodEndParams, error) {
+	if !e.PaymentsEnabled() {
+		return generated.SetSubscriptionCancelAtPeriodEndParams{}, ErrDisabled
+	}
 	sub, err := e.Queries.GetOrgSubscription(ctx, orgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return generated.SetSubscriptionCancelAtPeriodEndParams{}, ErrSubscriptionNone
@@ -270,6 +283,9 @@ func (e *Engine) CancelAtPeriodEnd(ctx context.Context, orgID uuid.UUID) error {
 }
 
 func (e *Engine) HandleWebhook(ctx context.Context, raw []byte, headers map[string]string) error {
+	if !e.PaymentsEnabled() {
+		return ErrDisabled
+	}
 	// Mollie's classic webhook gives the receiver 15 seconds. Bound the full
 	// dereference/reconcile/commit sequence below that so a transient provider
 	// delay produces a retryable response instead of an ambiguous late 2xx.
@@ -538,7 +554,7 @@ func (e *Engine) EnforceDocumentQuota(ctx context.Context, orgID uuid.UUID) erro
 	if plan.DocumentQuotaMonthly == 0 && plan.RecipientQuotaMonthly == 0 {
 		return nil
 	}
-	start, end := quotaPeriod(sub, time.Now().UTC())
+	start, end := e.QuotaPeriod(sub, time.Now().UTC())
 	usage, err := e.Queries.CountBillingUsageInPeriodForOrg(ctx, generated.CountBillingUsageInPeriodForOrgParams{
 		OrgID: orgID, PeriodStart: pgTime(start), PeriodEnd: pgTime(end),
 	})
@@ -595,6 +611,30 @@ func (e *Engine) EnforceDocumentQuotaMutation(ctx context.Context, q *generated.
 }
 
 func (e *Engine) PlanForOrg(ctx context.Context, orgID uuid.UUID) (*generated.BillingPlan, *generated.OrgSubscription, error) {
+	if e == nil || e.Queries == nil {
+		return nil, nil, &EntitlementUnavailableError{Stage: "plan engine unavailable"}
+	}
+	if e.operatorPlans != nil {
+		slug, ok := e.operatorPlans[orgID]
+		if !ok {
+			return nil, nil, &EntitlementUnavailableError{Stage: "internal organization not approved"}
+		}
+		plan, err := e.Queries.GetBillingPlanBySlug(ctx, slug)
+		if err != nil || plan == nil || !plan.Active || plan.DocumentQuotaMonthly <= 0 || plan.RecipientQuotaMonthly <= 0 {
+			return nil, nil, &EntitlementUnavailableError{Stage: "internal plan unavailable or unbounded", Err: err}
+		}
+		var features map[string]any
+		if err := json.Unmarshal(plan.FeaturesJson, &features); err != nil || features == nil {
+			return nil, nil, &EntitlementUnavailableError{Stage: "invalid internal plan features", Err: err}
+		}
+		for _, value := range features {
+			if _, ok := value.(bool); !ok {
+				return nil, nil, &EntitlementUnavailableError{Stage: "invalid internal plan features"}
+			}
+		}
+		return plan, nil, nil
+	}
+
 	sub, err := e.Queries.GetOrgSubscription(ctx, orgID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		free, freeErr := e.Queries.GetBillingPlanBySlug(ctx, "free")

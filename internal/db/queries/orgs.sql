@@ -6,6 +6,11 @@ RETURNING *;
 -- name: GetOrg :one
 SELECT * FROM orgs WHERE id = $1;
 
+-- name: GetOrgForOwnerMutation :one
+-- Serialize tenant settings before locking the live owner and credential.
+-- Non-key locking permits audit inserts' foreign-key KEY SHARE locks.
+SELECT * FROM orgs WHERE id = $1 FOR NO KEY UPDATE;
+
 -- name: ListOrgIDsAfter :many
 -- Keyset page used by release-blocking estate integrity checks. A zero UUID is
 -- the initial cursor; application org IDs are generated randomly and nonzero.

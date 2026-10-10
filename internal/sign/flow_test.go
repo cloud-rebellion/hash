@@ -209,19 +209,11 @@ func TestAllRequiredRecipientsSigned_CustomRoleDoesNotInjectSigner(t *testing.T)
 	}
 }
 
-func TestAllRequiredRecipientsSigned_RequiresEveryRecipientInRole(t *testing.T) {
+func TestAllRequiredRecipientsSigned_PDFRequiresAuthoritativePlacedFields(t *testing.T) {
 	doc := &generated.Document{SourceKind: "pdf"}
-	recipients := []*generated.Recipient{
-		{Role: "signer", Status: "signed"},
-		{Role: "signer", Status: "viewed"},
-		{Role: "approver", Status: "pending"}, // not a PDF signing role
-	}
-	if allRequiredRecipientsSigned(doc, recipients) {
-		t.Fatal("one pending signer among several must block finalization")
-	}
-	recipients[1].Status = "signed"
-	if !allRequiredRecipientsSigned(doc, recipients) {
-		t.Fatal("non-required PDF approver must not block all signed signers")
+	rows := []*generated.Recipient{{Role: "signer", Status: "signed"}, {Role: "provider", Status: "signed"}}
+	if allRequiredRecipientsSigned(doc, rows) {
+		t.Fatal("a PDF cannot be declared ready without its placed field assignment")
 	}
 }
 

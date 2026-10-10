@@ -115,6 +115,183 @@ func (q *Queries) InsertAICompletionAudit(ctx context.Context, arg InsertAICompl
 	return &i, err
 }
 
+const insertRequestedAICompletionAudit = `-- name: InsertRequestedAICompletionAudit :one
+INSERT INTO ai_completion_audit (
+    id, org_id, document_id, actor_user_id, provider, model,
+    prompt_name, prompt_version, shield_active,
+    input_tokens, output_tokens, latency_ms, success, error,
+    transfer_jurisdiction
+)
+SELECT $1::uuid, $2::uuid,
+       $3::uuid, $4::uuid,
+       $5::text, $6::text,
+       $7::text, $8::int,
+       $9::boolean,
+       $10::int, $11::int,
+       $12::int, $13::boolean,
+       $14::text, $15::text
+WHERE EXISTS (
+    SELECT 1 FROM events
+    WHERE id = $1::uuid
+      AND org_id = $2::uuid
+      AND document_id = $3::uuid
+      AND actor_user_id = $4::uuid
+      AND kind = 'ai.requested'
+)
+ON CONFLICT (id) DO NOTHING
+RETURNING id, org_id, document_id, actor_user_id, provider, model, prompt_name, prompt_version, shield_active, input_tokens, output_tokens, latency_ms, success, error, created_at, transfer_jurisdiction
+`
+
+type InsertRequestedAICompletionAuditParams struct {
+	RequestEventID       uuid.UUID `json:"request_event_id"`
+	OrgID                uuid.UUID `json:"org_id"`
+	DocumentID           uuid.UUID `json:"document_id"`
+	ActorUserID          uuid.UUID `json:"actor_user_id"`
+	Provider             string    `json:"provider"`
+	Model                string    `json:"model"`
+	PromptName           string    `json:"prompt_name"`
+	PromptVersion        int32     `json:"prompt_version"`
+	ShieldActive         bool      `json:"shield_active"`
+	InputTokens          int32     `json:"input_tokens"`
+	OutputTokens         int32     `json:"output_tokens"`
+	LatencyMs            int32     `json:"latency_ms"`
+	Success              bool      `json:"success"`
+	Error                string    `json:"error"`
+	TransferJurisdiction string    `json:"transfer_jurisdiction"`
+}
+
+// Exactly one provider completion belongs to an authorized durable request.
+// Reusing the immutable request event UUID links cost even if result delivery
+// later fails. A missing/foreign/mismatched receipt and a duplicate completion
+// produce no row, so callers must refuse delivery.
+func (q *Queries) InsertRequestedAICompletionAudit(ctx context.Context, arg InsertRequestedAICompletionAuditParams) (*AiCompletionAudit, error) {
+	row := q.db.QueryRow(ctx, insertRequestedAICompletionAudit,
+		arg.RequestEventID,
+		arg.OrgID,
+		arg.DocumentID,
+		arg.ActorUserID,
+		arg.Provider,
+		arg.Model,
+		arg.PromptName,
+		arg.PromptVersion,
+		arg.ShieldActive,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.LatencyMs,
+		arg.Success,
+		arg.Error,
+		arg.TransferJurisdiction,
+	)
+	var i AiCompletionAudit
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.DocumentID,
+		&i.ActorUserID,
+		&i.Provider,
+		&i.Model,
+		&i.PromptName,
+		&i.PromptVersion,
+		&i.ShieldActive,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.LatencyMs,
+		&i.Success,
+		&i.Error,
+		&i.CreatedAt,
+		&i.TransferJurisdiction,
+	)
+	return &i, err
+}
+
+const insertRequestedSignerAICompletionAudit = `-- name: InsertRequestedSignerAICompletionAudit :one
+INSERT INTO ai_completion_audit (
+    id, org_id, document_id, actor_user_id, provider, model,
+    prompt_name, prompt_version, shield_active,
+    input_tokens, output_tokens, latency_ms, success, error,
+    transfer_jurisdiction
+)
+SELECT $1::uuid, $2::uuid,
+       $3::uuid, NULL,
+       $4::text, $5::text,
+       $6::text, $7::int,
+       $8::boolean,
+       $9::int, $10::int,
+       $11::int, $12::boolean,
+       $13::text, $14::text
+WHERE EXISTS (
+    SELECT 1 FROM events
+    WHERE id = $1::uuid
+      AND org_id = $2::uuid
+      AND document_id = $3::uuid
+      AND recipient_id = $15::uuid
+      AND actor_user_id IS NULL
+      AND kind = 'ai.requested'
+)
+ON CONFLICT (id) DO NOTHING
+RETURNING id, org_id, document_id, actor_user_id, provider, model, prompt_name, prompt_version, shield_active, input_tokens, output_tokens, latency_ms, success, error, created_at, transfer_jurisdiction
+`
+
+type InsertRequestedSignerAICompletionAuditParams struct {
+	RequestEventID       uuid.UUID `json:"request_event_id"`
+	OrgID                uuid.UUID `json:"org_id"`
+	DocumentID           uuid.UUID `json:"document_id"`
+	Provider             string    `json:"provider"`
+	Model                string    `json:"model"`
+	PromptName           string    `json:"prompt_name"`
+	PromptVersion        int32     `json:"prompt_version"`
+	ShieldActive         bool      `json:"shield_active"`
+	InputTokens          int32     `json:"input_tokens"`
+	OutputTokens         int32     `json:"output_tokens"`
+	LatencyMs            int32     `json:"latency_ms"`
+	Success              bool      `json:"success"`
+	Error                string    `json:"error"`
+	TransferJurisdiction string    `json:"transfer_jurisdiction"`
+	RecipientID          uuid.UUID `json:"recipient_id"`
+}
+
+// Signer processing is attributed to its immutable recipient-bound request,
+// never to the sender's staff user. Reuse the event UUID to prevent duplicates.
+func (q *Queries) InsertRequestedSignerAICompletionAudit(ctx context.Context, arg InsertRequestedSignerAICompletionAuditParams) (*AiCompletionAudit, error) {
+	row := q.db.QueryRow(ctx, insertRequestedSignerAICompletionAudit,
+		arg.RequestEventID,
+		arg.OrgID,
+		arg.DocumentID,
+		arg.Provider,
+		arg.Model,
+		arg.PromptName,
+		arg.PromptVersion,
+		arg.ShieldActive,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.LatencyMs,
+		arg.Success,
+		arg.Error,
+		arg.TransferJurisdiction,
+		arg.RecipientID,
+	)
+	var i AiCompletionAudit
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.DocumentID,
+		&i.ActorUserID,
+		&i.Provider,
+		&i.Model,
+		&i.PromptName,
+		&i.PromptVersion,
+		&i.ShieldActive,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.LatencyMs,
+		&i.Success,
+		&i.Error,
+		&i.CreatedAt,
+		&i.TransferJurisdiction,
+	)
+	return &i, err
+}
+
 const upsertOrgAISettings = `-- name: UpsertOrgAISettings :one
 INSERT INTO org_ai_settings (
     org_id, provider, base_url, model, api_key_ct, key_last4, enabled, updated_at

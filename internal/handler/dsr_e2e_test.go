@@ -153,12 +153,15 @@ func setupDSRE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queri
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Attribute lock-wait evidence to this fixture, even when independent
+	// package test processes share the same disposable database.
+	config.ConnConfig.RuntimeParams["application_name"] = "hash-auth-e2e-" + uuid.NewString()
 	migrationDB := stdlib.OpenDB(*config.ConnConfig)
 	if err := mdb.RunMigrations(migrationDB); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	_ = migrationDB.Close()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}

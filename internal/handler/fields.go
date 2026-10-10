@@ -15,6 +15,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -417,6 +418,9 @@ func prepareSignerFieldValues(allowed []*generated.DocumentField, values []submi
 // `value` + `completed_at`. Emits document.field_filled for each value
 // so the audit timeline reflects the submission.
 func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
 	rc, ok := s.lookupTokenOrError(w, r)
 	if !ok {
 		return
@@ -443,7 +447,7 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "values required")
 		return
 	}
-	tx, err := s.Pool.Begin(r.Context())
+	tx, err := s.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeInternalError(w, err)
 		return
@@ -465,12 +469,42 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, "document is not accepting field updates")
 		return
 	}
-	freshRecipient, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{
-		ID: rc.Recipient.ID, OrgID: rc.Document.OrgID,
+	// Keep the admitted recipient credential stable through field/audit writes.
+	freshRecipient, err := q.GetRecipientForShare(r.Context(), generated.GetRecipientForShareParams{
+		ID: rc.Recipient.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID,
 	})
 	if err != nil {
-		writeInternalError(w, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
+		} else {
+			writeInternalError(w, err)
+		}
 		return
+	}
+
+	if err := sign.ValidateLockedRecipientCredential(rc, freshRecipient, lockedDoc, time.Now()); err != nil {
+		writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
+		return
+	}
+	if lockedDoc.SourceKind == "pdf" {
+		signatures, err := q.ListSignaturesByDocument(r.Context(), lockedDoc.ID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		rows, err := q.ListRecipientsByDocument(r.Context(), lockedDoc.ID)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		contentFrozen := len(signatures) > 0
+		for _, row := range rows {
+			contentFrozen = contentFrozen || row.Status == "signed" || row.SignedAt.Valid
+		}
+		if contentFrozen {
+			writeError(w, http.StatusConflict, "PDF content is frozen after the first signature; create a new revision to change it")
+			return
+		}
 	}
 	if freshRecipient.DocumentID != lockedDoc.ID || !recipientCanFillFields(freshRecipient.Status) {
 		writeError(w, http.StatusConflict, "recipient has already completed or declined this ceremony")
@@ -534,6 +568,12 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		}
 		pendingAudits = append(pendingAudits, pendingAudit)
 		updated = append(updated, fieldToDTO(row))
+	}
+	// A link can expire naturally while the immutable audit head is busy.
+	// The retained recipient lock prevents rotation; recheck the deadline now.
+	if err := sign.ValidateLockedRecipientCredential(rc, freshRecipient, lockedDoc, time.Now()); err != nil {
+		writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
+		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeInternalError(w, err)

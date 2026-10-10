@@ -23,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -286,7 +287,14 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
+	authorize, err := s.sessionDraftAuthorization(r, u.OrgID, u.UserID)
+	if err != nil {
+		s.writePreviewError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), resolver.PreviewTimeout)
+	defer cancel()
+	doc, err := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
@@ -304,15 +312,19 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 		writeInternalErrorMsg(w, "stored blocks invalid", err)
 		return
 	}
-	vars, _, err := s.resolveVariables(r.Context(), doc)
+	vars, report, err := s.resolveVariables(ctx, doc)
 	if err != nil {
 		writeInternalErrorMsg(w, "resolve vars", err)
 		return
 	}
 	body := blocks.RenderHTML(tree, vars)
-	brand, err := s.resolveBrandingForDoc(r.Context(), doc)
+	brand, err := s.resolveBrandingForDoc(ctx, doc)
 	if err != nil {
 		writeInternalErrorMsg(w, "resolve branding", err)
+		return
+	}
+	if err := resolver.CheckPreview(ctx, s.Pool, doc, report, u.UserID, authorize); err != nil {
+		s.writePreviewError(w, err)
 		return
 	}
 	html := brand.CSSVariables() + body

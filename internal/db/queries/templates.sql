@@ -23,6 +23,13 @@ SELECT * FROM templates
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
 FOR SHARE;
 
+-- name: GetTemplateForUpdate :one
+-- Mutations resolve omitted values from this locked current row and retain
+-- the lock through authorization, audit and commit.
+SELECT * FROM templates
+WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+FOR UPDATE;
+
 -- name: ListTemplates :many
 SELECT * FROM templates
 WHERE org_id = $1 AND archived_at IS NULL

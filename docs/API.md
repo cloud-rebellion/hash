@@ -38,6 +38,17 @@ and action tokens out of logs and analytics. Production ingress additionally
 authenticates the reverse proxy; external clients must not manufacture or
 receive the host-only proxy credential.
 
+MCP rejects malformed raw UTF-8, unpaired escaped surrogates and decoded NUL in
+the whole JSON-RPC envelope before normalization or dispatch. These failures
+return a parse error without echoing a normalized request ID. Valid Unicode and
+properly paired escapes remain supported.
+
+Internal deployments can use the explicit [operator mode](INTERNAL-OPERATOR-MODE.md).
+Its authenticated billing status reports `billing_enabled: true`,
+`payments_enabled: false`, provider `operator` and the approved finite plan.
+Subscription is absent; invoices and purchase catalog are empty. Payment
+operations are disabled while quotas and capabilities remain enforced.
+
 ## Roles and scopes
 
 `viewer` is read-only, `sender` creates/edits/sends documents, and `owner` also
@@ -46,6 +57,30 @@ tenant's document. A machine key's scopes narrow its role, and a document-scoped
 credential narrows its target further. Missing scopes do not inherit full access.
 See [role checks](../internal/auth/rbac.go) and
 [MCP tool scopes](../internal/mcp/scope.go).
+
+`POST /api/v1/documents` and MCP `create_document` retain the original signed
+session or organization-wide `write:authoring` key through quota, template,
+member and audit waits. They always validate an active tenant template of the
+matching source kind, including complete explicit overrides. Omitted block
+content/variables copy the locked current defaults; explicit empty values stay
+empty. PDF variables also populate document data, preserving exact template
+source/version pins; they do not rewrite existing PDF text. Version-one named
+party layouts create fresh recipients and positioned signature fields with an
+exact template-version observation and complete new party identities. See
+[document creation](API-GUIDE.md#document-creation) and
+[reusable PDF signing layouts](API-GUIDE.md#reusable-pdf-signing-layouts).
+
+Owner REST settings and credential writes use a separate live-owner transaction,
+including change-approval mode, branding/logo, AI provider, API keys and webhooks.
+Omitted values merge from the locked current state. New credentials are disclosed
+only after commit. MCP branding and webhook creation/deletion retain the original
+owner key through the same commit-time checks. Owner eIDAS/compliance policy
+writes use that same boundary; routing-tier updates retain draft sender/owner
+permission. AI requests and envelope mutations also revalidate their admitted
+credentials after waits; incurred AI costs use independently durable receipts.
+See [owner settings](API-GUIDE.md#owner-settings-and-organization-credentials).
+See [AI requests](API-GUIDE.md#ai-requests-and-negotiation-metadata) and
+[MCP envelope authoring](API-GUIDE.md#mcp-envelope-authoring).
 
 ## Negotiation and legal lifecycle
 
@@ -97,6 +132,15 @@ Frozen variables support both block-source and PDF-source documents. A changed
 draft or binding preparation returns HTTP 409 from REST Send and the automation
 command, or a tool error from MCP; fetch and review the current draft before
 trying again.
+
+CRM deal/contact bindings require a successful fresh source response at Send;
+the preview cache and configured fallbacks cannot stand in for that response.
+Missing source, failed fetch or invalidation during the request refuses sending.
+REST returns503 when current CRM information cannot be verified. Prepared
+observations use document and binding revision predicates and roll back with
+the freeze transaction if any binding changed. Local synthetic acceptance
+does not verify the configured account's tenant identity, mappings or business
+data; those remain live integration gates.
 
 Once Send commits an authorized sealing intent, `ResumeSendSealing` completes
 that durable intent using its persisted actor and evidence state. Worker retries
@@ -173,6 +217,12 @@ Hash's direct BrightCRM resolver fetches configured deal/contact endpoints with
 a configured bearer token; live response fields and account permissions must
 match the bindings. This is separate from OIDC sender login and does not
 implement an automatic CRM OAuth authorization/refresh flow.
+
+The current HTTP connector uses one instance-level credential; it does not
+select a credential from the document's organization. Tenant-scoped cache keys
+therefore do not establish CRM credential or record isolation. A reviewed
+organization-to-CRM-account mapping, source record ownership checks and live
+read-back remain required before enabling this connector across organizations.
 
 For the durable automation bridge, follow
 [BrightCRM integration](../../brightcrm/docs/REACTOR-HASH-ESIGN.md) and
@@ -364,15 +414,23 @@ values exclusively. Binding `last_value` and fallback fields are mutable
 observations and cannot replace a snapshot value, populate a missing snapshot
 variable, or turn a deliberately empty value into newer CRM content. Binding
 rows remain available for source reporting. Agent overrides are refused in
-frozen resolution. Live draft resolution and send-time materialization retain
-their existing behavior.
+frozen resolution.
 
-Live variable resolution fails if the successful value or source error cannot
-be persisted to the binding observation. Such failure returns no completed
-variable map or send-time frozen result and never adds a new cache entry.
-A recorded upstream error can still use the configured fallback. Observation
-writes for earlier bindings may already have completed; this is not a single
-transaction spanning all external fetches.
+REST HTML/resolve previews and MCP `preview_resolved_variables` are read-only:
+they do not write binding values, errors, resolution times or timestamps.
+Draft reads may use the bounded memory cache or configured fallback. Before
+returning, the application checks the document and binding snapshots and the
+original session/key after source/branding waits. A changed snapshot returns409;
+deleted/foreign documents404; expired credentials401; revoked access403. Viewer
+reads remain supported. MCP reports tool errors without claiming another token
+use. External fetches occur outside document locks. See
+[preview contracts](API-GUIDE.md#document-previews).
+
+Only Send stages binding observations, then persists them atomically with frozen
+document variables after authorization and exact document/binding revision
+checks. Persistence or revision failure returns no frozen result and rolls back
+all observations in that transaction. Preview reports therefore do not establish
+send-time source freshness or a durable binding observation.
 
 Successful live or cached source values remain authoritative even when empty.
 An empty CRM field clears the resolved variable instead of reviving a static
@@ -384,6 +442,6 @@ Supported source paths are `branding.primary_hex`, `accent_hex`, `surface_hex`,
 `text_hex`, `muted_hex`, `logo_url`, `logo_alt`, `font_heading`, `font_body`, and
 `signature_color` (each with the `branding.` prefix). `source_ref` does not
 select another tenant; identity comes from the authenticated document context.
-An absent branding record reports not configured and follows normal recorded
+An absent branding record reports not configured and follows normal preview
 fallback behavior. These live draft values use the resolver's bounded TTL cache;
 sent documents use their frozen variables.

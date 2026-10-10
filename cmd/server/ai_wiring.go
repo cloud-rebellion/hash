@@ -6,9 +6,11 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/config"
@@ -96,22 +98,31 @@ func buildAIRuntime(cfg *config.Config, q *generated.Queries) (*ai.Runtime, erro
 	// the same). A nil resolver leaves the instance-default path unchanged.
 	if cfg.AIShieldKey != "" {
 		keyRaw, _ := hex.DecodeString(cfg.AIShieldKey) // validated above
-		rt.ResolveOrgProvider = func(ctx context.Context, orgID uuid.UUID) (ai.Provider, bool) {
-			row, err := q.GetOrgAISettings(ctx, orgID)
-			if err != nil || row == nil || !row.Enabled {
-				return nil, false
+		rt.ResolveOrgProvider = func(ctx context.Context, orgID uuid.UUID, requestQueries *generated.Queries) (ai.Provider, bool, error) {
+			if requestQueries == nil {
+				return nil, false, errors.New("AI organization provider store unavailable")
+			}
+			row, err := requestQueries.GetOrgAISettings(ctx, orgID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, nil
+			}
+			if err != nil || row == nil || row.OrgID != orgID {
+				return nil, false, errors.New("AI organization provider lookup failed")
+			}
+			if !row.Enabled {
+				return nil, false, nil
 			}
 			plain, err := ai.AESDecrypt(keyRaw, row.ApiKeyCt)
 			if err != nil {
-				return nil, false
+				return nil, false, errors.New("AI organization provider credential unavailable")
 			}
 			switch row.Provider {
 			case "anthropic":
-				return ai.NewAnthropicProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true
+				return ai.NewAnthropicProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true, nil
 			case "mistral":
-				return ai.NewMistralProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true
+				return ai.NewMistralProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true, nil
 			}
-			return nil, false
+			return nil, false, errors.New("AI organization provider unsupported")
 		}
 	}
 	return rt, nil

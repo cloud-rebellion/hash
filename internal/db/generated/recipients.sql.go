@@ -246,6 +246,47 @@ func (q *Queries) GetRecipientByTokenHash(ctx context.Context, magicTokenHash []
 	return &i, err
 }
 
+const getRecipientForShare = `-- name: GetRecipientForShare :one
+SELECT r.id, r.document_id, r.role, r.email, r.name, r.order_index, r.status, r.magic_token_hash, r.sent_at, r.first_viewed_at, r.signed_at, r.declined_reason, r.created_at, r.magic_token_expires_at, r.locale FROM recipients r
+JOIN documents d ON d.id = r.document_id
+WHERE r.id = $1
+  AND r.document_id = $2
+  AND d.org_id = $3
+FOR SHARE OF r
+`
+
+type GetRecipientForShareParams struct {
+	ID         uuid.UUID `json:"id"`
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+// Callers lock the parent document first. Keep the exact admitted recipient
+// credential stable across bounded external processing without blocking the
+// foreign-key KEY SHARE locks used by independently committed cost evidence.
+func (q *Queries) GetRecipientForShare(ctx context.Context, arg GetRecipientForShareParams) (*Recipient, error) {
+	row := q.db.QueryRow(ctx, getRecipientForShare, arg.ID, arg.DocumentID, arg.OrgID)
+	var i Recipient
+	err := row.Scan(
+		&i.ID,
+		&i.DocumentID,
+		&i.Role,
+		&i.Email,
+		&i.Name,
+		&i.OrderIndex,
+		&i.Status,
+		&i.MagicTokenHash,
+		&i.SentAt,
+		&i.FirstViewedAt,
+		&i.SignedAt,
+		&i.DeclinedReason,
+		&i.CreatedAt,
+		&i.MagicTokenExpiresAt,
+		&i.Locale,
+	)
+	return &i, err
+}
+
 const invalidateRecipientTokens = `-- name: InvalidateRecipientTokens :exec
 UPDATE recipients
 SET magic_token_expires_at = now()

@@ -168,7 +168,7 @@ func registerVariableBindingTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "preview_resolved_variables",
-		Description: "Resolve every variable binding on a doc and return the final variable map plus a per-binding ResolveReport. On non-draft docs runs in FreezeMode (last_value cached at send time, no live fetches).",
+		Description: "Preview every variable binding on a doc without persisting observations and return the final variable map plus a per-binding ResolveReport. On non-draft docs runs in FreezeMode (last_value cached at send time, no live fetches).",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 			"agent_overrides": map[string]any{
@@ -193,7 +193,13 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeRead)
+			if err != nil {
+				return nil, err
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), resolver.PreviewTimeout)
+			defer cancel()
+			doc, err := d.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, errors.New("document not found")
 			}
@@ -204,8 +210,11 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			if doc.Status != "draft" {
 				opts.FreezeMode = true
 			}
-			vars, report, err := d.Resolver.Resolve(r.Context(), doc, opts)
+			vars, report, err := d.Resolver.Resolve(ctx, doc, opts)
 			if err != nil {
+				return nil, err
+			}
+			if err := resolver.CheckPreview(ctx, d.Pool, doc, report, u.UserID, authorize); err != nil {
 				return nil, err
 			}
 			return map[string]any{"variables": vars, "report": report, "frozen": opts.FreezeMode}, nil

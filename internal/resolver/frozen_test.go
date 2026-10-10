@@ -20,11 +20,11 @@ type frozenBindings struct {
 func (s *frozenBindings) ListVariableBindings(context.Context, uuid.UUID) ([]*generated.DocumentVariableBinding, error) {
 	return s.bindings, nil
 }
-func (s *frozenBindings) UpdateVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error {
+func (s *frozenBindings) StageVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error {
 	s.writes++
 	return nil
 }
-func (s *frozenBindings) UpdateVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error {
+func (s *frozenBindings) StageVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error {
 	s.writes++
 	return nil
 }
@@ -46,6 +46,9 @@ func TestFrozenResolutionUsesSnapshotInsteadOfMutableBindingValues(t *testing.T)
 	r := New(nil, forbiddenFrozenSource{t})
 	r.Q = store
 	doc := &generated.Document{ID: uuid.New(), VariablesJson: json.RawMessage(`{"amount":"100","empty":"","static":"unchanged"}`)}
+	for _, binding := range store.bindings {
+		binding.DocumentID = doc.ID
+	}
 	values, report, err := r.Resolve(context.Background(), doc, ResolveOptions{FreezeMode: true})
 	if err != nil {
 		t.Fatal(err)

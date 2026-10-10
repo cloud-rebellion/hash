@@ -23,6 +23,7 @@ import (
 	pdftypes "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/render"
 )
 
@@ -51,14 +52,14 @@ type stampItem struct {
 func buildPageOverlayHTML(items []stampItem) string {
 	var sb strings.Builder
 	sb.WriteString(`<!doctype html><html><head><meta charset="utf-8"><style>`)
-	sb.WriteString(`html,body{margin:0;padding:0;height:100%;width:100%}`)
+	sb.WriteString(`@page{margin:0}html,body{margin:0;padding:0;height:100%;width:100%}`)
 	sb.WriteString(`.f{position:absolute;box-sizing:border-box;display:flex;align-items:center;` +
 		`font-family:Inter,system-ui,sans-serif;font-size:11px;color:#111;overflow:hidden;line-height:1.2}`)
 	sb.WriteString(render.SignatureCSS())
 	sb.WriteString(`</style></head><body>`)
 	for _, it := range items {
 		fmt.Fprintf(&sb,
-			`<div class="f" style="left:%.3f%%;top:%.3f%%;width:%.3f%%;height:%.3f%%">%s</div>`,
+			`<div class="f" style="left:%.4f%%;top:%.4f%%;width:%.4f%%;height:%.4f%%">%s</div>`,
 			it.XPct, it.YPct, it.WPct, it.HPct, it.HTML)
 	}
 	sb.WriteString(`</body></html>`)
@@ -168,6 +169,13 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 	if err != nil {
 		return nil, err
 	}
+	recipients, err := e.Queries.ListRecipientsByDocument(ctx, doc.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := pdflayout.ValidateSignatureRows(doc, recipients, fields, sigs, len(dims)); err != nil {
+		return nil, fmt.Errorf("stamp PDF parties: %w", err)
+	}
 	sigByRec := map[string]*generated.Signature{}
 	for _, s := range sigs {
 		if err := render.ValidateSignatureName(s.TypedName); err != nil {
@@ -212,7 +220,10 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 			PaperWidth:  float32(dim.Width) / 72.0,
 			PaperHeight: float32(dim.Height) / 72.0,
 			Margins:     [4]float32{0, 0, 0, 0},
-			WaitDelay:   "500ms",
+			// Zero margins are intentional here. Suppress the ordinary
+			// one-inch document defaults so percentages remain page-relative.
+			PreferCSSPageSize: true,
+			WaitDelay:         "500ms",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("render overlay page %d: %w", page, err)

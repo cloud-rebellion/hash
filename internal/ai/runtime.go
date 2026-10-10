@@ -123,13 +123,20 @@ type Runtime struct {
 	Embedder  Embedder            // see embedder.go
 	PromptReg *PromptRegistry
 
+	// CompletionAudit is a request-bound writer. When configured, persistence
+	// is required before returning a completion; Q still supplies recipient PII.
+	CompletionAudit func(context.Context, generated.InsertAICompletionAuditParams) error
+
 	// ResolveOrgProvider, when non-nil, lets an org bring its own AI
 	// provider + key (BYOAI). It returns (provider, true) when the org has
-	// an enabled override, or (nil, false) to fall through to the instance
+	// an enabled override, or (nil, false, nil) to use the instance
 	// default. It is consulted only when the caller did not pin a specific
 	// provider via CompleteOptions.Provider, so a nil resolver leaves the
 	// existing instance-global behaviour exactly unchanged.
-	ResolveOrgProvider func(ctx context.Context, orgID uuid.UUID) (Provider, bool)
+	// Queries is the request-bound store: a guarded call must not acquire a
+	// fourth pooled connection while retaining authority/accounting capacity.
+	// Lookup/decryption failures must fail closed rather than select a fallback.
+	ResolveOrgProvider func(ctx context.Context, orgID uuid.UUID, q *generated.Queries) (Provider, bool, error)
 }
 
 // New builds a Runtime. Providers slice may be empty (a Runtime with no
@@ -160,6 +167,20 @@ func New(q *generated.Queries, shield Shield, embedder Embedder, providers ...Pr
 		PromptReg: NewPromptRegistry(),
 	}
 }
+
+// ForAuditedRequest retains provider selection, Shield and recipient lookup,
+// while requiring the caller's receipt-bound usage writer. Provider requests
+// have independent request/result evidence, so they bypass the process cache.
+func (r *Runtime) ForAuditedRequest(q *generated.Queries, writer func(context.Context, generated.InsertAICompletionAuditParams) error) *Runtime {
+	if r == nil || writer == nil {
+		return nil
+	}
+	scoped := *r
+	scoped.Q, scoped.Cache, scoped.CompletionAudit = q, nil, writer
+	return &scoped
+}
+
+var ErrCompletionAudit = errors.New("AI usage evidence unavailable")
 
 // Status describes the runtime's configuration for ai_runtime_status
 // reads. No usage data, no PII; safe to expose to operators.
@@ -210,7 +231,14 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	var ok bool
 	// Per-org BYOAI override: only when the caller did not pin a provider.
 	if providerName == "" && r.ResolveOrgProvider != nil && opts.OrgID != uuid.Nil {
-		if p, has := r.ResolveOrgProvider(ctx, opts.OrgID); has {
+		p, has, err := r.ResolveOrgProvider(ctx, opts.OrgID, r.Q)
+		if err != nil {
+			return Response{}, errors.New("AI organization provider unavailable")
+		}
+		if has {
+			if p == nil {
+				return Response{}, errors.New("AI organization provider unavailable")
+			}
 			provider, ok = p, true
 		}
 	}
@@ -221,14 +249,6 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 		provider, ok = r.Providers[providerName]
 		if !ok {
 			return Response{}, fmt.Errorf("ai runtime: provider %q not registered", providerName)
-		}
-	}
-
-	// Cache lookup first; the cache key already incorporates the prompt
-	// text so cached entries are safe to re-serve.
-	if opts.CacheKey != "" {
-		if hit, ok := r.Cache.get(opts.CacheKey); ok {
-			return hit, nil
 		}
 	}
 
@@ -247,7 +267,11 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	// NER/address pass, deferred.
 	known := append([]string{}, opts.KnownPII...)
 	if opts.DocumentID != nil && r.Q != nil {
-		if recs, rerr := r.Q.ListRecipientsByDocument(ctx, *opts.DocumentID); rerr == nil {
+		recs, rerr := r.Q.ListRecipientsByDocument(ctx, *opts.DocumentID)
+		if rerr != nil && r.CompletionAudit != nil {
+			return Response{}, errors.New("AI party context unavailable")
+		}
+		if rerr == nil {
 			for _, rec := range recs {
 				if rec != nil && strings.TrimSpace(rec.Name) != "" {
 					known = append(known, rec.Name)
@@ -256,16 +280,41 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 		}
 	}
 
+	// A plaintext cached response belongs to its tenant, document, actor,
+	// provider, Shield state and full PII/request context. BYOAI has mutable
+	// credentials with no cache generation, so it does not share cached results.
+	cacheKey := ""
+	if r.Cache != nil && r.CompletionAudit == nil && r.ResolveOrgProvider == nil && opts.CacheKey != "" && opts.OrgID != uuid.Nil && opts.DocumentID != nil && opts.UserID != nil {
+		contextKey, _ := json.Marshal(struct {
+			OrgID                     uuid.UUID
+			DocumentID, UserID        *uuid.UUID
+			Provider, Model, Endpoint string
+			Shield                    bool
+			Request                   Request
+			Options                   CompleteOptions
+			KnownPII                  []string
+		}{opts.OrgID, opts.DocumentID, opts.UserID, provider.Name(), provider.Model(), provider.Endpoint(), r.Shield.Active(), req, opts, known})
+		digest := sha256.Sum256(contextKey)
+		cacheKey = hex.EncodeToString(digest[:])
+		if hit, ok := r.Cache.get(cacheKey); ok {
+			return hit, nil
+		}
+	}
+
 	// Shield outbound. Both system and user blocks are tokenized; we
 	// re-stitch with the same handle so Untokenize works.
 	shieldedUser, handle, err := r.Shield.Tokenize(ctx, req.User, known...)
 	if err != nil {
-		r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err)
+		if auditErr := r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err); auditErr != nil {
+			return Response{}, auditErr
+		}
 		return Response{}, fmt.Errorf("shield tokenize: %w", err)
 	}
 	shieldedSystem, _, err := r.Shield.Tokenize(ctx, req.System, known...)
 	if err != nil {
-		r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err)
+		if auditErr := r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err); auditErr != nil {
+			return Response{}, auditErr
+		}
 		return Response{}, fmt.Errorf("shield tokenize system: %w", err)
 	}
 	out := req
@@ -276,7 +325,9 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	resp, err := provider.Complete(ctx, out)
 	latency := int(time.Since(start) / time.Millisecond)
 	if err != nil {
-		r.writeAudit(ctx, opts, provider, req, resp, latency, false, err)
+		if auditErr := r.writeAudit(ctx, opts, provider, req, resp, latency, false, err); auditErr != nil {
+			return Response{}, auditErr
+		}
 		return Response{}, err
 	}
 	resp.LatencyMs = latency
@@ -284,15 +335,19 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	// Shield inbound.
 	plain, err := r.Shield.Untokenize(ctx, resp.Text, handle)
 	if err != nil {
-		r.writeAudit(ctx, opts, provider, req, resp, latency, false, err)
+		if auditErr := r.writeAudit(ctx, opts, provider, req, resp, latency, false, err); auditErr != nil {
+			return Response{}, auditErr
+		}
 		return Response{}, fmt.Errorf("shield untokenize: %w", err)
 	}
 	resp.Text = plain
 
-	if opts.CacheKey != "" {
-		r.Cache.put(opts.CacheKey, resp)
+	if err := r.writeAudit(ctx, opts, provider, req, resp, latency, true, nil); err != nil {
+		return Response{}, err
 	}
-	r.writeAudit(ctx, opts, provider, req, resp, latency, true, nil)
+	if cacheKey != "" {
+		r.Cache.put(cacheKey, resp)
+	}
 	return resp, nil
 }
 
@@ -308,13 +363,13 @@ func CacheKey(req Request) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provider, req Request, resp Response, latency int, success bool, err error) {
-	if r.Q == nil {
-		return // tests may run without DB
-	}
+func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provider, req Request, resp Response, latency int, success bool, err error) error {
+	if r.Q == nil && r.CompletionAudit == nil {
+		return nil
+	} // tests may run without DB
 	errStr := ""
 	if err != nil {
-		errStr = err.Error()
+		errStr = "completion failed" // provider diagnostics may contain credentials or private text
 	}
 	var docID, userID pgtype.UUID
 	if opts.DocumentID != nil {
@@ -323,8 +378,7 @@ func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provid
 	if opts.UserID != nil {
 		userID = pgtype.UUID{Bytes: *opts.UserID, Valid: true}
 	}
-	// Best-effort log; never fail the call because of audit table issues.
-	_, _ = r.Q.InsertAICompletionAudit(ctx, generated.InsertAICompletionAuditParams{
+	params := generated.InsertAICompletionAuditParams{
 		OrgID:                opts.OrgID,
 		DocumentID:           docID,
 		ActorUserID:          userID,
@@ -339,7 +393,16 @@ func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provid
 		Success:              success,
 		Error:                errStr,
 		TransferJurisdiction: TransferJurisdictionForEndpoint(p.Endpoint()),
-	})
+	}
+	if r.CompletionAudit != nil {
+		if err := r.CompletionAudit(ctx, params); err != nil {
+			return ErrCompletionAudit
+		}
+		return nil
+	}
+	// Legacy callers are best-effort until their transport owns a request receipt.
+	_, _ = r.Q.InsertAICompletionAudit(ctx, params)
+	return nil
 }
 
 // TransferJurisdictionForEndpoint returns the canonical jurisdiction tag

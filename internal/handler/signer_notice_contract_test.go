@@ -43,39 +43,57 @@ func TestSignerMutationHandlersEnforceCurrentNotice(t *testing.T) {
 }
 
 func TestSignerClarifierAuditsBeforeExternalProcessingAndChecksResultAudit(t *testing.T) {
-	raw, err := os.ReadFile("ai_apps.go")
+	handlerRaw, err := os.ReadFile("ai_apps.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	allSource := string(raw)
-	start := strings.Index(allSource, "func (s *Server) handleSignerClarify")
-	end := strings.Index(allSource, "func lookupBlockWithNeighbours")
-	if start < 0 || end <= start {
-		t.Fatal("could not isolate handleSignerClarify source")
+	helperRaw, err := os.ReadFile("signer_ai.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	source := allSource[start:end]
-	rowLock := strings.Index(source, `GetDocumentForShare(`)
-	lockedValidation := strings.Index(source, `sign.ValidateLockedNoticeEvidence(`)
-	requestAudit := strings.Index(source, `Kind:        "clarifier.requested"`)
-	externalCall := strings.Index(source, `s.Clarifier.Clarify(`)
-	answerAudit := strings.Index(source, `Kind:        "clarifier.answered"`)
-	lockRelease := strings.Index(source, `lockTx.Commit(`)
-	if rowLock < 0 || lockedValidation <= rowLock || requestAudit <= lockedValidation ||
-		externalCall <= requestAudit || answerAudit <= externalCall || lockRelease <= answerAudit {
-		t.Fatalf("clarifier lock/revalidation/audit/provider order is unsafe: lock=%d validation=%d request=%d provider=%d answer=%d release=%d",
-			rowLock, lockedValidation, requestAudit, externalCall, answerAudit, lockRelease)
+	handler := string(handlerRaw)
+	handlerStart := strings.Index(handler, "func (s *Server) handleSignerClarify")
+	handlerEnd := strings.Index(handler, "func lookupBlockWithNeighbours")
+	if handlerStart < 0 || handlerEnd <= handlerStart {
+		t.Fatal("missing signer clarification endpoint")
 	}
-	if strings.Contains(source, `_, _ = s.Audit.Log`) {
-		t.Fatal("clarifier ignores an audit-ledger write failure")
+	handler = handler[handlerStart:handlerEnd]
+	notice := strings.Index(handler, "requireSignerNoticeAcknowledgement(")
+	guardedCall := strings.Index(handler, "s.completeSignerClarifier(")
+	if notice < 0 || guardedCall <= notice {
+		t.Fatal("clarifier bypasses recipient Article13 admission")
 	}
-	if strings.Contains(source, `s.Audit.LogTx`) {
-		t.Fatal("clarifier request audit is not independently durable before provider processing")
+	helper := string(helperRaw)
+	guardLock := strings.Index(helper, "GetDocumentForShare(")
+	recipientLock := strings.Index(helper, "GetRecipientForShare(")
+	originalCredential := strings.Index(helper, "sign.ValidateLockedRecipientCredential(")
+	lockedNotice := strings.Index(helper, "sign.ValidateLockedNoticeEvidence(")
+	if guardLock < 0 || recipientLock <= guardLock || originalCredential < 0 || lockedNotice <= originalCredential {
+		t.Fatal("clarifier lacks parent-first retained recipient credential and notice guard")
 	}
-	if !strings.Contains(source, `context.WithTimeout(r.Context(), signerClarifierTimeout)`) {
-		t.Fatal("clarifier external processing is not bounded by the request context")
+	start := strings.Index(helper, "func (s *Server) completeSignerClarifier(")
+	if start < 0 {
+		t.Fatal("missing guarded signer provider protocol")
 	}
-	if !strings.Contains(source, `lockTx.Rollback(rollbackCtx)`) {
-		t.Fatal("clarifier does not release its ceremony row lock on every error path")
+	source := helper[start:]
+	requestGuard := strings.Index(source, "lockSignerClarifier(ctx, requestTx,")
+	requestAudit := strings.Index(source, `Kind: "ai.requested"`)
+	requestCommit := strings.Index(source, "requestTx.Commit(ctx)")
+	dispatchGuard := strings.Index(source, "lockSignerClarifier(ctx, tx,")
+	externalCall := strings.Index(source, "}).Clarify(ctx,")
+	answerAudit := strings.Index(source, `Kind: "clarifier.answered"`)
+	finalCheck := strings.LastIndex(source, "guard.recheck(ctx)")
+	finalCommit := strings.Index(source, "tx.Commit(ctx)")
+	if requestGuard < 0 || requestAudit <= requestGuard || requestCommit <= requestAudit ||
+		dispatchGuard <= requestCommit || externalCall <= dispatchGuard || answerAudit <= externalCall ||
+		finalCheck <= answerAudit || finalCommit <= finalCheck {
+		t.Fatalf("clarifier durable-request/dispatch/result order unsafe: %d/%d/%d/%d/%d/%d/%d/%d", requestGuard, requestAudit, requestCommit, dispatchGuard, externalCall, answerAudit, finalCheck, finalCommit)
+	}
+	if !strings.Contains(source, "context.WithTimeout(r.Context(), signerClarifierTimeout)") ||
+		!strings.Contains(source, "authoring.ReserveAIAccounting(") ||
+		!strings.Contains(source, "InsertRequestedSignerAICompletionAudit(") ||
+		strings.Contains(source, "_, _ = s.Audit.Log") {
+		t.Fatal("clarifier lacks bounded processing or required reserved accounting")
 	}
 }
 

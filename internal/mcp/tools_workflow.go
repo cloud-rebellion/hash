@@ -19,6 +19,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/send"
 )
@@ -167,7 +168,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "set_expiry",
 		Write:       true,
-		Description: "Set or update the document's expires_at. After expiry, sent / in-progress documents transition to expired (worker hourly tick).",
+		Description: "Set or clear expires_at on an editable draft. After sending, the document expires at that frozen time (worker hourly tick). Retained signing evidence and open privacy reviews prevent editing.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 			"expires_at":  stringSchema("RFC3339 timestamp; pass empty string to clear"),
@@ -188,16 +189,6 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			existing, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
-			}
-			if err != nil {
-				return nil, err
-			}
-			if existing.Status != "draft" && existing.Status != "sent" && existing.Status != "in_progress" {
-				return nil, fmt.Errorf("expiry only adjustable on active documents (status=%s)", existing.Status)
-			}
 			var expiresArg pgtype.Timestamptz
 			if p.ExpiresAt != "" {
 				t, perr := time.Parse(time.RFC3339, p.ExpiresAt)
@@ -209,51 +200,23 @@ func registerWorkflowTools(s *Server, d Deps) {
 				}
 				expiresArg = pgtype.Timestamptz{Time: t, Valid: true}
 			}
-			if d.Pool == nil || d.Audit == nil {
-				return nil, errors.New("atomic audit dependencies unavailable")
-			}
-			tx, err := d.Pool.Begin(r.Context())
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			q := d.Queries.WithTx(tx)
-			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
-			if err != nil {
-				return nil, err
-			}
-			if locked.Status != "draft" {
-				return nil, errors.New("expiry can only be edited while the document is draft")
-			}
-			doc, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
-				ID: id, OrgID: u.OrgID,
-				Name:      locked.Name,
-				ExpiresAt: expiresArg,
-				Metadata:  locked.Metadata,
-			})
-			if err != nil {
-				return nil, err
-			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "set_expiry", "expires_at": p.ExpiresAt},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
-			return doc, nil
+			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteWorkflow,
+				map[string]any{"via": "mcp", "tool": "set_expiry", "expires_at": p.ExpiresAt},
+				func(locked *generated.Document) (generated.UpdateDocumentMetadataParams, error) {
+					// A timestamp that was valid at admission can expire during a
+					// parent/member lock wait. Validate the freshly locked edit too.
+					if expiresArg.Valid && !expiresArg.Time.After(time.Now()) {
+						return generated.UpdateDocumentMetadataParams{}, errors.New("expires_at must be in the future")
+					}
+					return generated.UpdateDocumentMetadataParams{ID: id, OrgID: u.OrgID, Name: locked.Name, ExpiresAt: expiresArg, Metadata: locked.Metadata}, nil
+				})
 		},
 	})
 
 	s.RegisterTool(ToolDef{
 		Name:        "attach_metadata",
 		Write:       true,
-		Description: "Merge a key/value pair into the document's metadata JSONB. External systems (BrightCRM, n8n, etc.) use this to correlate Hash documents with their own ids. Existing keys are overwritten.",
+		Description: "Merge a key/value pair into an editable draft's metadata JSONB. External systems use this to correlate Hash documents with their own ids. Existing keys are overwritten; retained signing evidence and open privacy reviews prevent editing.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 			"key":         stringSchema("metadata key"),
@@ -279,57 +242,76 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if p.Key == "" {
 				return nil, errors.New("key required")
 			}
-			if d.Pool == nil || d.Audit == nil {
-				return nil, errors.New("atomic audit dependencies unavailable")
-			}
-			tx, err := d.Pool.Begin(r.Context())
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			q := d.Queries.WithTx(tx)
-			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
-			if err != nil {
-				return nil, err
-			}
-			if locked.Status != "draft" {
-				return nil, errors.New("metadata can only be edited while the document is draft")
-			}
-			meta := map[string]any{}
-			if len(locked.Metadata) > 0 {
-				if err := json.Unmarshal(locked.Metadata, &meta); err != nil {
-					return nil, fmt.Errorf("stored metadata invalid: %w", err)
-				}
-			}
-			meta[p.Key] = p.Value
-			raw, err := json.Marshal(meta)
-			if err != nil {
-				return nil, err
-			}
-			doc, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
-				ID: id, OrgID: u.OrgID,
-				Name:      locked.Name,
-				ExpiresAt: locked.ExpiresAt,
-				Metadata:  raw,
-			})
-			if err != nil {
-				return nil, err
-			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "attach_metadata", "key": p.Key, "value": p.Value},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
-			return doc, nil
+			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteAuthoring,
+				map[string]any{"via": "mcp", "tool": "attach_metadata", "key": p.Key, "value": p.Value},
+				func(locked *generated.Document) (generated.UpdateDocumentMetadataParams, error) {
+					meta := map[string]any{}
+					if len(locked.Metadata) > 0 {
+						if err := json.Unmarshal(locked.Metadata, &meta); err != nil {
+							return generated.UpdateDocumentMetadataParams{}, fmt.Errorf("stored metadata invalid: %w", err)
+						}
+					}
+					if meta == nil {
+						return generated.UpdateDocumentMetadataParams{}, errors.New("stored metadata must be an object")
+					}
+					meta[p.Key] = p.Value
+					raw, err := json.Marshal(meta)
+					if err != nil {
+						return generated.UpdateDocumentMetadataParams{}, err
+					}
+					return generated.UpdateDocumentMetadataParams{ID: id, OrgID: u.OrgID, Name: locked.Name, ExpiresAt: locked.ExpiresAt, Metadata: raw}, nil
+				})
 		},
 	})
+}
+
+// Both metadata tools retain the original admitted key, the live sender/owner,
+// and draft/evidence/privacy locks through mutation and audit. No second token
+// use is claimed. Publication follows the final receipt check and commit.
+func mutateDraftDocumentMetadata(r *http.Request, d Deps, u auth.SessionUser, id uuid.UUID, scope string, payload map[string]any,
+	input func(*generated.Document) (generated.UpdateDocumentMetadataParams, error),
+) (*generated.Document, error) {
+	if d.Pool == nil || d.Queries == nil || d.Audit == nil {
+		return nil, errors.New("atomic metadata dependencies unavailable")
+	}
+	authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, scope)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
+	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
+	if err != nil {
+		return nil, err
+	}
+	params, err := input(guard.Document)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := d.Queries.WithTx(tx).UpdateDocumentMetadata(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	actorID := guard.UserID()
+	pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: u.OrgID, ActorUserID: &actorID, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := guard.Recheck(ctx); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	d.Audit.Publish(pending)
+	return doc, nil
 }
 
 // senderFromDoc loads the sender's identity for the email templates. Best

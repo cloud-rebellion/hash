@@ -99,7 +99,7 @@ func (s *Server) handleListBillingPlans(w http.ResponseWriter, r *http.Request) 
 			"features":                p.FeaturesJson,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"plans": out, "billing_enabled": true, "provider": s.Billing.Provider.Name()})
+	writeJSON(w, http.StatusOK, map[string]any{"plans": out, "billing_enabled": true, "payments_enabled": s.Billing.PaymentsEnabled(), "provider": s.Billing.Provider.Name()})
 }
 
 // handleGetBillingSubscription returns the org's current subscription
@@ -148,10 +148,15 @@ func (s *Server) handleGetBillingSubscription(w http.ResponseWriter, r *http.Req
 			"cancel_at_period_end": sub.CancelAtPeriodEnd,
 		}
 	}
+	if s.Billing.OperatorMode() {
+		subOut = nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plan":            planOut,
-		"subscription":    subOut,
-		"billing_enabled": true,
+		"plan":             planOut,
+		"subscription":     subOut,
+		"billing_enabled":  true,
+		"payments_enabled": s.Billing.PaymentsEnabled(),
+		"provider":         s.Billing.Provider.Name(),
 	})
 }
 
@@ -185,8 +190,8 @@ func (s *Server) handleStartBillingCheckout(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.Billing == nil {
-		writeError(w, http.StatusServiceUnavailable, "billing not enabled on this instance")
+	if !s.Billing.PaymentsEnabled() {
+		writeError(w, http.StatusServiceUnavailable, "payment collection not enabled on this instance")
 		return
 	}
 	var in checkoutInput
@@ -263,7 +268,7 @@ func (s *Server) handleCancelBillingSubscription(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	if s.Billing == nil {
+	if !s.Billing.PaymentsEnabled() {
 		writeError(w, http.StatusServiceUnavailable, "billing not enabled")
 		return
 	}
@@ -304,7 +309,7 @@ func (s *Server) handleListBillingInvoices(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if s.Billing == nil {
+	if !s.Billing.PaymentsEnabled() {
 		writeJSON(w, http.StatusOK, map[string]any{"invoices": []any{}})
 		return
 	}
@@ -338,7 +343,7 @@ func (s *Server) handleListBillingInvoices(w http.ResponseWriter, r *http.Reques
 // dereferences the ID against api.mollie.com to verify authenticity.
 // Mock provider accepts any JSON body for synthetic events.
 func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
-	if s.Billing == nil {
+	if !s.Billing.PaymentsEnabled() {
 		writeError(w, http.StatusServiceUnavailable, "billing not enabled")
 		return
 	}

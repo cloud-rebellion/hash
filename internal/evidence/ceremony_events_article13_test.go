@@ -281,6 +281,8 @@ func TestCeremonyEventsV2RequiresNoticeForEveryPostCutoverRecipientEvent(t *test
 		{name: "comment", kind: audit.KindCommentPosted, payload: map[string]any{"side": "signer"}},
 		{name: "clarifier request", kind: "clarifier.requested", payload: map[string]any{"block_id": "clause"}},
 		{name: "clarifier answer", kind: "clarifier.answered", payload: map[string]any{"block_id": "clause"}},
+		{name: "recipient AI request", kind: "ai.requested", payload: map[string]any{"via": "signer", "tool": "clarify_clause"}},
+		{name: "recipient AI cost", kind: "ai.completed", payload: map[string]any{"via": "signer", "tool": "clarify_clause"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -554,5 +556,68 @@ func TestVerifyCeremonyEventsV2RejectsOmissionDowngradeAndReordering(t *testing.
 	missingRecipientFile, missingRecipientDigest := ceremonyEventsFileForRows(t, ceremonyEventsSchemaV2, missingRecipientRows)
 	if err := VerifyCeremonyEventsJSON(missingRecipientFile, documentID.String(), orgID.String(), missingRecipientDigest, len(missingRecipientRows)); err == nil || !strings.Contains(err.Error(), "no recipient identity") {
 		t.Fatalf("VerifyCeremonyEventsJSON(missing recipient) error = %v", err)
+	}
+}
+
+func TestRecipientAIEventsRetainExactNoticeAndAllowStaffAccounting(t *testing.T) {
+	for _, kind := range []string{"ai.requested", "ai.completed"} {
+		t.Run(kind, func(t *testing.T) {
+			org, doc, recipient := uuid.New(), uuid.New(), uuid.New()
+			epoch := time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC)
+			marker := ceremonyTestEventAt(t, org, doc, pgtype.UUID{}, audit.KindDocumentSent, ceremonyArticle13MarkerPayload(t, epoch), epoch)
+			recipientUUID := pgtype.UUID{Bytes: recipient, Valid: true}
+			recipientPayload := func(ev article13.Evidence) []byte {
+				payload := map[string]any{"via": "signer", "tool": "clarify_clause"}
+				if err := ev.BindAuditPayload(payload); err != nil {
+					t.Fatal(err)
+				}
+				return ceremonyJSONPayload(t, payload)
+			}
+			good := recipientPayload(ceremonyArticle13EvidenceAt(t, org, doc, recipient, epoch))
+			row := ceremonyTestEventAt(t, org, doc, recipientUUID, kind, good, epoch.Add(time.Minute))
+			if _, _, _, err := BuildCeremonyEventsJSON(doc, []*generated.Event{marker, row}); err != nil {
+				t.Fatal("exact recipient AI notice refused", err)
+			}
+			for _, change := range []string{"body", "recipient", "epoch", "missing-recipient", "mixed-actor"} {
+				t.Run(change, func(t *testing.T) {
+					payload := good
+					switch change {
+					case "body":
+						payload = tamperCeremonyNoticeSnapshot(t, good)
+					case "recipient":
+						payload = recipientPayload(ceremonyArticle13EvidenceAt(t, org, doc, uuid.New(), epoch))
+					case "epoch":
+						payload = recipientPayload(ceremonyArticle13EvidenceAt(t, org, doc, recipient, epoch.Add(-time.Hour)))
+					}
+					bad := ceremonyTestEventAt(t, org, doc, recipientUUID, kind, payload, epoch.Add(time.Minute))
+					if change == "missing-recipient" {
+						bad.RecipientID = pgtype.UUID{}
+						bad.PayloadHashed = []byte(`{"via":"signer","tool":"clarify_clause"}`)
+						bad.PayloadJson = bad.PayloadHashed
+					}
+					if change == "mixed-actor" {
+						bad.ActorUserID = pgtype.UUID{Bytes: uuid.New(), Valid: true}
+					}
+					hash, err := audit.RecomputeEventRowHash(bad)
+					if err != nil {
+						t.Fatal(err)
+					}
+					bad.RowHash = hash
+					if _, _, _, err := BuildCeremonyEventsJSON(doc, []*generated.Event{marker, bad}); err == nil {
+						t.Fatal("recipient AI accepted altered/misbound notice")
+					}
+				})
+			}
+			staff := ceremonyTestEventAt(t, org, doc, pgtype.UUID{}, kind, []byte(`{"via":"rest","tool":"run_risk_analysis"}`), epoch.Add(2*time.Minute))
+			staff.ActorUserID = pgtype.UUID{Bytes: uuid.New(), Valid: true}
+			hash, err := audit.RecomputeEventRowHash(staff)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staff.RowHash = hash
+			if _, _, _, err := BuildCeremonyEventsJSON(doc, []*generated.Event{marker, staff}); err != nil {
+				t.Fatal("staff accounting requires fabricated signer acknowledgement", err)
+			}
+		})
 	}
 }

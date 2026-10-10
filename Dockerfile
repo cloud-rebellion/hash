@@ -16,7 +16,7 @@ COPY frontend/ .
 RUN bun run build
 
 # Stage 2: build the Go server.
-FROM golang:1.26.7-alpine3.24@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS backend
+FROM golang:1.26.9-alpine3.24@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS backend
 WORKDIR /app
 RUN apk add --no-cache ca-certificates git
 COPY go.mod go.sum ./
@@ -29,6 +29,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server ./cmd/server && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/worker ./cmd/worker && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/pdf-worker ./cmd/pdfworker && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/config-check ./cmd/configcheck && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/storage-check ./cmd/storagecheck && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/audit-verify ./cmd/auditverify && \
@@ -48,6 +49,7 @@ RUN apk add --no-cache \
     addgroup -S hash && adduser -S -G hash hash
 COPY --from=backend /out/server /usr/local/bin/hash-server
 COPY --from=backend /out/worker /usr/local/bin/hash-worker
+COPY --from=backend /out/pdf-worker /usr/local/bin/hash-pdf-worker
 COPY --from=backend /out/config-check /usr/local/bin/hash-config-check
 COPY --from=backend /out/storage-check /usr/local/bin/hash-storage-check
 COPY --from=backend /out/audit-verify /usr/local/bin/hash-audit-verify

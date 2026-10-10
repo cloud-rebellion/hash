@@ -16,6 +16,43 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getProposalForUpdate = `-- name: GetProposalForUpdate :one
+SELECT id, document_id, org_id, recipient_id, proposed_by, block_id, proposal_kind, proposed_text, rationale, diff_json, status, ai_assisted, parent_id, created_at, updated_at FROM document_proposals
+WHERE id = $1 AND org_id = $2 AND document_id = $3
+FOR UPDATE
+`
+
+type GetProposalForUpdateParams struct {
+	ID         uuid.UUID `json:"id"`
+	OrgID      uuid.UUID `json:"org_id"`
+	DocumentID uuid.UUID `json:"document_id"`
+}
+
+// Parent document is locked first; this exact row lookup binds chain/status
+// writes to the fresh authorized tenant/document and retains the proposal lock.
+func (q *Queries) GetProposalForUpdate(ctx context.Context, arg GetProposalForUpdateParams) (*DocumentProposal, error) {
+	row := q.db.QueryRow(ctx, getProposalForUpdate, arg.ID, arg.OrgID, arg.DocumentID)
+	var i DocumentProposal
+	err := row.Scan(
+		&i.ID,
+		&i.DocumentID,
+		&i.OrgID,
+		&i.RecipientID,
+		&i.ProposedBy,
+		&i.BlockID,
+		&i.ProposalKind,
+		&i.ProposedText,
+		&i.Rationale,
+		&i.DiffJson,
+		&i.Status,
+		&i.AiAssisted,
+		&i.ParentID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const getProposalOwnerDoc = `-- name: GetProposalOwnerDoc :one
 SELECT document_id FROM document_proposals WHERE id = $1 AND org_id = $2
 `

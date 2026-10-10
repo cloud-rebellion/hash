@@ -33,7 +33,7 @@ func TestResolverPreservesSuccessfulEmptySourceAndCacheValue(t *testing.T) {
 			t.Fatalf("values=%v report=%v", values, report)
 		}
 	}
-	if source.calls != 1 || store.writes != 2 {
+	if source.calls != 1 || store.writes != 0 {
 		t.Fatalf("fetches=%d writes=%d", source.calls, store.writes)
 	}
 	frozen, _, err := r.FreezeForSend(context.Background(), doc)

@@ -18,6 +18,7 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
+    showPDFSave: false, pdfSignatureFields: [],
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
     postingComment: false, commentLoadRevision: 0, commentRefreshError: null, savingMode: false,

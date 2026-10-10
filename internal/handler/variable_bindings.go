@@ -252,7 +252,14 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	doc, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
+	authorize, err := s.sessionDraftAuthorization(r, sess.OrgID, sess.UserID)
+	if err != nil {
+		s.writePreviewError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), resolver.PreviewTimeout)
+	defer cancel()
+	doc, err := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found")
@@ -261,9 +268,13 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	resolved, report, err := s.resolveVariables(r.Context(), doc)
+	resolved, report, err := s.resolveVariables(ctx, doc)
 	if err != nil {
 		writeInternalError(w, err)
+		return
+	}
+	if err := resolver.CheckPreview(ctx, s.Pool, doc, report, sess.UserID, authorize); err != nil {
+		s.writePreviewError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -271,4 +282,12 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 		"report":    report,
 		"frozen":    doc.Status != "draft",
 	})
+}
+
+func (s *Server) writePreviewError(w http.ResponseWriter, err error) {
+	if errors.Is(err, resolver.ErrPreviewChanged) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.writeDraftAuthoringError(w, "verify preview access", err)
 }

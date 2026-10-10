@@ -27,6 +27,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/requestmeta"
@@ -52,20 +53,24 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write:       true,
 		Description: "Create a new draft document. Use source_kind=blocks for the agent authoring path; source_kind=pdf with template_id for stamping flows.",
 		InputSchema: schemaObject(map[string]any{
-			"name":           stringSchema("human-readable document name"),
-			"source_kind":    map[string]any{"type": "string", "enum": []string{"blocks", "pdf"}, "description": "blocks (agent) or pdf (uploaded template)"},
-			"template_id":    stringSchema("optional template uuid to instantiate from"),
-			"variables_json": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "string variable values keyed by name (eg. {\"recipient.name\":\"Tom\"})"},
-			"blocks_json":    map[string]any{"type": "object", "description": "initial block tree {version:1,blocks:[...]} when source_kind=blocks"},
+			"name":                      stringSchema("human-readable document name"),
+			"source_kind":               map[string]any{"type": "string", "enum": []string{"blocks", "pdf"}, "description": "blocks (agent) or pdf (uploaded template)"},
+			"template_id":               stringSchema("optional template uuid to instantiate from"),
+			"expected_template_version": map[string]any{"type": "integer", "minimum": 1, "description": "reviewed current PDF layout template version"},
+			"parties":                   map[string]any{"type": "array", "maxItems": pdflayout.MaxParties, "items": schemaObject(map[string]any{"role": stringSchema("declared party role"), "name": stringSchema("fresh party name"), "email": stringSchema("fresh party email"), "locale": stringSchema("ceremony language")}, []string{"role", "name", "email"})},
+			"variables_json":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "string variable values keyed by name (eg. {\"recipient.name\":\"Tom\"})"},
+			"blocks_json":               map[string]any{"type": "object", "description": "initial block tree {version:1,blocks:[...]} when source_kind=blocks"},
 		}, []string{"name", "source_kind"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				Name          string          `json:"name"`
-				SourceKind    string          `json:"source_kind"`
-				TemplateID    string          `json:"template_id"`
-				BlocksJSON    json.RawMessage `json:"blocks_json"`
-				VariablesJSON json.RawMessage `json:"variables_json"`
+				Name                    string              `json:"name"`
+				SourceKind              string              `json:"source_kind"`
+				TemplateID              string              `json:"template_id"`
+				BlocksJSON              json.RawMessage     `json:"blocks_json"`
+				VariablesJSON           json.RawMessage     `json:"variables_json"`
+				ExpectedTemplateVersion *int32              `json:"expected_template_version"`
+				Parties                 []pdflayout.Binding `json:"parties"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -75,6 +80,9 @@ func registerAuthoringTools(s *Server, d Deps) {
 			}
 			if p.SourceKind != "blocks" && p.SourceKind != "pdf" {
 				return nil, errors.New("source_kind must be 'blocks' or 'pdf'")
+			}
+			if p.SourceKind != "pdf" && (len(p.Parties) > 0 || p.ExpectedTemplateVersion != nil) {
+				return nil, errors.New("party bindings require a PDF template")
 			}
 
 			var tmplID pgtype.UUID
@@ -86,130 +94,137 @@ func registerAuthoringTools(s *Server, d Deps) {
 				tmplID = pgtypeUUID(id)
 			}
 
-			vars := p.VariablesJSON
-			if len(vars) == 0 {
-				vars = json.RawMessage(`{}`)
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
 			}
-			if p.SourceKind == "blocks" {
-				if _, err := blocks.ParseVariableValues(vars); err != nil {
-					return nil, fmt.Errorf("invalid variables_json: %w", err)
-				}
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("document creation dependencies unavailable")
 			}
-
+			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+			defer cancel()
+			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = authoring.Rollback(ctx, tx) }()
+			q := generated.New(tx)
+			var doc *generated.Document
+			var guard *authoring.MemberGuard
+			var layoutEvents []audit.PendingEvent
 			switch p.SourceKind {
 			case "blocks":
-				blockTree := p.BlocksJSON
-				if len(blockTree) == 0 {
-					blockTree = json.RawMessage(`{"version":1,"blocks":[]}`)
+				if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+					return nil, err
 				}
-				// Normalize so generated block IDs are persisted once rather than
-				// being regenerated on every read/render.
-				normalized, err := blocks.NormalizeTreeJSON(blockTree)
-				if err != nil {
-					return nil, fmt.Errorf("invalid blocks_json: %w", err)
-				}
-				blockTree = normalized
-				doc, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-					func(q *generated.Queries) (*generated.Document, error) {
-						if err := d.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-							return nil, err
-						}
-						doc, err := q.CreateBlocksDocument(r.Context(), generated.CreateBlocksDocumentParams{
-							OrgID:         u.OrgID,
-							TemplateID:    tmplID,
-							Name:          p.Name,
-							BlocksJson:    blockTree,
-							VariablesJson: vars,
-							SenderID:      u.UserID,
-						})
-						if err != nil {
-							return nil, err
-						}
-						if d.Versions != nil {
-							if _, err := versions.New(q).Snapshot(r.Context(), versions.SnapshotInput{
-								DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-								BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &u.UserID,
-								Via: versions.ViaMCP, Summary: "create_document",
-							}); err != nil {
-								return nil, err
-							}
-						}
-						if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-							return nil, err
-						}
-						return doc, nil
-					},
-					func(doc *generated.Document) audit.Entry {
-						return audit.Entry{
-							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-							Kind:    audit.KindDocumentCreated,
-							Payload: map[string]any{"name": p.Name, "source_kind": "blocks", "via": "mcp", "tool": "create_document"},
-						}
-					},
-				)
+				seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, tmplID, p.SourceKind, p.BlocksJSON, p.VariablesJSON)
 				if err != nil {
 					return nil, err
 				}
-				return doc, nil
-			case "pdf":
-				if !tmplID.Valid {
-					return nil, errors.New("template_id required when source_kind=pdf")
+				guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+				if err != nil {
+					return nil, err
 				}
-				tpl, err := d.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{
-					ID: uuid.UUID(tmplID.Bytes), OrgID: u.OrgID,
+				doc, err = q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
+					OrgID: u.OrgID, TemplateID: tmplID, Name: p.Name,
+					BlocksJson: seed.BlocksJSON, VariablesJson: seed.VariablesJSON, SenderID: u.UserID,
 				})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("template not found")
+				if err != nil {
+					return nil, err
 				}
-				if err != nil || tpl.SourceKind != "pdf" {
-					return nil, errors.New("template is not a pdf-source template")
+				if d.Versions != nil {
+					if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
+						DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
+						BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &u.UserID,
+						Via: versions.ViaMCP, Summary: "create_document",
+					}); err != nil {
+						return nil, err
+					}
+				}
+				if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+					return nil, err
+				}
+			case "pdf":
+				if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+					return nil, err
+				}
+				seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, tmplID, p.SourceKind, nil, p.VariablesJSON)
+				if err != nil {
+					return nil, err
+				}
+				guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+				if err != nil {
+					return nil, err
 				}
 				rep, err := sanitize.SyntheticTemplateReport()
 				if err != nil {
 					return nil, err
 				}
-				doc, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-					func(q *generated.Queries) (*generated.Document, error) {
-						if err := d.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-							return nil, err
-						}
-						doc, err := q.CreatePDFDocument(r.Context(), generated.CreatePDFDocumentParams{
-							OrgID:                       u.OrgID,
-							TemplateID:                  tmplID,
-							Name:                        p.Name,
-							PdfStorageKey:               tpl.PdfStorageKey,
-							PdfSha256:                   tpl.PdfSha256,
-							PdfStorageVersionID:         tpl.PdfStorageVersionID,
-							EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
-							SenderID:                    u.UserID,
-						})
-						if err != nil {
-							return nil, err
-						}
-						if err := q.UpdateMetadataRedactionReport(r.Context(), generated.UpdateMetadataRedactionReportParams{
-							ID: doc.ID, MetadataRedactionReport: rep,
-						}); err != nil {
-							return nil, err
-						}
-						if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-							return nil, err
-						}
-						return doc, nil
-					},
-					func(doc *generated.Document) audit.Entry {
-						return audit.Entry{
-							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-							Kind:    audit.KindDocumentCreated,
-							Payload: map[string]any{"name": p.Name, "source_kind": "pdf", "via": "mcp", "tool": "create_document"},
-						}
-					},
-				)
+				tpl := seed.Template
+				layout, parties, err := pdflayout.Prepare(tpl, p.ExpectedTemplateVersion, p.Parties)
 				if err != nil {
 					return nil, err
 				}
-				return doc, nil
+				doc, err = q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
+					OrgID: u.OrgID, TemplateID: tmplID, Name: p.Name,
+					PdfStorageKey: tpl.PdfStorageKey, PdfSha256: tpl.PdfSha256,
+					PdfStorageVersionID: tpl.PdfStorageVersionID, EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
+					SenderID: u.UserID,
+				})
+				if err != nil {
+					return nil, err
+				}
+				if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{ID: doc.ID, MetadataRedactionReport: rep}); err != nil {
+					return nil, err
+				}
+				// Report storage changes updated_at; keep the guarded values
+				// update tied to the transaction's current newly created row.
+				doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: u.OrgID})
+				if err != nil {
+					return nil, err
+				}
+				// Preserve declared values for PDF designs too. This populates
+				// contract data; it does not rewrite already-rendered PDF bytes.
+				doc, err = q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
+					ID: doc.ID, OrgID: u.OrgID, VariablesJson: seed.VariablesJSON, ExpectedUpdatedAt: doc.UpdatedAt,
+				})
+				if err != nil {
+					return nil, err
+				}
+				if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
+					return nil, err
+				}
+				layoutEvents, err = pdflayout.Materialize(ctx, tx, q, d.Billing, d.Audit, doc, u.UserID, layout, parties, "mcp")
+				if err != nil {
+					return nil, err
+				}
 			}
-			return nil, errors.New("unreachable")
+			creationPayload := map[string]any{"name": p.Name, "source_kind": doc.SourceKind, "via": "mcp", "tool": "create_document"}
+			if len(layoutEvents) > 0 {
+				creationPayload["template_id"] = p.TemplateID
+				creationPayload["template_version"] = *p.ExpectedTemplateVersion
+				creationPayload["layout_version"] = 1
+				creationPayload["party_count"] = len(p.Parties)
+			}
+			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
+				Kind:    audit.KindDocumentCreated,
+				Payload: creationPayload,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := guard.Recheck(ctx); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, err
+			}
+			for _, event := range layoutEvents {
+				d.Audit.Publish(event)
+			}
+			d.Audit.Publish(pending)
+			return doc, nil
 		},
 	})
 
@@ -277,16 +292,27 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if d.Pool == nil || d.Audit == nil {
 				return nil, errors.New("atomic audit dependencies unavailable")
 			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+			defer cancel()
+			r = r.WithContext(ctx)
 			tx, err := d.Pool.Begin(r.Context())
 			if err != nil {
 				return nil, err
 			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
+			defer func() { _ = authoring.Rollback(ctx, tx) }()
 			q := d.Queries.WithTx(tx)
-			if err := d.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
+			if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
 				return nil, err
 			}
-			doc, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), q, d.Storage, u.OrgID, u.UserID, p.Name, data)
+			guard, err := authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
+			if err != nil {
+				return nil, err
+			}
+			doc, pageCount, err := docintake.CreatePDFSourceDocument(ctx, q, d.Storage, u.OrgID, u.UserID, p.Name, data)
 			if err != nil {
 				return nil, err
 			}
@@ -316,6 +342,10 @@ func registerAuthoringTools(s *Server, d Deps) {
 			})
 			if err != nil {
 				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
+				return nil, errors.Join(err, cleanupErr)
+			}
+			if err := guard.Recheck(ctx); err != nil {
+				cleanupErr := cleanupMCPImportedPDF(ctx, d, doc)
 				return nil, errors.Join(err, cleanupErr)
 			}
 			if err := tx.Commit(r.Context()); err != nil {

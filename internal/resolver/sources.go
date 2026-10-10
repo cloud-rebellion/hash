@@ -194,8 +194,15 @@ type OrgSettingStore interface {
 	GetOrgBranding(context.Context, uuid.UUID) (*generated.OrgBranding, error)
 }
 
+// OrgPlanStore resolves effective entitlements, including reviewed internal
+// operator plans. The legacy orgs.plan column is not the billing authority.
+type OrgPlanStore interface {
+	PlanForOrg(context.Context, uuid.UUID) (*generated.BillingPlan, *generated.OrgSubscription, error)
+}
+
 type OrgSettingSource struct {
-	Q OrgSettingStore
+	Q     OrgSettingStore
+	Plans OrgPlanStore
 }
 
 func (OrgSettingSource) Kind() SourceKind { return SourceOrgSetting }
@@ -204,19 +211,38 @@ func (s *OrgSettingSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	if ref.OrgID == uuid.Nil {
 		return "", errors.New("org.setting: missing org context")
 	}
+	if s.Q == nil {
+		return "", ErrNotConfigured
+	}
 	if !strings.HasPrefix(ref.Path, "org.") && !strings.HasPrefix(ref.Path, "branding.") {
 		return "", fmt.Errorf("org.setting: unknown path scope %q (expected org.* or branding.*)", ref.Path)
 	}
 	if strings.HasPrefix(ref.Path, "org.") {
 		org, err := s.Q.GetOrg(ctx, ref.OrgID)
 		if err != nil {
-			return "", fmt.Errorf("org.setting: %w", err)
+			return "", errors.New("org.setting: organization lookup failed")
+		}
+		if org == nil || org.ID != ref.OrgID {
+			return "", errors.New("org.setting: organization tenant mismatch")
 		}
 		switch ref.Path {
 		case "org.name":
 			return org.Name, nil
 		case "org.plan":
-			return org.Plan, nil
+			if s.Plans == nil {
+				return "", ErrNotConfigured
+			}
+			plan, sub, err := s.Plans.PlanForOrg(ctx, ref.OrgID)
+			if err != nil {
+				return "", errors.New("org.setting: effective plan lookup failed")
+			}
+			if plan == nil || !plan.Active || strings.TrimSpace(plan.Slug) == "" {
+				return "", errors.New("org.setting: effective plan unavailable")
+			}
+			if sub != nil && sub.OrgID != ref.OrgID {
+				return "", errors.New("org.setting: subscription tenant mismatch")
+			}
+			return plan.Slug, nil
 		case "org.id":
 			return org.ID.String(), nil
 		default:

@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
@@ -40,7 +42,7 @@ func registerBrandingTools(s *Server, d Deps) {
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST PUT /branding is owner-only; match it (branding renders into every signer page + final PDF)
 		MinFeature:  "branding",     // paid-feature gate, mirroring the REST handleSetBranding
-		Description: "Upsert the org-level brand palette. All fields optional; missing fields default to the system palette. Hex colours accept 3- or 6-char form with optional leading '#' and normalise to '#RRGGBB'. Font lists accept safe comma-separated family names and are stored canonically.",
+		Description: "Upsert the org-level brand palette. All fields optional; missing fields preserve current values, or use system defaults for a new palette. Hex colours accept 3- or 6-char form with optional leading '#' and normalise to '#RRGGBB'. Font lists accept safe comma-separated family names and are stored canonically.",
 		InputSchema: schemaObject(map[string]any{
 			"primary_hex":     stringSchema("hex color for primary surfaces"),
 			"accent_hex":      stringSchema("hex color for accents + links"),
@@ -115,49 +117,42 @@ func registerBrandingTools(s *Server, d Deps) {
 			if err := branding.ValidateLogoURLForEnvironment(d.Environment, in.LogoURL); err != nil {
 				return nil, err
 			}
-			merged := mergeForMCP(loadOrgBranding(r, d, u.OrgID), in.PrimaryHex, in.AccentHex,
-				in.SurfaceHex, in.TextHex, in.MutedHex, in.LogoURL, in.LogoAlt,
-				in.FontHeading, in.FontBody, in.SignatureColor)
-			// MCP updates merge omitted fields into the existing row. Recheck the
-			// effective value so an old logo cannot survive a production palette
-			// edit and bypass the immutable-logo gate.
-			merged.LogoURL = strings.TrimSpace(merged.LogoURL)
-			if err := branding.ValidateLogoURLForEnvironment(d.Environment, merged.LogoURL); err != nil {
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
 				return nil, err
 			}
-			normalizedFont, err := branding.NormaliseFontFamily(merged.FontHeading)
-			if err != nil {
-				return nil, fmt.Errorf("font_heading: %w", err)
-			}
-			merged.FontHeading = normalizedFont
-			normalizedFont, err = branding.NormaliseFontFamily(merged.FontBody)
-			if err != nil {
-				return nil, fmt.Errorf("font_body: %w", err)
-			}
-			merged.FontBody = normalizedFont
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.OrgBranding, error) {
-					return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
-						OrgID:          u.OrgID,
-						PrimaryHex:     merged.PrimaryHex,
-						AccentHex:      merged.AccentHex,
-						SurfaceHex:     merged.SurfaceHex,
-						TextHex:        merged.TextHex,
-						MutedHex:       merged.MutedHex,
-						LogoUrl:        merged.LogoURL,
-						LogoAlt:        merged.LogoAlt,
-						FontHeading:    merged.FontHeading,
-						FontBody:       merged.FontBody,
-						SignatureColor: merged.SignatureColor,
+			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (*generated.OrgBranding, error) {
+					base, err := loadOrgBrandingStrict(ctx, q, u.OrgID)
+					if err != nil {
+						return nil, err
+					}
+					merged := mergeForMCP(base, in.PrimaryHex, in.AccentHex,
+						in.SurfaceHex, in.TextHex, in.MutedHex, in.LogoURL, in.LogoAlt,
+						in.FontHeading, in.FontBody, in.SignatureColor)
+					merged.LogoURL = strings.TrimSpace(merged.LogoURL)
+					if err := branding.ValidateLogoURLForEnvironment(d.Environment, merged.LogoURL); err != nil {
+						return nil, err
+					}
+					merged.FontHeading, err = branding.NormaliseFontFamily(merged.FontHeading)
+					if err != nil {
+						return nil, fmt.Errorf("font_heading: %w", err)
+					}
+					merged.FontBody, err = branding.NormaliseFontFamily(merged.FontBody)
+					if err != nil {
+						return nil, fmt.Errorf("font_body: %w", err)
+					}
+					return q.UpsertOrgBranding(ctx, generated.UpsertOrgBrandingParams{
+						OrgID: u.OrgID, PrimaryHex: merged.PrimaryHex, AccentHex: merged.AccentHex,
+						SurfaceHex: merged.SurfaceHex, TextHex: merged.TextHex, MutedHex: merged.MutedHex,
+						LogoUrl: merged.LogoURL, LogoAlt: merged.LogoAlt, FontHeading: merged.FontHeading,
+						FontBody: merged.FontBody, SignatureColor: merged.SignatureColor,
 					})
 				},
 				func(*generated.OrgBranding) audit.Entry {
-					return audit.Entry{
-						OrgID:       u.OrgID,
-						ActorUserID: &u.UserID,
-						Kind:        audit.KindDocumentUpdated,
-						Payload:     map[string]any{"via": "mcp", "tool": "set_org_branding"},
-					}
+					return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "set_org_branding"}}
 				},
 			)
 			if err != nil {
@@ -282,6 +277,51 @@ func loadOrgBranding(r *http.Request, d Deps, orgID uuid.UUID) branding.Branding
 		out.SignatureColor = row.SignatureColor
 	}
 	return out
+}
+
+func loadOrgBrandingStrict(ctx context.Context, q *generated.Queries, orgID uuid.UUID) (branding.Branding, error) {
+	out := branding.DefaultBranding()
+	row, err := q.GetOrgBranding(ctx, orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	if row == nil {
+		return out, errors.New("branding lookup returned no row")
+	}
+	if row.PrimaryHex != "" {
+		out.PrimaryHex = row.PrimaryHex
+	}
+	if row.AccentHex != "" {
+		out.AccentHex = row.AccentHex
+	}
+	if row.SurfaceHex != "" {
+		out.SurfaceHex = row.SurfaceHex
+	}
+	if row.TextHex != "" {
+		out.TextHex = row.TextHex
+	}
+	if row.MutedHex != "" {
+		out.MutedHex = row.MutedHex
+	}
+	if row.LogoUrl != "" {
+		out.LogoURL = row.LogoUrl
+	}
+	if row.LogoAlt != "" {
+		out.LogoAlt = row.LogoAlt
+	}
+	if row.FontHeading != "" {
+		out.FontHeading = row.FontHeading
+	}
+	if row.FontBody != "" {
+		out.FontBody = row.FontBody
+	}
+	if row.SignatureColor != "" {
+		out.SignatureColor = row.SignatureColor
+	}
+	return out, nil
 }
 
 func brandingToMap(b branding.Branding) map[string]any {

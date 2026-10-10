@@ -23,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/storage"
 )
 
@@ -522,12 +523,25 @@ func (e *Engine) requiredRolesForFinalization(ctx context.Context, q *generated.
 		}
 		return nil, nil
 	}
-	roles, err := e.signerRolesForDocument(ctx, doc)
+	roles, err := e.signerRolesForDocumentTx(ctx, q, doc)
 	if err != nil {
 		return nil, err
 	}
 	if !allRequiredRecipientsSignedForRoles(roles, recipients) {
 		return nil, ErrDocumentNotReadyToFinalize
+	}
+	if doc.SourceKind == "pdf" {
+		fields, err := q.ListFieldsByDocument(ctx, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		signatures, err := q.ListSignaturesByDocument(ctx, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := pdflayout.ValidateSignatureRows(doc, recipients, fields, signatures, 0); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrDocumentNotReadyToFinalize, err)
+		}
 	}
 	return signerRoleSet(roles), nil
 }

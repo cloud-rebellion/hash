@@ -102,6 +102,9 @@ func CleanWithContext(ctx context.Context, asset string, contentType string, raw
 	ct := strings.ToLower(strings.TrimSpace(contentType))
 	switch {
 	case ct == "application/pdf":
+		if worker := activePDFWorker.Load(); worker != nil {
+			return worker.clean(ctx, asset, ct, raw)
+		}
 		return cleanPDF(asset, ct, raw)
 	case ct == "image/png":
 		return cleanImage(asset, ct, raw, "png")
@@ -153,7 +156,7 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 	if len(raw) > MaxPDFBytes {
 		return Result{}, ErrPDFTooLarge
 	}
-	pages, err := PageCount(raw)
+	pages, err := pageCountInProcess(raw)
 	if err != nil {
 		return Result{}, fmt.Errorf("pdf preflight: %w", err)
 	}

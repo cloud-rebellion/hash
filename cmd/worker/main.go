@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/config"
@@ -34,6 +35,7 @@ import (
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -110,6 +112,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if err := sanitize.ConfigurePDFWorker(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment); err != nil {
+		slog.Error("PDF worker unavailable")
+		os.Exit(1)
+	}
 
 	pool, err := pgxpool.New(ctx, cfg.DBURL)
 	if err != nil {
@@ -254,11 +260,30 @@ func main() {
 		},
 	}
 
+	var billingEngine *billing.Engine
+	switch {
+	case cfg.BillingProvider == "operator":
+		billingEngine = billing.NewOperator(queries, cfg.OperatorEntitlements)
+		if err := billingEngine.ValidateOperatorPlans(ctx); err != nil {
+			slog.Error("operator entitlement validation", "err", err)
+			os.Exit(1)
+		}
+	case cfg.BillingProvider == "mollie":
+		billingEngine = billing.New(queries, billing.NewMollieProvider(cfg.MollieAPIKey, cfg.MollieBaseURL, cfg.MollieWebhookPathSecret), cfg.PublicURL, cfg.PublicURL+"/webhooks/billing/"+cfg.MollieWebhookPathSecret)
+	case config.IsLocalDevelopment(cfg.PublicURL):
+		billingEngine = billing.New(queries, billing.MockProvider{}, cfg.PublicURL, "")
+	}
+	if billingEngine == nil {
+		slog.Error("billing: worker entitlement engine unavailable")
+		os.Exit(1)
+	}
+
 	// Lifecycle engine for reminders and durable send-sealing recovery. Draft
 	// preparation (resolver/billing) has already completed before the sealing
 	// intent commits; recovery rechecks the frozen envelope/eIDAS/source state,
 	// applies retention idempotently, then atomically mints links/outbox/audit.
 	sendEngine := &send.Engine{
+		Billing:     billingEngine,
 		Pool:        pool,
 		Queries:     queries,
 		Audit:       auditLog,
@@ -272,6 +297,7 @@ func main() {
 	}
 
 	w := &worker{
+		billing:           billingEngine,
 		pool:              pool,
 		queries:           queries,
 		audit:             auditLog,
@@ -379,6 +405,7 @@ type worker struct {
 	// so worker-minted links always carry an expiry.
 	sendEngine *send.Engine
 	baseURL    string
+	billing    *billing.Engine
 	orgName    string
 
 	// Phase 12.2: nil when HASH_COMPLIANCE_FEED_URL is unset, so

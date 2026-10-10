@@ -622,8 +622,8 @@ type FreezeDocumentVariablesParams struct {
 	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
 }
 
-// Source-neutral frozen values are committed only inside an authorized send
-// transaction after the original draft observation has been checked.
+// Source-neutral values are committed only inside authorized draft creation
+// or send, after the current draft revision has been checked.
 func (q *Queries) FreezeDocumentVariables(ctx context.Context, arg FreezeDocumentVariablesParams) (*Document, error) {
 	row := q.db.QueryRow(ctx, freezeDocumentVariables,
 		arg.ID,

@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
@@ -108,12 +110,14 @@ func (s *Server) handleGetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+var errAIKeyRequired = errors.New("api_key required for a new provider config")
+
 type setOrgAIProviderInput struct {
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
-	Model    string `json:"model"`
-	APIKey   string `json:"api_key"`
-	Enabled  *bool  `json:"enabled"`
+	Provider string  `json:"provider"`
+	BaseURL  *string `json:"base_url"`
+	Model    *string `json:"model"`
+	APIKey   string  `json:"api_key"`
+	Enabled  *bool   `json:"enabled"`
 }
 
 func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) {
@@ -137,65 +141,70 @@ func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "provider must be 'anthropic' or 'mistral'")
 		return
 	}
-	if err := s.validateBYOAIBaseURL(in.Provider, in.BaseURL); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if in.BaseURL != nil {
+		if err := s.validateBYOAIBaseURL(in.Provider, *in.BaseURL); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize AI provider update", err)
 		return
 	}
-	enabled := true
-	if in.Enabled != nil {
-		enabled = *in.Enabled
-	}
-
-	// Resolve the ciphertext: a new key is sealed now; a blank key reuses the
-	// stored one (so edits that don't touch the secret are possible).
-	var ct []byte
-	var last4 string
-	if in.APIKey != "" {
-		sealed, err := ai.AESEncrypt(s.AISealKey, []byte(in.APIKey))
-		if err != nil {
-			writeInternalErrorMsg(w, "seal key", err)
-			return
-		}
-		ct = sealed
-		last4 = lastN(in.APIKey, 4)
-	} else {
-		existing, err := s.Queries.GetOrgAISettings(r.Context(), u.OrgID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusBadRequest, "api_key required for a new provider config")
-			return
-		}
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		ct = existing.ApiKeyCt
-		last4 = existing.KeyLast4
-	}
-
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.OrgAiSetting, error) {
-			return q.UpsertOrgAISettings(r.Context(), generated.UpsertOrgAISettingsParams{
-				OrgID:    u.OrgID,
-				Provider: in.Provider,
-				BaseUrl:  in.BaseURL,
-				Model:    in.Model,
-				ApiKeyCt: ct,
-				KeyLast4: last4,
-				Enabled:  enabled,
+	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (*generated.OrgAiSetting, error) {
+			current, err := q.GetOrgAISettings(ctx, u.OrgID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, err
+			}
+			enabled := true
+			baseURL, model := "", ""
+			if current != nil && err == nil {
+				enabled, baseURL, model = current.Enabled, current.BaseUrl, current.Model
+			}
+			if in.BaseURL != nil {
+				baseURL = *in.BaseURL
+			}
+			if in.Model != nil {
+				model = *in.Model
+			}
+			if validationErr := s.validateBYOAIBaseURL(in.Provider, baseURL); validationErr != nil {
+				return nil, fmt.Errorf("%w: %s", errOwnerMutationInput, validationErr)
+			}
+			if in.Enabled != nil {
+				enabled = *in.Enabled
+			}
+			var ct []byte
+			var last4 string
+			if in.APIKey != "" {
+				ct, err = ai.AESEncrypt(s.AISealKey, []byte(in.APIKey))
+				if err != nil {
+					return nil, err
+				}
+				last4 = lastN(in.APIKey, 4)
+			} else {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, errAIKeyRequired
+				}
+				ct, last4 = current.ApiKeyCt, current.KeyLast4
+			}
+			return q.UpsertOrgAISettings(ctx, generated.UpsertOrgAISettingsParams{
+				OrgID: u.OrgID, Provider: in.Provider, BaseUrl: baseURL, Model: model,
+				ApiKeyCt: ct, KeyLast4: last4, Enabled: enabled,
 			})
 		},
 		func(row *generated.OrgAiSetting) audit.Entry {
-			return audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID,
-				Kind: "ai_provider.updated",
-				IP:   clientIP(r),
-				// Never log key material; provider + model + enabled only.
-				Payload: map[string]any{"provider": row.Provider, "model": row.Model, "enabled": row.Enabled},
-			}
+			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: "ai_provider.updated", IP: clientIP(r),
+				Payload: map[string]any{"provider": row.Provider, "model": row.Model, "enabled": row.Enabled}}
 		},
 	)
 	if err != nil {
-		writeInternalError(w, err)
+		if errors.Is(err, errAIKeyRequired) || errors.Is(err, errOwnerMutationInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeDraftAuthoringError(w, "update AI provider", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, orgAIProviderResponse{
@@ -215,9 +224,14 @@ func (s *Server) handleDeleteOrgAIProvider(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (uuid.UUID, error) {
-			return u.OrgID, q.DeleteOrgAISettings(r.Context(), u.OrgID)
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize AI provider deletion", err)
+		return
+	}
+	_, err = authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
+			return u.OrgID, q.DeleteOrgAISettings(ctx, u.OrgID)
 		},
 		func(uuid.UUID) audit.Entry {
 			return audit.Entry{
@@ -228,7 +242,7 @@ func (s *Server) handleDeleteOrgAIProvider(w http.ResponseWriter, r *http.Reques
 		},
 	)
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeDraftAuthoringError(w, "delete AI provider", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

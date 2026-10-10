@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -12,11 +13,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
+
+var errWebhookEndpointNotFound = errors.New("webhook endpoint not found")
 
 type webhookEndpointResponse struct {
 	ID               uuid.UUID `json:"id"`
@@ -70,6 +74,11 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "webhook endpoint encryption is unavailable")
 		return
 	}
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize credential creation", err)
+		return
+	}
 	endpointID, err := uuid.NewRandom()
 	if err != nil {
 		writeInternalErrorMsg(w, "endpoint id generation failed", err)
@@ -85,9 +94,9 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		writeInternalErrorMsg(w, "secret encryption failed", err)
 		return
 	}
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
-			return q.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
+	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
+			return q.CreateWebhookEndpoint(ctx, generated.CreateWebhookEndpointParams{
 				ID:               endpointID,
 				OrgID:            u.OrgID,
 				Url:              in.URL,
@@ -109,7 +118,7 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		writeInternalErrorMsg(w, "create webhook failed", err)
+		s.writeDraftAuthoringError(w, "create webhook failed", err)
 		return
 	}
 	// Secret is returned ONCE on create. Subsequent reads omit it so a
@@ -159,9 +168,18 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (uuid.UUID, error) {
-			return q.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{ID: id, OrgID: u.OrgID})
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize credential deletion", err)
+		return
+	}
+	_, err = authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
+			deleted, err := q.DeleteWebhookEndpoint(ctx, generated.DeleteWebhookEndpointParams{ID: id, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return uuid.Nil, errWebhookEndpointNotFound
+			}
+			return deleted, err
 		},
 		func(deletedID uuid.UUID) audit.Entry {
 			return audit.Entry{
@@ -172,12 +190,12 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, errWebhookEndpointNotFound) {
 		writeError(w, http.StatusNotFound, "webhook endpoint not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		s.writeDraftAuthoringError(w, "delete failed", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

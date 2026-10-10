@@ -10,8 +10,10 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"net/url"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/hash/internal/s3policy"
@@ -141,6 +144,7 @@ type Config struct {
 	// is the per-instance secret embedded in the webhook URL so an
 	// attacker can't spam /webhooks/billing/<random>.
 	BillingProvider         string
+	OperatorEntitlements    []OperatorEntitlement
 	MollieAPIKey            string
 	MollieBaseURL           string
 	MollieWebhookPathSecret string
@@ -233,6 +237,15 @@ func Load() (*Config, error) {
 		MollieAPIKey:                 os.Getenv("HASH_MOLLIE_API_KEY"),
 		MollieBaseURL:                envString("HASH_MOLLIE_BASE_URL", "https://api.mollie.com/v2"),
 		MollieWebhookPathSecret:      os.Getenv("HASH_MOLLIE_WEBHOOK_PATH_SECRET"),
+	}
+	if c.BillingProvider == "operator" {
+		grants, err := ParseOperatorEntitlements(os.Getenv("HASH_OPERATOR_ENTITLEMENTS"))
+		if err != nil {
+			return nil, err
+		}
+		c.OperatorEntitlements = grants
+	} else if os.Getenv("HASH_OPERATOR_ENTITLEMENTS") != "" {
+		return nil, errors.New("HASH_OPERATOR_ENTITLEMENTS requires HASH_BILLING_PROVIDER=operator")
 	}
 	c.Environment = strings.ToLower(strings.TrimSpace(c.Environment))
 	if c.Environment == "" {
@@ -446,19 +459,21 @@ func Load() (*Config, error) {
 		// Mock billing accepts unauthenticated, forgeable webhooks. Refuse to
 		// boot a production instance on it. An unset or misspelled provider is
 		// also unsafe: it leaves the billing engine nil, which bypasses document
-		// quotas and paid-feature checks. Production therefore has exactly one
-		// supported billing mode and fails closed before serving traffic.
-		if c.BillingProvider != "mollie" {
-			return nil, errors.New("HASH_BILLING_PROVIDER must be 'mollie' outside local dev; an unset provider bypasses quota and paid-feature enforcement, and the mock provider is development-only")
+		// quotas and paid-feature checks. Production requires a real payment
+		// provider or explicit reviewed internal entitlements before serving.
+		if c.BillingProvider != "mollie" && c.BillingProvider != "operator" {
+			return nil, errors.New("HASH_BILLING_PROVIDER must be 'mollie' or 'operator' outside local dev; an unset provider bypasses quota and paid-feature enforcement, and the mock provider is development-only")
 		}
-		if err := validateProductionMollieURL(c.MollieBaseURL); err != nil {
-			return nil, fmt.Errorf("HASH_MOLLIE_BASE_URL: %w", err)
-		}
-		if c.MollieAPIKey == "" {
-			return nil, errors.New("HASH_MOLLIE_API_KEY is required when billing provider is 'mollie'")
-		}
-		if !isURLSafePathToken(c.MollieWebhookPathSecret) {
-			return nil, errors.New("HASH_MOLLIE_WEBHOOK_PATH_SECRET must be a 16-128 character URL-safe token using only letters, digits, '-', '.', '_', or '~'")
+		if c.BillingProvider == "mollie" {
+			if err := validateProductionMollieURL(c.MollieBaseURL); err != nil {
+				return nil, fmt.Errorf("HASH_MOLLIE_BASE_URL: %w", err)
+			}
+			if c.MollieAPIKey == "" {
+				return nil, errors.New("HASH_MOLLIE_API_KEY is required when billing provider is 'mollie'")
+			}
+			if !isURLSafePathToken(c.MollieWebhookPathSecret) {
+				return nil, errors.New("HASH_MOLLIE_WEBHOOK_PATH_SECRET must be a 16-128 character URL-safe token using only letters, digits, '-', '.', '_', or '~'")
+			}
 		}
 		// Without a stable ed25519 audit key the boot path mints an
 		// ephemeral one (cmd/server/main.go), so audit certificates signed
@@ -994,4 +1009,76 @@ func envBool(key string, fallback bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s must be one of true, false, 1, 0, yes, no, on, or off", key)
 	}
+}
+
+// OperatorEntitlement binds one reviewed internal organization to a real plan.
+// No subscription or payment is manufactured by this deployment mode.
+type OperatorEntitlement struct {
+	OrgID     uuid.UUID `json:"org_id"`
+	PlanSlug  string    `json:"plan_slug"`
+	ReviewRef string    `json:"review_ref"`
+}
+
+func ParseOperatorEntitlements(raw string) ([]OperatorEntitlement, error) {
+	fail := func() ([]OperatorEntitlement, error) {
+		return nil, errors.New("HASH_OPERATOR_ENTITLEMENTS must be a nonempty strict JSON array of unique org_id, plan_slug and review_ref bindings")
+	}
+	if len(raw) > 65536 {
+		return fail()
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var grants []OperatorEntitlement
+	if err := dec.Decode(&grants); err != nil {
+		return fail()
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF || len(grants) == 0 || len(grants) > 100 {
+		return fail()
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, g := range grants {
+		if g.OrgID == uuid.Nil || seen[g.OrgID] || g.PlanSlug == "" || len(g.PlanSlug) > 100 || strings.TrimSpace(g.PlanSlug) != g.PlanSlug || strings.TrimSpace(g.ReviewRef) == "" || len(g.ReviewRef) > 256 {
+			return fail()
+		}
+		seen[g.OrgID] = true
+	}
+	return grants, nil
+}
+
+// Reject duplicate fields rather than accepting the last value in a reviewed
+// entitlement. Ordinary encoding/json struct decoding permits duplicates.
+func (g *OperatorEntitlement) UnmarshalJSON(raw []byte) error {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return errors.New("operator entitlement must be an object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok || seen[key] {
+			return errors.New("duplicate operator entitlement field")
+		}
+		seen[key] = true
+		switch key {
+		case "org_id":
+			err = dec.Decode(&g.OrgID)
+		case "plan_slug":
+			err = dec.Decode(&g.PlanSlug)
+		case "review_ref":
+			err = dec.Decode(&g.ReviewRef)
+		default:
+			return errors.New("unknown operator entitlement field")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }

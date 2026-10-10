@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,10 +14,13 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/eidas"
 )
+
+var errComplianceFlagNotFound = errors.New("flag not found")
 
 // registerComplianceTools mounts the Phase 12 MCP surface: seed the
 // baseline, list flags, transition flag status, manually trigger a
@@ -53,36 +57,28 @@ func registerComplianceTools(s *Server, d Deps) {
 				if err != nil {
 					return nil, err
 				}
-				if d.Pool == nil || d.Audit == nil {
-					return nil, errors.New("atomic audit dependencies unavailable")
-				}
-				tx, err := d.Pool.Begin(r.Context())
+				authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
 				if err != nil {
 					return nil, err
 				}
-				defer func() { _ = tx.Rollback(r.Context()) }()
-				q := d.Queries.WithTx(tx)
-				res, err := compliance.New(q, eidas.New(q)).Seed(r.Context(), compliance.SeedInput{
-					OrgID:        u.OrgID,
-					UserID:       u.UserID,
-					BusinessType: bt,
-					Jurisdiction: jurisdiction,
-				})
+				res, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+					authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+					func(ctx context.Context, q *generated.Queries) (*compliance.SeedResult, error) {
+						return compliance.New(q, eidas.New(q)).Seed(ctx, compliance.SeedInput{
+							OrgID: u.OrgID, UserID: u.UserID, BusinessType: bt, Jurisdiction: jurisdiction,
+						})
+					},
+					func(*compliance.SeedResult) audit.Entry {
+						return audit.Entry{
+							OrgID: u.OrgID, ActorUserID: &u.UserID,
+							Kind:    "compliance.baseline_seeded",
+							Payload: map[string]any{"via": "mcp", "business_type": bt, "jurisdiction": jurisdiction},
+						}
+					},
+				)
 				if err != nil {
 					return nil, err
 				}
-				pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID,
-					Kind:    "compliance.baseline_seeded",
-					Payload: map[string]any{"via": "mcp", "business_type": bt, "jurisdiction": jurisdiction},
-				})
-				if err != nil {
-					return nil, err
-				}
-				if err := tx.Commit(r.Context()); err != nil {
-					return nil, err
-				}
-				d.Audit.Publish(pending)
 				return res, nil
 			},
 		})
@@ -164,11 +160,20 @@ func registerComplianceTools(s *Server, d Deps) {
 			default:
 				return nil, errors.New("status must be open|acknowledged|resolved|dismissed")
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.ComplianceFlag, error) {
-					return q.SetComplianceFlagStatus(r.Context(), generated.SetComplianceFlagStatusParams{
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (*generated.ComplianceFlag, error) {
+					row, err := q.SetComplianceFlagStatus(ctx, generated.SetComplianceFlagStatusParams{
 						ID: id, OrgID: u.OrgID, Status: p.Status,
 					})
+					if errors.Is(err, pgx.ErrNoRows) {
+						return nil, errComplianceFlagNotFound
+					}
+					return row, err
 				},
 				func(*generated.ComplianceFlag) audit.Entry {
 					return audit.Entry{

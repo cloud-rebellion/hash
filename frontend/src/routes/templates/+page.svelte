@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import {
     listTemplates,
@@ -8,7 +8,10 @@
     createStarterTemplate,
     createBlocksTemplate,
     type TemplateResponse,
+    type PDFPartyBinding,
   } from '$lib/api/client';
+  import { pdfTemplateParties, type PDFTemplateParty } from '$lib/pdfTemplate';
+  import { LOCALES } from '$lib/i18n';
   import { Upload, FileText, FilePlus, Sparkles, FileSignature } from 'lucide-svelte';
 
   let templates = $state<TemplateResponse[]>([]);
@@ -17,6 +20,12 @@
   let error = $state<string | null>(null);
   let creatingId = $state<string | null>(null);
   let seeding = $state<string | null>(null);
+  let selectedTemplate = $state<TemplateResponse | null>(null);
+  let selectedParties = $state<PDFTemplateParty[]>([]);
+  let bindings = $state<PDFPartyBinding[]>([]);
+  let documentName = $state('');
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
 
   async function seedStarter() {
     seeding = 'starter';
@@ -45,6 +54,20 @@
   }
 
   async function useTemplate(t: TemplateResponse) {
+    if (creatingId !== null) return;
+    error = null;
+    if (t.source_kind === 'pdf') {
+      try {
+        const parties = pdfTemplateParties(t.fields_json);
+        if (parties.length) {
+          selectedTemplate = t;
+          selectedParties = parties;
+          bindings = parties.map((party) => ({ role: party.role, name: '', email: '', locale: 'en' }));
+          documentName = `${t.name} (${new Date().toLocaleDateString()})`;
+          return;
+        }
+      } catch (e) { error = (e as Error).message; return; }
+    }
     creatingId = t.id;
     error = null;
     try {
@@ -53,11 +76,29 @@
         t.id,
         t.source_kind,
       );
-      await goto(`/documents/${doc.id}`);
+      if (!disposed) await goto(`/documents/${doc.id}`);
     } catch (e) {
       error = (e as Error).message;
       creatingId = null;
     }
+  }
+
+  async function createBoundDocument(event: Event) {
+    event.preventDefault();
+    if (!selectedTemplate || creatingId !== null) return;
+    const template = selectedTemplate;
+    const parties = bindings.map((party) => ({ ...party, name: party.name.trim(), email: party.email.trim() }));
+    creatingId = template.id;
+    error = null;
+    try {
+      const doc = await createDocumentFromTemplate(documentName.trim(), template.id, 'pdf', {
+        expected_template_version: template.version, parties,
+      });
+      if (!disposed && selectedTemplate?.id === template.id && selectedTemplate.version === template.version) {
+        await goto(`/documents/${doc.id}`);
+      }
+    } catch (e) { if (!disposed) error = (e as Error).message; }
+    finally { if (!disposed) creatingId = null; }
   }
 
   let fileInput: HTMLInputElement;
@@ -101,6 +142,34 @@
     <p class="page-eyebrow">Library</p>
     <h1 class="page-title">Templates</h1>
   </div>
+
+  {#if error}<p role="alert" class="card p-4 mb-6 text-danger">{error}</p>{/if}
+
+  {#if selectedTemplate}
+    <form onsubmit={createBoundDocument} class="card p-6 mb-6 space-y-4" aria-label="Create document from PDF signing template">
+      <h2 class="font-display text-lg">New contract from {selectedTemplate.name}</h2>
+      <p class="text-sm text-text-secondary">Version {selectedTemplate.version} reuses the PDF text and signature positions. Add the people who will sign this contract.</p>
+      <label class="block text-sm">Document name
+        <input bind:value={documentName} required maxlength="200" disabled={creatingId !== null} class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
+      </label>
+      {#each bindings as binding, index (binding.role)}
+        <fieldset class="border border-border-light rounded-md p-4 space-y-3" disabled={creatingId !== null}>
+          <legend class="text-sm px-1">{selectedParties[index].label}</legend>
+          <label class="block text-sm">Full name <input bind:value={binding.name} required maxlength="200" autocomplete="name" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
+          <label class="block text-sm">Email address <input type="email" bind:value={binding.email} required maxlength="254" autocomplete="email" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
+          <label class="block text-sm">Email language
+            <select bind:value={binding.locale} class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated">
+              {#each LOCALES as locale}<option value={locale.code}>{locale.name}</option>{/each}
+            </select>
+          </label>
+        </fieldset>
+      {/each}
+      <div class="flex gap-2">
+        <button type="submit" class="btn btn-primary" disabled={creatingId !== null}>{creatingId ? 'Creating…' : 'Create contract draft'}</button>
+        <button type="button" class="btn btn-secondary" disabled={creatingId !== null} onclick={() => { selectedTemplate = null; bindings = []; selectedParties = []; }}>Cancel</button>
+      </div>
+    </form>
+  {/if}
 
   <div class="card p-6 mb-6">
     <h2 class="font-display font-extralight text-lg mb-1">Development-only legal draft</h2>
@@ -148,9 +217,6 @@
       <Upload class="size-4" />
       {uploading ? 'Uploading…' : 'Upload PDF as template'}
     </button>
-    {#if error}
-      <p class="text-sm text-danger">{error}</p>
-    {/if}
   </form>
 
   {#if loading}
@@ -162,28 +228,28 @@
       <p class="text-text-secondary text-sm mt-2">Upload your first PDF above.</p>
     </div>
   {:else}
-    <div class="card overflow-hidden">
+    <div class="card overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="border-b border-border-light bg-bg-elevated">
           <tr>
             <th class="text-left px-4 py-3 font-medium">Name</th>
-            <th class="text-left px-4 py-3 font-medium">Type</th>
+            <th class="hidden sm:table-cell text-left px-4 py-3 font-medium">Type</th>
             <th class="text-left px-4 py-3 font-medium">Version</th>
-            <th class="text-left px-4 py-3 font-medium">Updated</th>
+            <th class="hidden sm:table-cell text-left px-4 py-3 font-medium">Updated</th>
             <th class="text-right px-4 py-3 font-medium">Actions</th>
           </tr>
         </thead>
         <tbody>
           {#each templates as t (t.id)}
             <tr class="border-b border-border-light last:border-0">
-              <td class="px-4 py-3">{t.name}</td>
-              <td class="px-4 py-3 capitalize">{t.source_kind}</td>
+              <td class="px-4 py-3">{t.name}<span class="block sm:hidden text-xs text-text-muted capitalize">{t.source_kind}</span></td>
+              <td class="hidden sm:table-cell px-4 py-3 capitalize">{t.source_kind}</td>
               <td class="px-4 py-3 text-text-muted">v{t.version}</td>
-              <td class="px-4 py-3 text-text-muted">{new Date(t.updated_at).toLocaleString()}</td>
+              <td class="hidden sm:table-cell px-4 py-3 text-text-muted">{new Date(t.updated_at).toLocaleString()}</td>
               <td class="px-4 py-3 text-right">
                 <button
                   class="btn btn-secondary text-xs"
-                  disabled={creatingId === t.id}
+                  disabled={creatingId !== null}
                   onclick={() => useTemplate(t)}
                 >
                   <FilePlus class="size-3" />

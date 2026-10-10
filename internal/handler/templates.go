@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/templatepin"
 )
@@ -176,9 +178,9 @@ func (s *Server) createBlocksTemplate(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 	in.BlocksJSON = normalizedBlocks
-	t, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Template, error) {
-			return q.CreateBlocksTemplate(r.Context(), generated.CreateBlocksTemplateParams{
+	t, err := s.createTemplateAuthorized(r, userID, orgID,
+		func(ctx context.Context, q *generated.Queries) (*generated.Template, error) {
+			return q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
 				OrgID:         orgID,
 				Name:          in.Name,
 				BlocksJson:    in.BlocksJSON,
@@ -196,7 +198,7 @@ func (s *Server) createBlocksTemplate(w http.ResponseWriter, r *http.Request, us
 		},
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create template failed")
+		s.writeTemplateMutationError(w, "create template failed", err)
 		return
 	}
 	writeTemplateResponse(w, http.StatusCreated, t)
@@ -234,9 +236,9 @@ func (s *Server) handleCreateStarterTemplate(w http.ResponseWriter, r *http.Requ
 	if name == "" {
 		name = st.Name
 	}
-	t, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Template, error) {
-			return q.CreateBlocksTemplate(r.Context(), generated.CreateBlocksTemplateParams{
+	t, err := s.createTemplateAuthorized(r, u.UserID, u.OrgID,
+		func(ctx context.Context, q *generated.Queries) (*generated.Template, error) {
+			return q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
 				OrgID:         u.OrgID,
 				Name:          name,
 				BlocksJson:    st.BlocksJSON(),
@@ -254,7 +256,7 @@ func (s *Server) handleCreateStarterTemplate(w http.ResponseWriter, r *http.Requ
 		},
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create template failed")
+		s.writeTemplateMutationError(w, "create template failed", err)
 		return
 	}
 	writeTemplateResponse(w, http.StatusCreated, t)
@@ -309,7 +311,20 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 			writeScanError(w, err)
 			return
 		}
+		if writePDFWorkerError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "sanitize PDF: "+err.Error())
+		return
+	}
+	// A template must have a known valid page count before any object write.
+	// Production parsing runs through the bounded isolated PDF worker.
+	pageCount, err := sanitize.PageCountWithContext(r.Context(), cleaned.Bytes)
+	if err != nil || pageCount < 1 {
+		if writePDFWorkerError(w, err) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid PDF page count")
 		return
 	}
 	stored, err := s.Storage.PutVersioned(r.Context(), key, "application/pdf", cleaned.Bytes)
@@ -318,15 +333,9 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	// Real page count via pdfcpu (over the sanitized bytes). A parse failure
-	// falls back to 0 rather than blocking the upload; the field designer
-	// derives page count client-side regardless, but a correct value here
-	// lets headless/MCP callers target pages without fetching the PDF.
-	pageCount, _ := sanitize.PageCount(cleaned.Bytes)
-
-	t, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Template, error) {
-			return q.CreatePDFTemplate(r.Context(), generated.CreatePDFTemplateParams{
+	t, err := s.createTemplateAuthorized(r, userID, orgID,
+		func(ctx context.Context, q *generated.Queries) (*generated.Template, error) {
+			return q.CreatePDFTemplate(ctx, generated.CreatePDFTemplateParams{
 				OrgID:                      orgID,
 				Name:                       name,
 				PdfStorageKey:              pgtype.Text{String: key, Valid: true},
@@ -364,7 +373,7 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 		if cleanupErr != nil {
 			writeInternalErrorMsg(w, "create template failed; orphan cleanup failed", errors.Join(err, cleanupErr))
 		} else {
-			writeInternalErrorMsg(w, "create template failed", err)
+			s.writeDraftAuthoringError(w, "create template failed", err)
 		}
 		return
 	}
@@ -414,95 +423,88 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in updateTemplateInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	existing, err := s.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{ID: id, OrgID: u.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "template not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get template failed")
-		return
-	}
-
-	switch existing.SourceKind {
-	case "blocks":
-		blocks := in.BlocksJSON
-		if len(blocks) == 0 {
-			blocks = existing.BlocksJson
-		}
-		blocks, err = blockschema.NormalizeTreeJSON(blocks)
+	// Validate supplied content before locking. Missing values are resolved
+	// later from the locked current template, so a concurrent edit is retained.
+	if len(in.BlocksJSON) != 0 {
+		normalized, err := blockschema.NormalizeTreeJSON(in.BlocksJSON)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid blocks_json: "+err.Error())
 			return
 		}
-		vars := in.VariablesJSON
-		if len(vars) == 0 {
-			vars = existing.VariablesJson
-		}
-		if _, err := blockschema.ParseVariableValues(vars); err != nil {
+		in.BlocksJSON = normalized
+	}
+	if len(in.VariablesJSON) != 0 {
+		if _, err := blockschema.ParseVariableValues(in.VariablesJSON); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid variables_json: "+err.Error())
 			return
 		}
-		name := in.Name
-		if name == "" {
-			name = existing.Name
-		}
-		t, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-			func(q *generated.Queries) (*generated.Template, error) {
-				return q.UpdateBlocksTemplate(r.Context(), generated.UpdateBlocksTemplateParams{
-					ID:            id,
-					OrgID:         u.OrgID,
-					Name:          name,
-					BlocksJson:    blocks,
-					VariablesJson: vars,
-				})
-			},
-			func(*generated.Template) audit.Entry {
-				return audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID,
-					Kind:    audit.KindTemplateUpdated,
-					Payload: map[string]any{"template_id": id, "source_kind": "blocks"},
-				}
-			},
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "update template failed")
-			return
-		}
-		writeTemplateResponse(w, http.StatusOK, t)
-	case "pdf":
-		fields := in.FieldsJSON
-		if len(fields) == 0 {
-			fields = existing.FieldsJson
-		}
-		t, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-			func(q *generated.Queries) (*generated.Template, error) {
-				return q.UpdatePDFTemplateFields(r.Context(), generated.UpdatePDFTemplateFieldsParams{
-					ID:         id,
-					OrgID:      u.OrgID,
-					FieldsJson: fields,
-				})
-			},
-			func(*generated.Template) audit.Entry {
-				return audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID,
-					Kind:    audit.KindTemplateUpdated,
-					Payload: map[string]any{"template_id": id, "source_kind": "pdf"},
-				}
-			},
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "update template failed")
-			return
-		}
-		writeTemplateResponse(w, http.StatusOK, t)
-	default:
-		writeError(w, http.StatusInternalServerError, "unknown template source kind")
 	}
+
+	t, err := s.mutateTemplateAuthorized(r, u.UserID, u.OrgID, id,
+		func(ctx context.Context, q *generated.Queries, current *generated.Template) (*generated.Template, error) {
+			switch current.SourceKind {
+			case "blocks":
+				blocks := in.BlocksJSON
+				if len(blocks) == 0 {
+					blocks = current.BlocksJson
+				}
+				blocks, err := blockschema.NormalizeTreeJSON(blocks)
+				if err != nil {
+					return nil, fmt.Errorf("invalid current blocks_json: %w", err)
+				}
+				vars := in.VariablesJSON
+				if len(vars) == 0 {
+					vars = current.VariablesJson
+				}
+				if _, err := blockschema.ParseVariableValues(vars); err != nil {
+					return nil, fmt.Errorf("invalid current variables_json: %w", err)
+				}
+				name := in.Name
+				if name == "" {
+					name = current.Name
+				}
+				return q.UpdateBlocksTemplate(ctx, generated.UpdateBlocksTemplateParams{
+					ID: id, OrgID: u.OrgID, Name: name, BlocksJson: blocks, VariablesJson: vars,
+				})
+			case "pdf":
+				fields := in.FieldsJSON
+				if len(fields) == 0 {
+					fields = current.FieldsJson
+				}
+				if len(in.FieldsJSON) > 0 {
+					var err error
+					fields, err = pdflayout.CanonicalForUpdate(fields, current.PageCount.Int32)
+					if err != nil {
+						return nil, err
+					}
+				}
+				return q.UpdatePDFTemplateFields(ctx, generated.UpdatePDFTemplateFieldsParams{
+					ID: id, OrgID: u.OrgID, FieldsJson: fields,
+				})
+			default:
+				return nil, errors.New("unknown template source kind")
+			}
+		},
+		func(t *generated.Template) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindTemplateUpdated,
+				Payload: map[string]any{"template_id": id, "source_kind": t.SourceKind},
+			}
+		},
+	)
+	if err != nil {
+		if errors.Is(err, pdflayout.ErrInvalid) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeTemplateMutationError(w, "update template failed", err)
+		return
+	}
+	writeTemplateResponse(w, http.StatusOK, t)
 }
 
 func (s *Server) handleArchiveTemplate(w http.ResponseWriter, r *http.Request) {
@@ -514,14 +516,14 @@ func (s *Server) handleArchiveTemplate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (uuid.UUID, error) {
-			if _, err := q.GetTemplate(r.Context(), generated.GetTemplateParams{ID: id, OrgID: u.OrgID}); err != nil {
-				return uuid.Nil, err
+	_, err := s.mutateTemplateAuthorized(r, u.UserID, u.OrgID, id,
+		func(ctx context.Context, q *generated.Queries, current *generated.Template) (*generated.Template, error) {
+			if err := q.ArchiveTemplate(ctx, generated.ArchiveTemplateParams{ID: id, OrgID: u.OrgID}); err != nil {
+				return nil, err
 			}
-			return id, q.ArchiveTemplate(r.Context(), generated.ArchiveTemplateParams{ID: id, OrgID: u.OrgID})
+			return current, nil
 		},
-		func(uuid.UUID) audit.Entry {
+		func(*generated.Template) audit.Entry {
 			return audit.Entry{
 				OrgID: u.OrgID, ActorUserID: &u.UserID,
 				Kind:    audit.KindTemplateArchived,
@@ -529,12 +531,8 @@ func (s *Server) handleArchiveTemplate(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "template not found")
-		return
-	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "archive template failed")
+		s.writeTemplateMutationError(w, "archive template failed", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

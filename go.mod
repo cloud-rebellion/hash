@@ -1,6 +1,6 @@
 module github.com/bright-interaction/hash
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0
@@ -13,7 +13,7 @@ require (
 	github.com/minio/minio-go/v7 v7.0.77
 	github.com/pdfcpu/pdfcpu v0.12.0
 	github.com/pressly/goose/v3 v3.22.1
-	golang.org/x/net v0.57.0
+	golang.org/x/net v0.60.0
 	golang.org/x/oauth2 v0.27.0
 	nhooyr.io/websocket v1.8.17
 )
@@ -43,10 +43,10 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/image v0.45.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

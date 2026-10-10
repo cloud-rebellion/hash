@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/i18n"
+	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -432,6 +434,23 @@ func checkActiveCeremonyAccess(doc *generated.Document) error {
 	}
 }
 
+// ValidateLockedRecipientCredential preserves the exact magic-link admission
+// through document and audit waits. Callers must retain the recipient row lock
+// before using this as a final pre-commit check.
+func ValidateLockedRecipientCredential(rc *RecipientContext, fresh *generated.Recipient, doc *generated.Document, now time.Time) error {
+	if rc == nil || rc.Recipient == nil || rc.Document == nil || fresh == nil || doc == nil ||
+		fresh.ID != rc.Recipient.ID || fresh.DocumentID != doc.ID || doc.ID != rc.Document.ID || doc.OrgID != rc.Document.OrgID ||
+		len(rc.Recipient.MagicTokenHash) == 0 || subtle.ConstantTimeCompare(rc.Recipient.MagicTokenHash, fresh.MagicTokenHash) != 1 {
+		return ErrMagicLinkExpired
+	}
+	// A later deadline extension cannot revive a request admitted under an
+	// earlier expiry. Both the original receipt and retained row must be live.
+	if err := checkMagicLinkExpiry(rc.Recipient, rc.Document, now); err != nil {
+		return err
+	}
+	return checkLockedMagicLinkExpiry(fresh, doc, now)
+}
+
 // now returns the current time, override via Engine.Now for tests.
 func (e *Engine) now() time.Time {
 	if e.Now != nil {
@@ -463,22 +482,23 @@ func (e *Engine) LookupByRecipientID(ctx context.Context, recipientID, orgID uui
 		return nil, err
 	}
 	row := &generated.GetRecipientByTokenHashRow{
-		ID:             rec.ID,
-		DocumentID:     rec.DocumentID,
-		Role:           rec.Role,
-		Email:          rec.Email,
-		Name:           rec.Name,
-		OrderIndex:     rec.OrderIndex,
-		Status:         rec.Status,
-		Locale:         rec.Locale,
-		MagicTokenHash: rec.MagicTokenHash,
-		SentAt:         rec.SentAt,
-		FirstViewedAt:  rec.FirstViewedAt,
-		SignedAt:       rec.SignedAt,
-		DeclinedReason: rec.DeclinedReason,
-		CreatedAt:      rec.CreatedAt,
-		DocOrgID:       orgID,
-		DocStatus:      doc.Status,
+		ID:                  rec.ID,
+		DocumentID:          rec.DocumentID,
+		Role:                rec.Role,
+		Email:               rec.Email,
+		Name:                rec.Name,
+		OrderIndex:          rec.OrderIndex,
+		Status:              rec.Status,
+		Locale:              rec.Locale,
+		MagicTokenHash:      rec.MagicTokenHash,
+		MagicTokenExpiresAt: rec.MagicTokenExpiresAt,
+		SentAt:              rec.SentAt,
+		FirstViewedAt:       rec.FirstViewedAt,
+		SignedAt:            rec.SignedAt,
+		DeclinedReason:      rec.DeclinedReason,
+		CreatedAt:           rec.CreatedAt,
+		DocOrgID:            orgID,
+		DocStatus:           doc.Status,
 	}
 	return &RecipientContext{Recipient: row, Document: doc}, nil
 }
@@ -514,11 +534,6 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	if err := validateNoticeEvidence(rc, in.Notice); err != nil {
 		return nil, err
 	}
-	requiredRoles, err := e.signerRolesForDocument(ctx, doc)
-	if err != nil {
-		return nil, err
-	}
-
 	// Render the signature span and resolve its field, but do not retain any
 	// object yet. Authoritative state/recipient/required-field checks happen
 	// under the document lock before immutable storage is touched.
@@ -552,7 +567,7 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	if err != nil {
 		return nil, err
 	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
 		return nil, err
 	}
 	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
@@ -563,6 +578,14 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	}
 	if freshRec.Status == "declined" {
 		return nil, errors.New("recipient already declined")
+	}
+
+	requiredRoles, err := e.signerRolesForDocumentTx(ctx, q, lockedDoc)
+	if err != nil {
+		return nil, err
+	}
+	if _, required := signerRoleSet(requiredRoles)[freshRec.Role]; !required {
+		return nil, ErrRecipientNotEligibleForResponse
 	}
 
 	// v1.2: refuse to sign if any required non-signature field for this
@@ -635,6 +658,16 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 		return nil, fmt.Errorf("audit signature: %w", err)
 	}
 
+	// Audit/storage waits may outlive the admitted link. The status UPDATE
+	// already retains the recipient row lock, so this final read also catches
+	// any rotation that happened before that lock was acquired.
+	freshRec, err = q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit signature: %w", err)
 	}
@@ -2751,14 +2784,14 @@ func canMaterializeSignatureField(doc *generated.Document) bool {
 // signerRolesForDoc is the boolean-only compatibility helper used by pure
 // readiness predicates. Block documents derive roles solely from signature
 // fields present after projecting the frozen conditional tree; PDF documents
-// use the canonical legacy signer role. Invalid block state returns no roles
-// and therefore cannot satisfy readiness.
+// require their placed field rows and cannot be resolved here. Invalid state
+// returns no roles and therefore cannot satisfy readiness.
 func signerRolesForDoc(doc *generated.Document) []string {
 	if doc == nil {
 		return nil
 	}
 	if doc.SourceKind != "blocks" {
-		return []string{"signer"}
+		return nil
 	}
 	roles, err := projectedBlockSignerRoles(doc)
 	if err != nil {
@@ -2790,6 +2823,10 @@ func projectedBlockSignerRoles(doc *generated.Document) ([]string, error) {
 // ordinary documents and unit tests; envelopes have an intentionally empty
 // shell, so their required roles must be gathered from every frozen child.
 func (e *Engine) signerRolesForDocument(ctx context.Context, doc *generated.Document) ([]string, error) {
+	return e.signerRolesForDocumentTx(ctx, e.Queries, doc)
+}
+
+func (e *Engine) signerRolesForDocumentTx(ctx context.Context, q *generated.Queries, doc *generated.Document) ([]string, error) {
 	if doc == nil {
 		return nil, errors.New("resolve signer roles: nil document")
 	}
@@ -2797,7 +2834,18 @@ func (e *Engine) signerRolesForDocument(ctx context.Context, doc *generated.Docu
 		if doc.SourceKind == "blocks" {
 			return projectedBlockSignerRoles(doc)
 		}
-		return []string{"signer"}, nil
+		if q == nil {
+			return nil, errors.New("resolve signer roles: PDF field store unavailable")
+		}
+		rows, err := q.ListRecipientsByDocument(ctx, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		fields, err := q.ListFieldsByDocument(ctx, doc.ID)
+		if err != nil {
+			return nil, err
+		}
+		return pdflayout.RequiredRoles(doc, rows, fields, 0)
 	}
 	if e.EnvelopeChildren == nil {
 		return nil, errors.New("resolve signer roles: envelope children unavailable")
@@ -3443,6 +3491,12 @@ func truncateFieldValueForCert(v string) string {
 }
 
 func buildHTMLDocument(brandCSS, body, cert string) string {
+	certificateStart := ""
+	if strings.TrimSpace(body) == "" && strings.TrimSpace(cert) != "" {
+		// Standalone evidence has no preceding contract body. Forcing a page
+		// break here otherwise leaves a blank branded page before the cert.
+		certificateStart = ".hash-doc > .hash-cert-page { page-break-before: auto; break-before: auto; }"
+	}
 	// Branding CSS is emitted FIRST so its custom properties on :root are
 	// available to the base stylesheet's rules below. The base styles use
 	// var(--hash-text) etc. with safe fallbacks so an unconfigured
@@ -3486,6 +3540,15 @@ func buildHTMLDocument(brandCSS, body, cert string) string {
   .hash-doc pre { background: #f5f5f4; border: 1px solid #e7e5e4; border-radius: 6px; padding: 10px; font-size: 11px; overflow-x: auto; }
   .hash-doc img { max-width: 100%%; }
   %s
+  .hash-doc .hash-cert-page table { table-layout: fixed; }
+  .hash-doc .hash-cert-page td, .hash-doc .hash-cert-page code { overflow-wrap: anywhere; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(1) { width: 12%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(2) { width: 26%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(3) { width: 9%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(4) { width: 17%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(5) { width: 10%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(6) { width: 26%%; }
+  %s
   .hash-field--signed { display: inline-block; min-width: 340px; border-bottom: 1.5px solid var(--hash-primary, #18181b); padding: 0.15em 0.4em 0.3em; background: transparent; }
   .hash-field--unsigned { display: inline-block; min-width: 340px; border-bottom: 1.5px dashed var(--hash-accent, #0891B2); padding: 0.5em 0.4em; color: var(--hash-muted, #52525b); font-style: italic; }
 </style>
@@ -3495,7 +3558,7 @@ func buildHTMLDocument(brandCSS, body, cert string) string {
 %s
 %s
 </div>
-</body></html>`, brandCSS, render.SignatureCSS(), body, cert)
+</body></html>`, brandCSS, render.SignatureCSS(), certificateStart, body, cert)
 }
 
 func htmlEscape(s string) string {

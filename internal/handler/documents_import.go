@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/bright-interaction/hash/internal/malwarescan"
@@ -13,9 +14,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/sanitize"
 )
 
 // maxProposalHTML caps the JSON body for the HTML intake path. A designed
@@ -136,22 +139,38 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 // finishPDFDocument runs the shared clean+store+create intake, then does the
 // HTTP + audit bookkeeping.
 func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte) {
+	authorize, err := s.sessionDraftAuthorization(r, orgID, userID)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize document import", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
 	tx, err := s.Pool.Begin(r.Context())
 	if err != nil {
 		writeInternalErrorMsg(w, "begin document import", err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
+	defer func() { _ = authoring.Rollback(ctx, tx) }()
 	q := s.Queries.WithTx(tx)
-	if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, orgID); err != nil {
+	if err := s.Billing.LockDocumentQuotaMutation(ctx, q, orgID); err != nil {
 		if s.writeAuthoringQuotaError(w, err) {
 			return
 		}
 		writeInternalErrorMsg(w, "lock document quota", err)
 		return
 	}
-	d, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), q, s.Storage, orgID, userID, name, data)
+	guard, err := authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize})
 	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize document import", err)
+		return
+	}
+	d, pageCount, err := docintake.CreatePDFSourceDocument(ctx, q, s.Storage, orgID, userID, name, data)
+	if err != nil {
+		if writePDFWorkerError(w, err) {
+			return
+		}
 		if errors.Is(err, malwarescan.ErrUnavailable) {
 			writeScanError(w, err)
 			return
@@ -194,6 +213,14 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 		writeInternalErrorMsg(w, "audit document import failed", errors.Join(err, cleanupErr))
 		return
 	}
+	if err := guard.Recheck(ctx); err != nil {
+		if cleanupErr := deleteObjectDetached(ctx, s.Storage, cleanupObject); cleanupErr != nil {
+			writeInternalErrorMsg(w, "document import authorization failed; orphan cleanup failed", errors.Join(err, cleanupErr))
+		} else {
+			s.writeDraftAuthoringError(w, "authorize document import commit", err)
+		}
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
 		writeInternalErrorMsg(w, "commit document import failed", errors.Join(err, cleanupErr))
@@ -204,4 +231,17 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 		"document":   toDocumentResponse(d),
 		"page_count": pageCount,
 	})
+}
+
+func writePDFWorkerError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, sanitize.ErrPDFWorkerCapacity) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "PDF processing capacity exceeded")
+		return true
+	}
+	if errors.Is(err, sanitize.ErrPDFWorkerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, http.StatusServiceUnavailable, "PDF processing unavailable")
+		return true
+	}
+	return false
 }

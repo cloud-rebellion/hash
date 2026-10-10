@@ -19,10 +19,14 @@ import (
 )
 
 type intakeQueriesStub struct {
-	createErr error
+	createErr    error
+	beforeCreate func()
 }
 
 func (s *intakeQueriesStub) CreatePDFDocument(context.Context, generated.CreatePDFDocumentParams) (*generated.Document, error) {
+	if s.beforeCreate != nil {
+		s.beforeCreate()
+	}
 	if s.createErr != nil {
 		return nil, s.createErr
 	}
@@ -70,7 +74,8 @@ func TestCreatePDFSourceDocumentDeletesObjectWhenDatabaseInsertFails(t *testing.
 	q := &intakeQueriesStub{createErr: dbErr}
 	st := &intakeStoreStub{}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cleanup must not inherit this cancellation
+	defer cancel()
+	q.beforeCreate = cancel // cancellation after storage must not poison cleanup
 
 	_, _, err := CreatePDFSourceDocument(ctx, q, st, uuid.New(), uuid.New(), "Proposal", intakeTestPDF(t))
 	if !errors.Is(err, dbErr) {

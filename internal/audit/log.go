@@ -189,7 +189,7 @@ func (l *Logger) append(ctx context.Context, q *generated.Queries, p preparedEnt
 			// Fail closed: a transient head-read error must NOT silently write
 			// a genesis row in the middle of a populated chain.
 			slog.Error("audit: head-read failed; refusing to write to avoid genesis-mid-chain",
-				"org_id", e.OrgID, "kind", e.Kind, "err", prevErr)
+				"org_id", e.OrgID, "kind", e.Kind, "error_type", fmt.Sprintf("%T", prevErr))
 			return uuid.Nil, fmt.Errorf("audit: read chain head: %w", prevErr)
 		}
 		prev = nil // genuine empty chain (first row in this org)
@@ -235,7 +235,9 @@ func (l *Logger) append(ctx context.Context, q *generated.Queries, p preparedEnt
 		CreatedAt:     pgtype.Timestamptz{Time: p.createdAt, Valid: true},
 	})
 	if err != nil {
-		slog.Error("audit log insert failed", "kind", e.Kind, "err", err)
+		// Database diagnostics can echo document content or URL credentials.
+		// Keep the error for rollback/classification without writing it to logs.
+		slog.Error("audit log insert failed", "org_id", e.OrgID, "kind", e.Kind, "error_type", fmt.Sprintf("%T", err))
 		return uuid.Nil, err
 	}
 	return row.ID, nil
@@ -310,7 +312,7 @@ func (l *Logger) Publish(p PendingEvent) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("audit hook panicked", "kind", e.Kind, "panic", r)
+					slog.Error("audit hook panicked", "kind", e.Kind, "panic_type", fmt.Sprintf("%T", r))
 				}
 			}()
 			hctx, cancel := context.WithTimeout(context.Background(), AuditHookTimeout)

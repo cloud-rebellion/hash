@@ -334,8 +334,8 @@ WHERE expires_at IS NOT NULL
   AND status IN ('sent','in_progress')
 LIMIT $1;
 -- name: FreezeDocumentVariables :one
--- Source-neutral frozen values are committed only inside an authorized send
--- transaction after the original draft observation has been checked.
+-- Source-neutral values are committed only inside authorized draft creation
+-- or send, after the current draft revision has been checked.
 UPDATE documents
 SET variables_json = $3, updated_at = clock_timestamp()
 WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL

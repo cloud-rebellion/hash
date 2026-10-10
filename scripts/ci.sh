@@ -73,6 +73,26 @@ step() {
   esac
 }
 
+# This denial suite only exists in Linux non-race builds. A successful empty
+# package test on another host must never stand in for executed sandbox checks.
+pdf_worker_sandbox_checks() {
+  local host output rc
+  host="$(uname -s)" || return 1
+  if [ "$host" != "Linux" ]; then
+    echo "not run: PDF worker syscall/resource checks require a Linux host"
+    return 99
+  fi
+  output="$(go test -race=false -v ./cmd/pdfworker \
+    -run '^TestPDFSandboxResourceAndAllThreadDenials$' -count=1 -timeout=30s 2>&1)"
+  rc=$?
+  printf '%s\n' "$output"
+  [ "$rc" -eq 0 ] || return 1
+  if ! grep -F -- '--- PASS: TestPDFSandboxResourceAndAllThreadDenials (' <<<"$output" >/dev/null; then
+    echo "PDF worker sandbox parent test did not execute and pass" >&2
+    return 1
+  fi
+}
+
 # Are we in the published mirror, or in the private monorepo the mirror is cut from?
 # scripts/split-public-repo.sh strips a fixed list of internal-ops files (STRIP_PATHS)
 # from every published commit, so any one of them existing means we are upstream.
@@ -84,6 +104,58 @@ IN_MIRROR=1
 for internal_only in PLAN.md docker-compose.prod.yml PRODUCTION-CUTOVER.md; do
   [ -e "$internal_only" ] && IN_MIRROR=0
 done
+
+# A module directive alone does not prove which compiler CI or a container
+# actually uses. Keep both modules, both image builders, and every Hash CI job
+# on the same reviewed security release.
+go_toolchain_policy() {
+  local expected="1.26.9" actual file
+  local builder="golang:1.26.9-alpine3.24@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0"
+  actual="$(go env GOVERSION)" || return 1
+  [ "$actual" = "go$expected" ] || {
+    echo "Hash CI requires Go $expected; effective toolchain is $actual" >&2
+    return 1
+  }
+  actual="$(cd gotenberg && GOWORK=off go env GOVERSION)" || return 1
+  [ "$actual" = "go$expected" ] || {
+    echo "renderer CI requires Go $expected; effective toolchain is $actual" >&2
+    return 1
+  }
+  for file in go.mod gotenberg/go.mod; do
+    awk -v expected="$expected" '
+      $1 == "go" { count++; if ($2 != expected) bad=1 }
+      $1 == "toolchain" && $2 != "go" expected { bad=1 }
+      END { exit (count != 1 || bad) }
+    ' "$file" || {
+      echo "$file must declare Go $expected without a different toolchain override" >&2
+      return 1
+    }
+  done
+  grep -Fxq "FROM $builder AS backend" Dockerfile \
+    && grep -Fxq "FROM $builder AS builder" gotenberg/Dockerfile || {
+      echo "both Hash image builders must use the reviewed immutable Go $expected image" >&2
+      return 1
+    }
+  [ -f .github/workflows/ci.yml ] || {
+    echo "the public Hash CI workflow is required for the toolchain policy" >&2
+    return 1
+  }
+  for file in .github/workflows/ci.yml ../.github/workflows/hash-ci.yml; do
+    [ -f "$file" ] || continue
+    awk -v expected="$expected" '
+      $1 == "go-version:" {
+        count++; gsub(/["\047]/, "", $2)
+        if ($2 != expected) bad=1
+      }
+      $1 == "go-version-file:" { bad=1 }
+      END { exit (count == 0 || bad) }
+    ' "$file" || {
+      echo "every Go setup job in $file must use Go $expected" >&2
+      return 1
+    }
+  done
+  echo "both modules, image builders, and Hash CI jobs use the reviewed Go $expected release"
+}
 
 # gofmt is not a style preference here, it is the diff-noise floor: an unformatted file
 # makes every later change to it look bigger than it is. `gofmt -l` prints the files it
@@ -829,7 +901,7 @@ license_headers() {
     echo "not run: needs a git checkout to enumerate tracked files"
     return 99
   fi
-  missing=$(git ls-files '*.go' | while read -r f; do
+  missing=$(git ls-files -z '*.go' | while IFS= read -r -d '' f; do
     awk 'NR<=5 && /SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License/ { found=1; exit } END { exit !found }' "$f" \
       || printf '%s\n' "$f"
   done)
@@ -1054,8 +1126,8 @@ renderer_vulnerability_scan() {
     --arg revision "$actual_revision" '
       .schema == 1 and .module == $module and .version == $version and
       .module_h1 == $h1 and .upstream_revision == $revision and
-      .reviewed_on == "2026-09-09" and
-      .review_expires_on == "2026-10-09" and
+      .reviewed_on == "2026-10-09" and
+      .review_expires_on == "2026-11-08" and
       (.basis | type == "string" and length > 0) and
       (.reviewed_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
       (.review_expires_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
@@ -1195,9 +1267,11 @@ secret_scan() {
   fi
 }
 
+step "Go toolchain security-release policy"    go_toolchain_policy
 step "build"                                   go build ./...
 step "vet"                                     vet_all
 step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=120s
+step "PDF worker Linux syscall/resource checks" pdf_worker_sandbox_checks
 step "nested renderer module verify + test"    renderer_module_checks
 step "renderer pinned-source/module policy"    renderer_source_policy
 step "frontend typecheck + production build"   frontend_checks

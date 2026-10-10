@@ -4,8 +4,10 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -14,11 +16,14 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
+
+var errWebhookEndpointNotFound = errors.New("webhook endpoint not found")
 
 // registerWebhookTools exposes outbound-webhook CRUD over MCP so an
 // agent can stand up integrations without a human touching the settings
@@ -85,6 +90,10 @@ func registerWebhookTools(s *Server, d Deps) {
 			if d.WebhookSecrets == nil {
 				return nil, errors.New("webhook endpoint encryption is unavailable")
 			}
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
 			endpointID, err := uuid.NewRandom()
 			if err != nil {
 				return nil, err
@@ -97,9 +106,10 @@ func registerWebhookTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
-					return q.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
+			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
+					return q.CreateWebhookEndpoint(ctx, generated.CreateWebhookEndpointParams{
 						ID:               endpointID,
 						OrgID:            u.OrgID,
 						Url:              p.URL,
@@ -121,7 +131,7 @@ func registerWebhookTools(s *Server, d Deps) {
 				},
 			)
 			if err != nil {
-				return nil, err
+				return nil, webhookOwnerMutationError("create_webhook", u.OrgID, err)
 			}
 			// The secret is returned exactly once on create.
 			// Subsequent reads (list_webhooks) omit it.
@@ -135,7 +145,7 @@ func registerWebhookTools(s *Server, d Deps) {
 		Name:        "delete_webhook",
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST delete-webhook is owner-only; match it
-		Description: "Delete an outbound webhook endpoint by id. Past deliveries are retained for audit; future events stop firing.",
+		Description: "Delete an outbound webhook endpoint by id and its delivery-attempt rows. Organization audit events remain; future events stop firing.",
 		InputSchema: schemaObject(map[string]any{
 			"endpoint_id": stringSchema("uuid of the endpoint to remove"),
 		}, []string{"endpoint_id"}),
@@ -151,11 +161,20 @@ func registerWebhookTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("endpoint_id must be a uuid")
 			}
-			deletedID, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (uuid.UUID, error) {
-					return q.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			deletedID, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
+					deleted, err := q.DeleteWebhookEndpoint(ctx, generated.DeleteWebhookEndpointParams{
 						ID: id, OrgID: u.OrgID,
 					})
+					if errors.Is(err, pgx.ErrNoRows) {
+						return uuid.Nil, errWebhookEndpointNotFound
+					}
+					return deleted, err
 				},
 				func(deletedID uuid.UUID) audit.Entry {
 					return audit.Entry{
@@ -165,11 +184,11 @@ func registerWebhookTools(s *Server, d Deps) {
 					}
 				},
 			)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("webhook endpoint not found")
+			if errors.Is(err, errWebhookEndpointNotFound) {
+				return nil, errWebhookEndpointNotFound
 			}
 			if err != nil {
-				return nil, err
+				return nil, webhookOwnerMutationError("delete_webhook", u.OrgID, err)
 			}
 			return map[string]any{"deleted": deletedID.String()}, nil
 		},
@@ -252,5 +271,21 @@ func webhookRow(id uuid.UUID, endpointURL string, events []string, active bool, 
 		"events_subscribed": append([]string{}, events...),
 		"active":            active,
 		"created_at":        createdAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+}
+
+// Endpoint URLs can carry provider credentials. Neither a database error nor
+// its arbitrary diagnostics may become an immutable audit or a raw MCP log.
+func webhookOwnerMutationError(tool string, orgID uuid.UUID, err error) error {
+	switch {
+	case errors.Is(err, auth.ErrMutationCredentialExpired):
+		return auth.ErrMutationCredentialExpired
+	case errors.Is(err, auth.ErrMutationPermissionRevoked):
+		return auth.ErrMutationPermissionRevoked
+	case errors.Is(err, errWebhookEndpointNotFound):
+		return errWebhookEndpointNotFound
+	default:
+		slog.Error("webhook owner mutation failed", "tool", tool, "org_id", orgID)
+		return errors.New("webhook mutation failed")
 	}
 }

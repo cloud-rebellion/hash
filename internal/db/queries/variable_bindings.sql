@@ -69,17 +69,39 @@ WHERE document_id = $1 AND variable_name = $2
       WHERE d.id = document_variable_bindings.document_id
         AND d.status = 'draft' AND d.deleted_at IS NULL);
 
--- name: UpdateVariableBindingResolved :exec
-UPDATE document_variable_bindings
-   SET last_value    = $3,
-       last_resolved = now(),
-       last_error    = '',
-       updated_at    = now()
- WHERE document_id = $1 AND variable_name = $2;
+-- name: GetResolverDocumentRevisionForShare :one
+SELECT id, org_id, status, updated_at
+FROM documents
+WHERE id = sqlc.arg(document_id) AND org_id = sqlc.arg(org_id) AND deleted_at IS NULL
+FOR SHARE;
 
--- name: UpdateVariableBindingError :exec
-UPDATE document_variable_bindings
-   SET last_error    = $3,
-       last_resolved = now(),
-       updated_at    = now()
- WHERE document_id = $1 AND variable_name = $2;
+-- name: ListVariableBindingsForShare :many
+SELECT * FROM document_variable_bindings
+WHERE document_id = $1
+ORDER BY variable_name ASC
+FOR SHARE;
+
+-- name: UpdateVariableBindingResolved :execrows
+-- Observations are admitted only by the reviewed send transaction after member,
+-- credential and family locks. Match both revisions; never overwrite a binding
+-- that was edited/deleted/recreated while its upstream request was in flight.
+UPDATE document_variable_bindings b
+   SET last_value = sqlc.arg(last_value), last_resolved = clock_timestamp(),
+       last_error = '', updated_at = clock_timestamp()
+ WHERE b.document_id = sqlc.arg(document_id) AND b.variable_name = sqlc.arg(variable_name)
+   AND b.created_at = sqlc.arg(expected_binding_created_at)
+   AND b.updated_at = sqlc.arg(expected_binding_updated_at)
+   AND EXISTS (SELECT 1 FROM documents d WHERE d.id = b.document_id
+       AND d.org_id = sqlc.arg(org_id) AND d.status = 'draft' AND d.deleted_at IS NULL
+       AND d.updated_at = sqlc.arg(expected_document_updated_at));
+
+-- name: UpdateVariableBindingError :execrows
+UPDATE document_variable_bindings b
+   SET last_error = sqlc.arg(last_error), last_resolved = clock_timestamp(),
+       updated_at = clock_timestamp()
+ WHERE b.document_id = sqlc.arg(document_id) AND b.variable_name = sqlc.arg(variable_name)
+   AND b.created_at = sqlc.arg(expected_binding_created_at)
+   AND b.updated_at = sqlc.arg(expected_binding_updated_at)
+   AND EXISTS (SELECT 1 FROM documents d WHERE d.id = b.document_id
+       AND d.org_id = sqlc.arg(org_id) AND d.status = 'draft' AND d.deleted_at IS NULL
+       AND d.updated_at = sqlc.arg(expected_document_updated_at));

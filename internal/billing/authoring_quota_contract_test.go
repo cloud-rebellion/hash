@@ -30,6 +30,7 @@ func TestCountedAuthoringCallsitesUseAtomicQuotaProtocol(t *testing.T) {
 		"internal/handler/documents_import.go",
 		"internal/mcp/tools_authoring.go",
 		"internal/mcp/tools_envelopes.go",
+		"internal/pdflayout/materialize.go",
 	}
 	for _, rel := range files {
 		body, err := os.ReadFile(filepath.Join(root, rel))

@@ -40,6 +40,7 @@ import (
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -90,6 +91,9 @@ func run() error {
 	flarereport.InitFlare("hash", cfg.Release, cfg.Environment)
 
 	ctx := context.Background()
+	if err := sanitize.ConfigurePDFWorker(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment); err != nil {
+		return err
+	}
 	if err := malwarescan.Configure(ctx, cfg.MalwareSocket, cfg.Environment); err != nil {
 		return err
 	}
@@ -247,20 +251,6 @@ func run() error {
 		"prompts", aiRuntime.Status().PromptCount,
 	)
 
-	// Phase 8.2: variable resolver. Empty BrightCRM/Scanner creds are fine,
-	// the corresponding source plugins return ErrNotConfigured and the UI
-	// surfaces a "configure integration" hint per binding. The org-setting
-	// source always works (reads local hash.orgs); agent.computed always
-	// works (override-only).
-	allowPrivateIntegrations := config.IsLocalDevelopment(cfg.PublicURL)
-	resolverEngine := resolver.New(queries,
-		resolver.NewCRMDealSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
-		resolver.NewCRMContactSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
-		resolver.NewScannerFindingSource(cfg.ScannerURL, cfg.ScannerToken, allowPrivateIntegrations),
-		&resolver.OrgSettingSource{Q: queries},
-		resolver.AgentComputedSource{},
-	)
-
 	var signer *sign.CertSigner
 	if cfg.AuditPrivateKey == "" {
 		// config.Load permits an empty audit key only for explicit local
@@ -357,13 +347,18 @@ func run() error {
 		complianceFeed = &compliance.SyntheticFeed{Items: compliance.DevelopmentSampleFeedItems()}
 	}
 
-	// v1.1 billing. A real provider (Mollie) is mandatory outside local dev;
+	// Billing: Mollie or reviewed internal operator entitlements outside local dev;
 	// config.Load fails boot before this point if it is absent. The forgeable
 	// auto-completing MockProvider runs only on an explicit loopback deployment.
 	// Keeping that boundary here too ensures production can never construct a
 	// nil engine that silently bypasses quotas and paid-feature checks.
 	var billingEngine *billing.Engine
 	switch {
+	case cfg.BillingProvider == "operator":
+		billingEngine = billing.NewOperator(queries, cfg.OperatorEntitlements)
+		if err := billingEngine.ValidateOperatorPlans(ctx); err != nil {
+			return err
+		}
 	case cfg.BillingProvider == "mollie":
 		billingProvider := billing.NewMollieProvider(cfg.MollieAPIKey, cfg.MollieBaseURL, cfg.MollieWebhookPathSecret)
 		billingWebhookURL := cfg.PublicURL + "/webhooks/billing/" + cfg.MollieWebhookPathSecret
@@ -373,7 +368,7 @@ func run() error {
 		billingEngine = billing.New(queries, billing.MockProvider{}, cfg.PublicURL, billingWebhookURL)
 	}
 	if !config.IsLocalDevelopment(cfg.PublicURL) && billingEngine == nil {
-		return errors.New("billing: production engine unavailable; HASH_BILLING_PROVIDER=mollie is required")
+		return errors.New("billing: production engine unavailable; HASH_BILLING_PROVIDER=mollie or operator is required")
 	}
 	// Boot assertion: HasFeature now fails closed on an unresolvable plan, so a missing
 	// "free" seed would 402 every paid feature for every org silently. Catch that at
@@ -383,6 +378,18 @@ func run() error {
 			return fmt.Errorf("billing: free plan not seeded (apply migration 00021 before serving): %w", ferr)
 		}
 	}
+
+	// Variable resolution uses the same effective billing authority as feature
+	// and quota enforcement, including explicitly approved operator plans.
+	// Missing integration configuration remains an actionable binding error.
+	allowPrivateIntegrations := config.IsLocalDevelopment(cfg.PublicURL)
+	resolverEngine := resolver.New(queries,
+		resolver.NewCRMDealSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
+		resolver.NewCRMContactSource(cfg.BrightCRMURL, cfg.BrightCRMToken, allowPrivateIntegrations),
+		resolver.NewScannerFindingSource(cfg.ScannerURL, cfg.ScannerToken, allowPrivateIntegrations),
+		&resolver.OrgSettingSource{Q: queries, Plans: billingEngine},
+		resolver.AgentComputedSource{},
+	)
 
 	// Document lifecycle engine (send/void/remind). REST, MCP, and the worker
 	// all route through it so the magic-token TTL, variable freeze, eIDAS

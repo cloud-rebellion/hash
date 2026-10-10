@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const claimBrightCRMWebhookReceipt = `-- name: ClaimBrightCRMWebhookReceipt :execrows
@@ -70,6 +71,37 @@ func (q *Queries) GetBrightCRMWebhookReceipt(ctx context.Context, deliveryCorrel
 	row := q.db.QueryRow(ctx, getBrightCRMWebhookReceipt, deliveryCorrelation)
 	var i GetBrightCRMWebhookReceiptRow
 	err := row.Scan(&i.PayloadCorrelation, &i.OrgIds)
+	return &i, err
+}
+
+const getResolverDocumentRevisionForShare = `-- name: GetResolverDocumentRevisionForShare :one
+SELECT id, org_id, status, updated_at
+FROM documents
+WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
+FOR SHARE
+`
+
+type GetResolverDocumentRevisionForShareParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+type GetResolverDocumentRevisionForShareRow struct {
+	ID        uuid.UUID          `json:"id"`
+	OrgID     uuid.UUID          `json:"org_id"`
+	Status    string             `json:"status"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetResolverDocumentRevisionForShare(ctx context.Context, arg GetResolverDocumentRevisionForShareParams) (*GetResolverDocumentRevisionForShareRow, error) {
+	row := q.db.QueryRow(ctx, getResolverDocumentRevisionForShare, arg.DocumentID, arg.OrgID)
+	var i GetResolverDocumentRevisionForShareRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Status,
+		&i.UpdatedAt,
+	)
 	return &i, err
 }
 
@@ -152,6 +184,45 @@ func (q *Queries) ListVariableBindings(ctx context.Context, documentID uuid.UUID
 	return items, nil
 }
 
+const listVariableBindingsForShare = `-- name: ListVariableBindingsForShare :many
+SELECT document_id, variable_name, source_kind, source_ref, source_path, fallback, last_value, last_resolved, last_error, created_at, updated_at FROM document_variable_bindings
+WHERE document_id = $1
+ORDER BY variable_name ASC
+FOR SHARE
+`
+
+func (q *Queries) ListVariableBindingsForShare(ctx context.Context, documentID uuid.UUID) ([]*DocumentVariableBinding, error) {
+	rows, err := q.db.Query(ctx, listVariableBindingsForShare, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*DocumentVariableBinding{}
+	for rows.Next() {
+		var i DocumentVariableBinding
+		if err := rows.Scan(
+			&i.DocumentID,
+			&i.VariableName,
+			&i.SourceKind,
+			&i.SourceRef,
+			&i.SourcePath,
+			&i.Fallback,
+			&i.LastValue,
+			&i.LastResolved,
+			&i.LastError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const purgeExpiredBrightCRMWebhookReceipts = `-- name: PurgeExpiredBrightCRMWebhookReceipts :execrows
 WITH expired AS (
     SELECT delivery_correlation
@@ -176,43 +247,83 @@ func (q *Queries) PurgeExpiredBrightCRMWebhookReceipts(ctx context.Context) (int
 	return result.RowsAffected(), nil
 }
 
-const updateVariableBindingError = `-- name: UpdateVariableBindingError :exec
-UPDATE document_variable_bindings
-   SET last_error    = $3,
-       last_resolved = now(),
-       updated_at    = now()
- WHERE document_id = $1 AND variable_name = $2
+const updateVariableBindingError = `-- name: UpdateVariableBindingError :execrows
+UPDATE document_variable_bindings b
+   SET last_error = $1, last_resolved = clock_timestamp(),
+       updated_at = clock_timestamp()
+ WHERE b.document_id = $2 AND b.variable_name = $3
+   AND b.created_at = $4
+   AND b.updated_at = $5
+   AND EXISTS (SELECT 1 FROM documents d WHERE d.id = b.document_id
+       AND d.org_id = $6 AND d.status = 'draft' AND d.deleted_at IS NULL
+       AND d.updated_at = $7)
 `
 
 type UpdateVariableBindingErrorParams struct {
-	DocumentID   uuid.UUID `json:"document_id"`
-	VariableName string    `json:"variable_name"`
-	LastError    string    `json:"last_error"`
+	LastError                 string             `json:"last_error"`
+	DocumentID                uuid.UUID          `json:"document_id"`
+	VariableName              string             `json:"variable_name"`
+	ExpectedBindingCreatedAt  pgtype.Timestamptz `json:"expected_binding_created_at"`
+	ExpectedBindingUpdatedAt  pgtype.Timestamptz `json:"expected_binding_updated_at"`
+	OrgID                     uuid.UUID          `json:"org_id"`
+	ExpectedDocumentUpdatedAt pgtype.Timestamptz `json:"expected_document_updated_at"`
 }
 
-func (q *Queries) UpdateVariableBindingError(ctx context.Context, arg UpdateVariableBindingErrorParams) error {
-	_, err := q.db.Exec(ctx, updateVariableBindingError, arg.DocumentID, arg.VariableName, arg.LastError)
-	return err
+func (q *Queries) UpdateVariableBindingError(ctx context.Context, arg UpdateVariableBindingErrorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateVariableBindingError,
+		arg.LastError,
+		arg.DocumentID,
+		arg.VariableName,
+		arg.ExpectedBindingCreatedAt,
+		arg.ExpectedBindingUpdatedAt,
+		arg.OrgID,
+		arg.ExpectedDocumentUpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const updateVariableBindingResolved = `-- name: UpdateVariableBindingResolved :exec
-UPDATE document_variable_bindings
-   SET last_value    = $3,
-       last_resolved = now(),
-       last_error    = '',
-       updated_at    = now()
- WHERE document_id = $1 AND variable_name = $2
+const updateVariableBindingResolved = `-- name: UpdateVariableBindingResolved :execrows
+UPDATE document_variable_bindings b
+   SET last_value = $1, last_resolved = clock_timestamp(),
+       last_error = '', updated_at = clock_timestamp()
+ WHERE b.document_id = $2 AND b.variable_name = $3
+   AND b.created_at = $4
+   AND b.updated_at = $5
+   AND EXISTS (SELECT 1 FROM documents d WHERE d.id = b.document_id
+       AND d.org_id = $6 AND d.status = 'draft' AND d.deleted_at IS NULL
+       AND d.updated_at = $7)
 `
 
 type UpdateVariableBindingResolvedParams struct {
-	DocumentID   uuid.UUID `json:"document_id"`
-	VariableName string    `json:"variable_name"`
-	LastValue    string    `json:"last_value"`
+	LastValue                 string             `json:"last_value"`
+	DocumentID                uuid.UUID          `json:"document_id"`
+	VariableName              string             `json:"variable_name"`
+	ExpectedBindingCreatedAt  pgtype.Timestamptz `json:"expected_binding_created_at"`
+	ExpectedBindingUpdatedAt  pgtype.Timestamptz `json:"expected_binding_updated_at"`
+	OrgID                     uuid.UUID          `json:"org_id"`
+	ExpectedDocumentUpdatedAt pgtype.Timestamptz `json:"expected_document_updated_at"`
 }
 
-func (q *Queries) UpdateVariableBindingResolved(ctx context.Context, arg UpdateVariableBindingResolvedParams) error {
-	_, err := q.db.Exec(ctx, updateVariableBindingResolved, arg.DocumentID, arg.VariableName, arg.LastValue)
-	return err
+// Observations are admitted only by the reviewed send transaction after member,
+// credential and family locks. Match both revisions; never overwrite a binding
+// that was edited/deleted/recreated while its upstream request was in flight.
+func (q *Queries) UpdateVariableBindingResolved(ctx context.Context, arg UpdateVariableBindingResolvedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateVariableBindingResolved,
+		arg.LastValue,
+		arg.DocumentID,
+		arg.VariableName,
+		arg.ExpectedBindingCreatedAt,
+		arg.ExpectedBindingUpdatedAt,
+		arg.OrgID,
+		arg.ExpectedDocumentUpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertVariableBinding = `-- name: UpsertVariableBinding :one

@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -14,8 +15,11 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
+
+var errAPIKeyNotFound = errors.New("api key not found")
 
 type apiKeyResponse struct {
 	ID         uuid.UUID `json:"id"`
@@ -109,15 +113,20 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		expires = pgtype.Timestamptz{Time: t, Valid: true}
 	}
 
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize credential creation", err)
+		return
+	}
 	key, err := auth.MintAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "key mint failed")
 		return
 	}
 
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.ApiKey, error) {
-			return q.CreateAPIKey(r.Context(), generated.CreateAPIKeyParams{
+	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (*generated.ApiKey, error) {
+			return q.CreateAPIKey(ctx, generated.CreateAPIKeyParams{
 				OrgID:     u.OrgID,
 				UserID:    u.UserID,
 				KeyPrefix: key.Prefix,
@@ -142,7 +151,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		writeInternalErrorMsg(w, "create api key failed", err)
+		s.writeDraftAuthoringError(w, "create api key failed", err)
 		return
 	}
 
@@ -157,6 +166,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if row.ExpiresAt.Valid {
 		out.ExpiresAt = row.ExpiresAt.Time.Format(time.RFC3339)
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -186,9 +197,18 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (uuid.UUID, error) {
-			return q.DeleteAPIKey(r.Context(), generated.DeleteAPIKeyParams{ID: id, UserID: u.UserID})
+	actor, err := s.sessionOwnerActor(r, u)
+	if err != nil {
+		s.writeDraftAuthoringError(w, "authorize credential deletion", err)
+		return
+	}
+	_, err = authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
+		func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
+			deleted, err := q.DeleteAPIKey(ctx, generated.DeleteAPIKeyParams{ID: id, UserID: u.UserID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return uuid.Nil, errAPIKeyNotFound
+			}
+			return deleted, err
 		},
 		func(deletedID uuid.UUID) audit.Entry {
 			return audit.Entry{
@@ -199,12 +219,12 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, errAPIKeyNotFound) {
 		writeError(w, http.StatusNotFound, "api key not found")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "delete failed")
+		s.writeDraftAuthoringError(w, "delete failed", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

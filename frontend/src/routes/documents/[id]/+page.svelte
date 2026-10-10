@@ -28,6 +28,7 @@
   import SenderPanel from '$lib/components/SenderPanel.svelte';
   import TimelinePanel from '$lib/components/TimelinePanel.svelte';
   import PdfFieldDesigner from '$lib/components/PdfFieldDesigner.svelte';
+  import SavePDFTemplate from '$lib/components/SavePDFTemplate.svelte';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
   let doc = $state<DocumentResponse | null>(null);
@@ -38,6 +39,8 @@
   let recipientRevision = $state(0);
   let savingTemplate = $state(false);
   let savedTemplateFlash = $state(false);
+  let showPDFSave = $state(false);
+  let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
   let changeRequests = $state<ChangeRequest[]>([]);
   let revising = $state(false);
   let approvalMode = $state<'accept' | 'auto_apply'>('accept');
@@ -288,6 +291,8 @@
     showPreview = false;
     savingTemplate = false;
     savedTemplateFlash = false;
+    showPDFSave = false;
+    pdfSignatureFields = [];
     changeRequests = [];
     revising = false;
     approvalMode = 'accept';
@@ -367,6 +372,10 @@
             <button class="btn btn-secondary" disabled={savingTemplate} onclick={saveAsTemplate}>
               <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template'}
             </button>
+          {:else if doc.status === 'draft'}
+            <button class="btn btn-secondary" onclick={() => (showPDFSave = !showPDFSave)}>
+              <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : 'Save as template'}
+            </button>
           {/if}
           <a class="btn btn-secondary" href="/settings/api-keys">
             <Sparkles class="size-4" /> Attach AI
@@ -374,6 +383,12 @@
         </div>
       </div>
     </div>
+
+    {#if showPDFSave && doc.status === 'draft' && doc.source_kind === 'pdf'}
+      <SavePDFTemplate document={doc} onClose={() => (showPDFSave = false)} onSaved={() => {
+        if (isCurrentDocument(documentScope)) { showPDFSave = false; savedTemplateFlash = true; }
+      }} />
+    {/if}
 
     {#if doc.status === 'draft'}
       <div class="card p-4 mb-6 flex items-center justify-between gap-4">
@@ -463,7 +478,9 @@
       {/if}
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
-        <PdfFieldDesigner documentID={doc.id} {recipientRevision} />
+        <PdfFieldDesigner documentID={doc.id} {recipientRevision} onSignatureFieldsChange={(fields) => {
+          if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
+        }} />
       </div>
       {#if showPreview}
         <iframe title="preview" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
@@ -478,7 +495,9 @@
     {:else if doc.source_kind === 'blocks'}
       <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
-      <PdfFieldDesigner documentID={doc.id} {recipientRevision} />
+      <PdfFieldDesigner documentID={doc.id} {recipientRevision} onSignatureFieldsChange={(fields) => {
+        if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
+      }} />
     {/if}
 
     <div class="mt-8">
@@ -487,7 +506,7 @@
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         defaultLocale={doc.default_locale}
-        signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : []}
+        signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : pdfSignatureFields}
         onStatusChange={(next) => receiveStatus(next, documentScope)}
         onRecipientsChange={() => { if (isCurrentDocument(documentScope)) recipientRevision++; }}
         onDefaultLocaleChange={(locale) => changeDefaultLocale(locale, documentScope)}

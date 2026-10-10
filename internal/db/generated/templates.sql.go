@@ -218,6 +218,44 @@ func (q *Queries) GetTemplateForShare(ctx context.Context, arg GetTemplateForSha
 	return &i, err
 }
 
+const getTemplateForUpdate = `-- name: GetTemplateForUpdate :one
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
+WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+FOR UPDATE
+`
+
+type GetTemplateForUpdateParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// Mutations resolve omitted values from this locked current row and retain
+// the lock through authorization, audit and commit.
+func (q *Queries) GetTemplateForUpdate(ctx context.Context, arg GetTemplateForUpdateParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, getTemplateForUpdate, arg.ID, arg.OrgID)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+	)
+	return &i, err
+}
+
 const listTemplates = `-- name: ListTemplates :many
 SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
 WHERE org_id = $1 AND archived_at IS NULL

@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,12 +12,16 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/eidas"
 )
+
+var errEIDASRuleNotFound = errors.New("rule not found")
 
 // registerEIDASTools mounts the Phase 9.2 routing-rules surface for
 // agents. Rules describe predicates over document metadata + resolved
@@ -85,9 +90,14 @@ func registerEIDASTools(s *Server, d Deps) {
 			if err := eidas.ValidateRuleActivation(eidas.Tier(p.RequiredTier), active); err != nil {
 				return nil, err
 			}
-			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (*generated.EidasRoutingRule, error) {
-					return q.InsertEIDASRule(r.Context(), generated.InsertEIDASRuleParams{
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (*generated.EidasRoutingRule, error) {
+					return q.InsertEIDASRule(ctx, generated.InsertEIDASRuleParams{
 						OrgID:         u.OrgID,
 						Name:          p.Name,
 						Priority:      p.Priority,
@@ -132,12 +142,20 @@ func registerEIDASTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("rule_id must be a uuid")
 			}
-			_, err = audit.CommitMutation(r.Context(), d.Pool, d.Audit,
-				func(q *generated.Queries) (uuid.UUID, error) {
-					if _, err := q.GetEIDASRule(r.Context(), generated.GetEIDASRuleParams{ID: id, OrgID: u.OrgID}); err != nil {
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			_, err = authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
+					if _, err := q.GetEIDASRule(ctx, generated.GetEIDASRuleParams{ID: id, OrgID: u.OrgID}); err != nil {
+						if errors.Is(err, pgx.ErrNoRows) {
+							return uuid.Nil, errEIDASRuleNotFound
+						}
 						return uuid.Nil, err
 					}
-					return id, q.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: u.OrgID})
+					return id, q.DeleteEIDASRule(ctx, generated.DeleteEIDASRuleParams{ID: id, OrgID: u.OrgID})
 				},
 				func(uuid.UUID) audit.Entry {
 					return audit.Entry{
@@ -276,13 +294,27 @@ func registerEIDASTools(s *Server, d Deps) {
 			if tier != string(eidas.TierSES) {
 				return nil, errors.New("AES and QES are unavailable until identity proofs are cryptographically bound to the ceremony; routing_tier must be SES")
 			}
-			tx, err := d.Pool.Begin(r.Context())
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteAuthoring)
 			if err != nil {
 				return nil, err
 			}
-			defer func() { _ = tx.Rollback(r.Context()) }()
-			q := d.Queries.WithTx(tx)
-			rows, err := q.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("routing tier mutation dependencies unavailable")
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+			defer cancel()
+			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = authoring.Rollback(ctx, tx) }()
+			guard, err := authoring.LockDraft(ctx, tx,
+				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
+			if err != nil {
+				return nil, err
+			}
+			q := generated.New(tx)
+			rows, err := q.SetDocumentRoutingTier(ctx, generated.SetDocumentRoutingTierParams{
 				ID: id, OrgID: u.OrgID, RoutingTier: tier,
 			})
 			if err != nil {
@@ -291,7 +323,7 @@ func registerEIDASTools(s *Server, d Deps) {
 			if rows != 1 {
 				return nil, errors.New("routing tier can only be set to SES while the document is draft")
 			}
-			pendingAudit, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
+			pendingAudit, err := d.Audit.LogTx(ctx, tx, audit.Entry{
 				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
 				Kind: audit.KindDocumentUpdated,
 				Payload: map[string]any{
@@ -301,7 +333,10 @@ func registerEIDASTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			if err := tx.Commit(r.Context()); err != nil {
+			if err := guard.Recheck(ctx); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
 			d.Audit.Publish(pendingAudit)

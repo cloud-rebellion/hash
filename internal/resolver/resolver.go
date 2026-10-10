@@ -94,7 +94,8 @@ var ErrNotConfigured = errors.New("source plugin not configured")
 // referenced entity doesn't exist. Falls through to the binding's fallback.
 var ErrNotFound = errors.New("source entity not found")
 
-var ErrBindingPersistence = errors.New("binding observation could not be saved")
+var ErrBindingPersistence = errors.New("binding observation could not be staged")
+var ErrSourceFreshness = errors.New("current binding source value could not be verified for send")
 
 // Resolver chains a static-document layer, a per-document binding layer, and
 // an optional agent-override layer. It is the single entry point used by
@@ -108,8 +109,14 @@ type Resolver struct {
 
 type BindingStore interface {
 	ListVariableBindings(context.Context, uuid.UUID) ([]*generated.DocumentVariableBinding, error)
-	UpdateVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error
-	UpdateVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error
+}
+
+// ObservationStager is deliberately not implemented by generated.Queries.
+// Freeze preparation may stage observations in memory; only the send engine's
+// authorized transaction may persist them with both revision predicates.
+type ObservationStager interface {
+	StageVariableBindingError(context.Context, generated.UpdateVariableBindingErrorParams) error
+	StageVariableBindingResolved(context.Context, generated.UpdateVariableBindingResolvedParams) error
 }
 
 // New builds a Resolver with the given source plugins. A static source is
@@ -138,6 +145,10 @@ type ResolveOptions struct {
 	// FreezeMode uses only the document snapshot variables. Binding rows are
 	// consulted for reporting, never as a source of mutable replacement values.
 	FreezeMode bool
+	// Only FreezeForSend enables these private preparation options. Preview
+	// callers cannot ask a default resolver to persist binding observations.
+	stageObservations bool
+	freshSources      bool
 }
 
 // Resolve produces the final variable map for a document. The block tree's
@@ -169,11 +180,16 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 		return nil, nil, fmt.Errorf("resolve: list bindings: %w", err)
 	}
 	for _, b := range bindings {
+		if b == nil || b.DocumentID != doc.ID {
+			return nil, nil, errors.New("resolve: invalid binding snapshot")
+		}
+		bindingSnapshot := *b
 		entry := ResolveReport{
-			Variable:   b.VariableName,
-			SourceKind: b.SourceKind,
-			SourceRef:  b.SourceRef,
-			SourcePath: b.SourcePath,
+			bindingSnapshot: &bindingSnapshot,
+			Variable:        b.VariableName,
+			SourceKind:      b.SourceKind,
+			SourceRef:       b.SourceRef,
+			SourcePath:      b.SourcePath,
 		}
 		if opts.FreezeMode {
 			entry.Value = out[b.VariableName]
@@ -181,7 +197,7 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 			report = append(report, entry)
 			continue
 		}
-		val, src, err := r.fetchOne(ctx, doc, b)
+		val, src, err := r.fetchOne(ctx, doc, b, opts)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -218,7 +234,7 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 // transitioning the document status to 'sent' so the snapshot triggered by
 // the state change captures the frozen values.
 func (r *Resolver) FreezeForSend(ctx context.Context, doc *generated.Document) (json.RawMessage, []ResolveReport, error) {
-	resolved, report, err := r.Resolve(ctx, doc, ResolveOptions{})
+	resolved, report, err := r.Resolve(ctx, doc, ResolveOptions{stageObservations: true, freshSources: true})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -231,68 +247,78 @@ func (r *Resolver) FreezeForSend(ctx context.Context, doc *generated.Document) (
 	return frozen, report, nil
 }
 
-// fetchOne runs the binding through the configured source, persists the
-// result back to last_value/last_error, and returns the resolved string plus
-// a label saying which layer answered ("source", "cached", "fallback", "").
-func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *generated.DocumentVariableBinding) (string, string, error) {
+// fetchOne is read-only unless FreezeForSend explicitly asks the send
+// preparation adapter to stage an observation. Preview cache hits and source
+// failures never update the customer's binding ledger.
+func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *generated.DocumentVariableBinding, opts ResolveOptions) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	if b.SourceKind == string(SourceStatic) {
-		// 'static' bindings exist so the UI shows them as a row, but the
-		// actual value comes from variables_json (already merged in Resolve
-		// before fetchOne). Skip the source plugin.
 		return "", "", nil
 	}
+	stage := func(value string, failed bool) error {
+		if !opts.stageObservations {
+			return nil
+		}
+		stager, ok := r.Q.(ObservationStager)
+		if !ok {
+			return ErrBindingPersistence
+		}
+		var err error
+		if failed {
+			err = stager.StageVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
+				DocumentID: b.DocumentID, OrgID: doc.OrgID, VariableName: b.VariableName, LastError: value,
+				ExpectedDocumentUpdatedAt: doc.UpdatedAt, ExpectedBindingCreatedAt: b.CreatedAt, ExpectedBindingUpdatedAt: b.UpdatedAt,
+			})
+		} else {
+			err = stager.StageVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
+				DocumentID: b.DocumentID, OrgID: doc.OrgID, VariableName: b.VariableName, LastValue: value,
+				ExpectedDocumentUpdatedAt: doc.UpdatedAt, ExpectedBindingCreatedAt: b.CreatedAt, ExpectedBindingUpdatedAt: b.UpdatedAt,
+			})
+		}
+		if err != nil {
+			return ErrBindingPersistence
+		}
+		return nil
+	}
+	freshRequired := opts.freshSources && (b.SourceKind == string(SourceCRMDeal) || b.SourceKind == string(SourceCRMContact))
 	src, ok := r.Sources[SourceKind(b.SourceKind)]
 	if !ok {
-		if persistErr := r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
-			DocumentID:   b.DocumentID,
-			VariableName: b.VariableName,
-			LastError:    fmt.Sprintf("source kind %q not registered", b.SourceKind),
-		}); persistErr != nil {
-			return "", "", ErrBindingPersistence
+		if err := stage(fmt.Sprintf("source kind %q not registered", b.SourceKind), true); err != nil {
+			return "", "", err
+		}
+		if freshRequired {
+			return "", "", ErrSourceFreshness
 		}
 		return "", "", nil
 	}
 	cacheKey := sourceCacheKey(doc.OrgID, b.SourceKind, b.SourceRef, b.SourcePath)
 	hit, cached, generation := r.Cache.getWithGeneration(cacheKey)
-	if cached {
-		// Cache entries intentionally span documents in the same org. The
-		// resolved value still belongs in this binding's audit/cache columns:
-		// otherwise a new document that reuses an org setting resolves correctly
-		// in memory but list_variable_bindings reports an empty last_value, and a
-		// subsequent binding inspection can report the successful observation.
-		if persistErr := r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
-			DocumentID:   b.DocumentID,
-			VariableName: b.VariableName,
-			LastValue:    hit,
-		}); persistErr != nil {
-			return "", "", ErrBindingPersistence
-		}
+	if cached && !opts.freshSources {
 		return hit, "cached", nil
 	}
-	val, err := src.Fetch(ctx, Ref{
-		OrgID:  doc.OrgID,
-		DocID:  b.DocumentID,
-		Source: b.SourceRef,
-		Path:   b.SourcePath,
-	})
+	val, err := src.Fetch(ctx, Ref{OrgID: doc.OrgID, DocID: b.DocumentID, Source: b.SourceRef, Path: b.SourcePath})
 	if err != nil {
-		if persistErr := r.Q.UpdateVariableBindingError(ctx, generated.UpdateVariableBindingErrorParams{
-			DocumentID:   b.DocumentID,
-			VariableName: b.VariableName,
-			LastError:    err.Error(),
-		}); persistErr != nil {
-			return "", "", ErrBindingPersistence
+		if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		}
+		if err := stage(err.Error(), true); err != nil {
+			return "", "", err
+		}
+		if freshRequired {
+			return "", "", ErrSourceFreshness
 		}
 		return "", "", nil
 	}
-	if persistErr := r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
-		DocumentID:   b.DocumentID,
-		VariableName: b.VariableName,
-		LastValue:    val,
-	}); persistErr != nil {
-		return "", "", ErrBindingPersistence
+	if err := stage(val, false); err != nil {
+		return "", "", err
 	}
-	r.Cache.putIfGeneration(cacheKey, val, generation)
+	if !r.Cache.putIfGeneration(cacheKey, val, generation) && opts.freshSources {
+		// An admitted upstream change invalidated this observation while the
+		// request was in flight. Never freeze its pre-change response.
+		return "", "", ErrSourceFreshness
+	}
 	return val, "source", nil
 }
 
@@ -300,12 +326,13 @@ func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *gen
 // callers so the editor's debug panel + the audit log can show which path
 // each variable took.
 type ResolveReport struct {
-	Variable     string `json:"variable"`
-	SourceKind   string `json:"source_kind"`
-	SourceRef    string `json:"source_ref,omitempty"`
-	SourcePath   string `json:"source_path,omitempty"`
-	Value        string `json:"value"`
-	ResolvedFrom string `json:"resolved_from"` // "source" | "cached" | "fallback" | "frozen" | ""
+	bindingSnapshot *generated.DocumentVariableBinding
+	Variable        string `json:"variable"`
+	SourceKind      string `json:"source_kind"`
+	SourceRef       string `json:"source_ref,omitempty"`
+	SourcePath      string `json:"source_path,omitempty"`
+	Value           string `json:"value"`
+	ResolvedFrom    string `json:"resolved_from"` // "source" | "cached" | "fallback" | "frozen" | ""
 }
 
 // stringify coerces JSON-decoded values to strings for the variable map.

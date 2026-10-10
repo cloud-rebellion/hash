@@ -34,7 +34,8 @@ var ErrTooManyPages = sanitize.ErrTooManyPages
 
 // maxIntakePages bounds a one-step intake document. Legitimate proposals and
 // contracts are far under this; the cap exists to reject amplification bombs
-// before they reach the (in-memory, ctx-less) pdfcpu rewrite passes.
+// before downstream processing. Production clean/count operations run in the
+// bounded isolated PDF worker; explicit-development/library behavior is separate.
 const maxIntakePages = sanitize.MaxPDFPages
 
 const orphanCleanupTimeout = 15 * time.Second
@@ -68,9 +69,9 @@ func CreatePDFSourceDocument(ctx context.Context, q documentQueries, st objectSt
 	}
 	// Reject an amplification bomb BEFORE storing it or handing it to the
 	// downstream pdfcpu passes.
-	pageCount, err := sanitize.PageCount(cleaned.Bytes)
+	pageCount, err := sanitize.PageCountWithContext(ctx, cleaned.Bytes)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%w: count sanitized PDF pages: %v", ErrSanitizePDF, err)
+		return nil, 0, fmt.Errorf("%w: count sanitized PDF pages: %w", ErrSanitizePDF, err)
 	}
 	if pageCount > maxIntakePages {
 		return nil, 0, fmt.Errorf("%w: %d pages exceeds the %d-page limit", ErrTooManyPages, pageCount, maxIntakePages)

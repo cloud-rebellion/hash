@@ -38,3 +38,10 @@ UPDATE documents
 -- The owning document of a proposal, org-scoped. Used to enforce doc-scope
 -- (a doc-scoped agent token must not touch a sibling document's proposals).
 SELECT document_id FROM document_proposals WHERE id = $1 AND org_id = $2;
+
+-- name: GetProposalForUpdate :one
+-- Parent document is locked first; this exact row lookup binds chain/status
+-- writes to the fresh authorized tenant/document and retains the proposal lock.
+SELECT * FROM document_proposals
+WHERE id = $1 AND org_id = $2 AND document_id = $3
+FOR UPDATE;

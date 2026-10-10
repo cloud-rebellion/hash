@@ -14,7 +14,7 @@ import (
 // document listings must not duplicate the origin/current masters per row.
 // The document UI's declared-source/history APIs retain deliberate inspection.
 func documentReadProjection(doc *generated.Document) *generated.Document {
-	if doc == nil || len(doc.HtmlSourceJson) == 0 {
+	if doc == nil || (len(doc.HtmlSourceJson) == 0 && len(doc.HtmlCurrentSourceJson) == 0) {
 		return doc
 	}
 	copy := *doc
@@ -45,6 +45,12 @@ func documentMCPSearchQueryProjection(rows []*generated.SearchDocumentsByNameFor
 		out[i] = (*generated.Document)(row)
 	}
 	return out
+}
+
+// The query excludes inline sources at the database boundary while retaining
+// every ordinary document column used by the existing scoped list/search API.
+func documentMCPScopedReadProjection(row *generated.GetDocumentReadProjectionRow) *generated.Document {
+	return (*generated.Document)(row)
 }
 
 type htmlDocumentReadResponse struct {

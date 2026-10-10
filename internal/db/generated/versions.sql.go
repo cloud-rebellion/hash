@@ -89,6 +89,64 @@ func (q *Queries) GetDocumentVersionByNo(ctx context.Context, arg GetDocumentVer
 	return &i, err
 }
 
+const getDocumentVersionByNoForRead = `-- name: GetDocumentVersionByNoForRead :one
+SELECT id, document_id, org_id, version_no, block_tree_json, variables_json,
+       name, source_kind, summary, created_by, created_via, created_at,
+       parent_id, schema_version, NULL::jsonb AS html_source_json, html_materialization_id
+FROM document_versions
+WHERE document_id = $1 AND version_no = $2
+`
+
+type GetDocumentVersionByNoForReadParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	VersionNo  int32     `json:"version_no"`
+}
+
+type GetDocumentVersionByNoForReadRow struct {
+	ID                    uuid.UUID          `json:"id"`
+	DocumentID            uuid.UUID          `json:"document_id"`
+	OrgID                 uuid.UUID          `json:"org_id"`
+	VersionNo             int32              `json:"version_no"`
+	BlockTreeJson         json.RawMessage    `json:"block_tree_json"`
+	VariablesJson         json.RawMessage    `json:"variables_json"`
+	Name                  string             `json:"name"`
+	SourceKind            string             `json:"source_kind"`
+	Summary               string             `json:"summary"`
+	CreatedBy             pgtype.UUID        `json:"created_by"`
+	CreatedVia            string             `json:"created_via"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ParentID              pgtype.UUID        `json:"parent_id"`
+	SchemaVersion         int32              `json:"schema_version"`
+	HtmlSourceJson        []byte             `json:"html_source_json"`
+	HtmlMaterializationID pgtype.UUID        `json:"html_materialization_id"`
+}
+
+// Public history detail does not need the frozen HTML master, inline assets or
+// internal object identity. Full internal version reads retain that provenance.
+func (q *Queries) GetDocumentVersionByNoForRead(ctx context.Context, arg GetDocumentVersionByNoForReadParams) (*GetDocumentVersionByNoForReadRow, error) {
+	row := q.db.QueryRow(ctx, getDocumentVersionByNoForRead, arg.DocumentID, arg.VersionNo)
+	var i GetDocumentVersionByNoForReadRow
+	err := row.Scan(
+		&i.ID,
+		&i.DocumentID,
+		&i.OrgID,
+		&i.VersionNo,
+		&i.BlockTreeJson,
+		&i.VariablesJson,
+		&i.Name,
+		&i.SourceKind,
+		&i.Summary,
+		&i.CreatedBy,
+		&i.CreatedVia,
+		&i.CreatedAt,
+		&i.ParentID,
+		&i.SchemaVersion,
+		&i.HtmlSourceJson,
+		&i.HtmlMaterializationID,
+	)
+	return &i, err
+}
+
 const getLatestDocumentVersion = `-- name: GetLatestDocumentVersion :one
 SELECT id, document_id, org_id, version_no, block_tree_json, variables_json, name, source_kind, summary, created_by, created_via, created_at, parent_id, schema_version, html_source_json, html_materialization_id FROM document_versions
 WHERE document_id = $1

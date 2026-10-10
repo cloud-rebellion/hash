@@ -105,11 +105,11 @@ func registerReadTools(s *Server, d Deps) {
 			// v1.1: per-doc tokens see exactly one document via this
 			// listing surface; return the bound doc alone.
 			if scope, ok := auth.DocumentScopeFromContext(r.Context()); ok {
-				doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: scope, OrgID: u.OrgID})
+				doc, err := d.Queries.GetDocumentReadProjection(r.Context(), generated.GetDocumentReadProjectionParams{ID: scope, OrgID: u.OrgID})
 				if err != nil {
 					return map[string]any{"documents": []any{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{documentReadProjection(doc)}, "count": 1}, nil
+				return map[string]any{"documents": []*generated.Document{documentMCPScopedReadProjection(doc)}, "count": 1}, nil
 			}
 			limit := int32(50)
 			if p.Limit > 0 && p.Limit <= 200 {
@@ -186,11 +186,11 @@ func registerReadTools(s *Server, d Deps) {
 			// A document-scoped token must not enumerate the org. Constrain the
 			// result to the single scoped document, and only if it matches.
 			if scope, ok := auth.DocumentScopeFromContext(r.Context()); ok {
-				doc, derr := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: scope, OrgID: u.OrgID})
+				doc, derr := d.Queries.GetDocumentReadProjection(r.Context(), generated.GetDocumentReadProjectionParams{ID: scope, OrgID: u.OrgID})
 				if derr != nil || !strings.Contains(strings.ToLower(doc.Name), strings.ToLower(p.Query)) {
 					return map[string]any{"documents": []*generated.Document{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{documentReadProjection(doc)}, "count": 1}, nil
+				return map[string]any{"documents": []*generated.Document{documentMCPScopedReadProjection(doc)}, "count": 1}, nil
 			}
 			rows, err := d.Queries.SearchDocumentsByNameForMCP(r.Context(), generated.SearchDocumentsByNameForMCPParams{
 				OrgID:   u.OrgID,
@@ -227,7 +227,7 @@ func registerReadTools(s *Server, d Deps) {
 				return nil, err
 			}
 			// Cross-tenant check.
-			if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+			if _, err := d.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: id, OrgID: u.OrgID}); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, errors.New("document not found")
 				}
@@ -263,7 +263,7 @@ func registerReadTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+			if _, err := d.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: id, OrgID: u.OrgID}); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, errors.New("document not found")
 				}

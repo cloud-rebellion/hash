@@ -338,7 +338,7 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		statusFilter = vs
 	}
 
-	rows, err := s.Queries.ListDocuments(r.Context(), generated.ListDocumentsParams{
+	rows, err := s.Queries.ListDocumentMetadataForREST(r.Context(), generated.ListDocumentMetadataForRESTParams{
 		OrgID:   u.OrgID,
 		Column2: statusFilter,
 		Limit:   limit,
@@ -350,7 +350,7 @@ func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]documentResponse, 0, len(rows))
 	for _, d := range rows {
-		out = append(out, toDocumentResponse(d))
+		out = append(out, toDocumentMetadataResponse(d))
 	}
 	total, _ := s.Queries.CountDocuments(r.Context(), generated.CountDocumentsParams{
 		OrgID:   u.OrgID,
@@ -666,7 +666,7 @@ func (s *Server) handleListChangeRequests(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: id, OrgID: u.OrgID}); err != nil {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
@@ -884,7 +884,7 @@ func (s *Server) handleListComments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: id, OrgID: u.OrgID}); err != nil {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
@@ -1069,7 +1069,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Authorization: ensure the document is in the caller's org.
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID}); err != nil {
+	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: docID, OrgID: u.OrgID}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return

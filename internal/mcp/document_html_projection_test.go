@@ -55,3 +55,19 @@ func TestHTMLDocumentMCPDetailEmitsUsableCurrentFieldPinsAndReviewReset(t *testi
 		t.Fatal("MCP detail lost exact field pins or inherited review from same-byte old source")
 	}
 }
+
+func TestHTMLDocumentMCPProjectionExcludesCurrentSourceWithoutOrigin(t *testing.T) {
+	asset := json.RawMessage(`{"inline_asset":"private-current-design-asset"}`)
+	doc := &generated.Document{ID: uuid.New(), SourceKind: "pdf", HtmlCurrentSourceJson: asset}
+	projection := documentReadProjection(doc)
+	body, err := json.Marshal(projection)
+	if err != nil || bytes.Contains(body, []byte("private-current-design-asset")) || len(projection.HtmlSourceJson) != 0 || len(projection.HtmlCurrentSourceJson) != 0 {
+		t.Fatal("current-only embedded source escaped the metadata projection")
+	}
+	if projection == doc || !bytes.Equal(doc.HtmlCurrentSourceJson, asset) || len(doc.HtmlSourceJson) != 0 || projection.ID != doc.ID {
+		t.Fatal("projection changed the supplied source or artifact identity")
+	}
+	if documentReadProjection(nil) != nil {
+		t.Fatal("nil metadata projection changed")
+	}
+}

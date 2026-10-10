@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -215,14 +216,16 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Audit.Publish(pending)
-	children, err := s.Envelopes.Children(r.Context(), envelopeID, sess.OrgID)
+	children, err := s.Queries.ListEnvelopeChildMetadataForRead(r.Context(), generated.ListEnvelopeChildMetadataForReadParams{
+		ParentEnvelopeID: pgtype.UUID{Bytes: envelopeID, Valid: true}, OrgID: sess.OrgID,
+	})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
 	out := make([]any, 0, len(children))
 	for _, c := range children {
-		out = append(out, toDocumentResponse(c))
+		out = append(out, toEnvelopeChildMetadataResponse(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"children": out, "count": len(out)})
 }
@@ -237,14 +240,16 @@ func (s *Server) handleListEnvelopeChildren(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	children, err := s.Envelopes.Children(r.Context(), envelopeID, sess.OrgID)
+	children, err := s.Queries.ListEnvelopeChildMetadataForRead(r.Context(), generated.ListEnvelopeChildMetadataForReadParams{
+		ParentEnvelopeID: pgtype.UUID{Bytes: envelopeID, Valid: true}, OrgID: sess.OrgID,
+	})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
 	out := make([]any, 0, len(children))
 	for _, c := range children {
-		out = append(out, toDocumentResponse(c))
+		out = append(out, toEnvelopeChildMetadataResponse(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"children": out, "count": len(out)})
 }

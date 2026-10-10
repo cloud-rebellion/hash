@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
@@ -303,7 +304,7 @@ func registerEnvelopeTools(s *Server, d Deps) {
 				return nil, err
 			}
 			kids, err := commitEnvelopeMutation(r.Context(), d, envID, ids,
-				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) ([]*generated.Document, error) {
+				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) ([]*generated.ListEnvelopeChildMetadataForReadRow, error) {
 					if !docs[envID].IsEnvelope || docs[envID].ParentEnvelopeID.Valid {
 						return nil, errEnvelopeTargetIneligible
 					}
@@ -317,9 +318,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 					if err := engine.Reorder(ctx, envID, u.OrgID, ids); err != nil {
 						return nil, envelopeTargetError(err)
 					}
-					return engine.Children(ctx, envID, u.OrgID)
+					return q.ListEnvelopeChildMetadataForRead(ctx, generated.ListEnvelopeChildMetadataForReadParams{
+						ParentEnvelopeID: pgtype.UUID{Bytes: envID, Valid: true}, OrgID: u.OrgID,
+					})
 				},
-				func([]*generated.Document) audit.Entry {
+				func([]*generated.ListEnvelopeChildMetadataForReadRow) audit.Entry {
 					return audit.Entry{
 						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
 						Payload: map[string]any{"via": "mcp", "tool": "reorder_envelope_children", "count": len(ids)},
@@ -331,7 +334,7 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			}
 			out := make([]map[string]any, 0, len(kids))
 			for _, c := range kids {
-				out = append(out, envelopeRow(c))
+				out = append(out, envelopeMetadataRow(c))
 			}
 			return map[string]any{"children": out, "count": len(out)}, nil
 		},
@@ -361,13 +364,15 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
 				return nil, err
 			}
-			kids, err := d.Envelopes.Children(r.Context(), envID, u.OrgID)
+			kids, err := d.Envelopes.Q.ListEnvelopeChildMetadataForRead(r.Context(), generated.ListEnvelopeChildMetadataForReadParams{
+				ParentEnvelopeID: pgtype.UUID{Bytes: envID, Valid: true}, OrgID: u.OrgID,
+			})
 			if err != nil {
 				return nil, err
 			}
 			out := make([]map[string]any, 0, len(kids))
 			for _, c := range kids {
-				out = append(out, envelopeRow(c))
+				out = append(out, envelopeMetadataRow(c))
 			}
 			return map[string]any{"children": out, "count": len(out)}, nil
 		},

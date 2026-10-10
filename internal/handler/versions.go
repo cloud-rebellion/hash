@@ -25,36 +25,34 @@ import (
 // variables are returned as raw JSON so callers can pass them straight back
 // into the editor without a re-encode roundtrip.
 type versionDTO struct {
-	ID             string          `json:"id"`
-	DocumentID     string          `json:"document_id"`
-	VersionNo      int32           `json:"version_no"`
-	Name           string          `json:"name"`
-	SourceKind     string          `json:"source_kind"`
-	BlocksJSON     json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON  json.RawMessage `json:"variables_json"`
-	CreatedBy      string          `json:"created_by,omitempty"`
-	CreatedVia     string          `json:"created_via"`
-	CreatedAt      string          `json:"created_at"`
-	ParentID       string          `json:"parent_id,omitempty"`
-	SchemaVersion  int32           `json:"schema_version"`
-	Summary        string          `json:"summary,omitempty"`
-	HTMLSourceJSON json.RawMessage `json:"html_source_json,omitempty"`
+	ID            string          `json:"id"`
+	DocumentID    string          `json:"document_id"`
+	VersionNo     int32           `json:"version_no"`
+	Name          string          `json:"name"`
+	SourceKind    string          `json:"source_kind"`
+	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON json.RawMessage `json:"variables_json"`
+	CreatedBy     string          `json:"created_by,omitempty"`
+	CreatedVia    string          `json:"created_via"`
+	CreatedAt     string          `json:"created_at"`
+	ParentID      string          `json:"parent_id,omitempty"`
+	SchemaVersion int32           `json:"schema_version"`
+	Summary       string          `json:"summary,omitempty"`
 }
 
 func toVersionDTO(v *generated.DocumentVersion) versionDTO {
 	out := versionDTO{
-		ID:             v.ID.String(),
-		DocumentID:     v.DocumentID.String(),
-		VersionNo:      v.VersionNo,
-		Name:           v.Name,
-		SourceKind:     v.SourceKind,
-		BlocksJSON:     v.BlockTreeJson,
-		VariablesJSON:  v.VariablesJson,
-		CreatedVia:     v.CreatedVia,
-		CreatedAt:      v.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
-		SchemaVersion:  v.SchemaVersion,
-		Summary:        v.Summary,
-		HTMLSourceJSON: v.HtmlSourceJson,
+		ID:            v.ID.String(),
+		DocumentID:    v.DocumentID.String(),
+		VersionNo:     v.VersionNo,
+		Name:          v.Name,
+		SourceKind:    v.SourceKind,
+		BlocksJSON:    v.BlockTreeJson,
+		VariablesJSON: v.VariablesJson,
+		CreatedVia:    v.CreatedVia,
+		CreatedAt:     v.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		SchemaVersion: v.SchemaVersion,
+		Summary:       v.Summary,
 	}
 	if v.CreatedBy.Valid {
 		out.CreatedBy = uuid.UUID(v.CreatedBy.Bytes).String()
@@ -77,7 +75,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Org guard: confirm doc belongs to caller's org before exposing history.
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID}); err != nil {
+	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: docID, OrgID: sess.OrgID}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
@@ -114,7 +112,7 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid version number")
 		return
 	}
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: sess.OrgID}); err != nil {
+	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: docID, OrgID: sess.OrgID}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
@@ -122,7 +120,7 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	v, err := s.Versions.GetByNo(r.Context(), docID, int32(n64))
+	row, err := s.Queries.GetDocumentVersionByNoForRead(r.Context(), generated.GetDocumentVersionByNoForReadParams{DocumentID: docID, VersionNo: int32(n64)})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "version not found")
@@ -131,11 +129,12 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	if v.OrgID != sess.OrgID {
+	if row.OrgID != sess.OrgID {
 		writeError(w, http.StatusNotFound, "version not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, toVersionDTO(v))
+	v := generated.DocumentVersion(*row)
+	writeJSON(w, http.StatusOK, toVersionDTO(&v))
 }
 
 // GET /api/v1/documents/{id}/diff?from=<n>&to=<n>

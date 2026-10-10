@@ -42,3 +42,12 @@ LIMIT 1;
 
 -- name: CountDocumentVersions :one
 SELECT COUNT(*)::int FROM document_versions WHERE document_id = $1;
+
+-- name: GetDocumentVersionByNoForRead :one
+-- Public history detail does not need the frozen HTML master, inline assets or
+-- internal object identity. Full internal version reads retain that provenance.
+SELECT id, document_id, org_id, version_no, block_tree_json, variables_json,
+       name, source_kind, summary, created_by, created_via, created_at,
+       parent_id, schema_version, NULL::jsonb AS html_source_json, html_materialization_id
+FROM document_versions
+WHERE document_id = $1 AND version_no = $2;

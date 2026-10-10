@@ -312,6 +312,12 @@ MCP `set_variables` also requires `expected_updated_at` and checks the locked
 row before replacing values. MCP document reads return the database timestamp
 with microsecond precision; use that value directly rather than truncating it.
 
+REST version history and `GET /api/v1/documents/{id}/versions/{n}` return
+snapshot metadata, blocks and variables. They omit raw HTML provenance, inline
+master assets and internal storage-version references at the SQL and response
+boundaries. Full internal snapshots are retained for evidence. Use the declared
+HTML source and PDF history endpoints below to inspect an HTML document.
+
 REST `POST /api/v1/documents/{id}/versions/{n}/restore` requires a JSON body
 `{"expected_updated_at":"<timestamp from the observed live document>"}`.
 The same field is required by MCP `restore_document_version`. A stale live-row
@@ -552,6 +558,13 @@ template export restriction after review. Document responses also include
 `html_source_commitment` and `html_materialization_revision` for the current
 materialization. The source commitment changes when declared text changes even
 if a renderer returns identical PDF bytes.
+
+REST document and envelope-child lists fetch these provenance/review flags and
+current revision pins without selecting either embedded HTML design. Scoped
+MCP list/search and envelope-child reads likewise exclude those designs in SQL;
+membership-only guards fetch only the document identity. Rendering, authoring,
+manifest and signing paths retain their full validated source reads. These
+projections reduce repeated source transfer; they are not a capacity guarantee.
 
 The original sender or an owner must inspect `/api/v1/documents/{id}/pdf` and
 explicitly review its current bytes with

@@ -254,6 +254,10 @@ func TestSendSealingNeverRevertsOnceRetentionMayHaveStarted(t *testing.T) {
 	if !sendSealingReversible(&generated.SendSealingIntent{}) {
 		t.Fatal("fresh pre-retention intent must be safely reversible")
 	}
+	delegated := &generated.SendSealingIntent{PresignExecutionID: pgtype.UUID{Bytes: uuid.New(), Valid: true}}
+	if sendSealingReversible(delegated) {
+		t.Fatal("committed delegated execution must never revert before retention")
+	}
 	started := &generated.SendSealingIntent{RetentionStartedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}}
 	if sendSealingReversible(started) {
 		t.Fatal("started retention must never revert to draft")

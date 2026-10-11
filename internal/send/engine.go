@@ -58,32 +58,33 @@ import (
 // status (REST) or tool error (MCP). Provider errors (eidas.GuardError,
 // billing.ErrQuotaExceeded) are passed through unwrapped for the same reason.
 var (
-	ErrDocumentNotFound          = errors.New("document not found")
-	ErrNotDraft                  = errors.New("document not in draft state")
-	ErrNoSigners                 = errors.New("document needs at least one signer recipient before send")
-	ErrNoRecipients              = errors.New("document needs at least one recipient before send")
-	ErrNoSignatureFields         = errors.New("signature-required blocks document needs at least one signature field")
-	ErrInvalidPDFSignatureField  = errors.New("signature-required PDF needs valid required placed fields for every distinct signing party")
-	ErrMissingSignerForRole      = errors.New("a signature field has no recipient assigned to its role")
-	ErrAmbiguousSignerForRole    = errors.New("a signature field role must have exactly one recipient")
-	ErrEnvelopeRequiresSignature = errors.New("envelopes must require signatures")
-	ErrAcknowledgementNeedsPDF   = errors.New("acknowledgement documents must be standalone PDF-source documents with a source PDF and SHA-256 digest")
-	ErrAcknowledgementFields     = errors.New("acknowledgement documents cannot contain fillable fields")
-	ErrUnsupportedBlockEvidence  = errors.New("block type is not supported by the immutable signing artifact")
-	ErrUnsupportedBrandingLogo   = errors.New("signing does not support logo branding until immutable asset evidence is implemented")
-	ErrUnresolvedVariables       = errors.New("document contains unresolved variables")
-	ErrLawfulBasisUnconfirmed    = errors.New("sender must explicitly confirm the document GDPR Article 6 lawful basis")
-	ErrInvalidSignerDisclosure   = errors.New("document cannot produce a valid signer privacy disclosure")
-	ErrUnsafeBuiltInLegalDraft   = errors.New("document contains a withdrawn built-in legal draft revision")
-	ErrAlreadyFinalised          = errors.New("document already finalised")
-	ErrNotVoidable               = errors.New("only sent or in-progress documents can be voided")
-	ErrEnvelopeChildLifecycle    = errors.New("envelope child lifecycle is controlled by its parent envelope")
-	ErrSignatureTierUnavailable  = errors.New("AES/QES signing is unavailable until identity proof is cryptographically bound to the signature")
-	ErrDraftChangedDuringSend    = errors.New("document changed while preparing send")
-	ErrNotRemindable             = errors.New("document not in a remindable state")
-	ErrInvalidRecipient          = errors.New("document has invalid recipient data")
-	ErrUnsupportedRecipientRole  = errors.New("viewer and cc recipient workflows are unavailable in this production release")
-	ErrExpiryTooSoon             = errors.New("document expiry must be at least 5 minutes in the future")
+	ErrDocumentNotFound             = errors.New("document not found")
+	ErrNotDraft                     = errors.New("document not in draft state")
+	ErrNoSigners                    = errors.New("document needs at least one signer recipient before send")
+	ErrNoRecipients                 = errors.New("document needs at least one recipient before send")
+	ErrNoSignatureFields            = errors.New("signature-required blocks document needs at least one signature field")
+	ErrInvalidPDFSignatureField     = errors.New("signature-required PDF needs valid required placed fields for every distinct signing party")
+	ErrMissingSignerForRole         = errors.New("a signature field has no recipient assigned to its role")
+	ErrAmbiguousSignerForRole       = errors.New("a signature field role must have exactly one recipient")
+	ErrEnvelopeRequiresSignature    = errors.New("envelopes must require signatures")
+	ErrAcknowledgementNeedsPDF      = errors.New("acknowledgement documents must be standalone PDF-source documents with a source PDF and SHA-256 digest")
+	ErrAcknowledgementFields        = errors.New("acknowledgement documents cannot contain fillable fields")
+	ErrUnsupportedBlockEvidence     = errors.New("block type is not supported by the immutable signing artifact")
+	ErrUnsupportedBrandingLogo      = errors.New("signing does not support logo branding until immutable asset evidence is implemented")
+	ErrUnresolvedVariables          = errors.New("document contains unresolved variables")
+	ErrLawfulBasisUnconfirmed       = errors.New("sender must explicitly confirm the document GDPR Article 6 lawful basis")
+	ErrInvalidSignerDisclosure      = errors.New("document cannot produce a valid signer privacy disclosure")
+	ErrUnsafeBuiltInLegalDraft      = errors.New("document contains a withdrawn built-in legal draft revision")
+	ErrAlreadyFinalised             = errors.New("document already finalised")
+	ErrNotVoidable                  = errors.New("only sent or in-progress documents can be voided")
+	ErrEnvelopeChildLifecycle       = errors.New("envelope child lifecycle is controlled by its parent envelope")
+	ErrSignatureTierUnavailable     = errors.New("AES/QES signing is unavailable until identity proof is cryptographically bound to the signature")
+	ErrDraftChangedDuringSend       = errors.New("document changed while preparing send")
+	ErrNotRemindable                = errors.New("document not in a remindable state")
+	ErrInvalidRecipient             = errors.New("document has invalid recipient data")
+	ErrUnsupportedRecipientRole     = errors.New("viewer and cc recipient workflows are unavailable in this production release")
+	ErrExpiryTooSoon                = errors.New("document expiry must be at least 5 minutes in the future")
+	ErrDelegatedRecoveryUnavailable = errors.New("delegated execution requires its own verified recovery path")
 )
 
 // MinimumExpiryLead prevents a document from entering the irreversible send
@@ -627,6 +628,9 @@ func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) 
 	if err != nil {
 		return SendResult{}, fmt.Errorf("resume send sealing: load intent: %w", err)
 	}
+	if intent.PresignExecutionID.Valid {
+		return SendResult{}, ErrDelegatedRecoveryUnavailable
+	}
 	intent, err = e.ensureSendSealingRetainUntil(ctx, intent)
 	if err != nil {
 		e.recordSendSealingFailure(ctx, docID, orgID, err)
@@ -872,7 +876,7 @@ func (e *Engine) abortUnstartedSendSealing(ctx context.Context, docID, orgID uui
 }
 
 func sendSealingReversible(intent *generated.SendSealingIntent) bool {
-	return intent != nil && !intent.RetentionStartedAt.Valid && !intent.RetentionCompletedAt.Valid
+	return intent != nil && !intent.PresignExecutionID.Valid && !intent.RetentionStartedAt.Valid && !intent.RetentionCompletedAt.Valid
 }
 
 func (e *Engine) recordSendSealingFailure(ctx context.Context, docID, orgID uuid.UUID, cause error) {
@@ -1038,6 +1042,9 @@ func (e *Engine) completeSealedSend(ctx context.Context, prepared *sealedSendSna
 	intent, err := q.GetSendSealingIntentForUpdate(ctx, generated.GetSendSealingIntentForUpdateParams{DocumentID: docID, OrgID: orgID})
 	if err != nil {
 		return SendResult{}, fmt.Errorf("complete send sealing: lock intent: %w", err)
+	}
+	if intent.PresignExecutionID.Valid {
+		return SendResult{}, ErrDelegatedRecoveryUnavailable
 	}
 	if !intent.RetentionCompletedAt.Valid {
 		return SendResult{}, errors.New("complete send sealing: evidence retention is not durable")

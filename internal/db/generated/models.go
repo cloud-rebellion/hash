@@ -675,6 +675,63 @@ type OrgSubscription struct {
 	LastQuotaWarningSentAt pgtype.Timestamptz `json:"last_quota_warning_sent_at"`
 }
 
+type PresignExecution struct {
+	OrgID                    uuid.UUID          `json:"org_id"`
+	ID                       uuid.UUID          `json:"id"`
+	DocumentID               uuid.UUID          `json:"document_id"`
+	GrantID                  uuid.UUID          `json:"grant_id"`
+	GrantRevision            int64              `json:"grant_revision"`
+	GrantSha256              []byte             `json:"grant_sha256"`
+	PolicyID                 uuid.UUID          `json:"policy_id"`
+	PolicyRevision           int64              `json:"policy_revision"`
+	PolicySha256             []byte             `json:"policy_sha256"`
+	ExecutorKind             string             `json:"executor_kind"`
+	ExecutorUserID           uuid.UUID          `json:"executor_user_id"`
+	ExecutorCredentialID     uuid.UUID          `json:"executor_credential_id"`
+	RequestID                uuid.UUID          `json:"request_id"`
+	CommandCanonical         []byte             `json:"command_canonical"`
+	CommandSha256            []byte             `json:"command_sha256"`
+	OriginalCredentialSha256 []byte             `json:"original_credential_sha256"`
+	CanonicalExecution       []byte             `json:"canonical_execution"`
+	ExecutionSha256          []byte             `json:"execution_sha256"`
+	AdmissionCanonical       []byte             `json:"admission_canonical"`
+	AdmissionSha256          []byte             `json:"admission_sha256"`
+	AuditEventID             uuid.UUID          `json:"audit_event_id"`
+	SignatureID              uuid.UUID          `json:"signature_id"`
+	ProviderRecipientID      uuid.UUID          `json:"provider_recipient_id"`
+	ProviderFieldID          uuid.UUID          `json:"provider_field_id"`
+	MaterializationID        uuid.UUID          `json:"materialization_id"`
+	SourceCommitment         []byte             `json:"source_commitment"`
+	CeremonyEpoch            pgtype.Timestamptz `json:"ceremony_epoch"`
+	ExecutedAt               pgtype.Timestamptz `json:"executed_at"`
+	UseNumber                int64              `json:"use_number"`
+}
+
+type PresignExecutionRequest struct {
+	OrgID                    uuid.UUID          `json:"org_id"`
+	ExecutorKind             string             `json:"executor_kind"`
+	ExecutorUserID           uuid.UUID          `json:"executor_user_id"`
+	ExecutorCredentialID     uuid.UUID          `json:"executor_credential_id"`
+	RequestID                uuid.UUID          `json:"request_id"`
+	State                    string             `json:"state"`
+	ExecutionID              pgtype.UUID        `json:"execution_id"`
+	ExecutionSha256          []byte             `json:"execution_sha256"`
+	CommandCanonical         []byte             `json:"command_canonical"`
+	CommandSha256            []byte             `json:"command_sha256"`
+	OriginalCredentialSha256 []byte             `json:"original_credential_sha256"`
+	AuditEventID             uuid.UUID          `json:"audit_event_id"`
+	OccurredAt               pgtype.Timestamptz `json:"occurred_at"`
+}
+
+type PresignExecutionUse struct {
+	OrgID           uuid.UUID `json:"org_id"`
+	GrantID         uuid.UUID `json:"grant_id"`
+	GrantRevision   int64     `json:"grant_revision"`
+	UseNumber       int64     `json:"use_number"`
+	ExecutionID     uuid.UUID `json:"execution_id"`
+	ExecutionSha256 []byte    `json:"execution_sha256"`
+}
+
 type PresignGrant struct {
 	OrgID           uuid.UUID          `json:"org_id"`
 	ID              uuid.UUID          `json:"id"`
@@ -818,6 +875,7 @@ type SendSealingIntent struct {
 	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 	RetainUntil            pgtype.Timestamptz `json:"retain_until"`
 	Article13NoticeEpochAt pgtype.Timestamptz `json:"article13_notice_epoch_at"`
+	PresignExecutionID     pgtype.UUID        `json:"presign_execution_id"`
 }
 
 type Signature struct {
@@ -834,6 +892,8 @@ type Signature struct {
 	SignedAt                pgtype.Timestamptz `json:"signed_at"`
 	ImageVersionID          pgtype.Text        `json:"image_version_id"`
 	ImageVersionPinRequired bool               `json:"image_version_pin_required"`
+	SignatureKind           string             `json:"signature_kind"`
+	PresignExecutionID      pgtype.UUID        `json:"presign_execution_id"`
 }
 
 type TelemetryEvent struct {

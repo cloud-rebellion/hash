@@ -492,7 +492,7 @@ SELECT
     $4, $5, $6, $7,
     next_epoch.value, hash_evidence_retain_until(next_epoch.value, 7)
 FROM next_epoch
-RETURNING document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at
+RETURNING document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at, presign_execution_id
 `
 
 type CreateSendSealingIntentParams struct {
@@ -535,6 +535,7 @@ func (q *Queries) CreateSendSealingIntent(ctx context.Context, arg CreateSendSea
 		&i.UpdatedAt,
 		&i.RetainUntil,
 		&i.Article13NoticeEpochAt,
+		&i.PresignExecutionID,
 	)
 	return &i, err
 }
@@ -558,7 +559,7 @@ func (q *Queries) DeleteSendSealingIntent(ctx context.Context, arg DeleteSendSea
 }
 
 const getSendSealingIntent = `-- name: GetSendSealingIntent :one
-SELECT document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at FROM send_sealing_intents
+SELECT document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at, presign_execution_id FROM send_sealing_intents
 WHERE document_id = $1 AND org_id = $2
 `
 
@@ -586,12 +587,13 @@ func (q *Queries) GetSendSealingIntent(ctx context.Context, arg GetSendSealingIn
 		&i.UpdatedAt,
 		&i.RetainUntil,
 		&i.Article13NoticeEpochAt,
+		&i.PresignExecutionID,
 	)
 	return &i, err
 }
 
 const getSendSealingIntentForUpdate = `-- name: GetSendSealingIntentForUpdate :one
-SELECT document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at FROM send_sealing_intents
+SELECT document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at, presign_execution_id FROM send_sealing_intents
 WHERE document_id = $1 AND org_id = $2
 FOR UPDATE
 `
@@ -620,6 +622,7 @@ func (q *Queries) GetSendSealingIntentForUpdate(ctx context.Context, arg GetSend
 		&i.UpdatedAt,
 		&i.RetainUntil,
 		&i.Article13NoticeEpochAt,
+		&i.PresignExecutionID,
 	)
 	return &i, err
 }
@@ -646,11 +649,16 @@ func (q *Queries) IsSendSealingExpired(ctx context.Context, arg IsSendSealingExp
 }
 
 const listPendingSendSealingIntents = `-- name: ListPendingSendSealingIntents :many
-SELECT document_id, org_id, actor_user_id, actor_email, actor_ip, via, tool, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, retain_until, article13_notice_epoch_at FROM send_sealing_intents
-ORDER BY updated_at, document_id
+SELECT i.document_id, i.org_id, i.actor_user_id, i.actor_email, i.actor_ip, i.via, i.tool, i.retention_started_at, i.retention_completed_at, i.attempts, i.last_error, i.created_at, i.updated_at, i.retain_until, i.article13_notice_epoch_at, i.presign_execution_id FROM send_sealing_intents i
+JOIN documents d ON d.id = i.document_id AND d.org_id = i.org_id
+WHERE d.status = 'sealing' AND d.deleted_at IS NULL
+  AND i.presign_execution_id IS NULL
+ORDER BY i.updated_at, i.document_id
 LIMIT $1
 `
 
+// Manual recovery must never process a committed delegated execution. Those
+// intents are immutable evidence and have a distinct recovery orchestrator.
 func (q *Queries) ListPendingSendSealingIntents(ctx context.Context, limit int32) ([]*SendSealingIntent, error) {
 	rows, err := q.db.Query(ctx, listPendingSendSealingIntents, limit)
 	if err != nil {
@@ -676,6 +684,7 @@ func (q *Queries) ListPendingSendSealingIntents(ctx context.Context, limit int32
 			&i.UpdatedAt,
 			&i.RetainUntil,
 			&i.Article13NoticeEpochAt,
+			&i.PresignExecutionID,
 		); err != nil {
 			return nil, err
 		}

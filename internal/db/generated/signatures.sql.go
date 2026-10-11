@@ -24,7 +24,7 @@ INSERT INTO signatures (
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (document_id, recipient_id) DO NOTHING
-RETURNING id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required
+RETURNING id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required, signature_kind, presign_execution_id
 `
 
 type InsertSignatureParams struct {
@@ -72,12 +72,14 @@ func (q *Queries) InsertSignature(ctx context.Context, arg InsertSignatureParams
 		&i.SignedAt,
 		&i.ImageVersionID,
 		&i.ImageVersionPinRequired,
+		&i.SignatureKind,
+		&i.PresignExecutionID,
 	)
 	return &i, err
 }
 
 const listSignaturesByDocument = `-- name: ListSignaturesByDocument :many
-SELECT id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required FROM signatures
+SELECT id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required, signature_kind, presign_execution_id FROM signatures
 WHERE document_id = $1
 ORDER BY signed_at
 `
@@ -105,6 +107,8 @@ func (q *Queries) ListSignaturesByDocument(ctx context.Context, documentID uuid.
 			&i.SignedAt,
 			&i.ImageVersionID,
 			&i.ImageVersionPinRequired,
+			&i.SignatureKind,
+			&i.PresignExecutionID,
 		); err != nil {
 			return nil, err
 		}
@@ -124,7 +128,7 @@ WHERE id = $2
   AND document_id = $3
   AND image_version_pin_required = FALSE
   AND image_version_id IS NULL
-RETURNING id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required
+RETURNING id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required, signature_kind, presign_execution_id
 `
 
 type PinLegacySignatureVersionParams struct {
@@ -150,6 +154,8 @@ func (q *Queries) PinLegacySignatureVersion(ctx context.Context, arg PinLegacySi
 		&i.SignedAt,
 		&i.ImageVersionID,
 		&i.ImageVersionPinRequired,
+		&i.SignatureKind,
+		&i.PresignExecutionID,
 	)
 	return &i, err
 }

@@ -8,6 +8,8 @@ router and checked with `go run ./cmd/apidocgen -check`.
 The [signing workflow/self-grant registry](PRE-SIGNING-REGISTRY-API.md) documents
 the session-only review, consent, revocation and durable recovery contract.
 Its registry does not enable document pre-signing or machine execution.
+The internal [execution persistence contract](PRE-SIGNING-EXECUTION.md) adds
+no public endpoint and does not enable that mode.
 
 ## Authentication boundaries
 

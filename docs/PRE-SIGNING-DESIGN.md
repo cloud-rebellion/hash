@@ -5,6 +5,9 @@ authorization/evidence model is implemented and verified locally; pre-signing
 is not enabled in Hash. Both parties continue to sign through the existing portal
 by default.
 No foundation-only check establishes a working delegated signing journey.
+The supporting [execution persistence contract](PRE-SIGNING-EXECUTION.md)
+describes the separate ledger, data admission and partial-state validator;
+it introduces no public execution route or enabled signing mode.
 
 ## Required behavior
 

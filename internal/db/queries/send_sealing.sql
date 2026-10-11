@@ -64,8 +64,13 @@ FROM documents
 WHERE id = $1 AND org_id = $2 AND status = 'sealing';
 
 -- name: ListPendingSendSealingIntents :many
-SELECT * FROM send_sealing_intents
-ORDER BY updated_at, document_id
+-- Manual recovery must never process a committed delegated execution. Those
+-- intents are immutable evidence and have a distinct recovery orchestrator.
+SELECT i.* FROM send_sealing_intents i
+JOIN documents d ON d.id = i.document_id AND d.org_id = i.org_id
+WHERE d.status = 'sealing' AND d.deleted_at IS NULL
+  AND i.presign_execution_id IS NULL
+ORDER BY i.updated_at, i.document_id
 LIMIT $1;
 
 -- name: PinDocumentSendEvidenceVersions :one

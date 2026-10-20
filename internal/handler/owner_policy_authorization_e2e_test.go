@@ -50,9 +50,9 @@ func (f ownerPolicyFeed) Fetch(ctx context.Context, _ time.Time) ([]compliance.F
 	return f.items, ctx.Err()
 }
 
-func setupOwnerPolicyE2E(t *testing.T) ownerPolicyFixture {
+func setupOwnerPolicyE2E(t *testing.T, sharedDatabase ...string) ownerPolicyFixture {
 	t.Helper()
-	f := setupOwnerOrgMutationE2E(t)
+	f := setupOwnerPolicyNative441E2E(t, sharedDatabase...)
 	f.s.EIDAS = eidas.New(f.q)
 	f.s.Compliance = compliance.New(f.q, f.s.EIDAS)
 	f.s.ComplianceFlagger = compliance.NewFlagger(f.q)
@@ -65,6 +65,7 @@ func setupOwnerPolicyE2E(t *testing.T) ownerPolicyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ownerPolicyPrepareRule441E2E(t, f, rule)
 	flag, err := f.q.InsertComplianceFlag(f.ctx, generated.InsertComplianceFlagParams{
 		OrgID: f.org, DocumentID: pgtype.UUID{Bytes: f.doc.ID, Valid: true}, UpdateRef: "existing-" + uuid.NewString(), UpdateTitle: "Existing review", AffectedTopic: "agreement", Severity: "review", SuggestedAction: "Review",
 	})
@@ -112,6 +113,7 @@ func (f ownerPolicyFixture) snapshot(t *testing.T) string {
 	var state string
 	if err := f.pool.QueryRow(f.ctx, `SELECT jsonb_build_object(
  'rules',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY id),'[]'::jsonb) FROM eidas_routing_rules r WHERE org_id=$1),
+ 'rule_measurements',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY rule_id),'[]'::jsonb) FROM eidas_rule_wire_sizes_v1 s WHERE org_id=$1),
  'baseline',(SELECT row_to_json(b) FROM compliance_baselines b WHERE org_id=$1),
  'flags',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY id),'[]'::jsonb) FROM compliance_flags c WHERE org_id=$1),
  'documents',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY id),'[]'::jsonb) FROM documents d WHERE org_id=$1),
@@ -126,7 +128,7 @@ func (f ownerPolicyFixture) snapshot(t *testing.T) string {
 func (f ownerPolicyFixture) assertUnchanged(t *testing.T, before string) {
 	t.Helper()
 	if f.snapshot(t) != before {
-		t.Fatal("refused policy mutation changed rules, baseline artifacts, flags, feed cache or audit")
+		t.Fatal("refused policy mutation changed rules, intrinsic measurements, baseline artifacts, flags, feed cache or audit")
 	}
 }
 
@@ -181,7 +183,7 @@ func TestOwnerPolicyRESTOriginalOwnerAndSessionAfterOrgWaitE2E(t *testing.T) {
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, 0, ttl)
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- f.submit(f.ctx, name, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetOrgForOwnerMutation", "transactionid")
+				awaitOwnerPolicyOrgLock441E2E(t, f, name)
 				var err error
 				want := http.StatusForbidden
 				switch change {
@@ -219,7 +221,7 @@ func TestOwnerPolicyMCPOriginalOwnerAndKeyAfterOrgWaitE2E(t *testing.T) {
 				blocked := ownerOrgLockE2E(t, f.ownerOrgMutationFixture, false)
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- f.submitMCP(f.ctx, name, mint.Plaintext) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetOrgForOwnerMutation", "transactionid")
+				awaitOwnerPolicyOrgLock441E2E(t, f, name)
 				var err error
 				want := auth.ErrMutationPermissionRevoked.Error()
 				switch change {
@@ -435,18 +437,23 @@ func TestOwnerPolicyFinalCredentialRecheckAfterAuditWaitE2E(t *testing.T) {
 
 func TestOwnerPolicyPatchUsesFreshDefaultsUnderOrgLockE2E(t *testing.T) {
 	f := setupOwnerPolicyE2E(t)
-	blocked := ownerOrgLockE2E(t, f.ownerOrgMutationFixture, false)
+	blocked := ownerOrgLockE2E(t, f.ownerOrgMutationFixture, true)
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, 0, time.Hour)
+	// A genuine complete PATCH owns the org fence, updates AND intrinsically
+	// measures the new source, then waits at the existing audit lock.
+	concurrent := f.operation("rule-update")
+	concurrent.body = `{"name":"Concurrent fresh policy","priority":31,"predicate_json":{"field":"country","op":"==","value":"NO"},"required_tier":"QES","reason":"Fresh migration reason","active":false}`
+	fresh := make(chan *httptest.ResponseRecorder, 1)
+	go func() { fresh <- submitOwnerOrgE2E(f.ownerOrgMutationFixture, f.ctx, concurrent, cookie) }()
+	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 	result := make(chan *httptest.ResponseRecorder, 1)
 	go func() { result <- f.submit(f.ctx, "rule-update", cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetOrgForOwnerMutation", "transactionid")
-	if _, err := f.q.WithTx(blocked).UpdateEIDASRule(f.ctx, generated.UpdateEIDASRuleParams{
-		ID: f.rule.ID, OrgID: f.org, Name: "Concurrent fresh policy", Priority: 31, PredicateJson: json.RawMessage(`{"field":"country","op":"==","value":"NO"}`), RequiredTier: "QES", Reason: "Fresh migration reason", Active: false,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	awaitOwnerPolicyOrgLock441E2E(t, f, "rule-update")
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)
+	}
+	if w := receiveSessionOperationE2E(t, fresh); w.Code != http.StatusOK {
+		t.Fatalf("genuine concurrent fresh policy PATCH=%d %s", w.Code, w.Body.String())
 	}
 	w := receiveSessionOperationE2E(t, result)
 	if w.Code != http.StatusOK {
@@ -456,6 +463,13 @@ func TestOwnerPolicyPatchUsesFreshDefaultsUnderOrgLockE2E(t *testing.T) {
 	if err != nil || row.Name != "Updated policy" || row.Priority != 31 || row.RequiredTier != "QES" || row.Active || row.Reason != "Fresh migration reason" || !strings.Contains(string(row.PredicateJson), "NO") {
 		t.Fatalf("omitted policy fields used stale values: %+v %v", row, err)
 	}
+	var wire int64
+	var current bool
+	if err := f.pool.QueryRow(f.ctx, `SELECT s.predicate_wire_bytes,s.rule_created_at=r.created_at AND s.rule_updated_at=r.updated_at AND s.measurement_server_version_num=current_setting('server_version_num')::integer FROM eidas_rule_wire_sizes_v1 s JOIN eidas_routing_rules r ON r.id=s.rule_id WHERE s.rule_id=$1 AND s.org_id=$2`, f.rule.ID, f.org).Scan(&wire, &current); err != nil || !current || wire != int64(len(row.PredicateJson)) { //nolint:rawsql -- genuine concurrent producer kept exact intrinsic source stamps/bytes
+		t.Fatal("fresh omitted-field merge lacks matching actual source measurement", wire, current, err)
+	}
+	// Unlike the old direct UPDATE fixture, both genuine PATCHes append audit.
+	ownerPolicyAssertTwoPatchAudits441E2E(t, f)
 	op := f.operation("rule-update")
 	op.body = `{"active":true}`
 	before := f.snapshot(t)
@@ -468,7 +482,12 @@ func TestOwnerPolicyPatchUsesFreshDefaultsUnderOrgLockE2E(t *testing.T) {
 func TestOwnerPolicyCrossTenantTargetsAndSESRefusalsE2E(t *testing.T) {
 	for _, transport := range []string{"rest", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
-			f, other := setupOwnerPolicyE2E(t), setupOwnerPolicyE2E(t)
+			f := setupOwnerPolicyE2E(t)
+			other := setupOwnerPolicyE2E(t, f.pool.Config().ConnConfig.Database)
+			var targetsPresent bool
+			if err := f.pool.QueryRow(f.ctx, `SELECT EXISTS(SELECT 1 FROM eidas_routing_rules WHERE id=$1 AND org_id=$2) AND EXISTS(SELECT 1 FROM compliance_flags WHERE id=$3 AND org_id=$2)`, other.rule.ID, other.org, other.flag.ID).Scan(&targetsPresent); err != nil || !targetsPresent { //nolint:rawsql -- foreign targets genuinely exist in the SAME owned database
+				t.Fatal("cross-tenant policy fixture lacks actual foreign targets", targetsPresent, err)
+			}
 			foreign := f
 			foreign.rule, foreign.flag = other.rule, other.flag
 			mint, _ := mintOwnerBrandingKeyE2E(t, f.ownerOrgMutationFixture)

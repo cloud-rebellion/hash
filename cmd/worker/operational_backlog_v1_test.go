@@ -68,3 +68,43 @@ func TestOperationalBacklog426ReadBudgetCancellationAndInvalidProjection(t *test
 		t.Fatal("shutdown became healthy observation")
 	}
 }
+
+// An empty active queue and successful invocations cannot erase terminal rows.
+// The reader represents successive generated-query snapshots, not SMTP delivery.
+func TestOperationalBacklog446FailedMailRequiresFreshDurableRemediation(t *testing.T) {
+	var c operationalBacklogCacheV1
+	now := time.Unix(2000, 0)
+	clock := func() time.Time { return now }
+	row := &generated.GetOperationalBacklogV1Row{MailFailedCount: 1000, MailFailedUnknownCreatedCount: 1, MailFailedOldestObservedCreationAgeSeconds: 7200, MailFailedLimitReached: true}
+	read := func(context.Context) (*generated.GetOperationalBacklogV1Row, error) { return row, nil }
+	s, ok := c.collectV1(context.Background(), read, clock)
+	if !ok || !s.HasSample || s.ReadUnavailable || s.Data.MailCount != 0 || s.Data.MailFailedCount != 1000 || s.Data.MailFailedUnknownCreatedCount != 1 || s.Data.MailFailedOldestObservedCreationAgeSeconds != 7200 || !s.Data.MailFailedLimitReached {
+		t.Fatal("terminal state lost while active queue empty", s)
+	}
+	// Repeated successful samples preserve the durable failure until rows change.
+	now = now.Add(time.Minute)
+	s, _ = c.collectV1(context.Background(), read, clock)
+	if s.ReadUnavailable || s.Data.MailFailedCount != 1000 || !s.Data.MailFailedLimitReached {
+		t.Fatal("healthy poll cleared terminal failures", s)
+	}
+	lastGood := s.Data
+	now = now.Add(6 * time.Minute)
+	failedRead := func(context.Context) (*generated.GetOperationalBacklogV1Row, error) {
+		return nil, errors.New("PRIVATE_TERMINAL_MAIL_READ_446")
+	}
+	s, _ = c.collectV1(context.Background(), failedRead, clock)
+	if !s.ReadUnavailable || !s.Stale || !s.HasSample || s.SampleAgeSeconds != 360 || s.Data != lastGood {
+		t.Fatal("read failure erased or refreshed terminal evidence", s)
+	}
+	row = &generated.GetOperationalBacklogV1Row{MailFailedCount: 1001}
+	s, _ = c.collectV1(context.Background(), read, clock)
+	if !s.ReadUnavailable || !s.Stale || s.Data != lastGood || s.SampleAgeSeconds != 360 {
+		t.Fatal("invalid terminal projection replaced last good sample", s)
+	}
+	// Only a successful fresh durable-zero sample can report remediation.
+	row = &generated.GetOperationalBacklogV1Row{MailCount: 1}
+	s, _ = c.collectV1(context.Background(), read, clock)
+	if !s.HasSample || s.ReadUnavailable || s.Stale || s.SampleAgeSeconds != 0 || s.Data.MailFailedCount != 0 || s.Data.MailFailedLimitReached || s.Data.MailFailedOldestObservedCreationAgeSeconds != 0 || s.Data.MailCount != 1 {
+		t.Fatal("fresh requeued state did not distinguish remediation", s)
+	}
+}

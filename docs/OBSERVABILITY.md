@@ -102,11 +102,15 @@ they do not independently carry release or environment. Keep
 Selected email/finalizer samples retain their original invocation semantics.
 The worker separately caches a metadata-only durable observation every two
 minutes through its existing serial telemetry loop. It covers pending/retrying
-mail, including future leases/backoff, and finalizing root documents partitioned
+mail, including future leases/backoff, a separate terminal-failed mail domain,
+and finalizing root documents partitioned
 by matching finalization intent. Intent rows overlap roots; do not add them as
 extra contracts. Mail creation age and overdue age are separate; finalization
 age uses intent creation, with missing, nonfinite and future clocks explicit.
-No document, recipient or organization identifiers enter this projection.
+Failed-mail creation age is not time since failure: no failure timestamp is
+stored. A fresh durable sample observes remediation; process restarts and healthy
+job checkins cannot establish that terminal failures have been resolved. No
+document, recipient or organization identifiers enter this projection.
 
 Each domain observes at most 1,000 rows. Reaching the cap means counts and oldest
 ages are observed lower bounds, not an exact global queue. LIMIT does not bound
@@ -120,19 +124,33 @@ privacy controls. There is no additional worker goroutine or database callback
 inside the telemetry sender.
 
 Backlog observations are native-log fields, not automatic SDK failure events or
-job-health checkins. Only `read_unavailable` or `stale` raises this record to
-`warn`. Business-age/count thresholds, missing intents, unknown ages and cap
+job-health checkins. `read_unavailable`, `stale` or a nonzero
+`mail_failed_count` raises this record to `warn`. The failed count, unknown
+creation count, observed creation age and cap flag remain fixed numeric/bool
+fields. Configure a stored-log rule and prove alert delivery; a warning is not
+that proof. Investigate affected outbox rows and their SMTP/dependency cause
+through restricted operational access, keeping recipients and bodies out of
+Flare. Deliberate authorized remediation must be followed by a fresh durable
+sample; a successful invocation alone is insufficient. Other business-age/count
+thresholds, missing intents, unknown ages and cap
 flags require explicit stored-log rules independently of invocation health and
 collector freshness. A normal checkin or fresh sample does not establish business
 completion or acceptable backlog.
 
 Controlled PostgreSQL checks cover count/filter/cap semantics, a genuinely
 blocked query interrupted by the unchanged one-second budget, unavailable-state
-reporting, backend query retirement and physical connection cleanup. These use
-session-local metadata shadows; production-schema plans, actual worker-loop
-shutdown and workload capacity remain separate acceptance. Terminal failed mail,
-ordinary/fitted preparation stages, stranded candidates and other recovery work
-still need their own observations. The next deploy
+reporting, backend query retirement and physical connection cleanup. Original426
+controls use session-local metadata shadows. The actual M114 full-schema fixture
+also covers fresh/occupied upgrade, replay/Down/collision, complete row/index
+preservation, read-only17-scalar failed-mail counts/clocks/cap and observed
+Up/Down lock cancellation with caller-pool usability and backend retirement.
+The separate50,000-row warm plan study compares the exact query before/after a
+trial index and rolls it back; neither fixture proves cold or large-table
+migration performance. M114 uses a transactional index build that scans existing
+rows and blocks writes; its Down requires strong locks. Qualify the maintenance
+window and release backup/compatibility gates before adoption. Actual worker-loop
+shutdown, workload capacity, ordinary/fitted preparation stages, stranded
+candidates and other recovery observations remain open. The next deploy
 must connect a stored runtime signal to an issue/rule and delivered alert, then
 independently prove silence/collector-outage detection and recovery.
 

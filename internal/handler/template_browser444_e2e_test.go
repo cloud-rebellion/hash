@@ -211,8 +211,8 @@ func TestOrdinaryOIDCSenderApprovedTemplateWithExternalBrowser444E2E(t *testing.
 	}
 	var server, migration int
 	err = f.pool.QueryRow(f.ctx, `SELECT current_setting('server_version_num')::integer,(SELECT version_id FROM (SELECT DISTINCT ON(version_id) id,version_id,is_applied FROM goose_db_version ORDER BY version_id,id DESC) x WHERE is_applied ORDER BY id DESC LIMIT 1)`).Scan(&server, &migration)
-	if err != nil || server != 160015 || migration != 113 {
-		t.Fatal("actual PG16.15/current113 state required")
+	if err != nil || server != 160015 || migration != 114 {
+		t.Fatal("actual PG16.15/current114 state required")
 	}
 	target, err := url.Parse(os.Getenv("HASH_E2E_RENDERER_URL"))
 	if err != nil || target.Scheme != "http" || target.Host == "" || target.User != nil || target.Path != "" || target.RawQuery != "" || target.Fragment != "" {

@@ -13,29 +13,39 @@ const OperationalBacklogRowLimitV1 int64 = 1000
 // Counts partition observed roots only. Intent rows overlap roots and are not
 // additional contracts. No private row, error, string label or callback fits.
 type OperationalBacklogDataV1 struct {
-	MailCount                                int64 `json:"mail_count"`
-	MailDueCount                             int64 `json:"mail_due_count"`
-	MailUnknownCreatedCount                  int64 `json:"mail_unknown_created_count"`
-	MailUnknownDueCount                      int64 `json:"mail_unknown_due_count"`
-	MailOldestObservedAgeSeconds             int64 `json:"mail_oldest_observed_age_seconds"`
-	MailOldestObservedOverdueSeconds         int64 `json:"mail_oldest_observed_overdue_seconds"`
-	MailLimitReached                         bool  `json:"mail_limit_reached"`
-	FinalizingRootCount                      int64 `json:"finalizing_root_count"`
-	FinalizingIntentCount                    int64 `json:"finalizing_intent_count"`
-	FinalizingMissingIntentCount             int64 `json:"finalizing_missing_intent_count"`
-	FinalizingUnknownIntentAgeCount          int64 `json:"finalizing_unknown_intent_age_count"`
-	FinalizingOldestObservedIntentAgeSeconds int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
-	FinalizingLimitReached                   bool  `json:"finalizing_limit_reached"`
+	MailCount                                  int64 `json:"mail_count"`
+	MailDueCount                               int64 `json:"mail_due_count"`
+	MailUnknownCreatedCount                    int64 `json:"mail_unknown_created_count"`
+	MailUnknownDueCount                        int64 `json:"mail_unknown_due_count"`
+	MailOldestObservedAgeSeconds               int64 `json:"mail_oldest_observed_age_seconds"`
+	MailOldestObservedOverdueSeconds           int64 `json:"mail_oldest_observed_overdue_seconds"`
+	MailLimitReached                           bool  `json:"mail_limit_reached"`
+	MailFailedCount                            int64 `json:"mail_failed_count"`
+	MailFailedUnknownCreatedCount              int64 `json:"mail_failed_unknown_created_count"`
+	MailFailedOldestObservedCreationAgeSeconds int64 `json:"mail_failed_oldest_observed_creation_age_seconds"`
+	MailFailedLimitReached                     bool  `json:"mail_failed_limit_reached"`
+	FinalizingRootCount                        int64 `json:"finalizing_root_count"`
+	FinalizingIntentCount                      int64 `json:"finalizing_intent_count"`
+	FinalizingMissingIntentCount               int64 `json:"finalizing_missing_intent_count"`
+	FinalizingUnknownIntentAgeCount            int64 `json:"finalizing_unknown_intent_age_count"`
+	FinalizingOldestObservedIntentAgeSeconds   int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
+	FinalizingLimitReached                     bool  `json:"finalizing_limit_reached"`
 }
 
 func (d OperationalBacklogDataV1) ValidV1() bool {
 	if d.MailCount < 0 || d.MailCount > OperationalBacklogRowLimitV1 || d.MailDueCount < 0 || d.MailDueCount > d.MailCount || d.MailUnknownCreatedCount < 0 || d.MailUnknownCreatedCount > d.MailCount || d.MailUnknownDueCount < 0 || d.MailUnknownDueCount > d.MailCount-d.MailDueCount || d.MailOldestObservedAgeSeconds < 0 || d.MailOldestObservedOverdueSeconds < 0 {
 		return false
 	}
+	if d.MailFailedCount < 0 || d.MailFailedCount > OperationalBacklogRowLimitV1 || d.MailFailedUnknownCreatedCount < 0 || d.MailFailedUnknownCreatedCount > d.MailFailedCount || d.MailFailedOldestObservedCreationAgeSeconds < 0 {
+		return false
+	}
 	if d.FinalizingRootCount < 0 || d.FinalizingRootCount > OperationalBacklogRowLimitV1 || d.FinalizingIntentCount < 0 || d.FinalizingMissingIntentCount < 0 || d.FinalizingIntentCount > d.FinalizingRootCount || d.FinalizingMissingIntentCount != d.FinalizingRootCount-d.FinalizingIntentCount || d.FinalizingUnknownIntentAgeCount < 0 || d.FinalizingUnknownIntentAgeCount > d.FinalizingIntentCount || d.FinalizingOldestObservedIntentAgeSeconds < 0 {
 		return false
 	}
-	if d.MailLimitReached != (d.MailCount == OperationalBacklogRowLimitV1) || d.FinalizingLimitReached != (d.FinalizingRootCount == OperationalBacklogRowLimitV1) {
+	if d.MailLimitReached != (d.MailCount == OperationalBacklogRowLimitV1) || d.MailFailedLimitReached != (d.MailFailedCount == OperationalBacklogRowLimitV1) || d.FinalizingLimitReached != (d.FinalizingRootCount == OperationalBacklogRowLimitV1) {
+		return false
+	}
+	if d.MailFailedUnknownCreatedCount == d.MailFailedCount && d.MailFailedOldestObservedCreationAgeSeconds != 0 {
 		return false
 	}
 	if d.MailUnknownCreatedCount == d.MailCount && d.MailOldestObservedAgeSeconds != 0 || d.MailDueCount == 0 && d.MailOldestObservedOverdueSeconds != 0 || d.FinalizingUnknownIntentAgeCount == d.FinalizingIntentCount && d.FinalizingOldestObservedIntentAgeSeconds != 0 {
@@ -92,7 +102,9 @@ func (l *Lifecycle) RecordOperationalBacklogV1(ctx context.Context, s Operationa
 		return
 	}
 	severity := "info"
-	if s.ReadUnavailable || s.Stale {
+	// Terminal failures remain visible until a fresh durable sample observes
+	// their remediation. Healthy job checkins do not resolve this business state.
+	if s.ReadUnavailable || s.Stale || s.Data.MailFailedCount > 0 {
 		severity = "warn"
 	}
 	// Fixed native projection bypasses only the generic log floor. Original

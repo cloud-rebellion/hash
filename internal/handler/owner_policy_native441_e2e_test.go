@@ -94,8 +94,8 @@ func setupOwnerPolicyNative441E2E(t *testing.T, sharedDatabase ...string) ownerO
 	if err := f.pool.QueryRow(f.ctx, `SELECT version_id FROM (
   SELECT DISTINCT ON (version_id) id,version_id,is_applied
   FROM goose_db_version ORDER BY version_id,id DESC
- ) AS latest_versions WHERE is_applied ORDER BY id DESC LIMIT 1`).Scan(&version); err != nil || version != 113 { //nolint:rawsql -- scalar actual child history oracle only
-		t.Fatal("owner-policy fixture is not at exact current migration113", version, err)
+ ) AS latest_versions WHERE is_applied ORDER BY id DESC LIMIT 1`).Scan(&version); err != nil || version != 114 { //nolint:rawsql -- scalar actual child history oracle only
+		t.Fatal("owner-policy fixture is not at exact current migration114", version, err)
 	}
 	application = f.pool.Config().ConnConfig.RuntimeParams["application_name"]
 	if application == "" || f.s.Send == nil {

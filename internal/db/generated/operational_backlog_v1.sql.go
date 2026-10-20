@@ -21,6 +21,14 @@ WITH observation AS MATERIALIZED (
   WHERE status IN ('pending', 'retrying')
   ORDER BY next_attempt_at, id
   LIMIT 1000
+), failed_mail AS MATERIALIZED (
+  -- Separate capped domain: terminal rows are not eligible for the active queue.
+  -- Creation age is not time since failure; no failure timestamp is stored.
+  SELECT created_at
+  FROM email_deliveries
+  WHERE status='failed'
+  ORDER BY id
+  LIMIT 1000
 ), roots AS MATERIALIZED (
   SELECT i.document_id IS NOT NULL AS has_intent, i.created_at AS intent_created_at
   FROM documents d
@@ -37,6 +45,10 @@ SELECT
   (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_age_seconds,
   (SELECT COALESCE(max(CASE WHEN isfinite(next_attempt_at) AND next_attempt_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM next_attempt_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_overdue_seconds,
   ((SELECT count(*) FROM mail)=1000)::boolean AS mail_limit_reached,
+  (SELECT count(*) FROM failed_mail)::bigint AS mail_failed_count,
+  (SELECT count(*) FROM failed_mail, observation WHERE created_at IS NULL OR NOT isfinite(created_at) OR created_at>observed_at)::bigint AS mail_failed_unknown_created_count,
+  (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM failed_mail, observation)::bigint AS mail_failed_oldest_observed_creation_age_seconds,
+  ((SELECT count(*) FROM failed_mail)=1000)::boolean AS mail_failed_limit_reached,
   (SELECT count(*) FROM roots)::bigint AS finalizing_root_count,
   (SELECT count(*) FROM roots WHERE has_intent)::bigint AS finalizing_intent_count,
   (SELECT count(*) FROM roots WHERE NOT has_intent)::bigint AS finalizing_missing_intent_count,
@@ -46,19 +58,23 @@ SELECT
 `
 
 type GetOperationalBacklogV1Row struct {
-	MailCount                                int64 `json:"mail_count"`
-	MailDueCount                             int64 `json:"mail_due_count"`
-	MailUnknownCreatedCount                  int64 `json:"mail_unknown_created_count"`
-	MailUnknownDueCount                      int64 `json:"mail_unknown_due_count"`
-	MailOldestObservedAgeSeconds             int64 `json:"mail_oldest_observed_age_seconds"`
-	MailOldestObservedOverdueSeconds         int64 `json:"mail_oldest_observed_overdue_seconds"`
-	MailLimitReached                         bool  `json:"mail_limit_reached"`
-	FinalizingRootCount                      int64 `json:"finalizing_root_count"`
-	FinalizingIntentCount                    int64 `json:"finalizing_intent_count"`
-	FinalizingMissingIntentCount             int64 `json:"finalizing_missing_intent_count"`
-	FinalizingUnknownIntentAgeCount          int64 `json:"finalizing_unknown_intent_age_count"`
-	FinalizingOldestObservedIntentAgeSeconds int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
-	FinalizingLimitReached                   bool  `json:"finalizing_limit_reached"`
+	MailCount                                  int64 `json:"mail_count"`
+	MailDueCount                               int64 `json:"mail_due_count"`
+	MailUnknownCreatedCount                    int64 `json:"mail_unknown_created_count"`
+	MailUnknownDueCount                        int64 `json:"mail_unknown_due_count"`
+	MailOldestObservedAgeSeconds               int64 `json:"mail_oldest_observed_age_seconds"`
+	MailOldestObservedOverdueSeconds           int64 `json:"mail_oldest_observed_overdue_seconds"`
+	MailLimitReached                           bool  `json:"mail_limit_reached"`
+	MailFailedCount                            int64 `json:"mail_failed_count"`
+	MailFailedUnknownCreatedCount              int64 `json:"mail_failed_unknown_created_count"`
+	MailFailedOldestObservedCreationAgeSeconds int64 `json:"mail_failed_oldest_observed_creation_age_seconds"`
+	MailFailedLimitReached                     bool  `json:"mail_failed_limit_reached"`
+	FinalizingRootCount                        int64 `json:"finalizing_root_count"`
+	FinalizingIntentCount                      int64 `json:"finalizing_intent_count"`
+	FinalizingMissingIntentCount               int64 `json:"finalizing_missing_intent_count"`
+	FinalizingUnknownIntentAgeCount            int64 `json:"finalizing_unknown_intent_age_count"`
+	FinalizingOldestObservedIntentAgeSeconds   int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
+	FinalizingLimitReached                     bool  `json:"finalizing_limit_reached"`
 }
 
 // Metadata only. LIMIT bounds observed rows, not rows scanned: the caller owns
@@ -76,6 +92,10 @@ func (q *Queries) GetOperationalBacklogV1(ctx context.Context) (*GetOperationalB
 		&i.MailOldestObservedAgeSeconds,
 		&i.MailOldestObservedOverdueSeconds,
 		&i.MailLimitReached,
+		&i.MailFailedCount,
+		&i.MailFailedUnknownCreatedCount,
+		&i.MailFailedOldestObservedCreationAgeSeconds,
+		&i.MailFailedLimitReached,
 		&i.FinalizingRootCount,
 		&i.FinalizingIntentCount,
 		&i.FinalizingMissingIntentCount,

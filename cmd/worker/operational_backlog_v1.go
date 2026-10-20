@@ -40,6 +40,8 @@ func (c *operationalBacklogCacheV1) collectV1(ctx context.Context, read operatio
 		d := flarereport.OperationalBacklogDataV1{
 			MailCount: row.MailCount, MailDueCount: row.MailDueCount, MailUnknownCreatedCount: row.MailUnknownCreatedCount, MailUnknownDueCount: row.MailUnknownDueCount,
 			MailOldestObservedAgeSeconds: row.MailOldestObservedAgeSeconds, MailOldestObservedOverdueSeconds: row.MailOldestObservedOverdueSeconds, MailLimitReached: row.MailLimitReached,
+			MailFailedCount: row.MailFailedCount, MailFailedUnknownCreatedCount: row.MailFailedUnknownCreatedCount,
+			MailFailedOldestObservedCreationAgeSeconds: row.MailFailedOldestObservedCreationAgeSeconds, MailFailedLimitReached: row.MailFailedLimitReached,
 			FinalizingRootCount: row.FinalizingRootCount, FinalizingIntentCount: row.FinalizingIntentCount, FinalizingMissingIntentCount: row.FinalizingMissingIntentCount,
 			FinalizingUnknownIntentAgeCount: row.FinalizingUnknownIntentAgeCount, FinalizingOldestObservedIntentAgeSeconds: row.FinalizingOldestObservedIntentAgeSeconds, FinalizingLimitReached: row.FinalizingLimitReached,
 		}

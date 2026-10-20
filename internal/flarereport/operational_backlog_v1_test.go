@@ -19,7 +19,7 @@ func TestOperationalBacklog426ActualNativeWirePrivacyAndJoinedClose(t *testing.T
 	sh := &logShipper{endpoint: peer.URL + "/api/1/logs", key: "PRIVATE_INGEST_KEY_426", service: "hash-worker", release: strings.Repeat("b", 40), environment: "test", ctx: ctx, cancel: cancel, done: make(chan struct{}), ch: make(chan nativeLogLine, logShipBuffer), client: &http.Client{Timeout: time.Second}}
 	go sh.run()
 	l := &Lifecycle{ctx: ctx, shipper: sh, service: "hash-worker"}
-	l.RecordOperationalBacklogV1(ctx, OperationalBacklogSnapshotV1{HasSample: true, ReadUnavailable: true, SampleAgeSeconds: 360, Stale: true, Data: OperationalBacklogDataV1{MailCount: 1000, MailDueCount: 2, MailLimitReached: true, MailOldestObservedAgeSeconds: 7200, MailOldestObservedOverdueSeconds: 60, FinalizingRootCount: 2, FinalizingIntentCount: 1, FinalizingMissingIntentCount: 1, FinalizingUnknownIntentAgeCount: 1}})
+	l.RecordOperationalBacklogV1(ctx, OperationalBacklogSnapshotV1{HasSample: true, ReadUnavailable: true, SampleAgeSeconds: 360, Stale: true, Data: OperationalBacklogDataV1{MailCount: 1000, MailDueCount: 2, MailLimitReached: true, MailFailedCount: 1000, MailFailedUnknownCreatedCount: 1, MailFailedOldestObservedCreationAgeSeconds: 9000, MailFailedLimitReached: true, MailOldestObservedAgeSeconds: 7200, MailOldestObservedOverdueSeconds: 60, FinalizingRootCount: 2, FinalizingIntentCount: 1, FinalizingMissingIntentCount: 1, FinalizingUnknownIntentAgeCount: 1}})
 	cleanup, stop := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stop()
 	sh.beginClose(cleanup)
@@ -42,7 +42,7 @@ func TestOperationalBacklog426ActualNativeWirePrivacyAndJoinedClose(t *testing.T
 	if err := json.Unmarshal(logs[0].Attributes, &attrs); err != nil || len(attrs) != 6 {
 		t.Fatal("closed envelope widened", err)
 	}
-	if logs[0].Severity != "warn" || logs[0].Body != "Hash durable backlog observation" || !strings.Contains(string(logs[0].Attributes), `"mail_limit_reached":true`) || !strings.Contains(string(logs[0].Attributes), `"finalizing_missing_intent_count":1`) || sh.failed.Load() != 0 {
+	if logs[0].Severity != "warn" || logs[0].Body != "Hash durable backlog observation" || !strings.Contains(string(logs[0].Attributes), `"mail_limit_reached":true`) || !strings.Contains(string(logs[0].Attributes), `"finalizing_missing_intent_count":1`) || !strings.Contains(string(logs[0].Attributes), `"mail_failed_count":1000`) || !strings.Contains(string(logs[0].Attributes), `"mail_failed_oldest_observed_creation_age_seconds":9000`) || !strings.Contains(string(logs[0].Attributes), `"mail_failed_limit_reached":true`) || sh.failed.Load() != 0 {
 		t.Fatal("unknown/capped state or actual delivery changed")
 	}
 	for _, private := range []string{"PRIVATE_INGEST_KEY_426", peer.URL, "document_id", "org_id", "recipient", "last_error", "mail_body"} {
@@ -56,6 +56,13 @@ func TestOperationalBacklog426ClosedValidationQueueAndOffRefusals(t *testing.T) 
 	bad := []OperationalBacklogSnapshotV1{
 		{},
 		{HasSample: true, Data: OperationalBacklogDataV1{MailCount: 1001}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: -1}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: 1001}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: 1, MailFailedUnknownCreatedCount: 2}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: 1, MailFailedUnknownCreatedCount: 1, MailFailedOldestObservedCreationAgeSeconds: 1}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: 1000}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedLimitReached: true}},
+		{HasSample: true, Data: OperationalBacklogDataV1{MailFailedOldestObservedCreationAgeSeconds: -1}},
 		{HasSample: true, Data: OperationalBacklogDataV1{MailCount: 1, MailDueCount: 1, MailUnknownDueCount: 1}},
 		{HasSample: true, Data: OperationalBacklogDataV1{FinalizingRootCount: 1}},
 		{HasSample: true, SampleAgeSeconds: 300},
@@ -83,5 +90,38 @@ func TestOperationalBacklog426ClosedValidationQueueAndOffRefusals(t *testing.T) 
 	l.service = "hash"
 	if l.OperationalBacklogEnabledV1() {
 		t.Fatal("server acquired worker backlog owner")
+	}
+}
+
+// These are emitted sample states, not a Flare alert-rule/delivery test. A rule
+// must treat unknown/stale reads as unknown, never as successful remediation.
+func TestOperationalBacklog446TerminalMailWarningAndFreshRecoverySamples(t *testing.T) {
+	l, sh := diagnosticFixture409(context.Background())
+	cases := []struct {
+		name     string
+		snapshot OperationalBacklogSnapshotV1
+		severity string
+	}{
+		{"unknown", OperationalBacklogSnapshotV1{ReadUnavailable: true}, "warn"},
+		{"terminal", OperationalBacklogSnapshotV1{HasSample: true, Data: OperationalBacklogDataV1{MailFailedCount: 2, MailFailedOldestObservedCreationAgeSeconds: 7200}}, "warn"},
+		{"stale_terminal", OperationalBacklogSnapshotV1{HasSample: true, ReadUnavailable: true, SampleAgeSeconds: 360, Stale: true, Data: OperationalBacklogDataV1{MailFailedCount: 2, MailFailedOldestObservedCreationAgeSeconds: 7200}}, "warn"},
+		{"fresh_durable_zero", OperationalBacklogSnapshotV1{HasSample: true, Data: OperationalBacklogDataV1{MailCount: 2}}, "info"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l.RecordOperationalBacklogV1(context.Background(), tc.snapshot)
+			var line nativeLogLine
+			select {
+			case line = <-sh.ch:
+			default:
+				t.Fatal("expected bounded sample missing")
+			}
+			var attrs struct {
+				Snapshot OperationalBacklogSnapshotV1 `json:"snapshot"`
+			}
+			if err := json.Unmarshal(line.Attributes, &attrs); err != nil || attrs.Snapshot != tc.snapshot || line.Severity != tc.severity || line.Body != "Hash durable backlog observation" {
+				t.Fatal("terminal/remediation sample authority changed", err, line.Severity)
+			}
+		})
 	}
 }

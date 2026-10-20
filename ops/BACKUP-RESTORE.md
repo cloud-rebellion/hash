@@ -103,6 +103,21 @@ provider, inventory, and restore gates pass. The provider drill must prove that
 more than 100 newer shadows cannot strand a current pinned artifact, while an
 over-limit legacy lookup fails closed and is routed to remediation.
 
+The canonical recovery inventory treats each `(object key, VersionId)` as a
+separate immutable identity. Several references to that same tuple share its
+provenance and strongest retention deadline; two different pinned versions of
+one key must both be restored and verified. Different SHA commitments for the
+same tuple, a required missing/invalid pin, wrong exact bytes, or insufficient
+COMPLIANCE retention still fail. An expected historical version is not an
+unexpected shadow merely because another independently verified referenced
+version is latest. If a key has any legacy/unpinned reference, retain the
+previous latest-shadow review rather than letting one successful pinned group
+vouch for unresolved references or a stronger deadline. Legacy lookup itself
+remains unchanged. Unexpected versions, delete markers and incomplete uploads
+still require review. The verifier remains read-only and never rewrites pins.
+A controlled real two-version restore and provider-specific recovery remain
+required acceptance gates; the inventory model alone does not prove recovery.
+
 Grant the backup principal read-only access to the production bucket and only
 the PostgreSQL privileges needed for backup. Grant the restore principal write
 access only to a newly created recovery database and recovery bucket.

@@ -7,8 +7,10 @@
 -- column is a single-line base64 encoding of the exact object key so recovery
 -- tooling never misparses whitespace or punctuation in an image storage_key.
 -- object_key_json is the human-readable, JSON-escaped form. A key referenced
--- by several rows/classes is intentionally collapsed into one inventory row;
--- reference_classes and owners retain its provenance.
+-- by several rows/classes at the same exact provider VersionId is intentionally
+-- collapsed into one inventory row; reference_classes and owners retain its
+-- provenance. Distinct pinned versions of one key remain separate identities.
+-- Unpinned legacy references form their own group and retain ambiguity checks.
 
 WITH RECURSIVE
 document_retention(document_id, legal_evidence, expected_retain_until) AS (
@@ -331,7 +333,7 @@ inventory AS (
 	           max(expected_retain_until) AS expected_retain_until,
 	           count(*) AS reference_count
       FROM normalised
-     GROUP BY object_key
+     GROUP BY object_key, expected_version_id
 )
 SELECT replace(encode(convert_to(object_key, 'UTF8'), 'base64'), E'\n', '') AS object_key_b64,
        to_json(object_key)::text AS object_key_json,
@@ -347,4 +349,4 @@ SELECT replace(encode(convert_to(object_key, 'UTF8'), 'base64'), E'\n', '') AS o
 	       legacy_version_lookup_allowed,
 	       coalesce(to_char(expected_retain_until AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '-') AS expected_retain_until
   FROM inventory
- ORDER BY object_key;
+ ORDER BY object_key, expected_version_id;

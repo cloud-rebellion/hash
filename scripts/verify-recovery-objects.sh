@@ -515,8 +515,12 @@ verified_versions="$output_dir/verified-object-versions.tsv"
 invalid_legal_retention="$output_dir/invalid-legal-evidence-retention.tsv"
 verified_legal_retention="$output_dir/verified-legal-evidence-retention.tsv"
 shadowed_references="$output_dir/shadowed-referenced-objects.tsv"
+latest_version_candidates="$output_dir/latest-version-candidates.b64.tsv"
+unreferenced_latest_versions="$output_dir/unreferenced-latest-versions.b64.tsv"
 version_resolved_hidden_keys="$output_dir/version-resolved-hidden-keys.txt"
 expected_provider_versions="$output_dir/expected-provider-versions.tsv"
+verified_reference_versions="$output_dir/verified-reference-versions.tsv"
+unpinned_reference_keys="$output_dir/unpinned-reference-keys.b64"
 provider_versions="$output_dir/provider-object-versions.tsv"
 extra_provider_versions="$output_dir/additional-provider-versions.tsv"
 missing_provider_versions="$output_dir/missing-provider-versions.tsv"
@@ -536,8 +540,12 @@ provider_state_after="$output_dir/provider-state-after.tsv"
 : > "$invalid_legal_retention"
 : > "$verified_legal_retention"
 : > "$shadowed_references"
+: > "$latest_version_candidates"
+: > "$unreferenced_latest_versions"
 : > "$version_resolved_hidden_keys"
 : > "$expected_provider_versions"
+: > "$verified_reference_versions"
+: > "$unpinned_reference_keys"
 : > "$provider_versions"
 : > "$extra_provider_versions"
 : > "$missing_provider_versions"
@@ -564,9 +572,12 @@ while IFS=$'\t' read -r key_b64 key_json classes owners org_ids expected_sha con
     *$'\n'*|*$'\r'*|*$'\t'*) die "object key contains a control separator: $key_json" ;;
   esac
   printf '%s\n' "$key" >> "$expected_keys"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  if [[ "$expected_version" == "-" ]]; then
+    printf '%s\n' "$key_b64" >> "$unpinned_reference_keys"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$key" "$classes" "$owners" "$org_ids" "$expected_sha" "$legal" "$refs" \
-    "$expected_version" "$version_conflict" "$legacy_lookup" "$expected_retain_until" >> "$expected_detail"
+    "$expected_version" "$version_conflict" "$legacy_lookup" "$expected_retain_until" "$conflict" >> "$expected_detail"
   if is_unverified_audit_sidecar "$classes" "$expected_sha"; then
     printf '%s\t%s\t%s\n' "$key" "$classes" "$owners" >> "$unverified_sidecars"
   fi
@@ -579,7 +590,7 @@ while IFS=$'\t' read -r key_b64 key_json classes owners org_ids expected_sha con
 done < "$inventory_tsv"
 LC_ALL=C sort -u -o "$expected_keys" "$expected_keys"
 
-while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expected_version version_conflict legacy_lookup expected_retain_until; do
+while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expected_version version_conflict legacy_lookup expected_retain_until db_hash_conflict; do
   selected_version_id=""
   selected_last_modified=""
   latest_version_id=""
@@ -587,6 +598,8 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
   head_available=0
   shadow_reported=0
   actual_sha="-"
+  reference_verified=1
+  [[ "$db_hash_conflict" == "f" ]] || reference_verified=0
 
   # A conflicting or required-but-missing database pin has no unique legal
   # object identity. Never guess one from provider history.
@@ -757,6 +770,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
     if ! "${aws_args[@]}" s3api get-object-retention \
         --bucket "$bucket" --key "$key" --version-id "$selected_version_id" > "$retention_tmp" 2>/dev/null; then
       printf '%s\t%s\t%s\tRETENTION_READ_FAILED\n' "$key" "$classes" "$selected_version_id" >> "$invalid_legal_retention"
+      reference_verified=0
     else
       retention_mode="$(jq -r '.Retention.Mode // empty' "$retention_tmp")"
       retain_until="$(jq -r '.Retention.RetainUntilDate // empty' "$retention_tmp")"
@@ -764,6 +778,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
          ! retention_meets_exact_deadline "$retention_mode" "$retain_until" "$expected_retain_until"; then
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$key" "$classes" "$selected_version_id" "${retention_mode:-MISSING}" "${retain_until:-MISSING}" "${selected_last_modified:-MISSING}" >> "$invalid_legal_retention"
+        reference_verified=0
       else
         required_epoch="$(rfc3339_epoch "$expected_retain_until")"
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -773,8 +788,9 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
   fi
 
   # A logical-key HEAD is diagnostic only. Exact pinned reads above remain
-  # authoritative even when a delete marker or hostile newer version hides
-  # them, but that shadowing is retained as an operator-review finding.
+  # authoritative. Another independently verified referenced version of this
+  # key is ordinary history; an unavailable or unreferenced latest identity
+  # remains an operator-review finding. Classify after all exact reads finish.
   if [[ -n "$selected_version_id" && "$selected_version_id" != "null" ]]; then
     : > "$head_tmp"
     if ! "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" \
@@ -787,8 +803,14 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
     else
       latest_after_verify="$(jq -r '.VersionId // empty' "$head_tmp")"
       if [[ "$latest_after_verify" != "$selected_version_id" && "$shadow_reported" == "0" ]]; then
-        printf '%s\t%s\t%s\t%s\t%s\n' \
-          "$key" "$selected_version_id" "${latest_after_verify:-UNVERSIONED}" "$expected_sha" "LATEST_VERSION_DIFFERS_FROM_DB_PIN" >> "$shadowed_references"
+        latest_version_b64="-"
+        if [[ -n "$latest_after_verify" ]]; then
+          latest_version_b64="$(printf '%s' "$latest_after_verify" | base64 | tr -d '\r\n')"
+        fi
+        printf '%s\t%s\t%s\t%s\n' \
+          "$(printf '%s' "$key" | base64 | tr -d '\r\n')" \
+          "$(printf '%s' "$selected_version_id" | base64 | tr -d '\r\n')" \
+          "$latest_version_b64" "$expected_sha" >> "$latest_version_candidates"
       fi
     fi
   fi
@@ -799,6 +821,13 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
       continue
     }
     printf '%s\t%s\t%s\n' "$key" "${selected_version_id:-UNVERSIONED}" "$actual_sha" >> "$verified_versions"
+    if [[ "$reference_verified" == "1" && "$expected_version" != "-" ]]; then
+      # Inventory presence is separate from byte/encryption/retention proof.
+      # Only fully verified digest-bearing rows may explain a latest version.
+      printf '%s\t%s\n' \
+        "$(printf '%s' "$key" | base64 | tr -d '\r\n')" \
+        "$(printf '%s' "$selected_version_id" | base64 | tr -d '\r\n')" >> "$verified_reference_versions"
+    fi
   fi
 done < "$expected_detail"
 : > "$download_tmp"
@@ -807,8 +836,8 @@ LC_ALL=C sort -u -o "$version_resolved_hidden_keys" "$version_resolved_hidden_ke
 # Re-inventory every ordinary version, delete marker, and incomplete upload
 # after all exact reads. This detects state that appeared or disappeared while
 # the verifier was proving bytes, encryption, and retention. Every final
-# ordinary version must be either the receipt-bound marker or the single exact
-# provider identity selected for one canonical database key.
+# ordinary version must be either the receipt-bound marker or one of the exact
+# provider identities selected for the canonical database references.
 if ! "${aws_args[@]}" s3api list-object-versions --bucket "$bucket" > "$final_versions_tmp" 2>/dev/null; then
   die "final complete object-version inventory failed"
 fi
@@ -861,6 +890,28 @@ jq -r '(.Uploads // [])[] | [(.Key | @base64), (.UploadId | @base64)] | @tsv' \
   "$final_multipart_tmp" >> "$provider_multipart_uploads"
 LC_ALL=C sort -u -o "$provider_multipart_uploads" "$provider_multipart_uploads"
 LC_ALL=C sort -u -o "$expected_provider_versions" "$expected_provider_versions"
+LC_ALL=C sort -u -o "$verified_reference_versions" "$verified_reference_versions"
+# Join only encoded key+version identities. Never compare provider versions by
+# mutable key alone. Missing latest pins use '-' outside the base64 alphabet.
+# A legacy/unpinned group can resolve to a pinned tuple with a stronger
+# deadline. Preserve prior review for such keys instead of allowing another
+# successful group to vouch for all of their unresolved references.
+awk -F '\t' '
+  FILENAME == ARGV[1] { verified[$1 FS $2] = 1; next }
+  FILENAME == ARGV[2] { unpinned[$1] = 1; next }
+  NF != 4 { exit 1 }
+  ($1 in unpinned) || !(($1 FS $3) in verified) { print }
+' "$verified_reference_versions" "$unpinned_reference_keys" "$latest_version_candidates" > "$unreferenced_latest_versions"
+while IFS=$'\t' read -r key_b64 selected_b64 latest_b64 expected_sha; do
+  key="$(printf '%s' "$key_b64" | decode_base64)" || die "invalid encoded latest-state key"
+  selected_version_id="$(printf '%s' "$selected_b64" | decode_base64)" || die "invalid encoded selected version"
+  latest_after_verify="UNVERSIONED"
+  if [[ "$latest_b64" != "-" ]]; then
+    latest_after_verify="$(printf '%s' "$latest_b64" | decode_base64)" || die "invalid encoded latest version"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$key" "$selected_version_id" "$latest_after_verify" "$expected_sha" "LATEST_VERSION_DIFFERS_FROM_DB_PIN" >> "$shadowed_references"
+done < "$unreferenced_latest_versions"
 comm -13 "$expected_provider_versions" "$provider_versions" > "$extra_provider_versions"
 comm -23 "$expected_provider_versions" "$provider_versions" > "$missing_provider_versions"
 
@@ -925,7 +976,7 @@ elif ((unreferenced_count > 0 || shadowed_reference_count > 0 || additional_prov
 fi
 
 cat > "$output_dir/recovery-object-verification-report.txt" <<EOF
-HASH_RECOVERY_OBJECT_VERIFIER_VERSION=6
+HASH_RECOVERY_OBJECT_VERIFIER_VERSION=7
 RESULT=$result
 VERIFIED_AT_UTC=$(date -u +%FT%TZ)
 EXPECTED_DB_OBJECTS=$expected_count

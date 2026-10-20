@@ -765,6 +765,65 @@ audit_key_documentation_policy() {
   echo "audit-key provisioning guides emit the exact raw 32-byte Ed25519 seed"
 }
 
+# Exercise the actual checkout verifier against closed protocol peers. These
+# cases execute no database/provider; real SQL/restore acceptance stays separate.
+recovery_object_version_protocol() {
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is required for recovery VersionId protocol checks" >&2
+    return 1
+  }
+  python3 - "$(pwd -P)" <<'PYCI'
+import hashlib,json,os,re,shutil,stat,subprocess,sys,tempfile
+from pathlib import Path
+module=Path(sys.argv[1])
+path='/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+closed={'PATH':path,'LANG':'C','LC_ALL':'C'}
+for tool in ('jq',):
+    if not shutil.which(tool,path=path):raise SystemExit(tool+' is required for recovery VersionId protocol checks')
+if not (shutil.which('sha256sum',path=path) or shutil.which('shasum',path=path)):
+    raise SystemExit('sha256sum or shasum is required for recovery VersionId protocol checks')
+bash=None
+for candidate in (shutil.which('bash',path=path),'/opt/homebrew/bin/bash','/usr/local/bin/bash','/bin/bash'):
+    if not candidate:continue
+    selected=Path(candidate).resolve()
+    if not selected.is_file():continue
+    try:
+        probe=subprocess.run([str(selected),'--noprofile','--norc','--version'],env=closed,
+                             stdin=subprocess.DEVNULL,capture_output=True,timeout=5)
+    except (OSError,subprocess.TimeoutExpired):continue
+    version=re.match(rb'GNU bash, version ([0-9]+)\.',probe.stdout)
+    if probe.returncode==0 and len(probe.stdout)+len(probe.stderr)<=4096 and version and int(version.group(1))>=5:
+        bash=selected;break
+if bash is None:raise SystemExit('a real Bash5 or newer is required for recovery VersionId protocol checks')
+verifier=module/'scripts/verify-recovery-objects.sh'
+inventory=module/'ops/recovery-object-inventory.sql'
+harness=module/'scripts/test-recovery-object-versions.py'
+for selected in (harness,verifier,inventory):
+    if not selected.is_file() or selected.is_symlink():raise SystemExit('required checkout recovery protocol input is absent or redirected')
+def digest(selected):return hashlib.sha256(selected.read_bytes()).hexdigest()
+parent=Path(tempfile.mkdtemp(prefix='hash-recovery-object-versions-')).resolve()
+info=parent.lstat();identity=(info.st_dev,info.st_ino,info.st_uid,stat.S_IMODE(info.st_mode))
+assert identity[2:]==(os.getuid(),0o700) and not parent.is_symlink()
+output=parent/'evidence'
+try:
+    result=subprocess.run([sys.executable,str(harness),'--verifier',str(verifier),'--verifier-sha256',digest(verifier),
+                           '--inventory',str(inventory),'--inventory-sha256',digest(inventory),
+                           '--bash',str(bash),'--bash-sha256',digest(bash),'--output',str(output)],env=closed)
+    if result.returncode:raise SystemExit(result.returncode)
+    summary=json.loads((output/'result.json').read_text())
+    assert summary['passed'] is True and summary['unittest_tops']==8 and summary['case_count']==17
+    assert summary['failures']==summary['errors']==summary['skips']==0
+    assert all(summary[key] is True for key in ('all_case_sandboxes_absent','all_case_process_groups_absent','all_case_work_removed'))
+    info=parent.lstat()
+    assert parent.resolve()==parent and not parent.is_symlink() and (info.st_dev,info.st_ino,info.st_uid,stat.S_IMODE(info.st_mode))==identity
+    shutil.rmtree(parent)
+except BaseException:
+    print('recovery VersionId protocol evidence retained at '+str(parent),file=sys.stderr)
+    raise
+print('recovery VersionId verifier protocol:8 test tops/17 cases passed')
+PYCI
+}
+
 # Modern evidence rows bind the provider's VersionId into PostgreSQL. A logical
 # S3 sync re-uploads bytes under new IDs and therefore cannot be advertised as a
 # portable recovery path for those rows. Keep the operator guide fail-closed,
@@ -1286,6 +1345,7 @@ step "production image identity policy"        production_image_policy
 step "single-server production topology policy" single_server_topology_policy
 step "audit-key provisioning documentation"   audit_key_documentation_policy
 step "recovery VersionId documentation policy" recovery_version_identity_policy
+step "recovery VersionId verifier protocol"    recovery_object_version_protocol
 step "Storage Box cold-backup contract"         storagebox_cold_backup_policy
 step "production cutover smoke identity policy" cutover_smoke_identity_policy
 step "gofmt"                                   gofmt_check

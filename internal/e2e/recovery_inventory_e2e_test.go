@@ -36,7 +36,12 @@ type canonicalRecoveryInventoryRow struct {
 	expectedRetainUntil string
 }
 
-func readCanonicalRecoveryInventory(t *testing.T, ctx context.Context, pool *pgxpool.Pool, inventorySQL []byte) map[string]canonicalRecoveryInventoryRow {
+type canonicalRecoveryInventoryKey struct {
+	key     string
+	version string
+}
+
+func readCanonicalRecoveryInventory(t *testing.T, ctx context.Context, pool *pgxpool.Pool, inventorySQL []byte) map[canonicalRecoveryInventoryKey]canonicalRecoveryInventoryRow {
 	t.Helper()
 	// Execute the operator inventory file unchanged. Testing a copied/reduced
 	// query would miss retention predicates or grouping drift in the real drill.
@@ -56,7 +61,7 @@ func readCanonicalRecoveryInventory(t *testing.T, ctx context.Context, pool *pgx
 			t.Fatalf("canonical inventory column %d is %q, want %q", i+1, columns[i].Name, expected)
 		}
 	}
-	result := map[string]canonicalRecoveryInventoryRow{}
+	result := map[canonicalRecoveryInventoryKey]canonicalRecoveryInventoryRow{}
 	for rows.Next() {
 		var row canonicalRecoveryInventoryRow
 		var keyB64, keyJSON string
@@ -68,21 +73,22 @@ func readCanonicalRecoveryInventory(t *testing.T, ctx context.Context, pool *pgx
 		if string(decoded) != row.key || strings.ContainsAny(keyB64, "\r\n\t ") || strings.ContainsAny(keyJSON, "\r\n\t") {
 			t.Fatalf("malformed inventory key encoding: base64=%q display=%q", keyB64, keyJSON)
 		}
-		if _, duplicate := result[row.key]; duplicate {
-			t.Fatalf("object key was not grouped into one inventory row: %q", row.key)
+		identity := canonicalRecoveryInventoryKey{key: row.key, version: row.version}
+		if _, duplicate := result[identity]; duplicate {
+			t.Fatalf("exact key/version was not grouped into one inventory row: %+v", identity)
 		}
 		if row.references <= 0 {
 			t.Fatalf("inventory row lost its provenance count: %+v", row)
 		}
-		result[row.key] = row
+		result[identity] = row
 	}
 	must(t, rows.Err(), "finish canonical inventory query")
 	return result
 }
 
-func assertCanonicalRecoveryInventoryRow(t *testing.T, rows map[string]canonicalRecoveryInventoryRow, expected canonicalRecoveryInventoryRow) {
+func assertCanonicalRecoveryInventoryRow(t *testing.T, rows map[canonicalRecoveryInventoryKey]canonicalRecoveryInventoryRow, expected canonicalRecoveryInventoryRow) {
 	t.Helper()
-	actual, ok := rows[expected.key]
+	actual, ok := rows[canonicalRecoveryInventoryKey{key: expected.key, version: expected.version}]
 	if !ok {
 		t.Fatalf("retained object missing from canonical inventory: %q", expected.key)
 	}
@@ -172,14 +178,32 @@ VALUES($1,$2,$3,'shared recovery objects','blocks',$4,$5,$6,$7,true)`, templateI
 		// ceremony deadline. The absence is distinct from an unread/empty column.
 		assertCanonicalRecoveryInventoryRow(t, before, expected)
 	}
-	// Shared provenance must expose conflicting hash/version identities rather
-	// than silently selecting one apparently valid recovery source.
+	// A stable logical key may retain several independently pinned versions.
+	// Prove both equal-byte/new-version and changed-byte/new-version cases using
+	// the complete operator query, including separate ownership/provenance.
 	conflictingHash := sha256.Sum256([]byte("conflicting shared source fixture"))
-	_, err = pool.Exec(ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id=$3 WHERE id=$1`, templateID, conflictingHash[:], "different-exact-version")
-	must(t, err, "seed conflicting shared source identity")
-	conflicted := readCanonicalRecoveryInventory(t, ctx, pool, inventorySQL)[sourceKey]
-	if !conflicted.hashConflict || !conflicted.versionConflict || conflicted.legalEvidence || conflicted.expectedRetainUntil != "-" || conflicted.references != 2 || conflicted.owners != sharedOwners {
-		t.Fatalf("conflicting shared identity was hidden: %+v", conflicted)
+	for _, laterHash := range [][]byte{sourceHash[:], conflictingHash[:]} {
+		_, err = pool.Exec(ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id=$3 WHERE id=$1`, templateID, laterHash, "different-exact-version")
+		must(t, err, "seed retained later source version")
+		versions := readCanonicalRecoveryInventory(t, ctx, pool, inventorySQL)
+		if len(versions) != 5 {
+			t.Fatalf("two-version inventory contains %d identities, want five", len(versions))
+		}
+		original := source
+		original.classes, original.owners, original.references = "document_source_pdf", "document:"+docID.String(), 1
+		later := source
+		later.classes, later.owners, later.references = "template_source_pdf", "template:"+templateID.String(), 1
+		later.hash, later.version = hex.EncodeToString(laterHash), "different-exact-version"
+		assertCanonicalRecoveryInventoryRow(t, versions, original)
+		assertCanonicalRecoveryInventoryRow(t, versions, later)
+	}
+	// Two commitments for the SAME exact key+VersionId are still a conflict;
+	// accepting another version must never conceal inconsistent evidence bytes.
+	_, err = pool.Exec(ctx, `UPDATE templates SET pdf_storage_version_id=$2 WHERE id=$1`, templateID, sourcePin)
+	must(t, err, "seed conflicting same-version source digest")
+	conflicted := readCanonicalRecoveryInventory(t, ctx, pool, inventorySQL)[canonicalRecoveryInventoryKey{key: sourceKey, version: sourcePin}]
+	if !conflicted.hashConflict || conflicted.versionConflict || conflicted.legalEvidence || conflicted.expectedRetainUntil != "-" || conflicted.references != 2 || conflicted.owners != sharedOwners {
+		t.Fatalf("same-version conflicting commitment was hidden: %+v", conflicted)
 	}
 	_, err = pool.Exec(ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id=$3 WHERE id=$1`, templateID, sourceHash[:], sourcePin)
 	must(t, err, "restore matching shared source identity")
@@ -193,11 +217,11 @@ VALUES($1,$2,$3,'shared recovery objects','blocks',$4,$5,$6,$7,true)`, templateI
 	image.classes, image.owners, image.references = "template_block_image", "template:"+templateID.String(), 1
 	assertCanonicalRecoveryInventoryRow(t, after, source)
 	assertCanonicalRecoveryInventoryRow(t, after, image)
-	if _, present := after[renderedKey]; present {
+	if _, present := after[canonicalRecoveryInventoryKey{key: renderedKey, version: renderedPin}]; present {
 		t.Fatal("retired parent preview survived without a remaining owner")
 	}
-	if _, present := after[versionImageKey]; present {
+	if _, present := after[canonicalRecoveryInventoryKey{key: versionImageKey, version: "-"}]; present {
 		t.Fatal("retired parent version image survived without a remaining owner")
 	}
-	t.Logf("canonical inventory SHA256=%s; exact13-column schema and four soft-deleted draft objects/pins/provenance/no-legal-deadline values verified; shared conflicts visible; parent retirement preserves two template-owned objects", hex.EncodeToString(inventoryDigest[:]))
+	t.Logf("canonical inventory SHA256=%s; exact13-column schema and four soft-deleted draft objects/pins/provenance/no-legal-deadline values verified; distinct pinned versions separate and same-version digest conflicts visible; parent retirement preserves two template-owned objects", hex.EncodeToString(inventoryDigest[:]))
 }

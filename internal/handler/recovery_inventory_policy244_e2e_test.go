@@ -61,7 +61,7 @@ func TestRecoveryInventoryPolicy244E2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(raw)
-	if len(raw) != 18652 || hex.EncodeToString(sum[:]) != "df4247d6ea6766e8b0d428c4d90e5976273f012b3db1c7b201f6ddf6c589a939" {
+	if len(raw) != 19459 || hex.EncodeToString(sum[:]) != "88ed1d5501571a287dd9e7f20d0a73fe926b72eff3caf48b8a5a850a2af158f2" {
 		t.Fatal("canonical inventory changed; review full inventory policy equivalence")
 	}
 	config := q.f.pool.Config().ConnConfig.Copy()

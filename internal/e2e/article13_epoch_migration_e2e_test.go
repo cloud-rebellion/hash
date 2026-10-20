@@ -39,6 +39,9 @@ func TestRecoveryInventoryDerivesExactCeremonyRetentionE2E(t *testing.T) {
 	sentID := seedDocument(t, ctx, pool, "recovery inventory sent")
 	progressID := seedDocument(t, ctx, pool, "recovery inventory in progress")
 	parentID := seedDocument(t, ctx, pool, "recovery inventory envelope sealing")
+	// The current report-schema guard requires the genuine root before a child.
+	_, envelopeErr := pool.Exec(ctx, `UPDATE documents SET is_envelope=TRUE WHERE id=$1`, parentID)
+	must(t, envelopeErr, "mark recovery envelope root before child seed")
 	childID := seedEnvelopeChild(t, ctx, pool, parentID, 1)
 	reversibleID := seedDocument(t, ctx, pool, "recovery inventory reversible sealing")
 	deletedDraftID := seedDocument(t, ctx, pool, "recovery inventory soft-deleted draft")

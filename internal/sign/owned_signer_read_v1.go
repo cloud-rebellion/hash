@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"log/slog"
 	"reflect"
 	"sync"
 	"time"
@@ -78,6 +79,7 @@ type signerReadLeaseV1 struct {
 	closed                  bool
 	borrowers               int
 	cleanupRunning          bool
+	cleanupFailureReported  bool
 }
 
 func cloneSignerReadContextV1(rc *RecipientContext) *RecipientContext {
@@ -399,10 +401,18 @@ func (l *signerReadLeaseV1) closeV1() error {
 		err = reader.CloseV1(cleanup)
 		cancel()
 	}
+	result := errors.Join(err, publicationErr)
 	l.mu.Lock()
 	l.cleanupRunning = false
+	reportFailure := result != nil && !l.cleanupFailureReported
+	if reportFailure {
+		l.cleanupFailureReported = true
+	}
 	l.mu.Unlock()
-	return errors.Join(err, publicationErr)
+	if reportFailure {
+		slog.Error("owned signer read cleanup failed", "operation", "signing", "outcome", "unavailable")
+	}
+	return result
 }
 func (l *signerReadLeaseV1) borrowOriginalV1(e *Engine, rc *RecipientContext, mode pdfadmission.SignerReadModeV1) (*RecipientContext, *pdfadmission.ApplicationSignerScopeV1, func(), error) {
 	if l == nil {

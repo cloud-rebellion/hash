@@ -84,6 +84,9 @@ func (l *Lifecycle) RecordOperationalBacklogV1(ctx context.Context, s Operationa
 		sh.rejected.Add(1)
 		return
 	}
+	// Checkin status follows the actual durable observation, independently of
+	// the native-log rate/queue. Existing off/role/cancel/validation gates hold.
+	l.recordOperationalBacklogHealthV1(s)
 	attrs := struct {
 		Schema      string                       `json:"schema"`
 		Service     string                       `json:"service"`
@@ -110,4 +113,40 @@ func (l *Lifecycle) RecordOperationalBacklogV1(ctx context.Context, s Operationa
 	// Fixed native projection bypasses only the generic log floor. Original
 	// off/queue/rate/size/context/close boundaries remain in force.
 	sh.enqueue(nativeLogLine{Severity: severity, Body: "Hash durable backlog observation", Attributes: raw, Timestamp: time.Now().UTC().Format(time.RFC3339Nano)})
+}
+
+// This scalar queue variant is distinct from the original12 invocation jobs.
+// No snapshot/context/error/private row crosses the existing queue16 boundary.
+func (l *Lifecycle) recordOperationalBacklogHealthV1(s OperationalBacklogSnapshotV1) {
+	if l.checkinURL == "" {
+		return
+	}
+	// A successful durable read resets age0. A same-second cached read failure
+	// may also retain age0; ReadUnavailable independently prevents remediation.
+	report := jobReport{backlogHealth: true, backlogUnhealthy: !s.HasSample || s.ReadUnavailable || s.Stale || s.SampleAgeSeconds > 0 || s.Data.MailFailedCount > 0, completedAt: time.Now()}
+	select {
+	case l.jobQueue <- report:
+	default:
+		l.jobDropped.Add(1)
+	}
+}
+
+func (l *Lifecycle) sendOperationalBacklogHealthV1(report jobReport) {
+	if l == nil || l.ctx == nil || l.ctx.Err() != nil || l.checkinURL == "" || !report.backlogHealth {
+		return
+	}
+	// An old healthy queue item must not revive a stalled sampler. An unhealthy
+	// observation is never mistaken for an old healthy item and silently lost.
+	age := time.Since(report.completedAt)
+	if !report.backlogUnhealthy && (age < 0 || age > jobReportInterval) {
+		l.jobDropped.Add(1)
+		return
+	}
+	status := "ok"
+	if report.backlogUnhealthy {
+		status = "error"
+	}
+	// Existing owned5s HTTP/drain/close and Lifecycle cancellation/join apply.
+	// No exception, SQL, retry, new timer, goroutine or receiver feature.
+	l.postCheckin(l.checkinURL + "-backlog?status=" + status)
 }

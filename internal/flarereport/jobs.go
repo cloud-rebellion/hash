@@ -48,6 +48,8 @@ type JobTick struct {
 	Duration                                         time.Duration
 }
 type jobReport struct {
+	// A separate sampler-health variant never represents a job invocation.
+	backlogHealth, backlogUnhealthy          bool
 	tick                                     JobTick
 	ticks, maxSelected                       int64
 	stale, policyInvalid, policyUnobservable bool

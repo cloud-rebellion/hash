@@ -111,7 +111,11 @@ func newLifecycleWithShipper(parent context.Context, ready <-chan struct{}, serv
 				emit()
 			case report := <-owner.jobQueue:
 				if ctx.Err() == nil {
-					owner.sendJobReport(report)
+					if report.backlogHealth {
+						owner.sendOperationalBacklogHealthV1(report)
+					} else {
+						owner.sendJobReport(report)
+					}
 				}
 			}
 		}

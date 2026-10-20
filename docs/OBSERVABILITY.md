@@ -123,19 +123,56 @@ The fixed native projection retains off, queue, rate, size, cancellation and
 privacy controls. There is no additional worker goroutine or database callback
 inside the telemetry sender.
 
-Backlog observations are native-log fields, not automatic SDK failure events or
-job-health checkins. `read_unavailable`, `stale` or a nonzero
-`mail_failed_count` raises this record to `warn`. The failed count, unknown
-creation count, observed creation age and cap flag remain fixed numeric/bool
-fields. Configure a stored-log rule and prove alert delivery; a warning is not
-that proof. Investigate affected outbox rows and their SMTP/dependency cause
-through restricted operational access, keeping recipients and bodies out of
-Flare. Deliberate authorized remediation must be followed by a fresh durable
-sample; a successful invocation alone is insufficient. Other business-age/count
-thresholds, missing intents, unknown ages and cap
-flags require explicit stored-log rules independently of invocation health and
-collector freshness. A normal checkin or fresh sample does not establish business
-completion or acceptable backlog.
+Backlog logs use native fields and do not create automatic SDK failure events. `read_unavailable`, `stale` or a nonzero
+`mail_failed_count` raises this record to `warn`; a valid no-sample observation
+is always read-unavailable. These warnings can contribute to the current Flare
+project-wide `log_severity` count/window rule. That rule cannot select the
+backlog body, numeric/bool attributes, role or release, so it cannot distinguish
+this record from other project warnings or express an age/count/cap predicate.
+A stored warning or accepted request is not delivered-alert proof. Sustained
+log-rule notifications repeat no faster than the larger of its window and
+60 minutes; they do not provide a recovery message.
+
+Other business-age/count thresholds, missing intents, unknown clocks and cap
+flags remain inspection evidence, not configured field-based alerting. Their
+meaning needs an explicit Hash-side policy and a supported dedicated check;
+no delivery SLA or cap-is-failure policy is supplied here. A normal invocation
+checkin or fresh sample does not establish business completion or acceptable
+backlog. Investigate outbox/SMTP causes through restricted operational access,
+keeping recipients and bodies out of Flare. Only a fresh durable sample can
+observe remediation; a restart or successful empty invocation cannot establish
+that terminal failures have been resolved.
+
+The separate worker observation monitor uses the existing configured worker
+checkin URL with the fixed `-backlog` suffix. It requires the existing enabled
+sampler/log identity and a valid `HASH_FLARE_MONITOR_PREFIX`; it uses the same
+ready-owned queue16 and five-second HTTP sender. It reports `error` for no
+sample, unavailable/cached/stale observations or any observed terminal failed
+mail. Only the successful durable-read shape with zero sample age and no observed
+failed mail reports `ok`. A same-second failed cached read still reports `error`
+through its unavailable flag. Pending work can coexist with `ok`; this is
+sampler availability and failed-mail observation, not business completion.
+Native-log rate or queue admission cannot suppress these separate checkins.
+A queued healthy report older than30seconds is dropped; an unhealthy report is
+not silently treated as old healthy data. The shared `job_dropped` diagnostic
+now also counts sampler-variant queue drops. The original12 invocation jobs,
+SQL budget, sampling cadence and lifecycle owners remain unchanged.
+
+Provision a distinct monitor with a positive interval and grace appropriate to
+the serial two-minute sampler; automatic monitor creation has interval0 and
+does not arm missing-checkin detection. Keep process heartbeat and invocation
+monitors separate. Current Flare deduplicates repeated failed checkins within
+one failed episode; a fresh accepted `ok` resets its state, and a later failure
+creates a new failed generation. It does not send a recovery notification.
+Prove actual persisted failed state, routed notice, fresh durable remediation,
+resumed state and missing-sampler detection while process heartbeat continues.
+Collector-outage detection still needs an independent observer.
+
+Local vet and full reporter/worker race suites pass84top tests and100subtests,
+including four actual local HTTP/queue/age/cancellation/lifecycle cases. Removing
+only the sampler-checkin bridge in a private overlay makes the real receiver
+case fail for the missing checkin. These checks do not establish current Flare
+persistence, configured channels or delivered alerts.
 
 Controlled PostgreSQL checks cover count/filter/cap semantics, a genuinely
 blocked query interrupted by the unchanged one-second budget, unavailable-state
@@ -183,7 +220,7 @@ that coverage. The controlled package-browser run does not prove Flare ingestion
 | HTTP role `hash` | Fixed unsampled handled5xx/panic signals, actual route-template/status tracing, safe structured logs and process readiness/shutdown wiring are implemented. Expected aborts and ordinary refusals are distinct. This does not provide every domain-specific failure or external startup/absence monitoring. | Normal and controlled handled500/panic produce distinct fixed outcomes, stored release/environment/role and safe route/status. Prove one issue rule and delivered alert. External functional health must cover startup failure and abrupt absence. |
 | Staff, signer and completed browser portals | Public runtime configuration, narrow matching CSP origin, fixed error/rejection/resource/render categories and bounded same-origin compiled-code frames are implemented. Direct keepalive fetch omits credentials; no raw error/object/resource URL is sent. Bounded early render/PDF errors can queue before valid config under the existing count/byte/time limits; config failure, pre-SPA failure and abrupt absence still need independent checks. | Running image loads the chosen runtime public configuration in all three portals, uses the exact validated collector origin under real CSP, and emits safe error/rejection/resource canaries. Independently verify stored events. External frontend checks cover config/startup failure. |
 | MCP | Fixed internal, dependency, unavailable and serialization signals now cover the reviewed tool/JSON-RPC failure boundaries even when HTTP200 is returned; expected auth/argument refusals stay separate. This is central protocol coverage, not a claim that every tool/domain producer is instrumented. | Normal result and controlled internal/tool or serialization failure have distinct fixed operations/outcomes and stored correlation. Auth/argument refusals remain expected outcomes. Prove actionable internal failure alerting without exporting arguments or results. |
-| Worker `hash-worker` and critical jobs | Fatal supervision, process heartbeat and post-invocation checkins/safe scalar logs cover the fixed inventory below, including a separate package-recovery observation within the Send loop. Ten additions carry state and duration only; email/finalizer retain selected-row samples. Global backlog, durable business-state completion, SDK loss accounting and configured job-silence rules remain open; the fixed native delivery-diagnostics projection is exported separately. | Separate server/worker identity; persist real normal/pending/error observations for every deployed enabled job, with the correct monitor suffix and state meaning. Prove relevant error and missing-job alert delivery and recovery from a resumed invocation. Independently qualify oldest unfinished age, retry and terminal-failure business outcomes. |
+| Worker `hash-worker` and critical jobs | Fatal supervision, process heartbeat and post-invocation checkins/safe scalar logs cover the fixed inventory below, including a separate package-recovery observation within the Send loop. Ten additions carry state and duration only; email/finalizer retain selected-row samples. The separate fixed `-backlog` monitor observes sampler availability and terminal failed mail; exact global backlog, durable business-state completion, SDK loss accounting and configured job-silence acceptance remain open; the fixed native delivery-diagnostics projection is exported separately. | Separate server/worker identity; persist real normal/pending/error observations for every deployed enabled job, with the correct monitor suffix and state meaning. Prove relevant error and missing-job alert delivery and recovery from a resumed invocation. Independently qualify oldest unfinished age, retry and terminal-failure business outcomes. |
 | Invitations, SMTP, reminders and negotiation notifications | Email dispatch reports selected/attempted counts, durable sent/retry/terminal acknowledgements, checkpoint failures, duration and sampled ages. Reminder invocation observations now surface fixed failure states, including failures returned by per-item helpers. Poll success and SMTP acceptance do not prove mailbox delivery; owner-notification domain outcomes and end-to-end delivery monitors remain open. | Safe queued/attempt/retry/terminal outcomes, backlog age and a delivered message to an authorized test mailbox. Complete invitation, owner-change notification and due-reminder canaries; distinguish SMTP acceptance from mailbox receipt. Alert on sustained failure/stale queue and prove recovery. |
 | Signing, Send and package finalization | `finalize_retry` reports invocation, selected/attempted/returned/failed counts, duration and sampled ages. Send sealing and package recovery separately report fixed invocation states after their existing synchronous work and deferred cleanup return. A nil attempt return or `returned` state is not a completed PDF/report; `pending` explicitly permits nonterminal work. End-to-end durable Send/signing/finalization state monitors and exported phase metrics remain open. | Observe send/sealing/finalizing/completed/refused outcomes, attempt duration and oldest unfinished age. Complete real main+attachments review/revision/resend/sign with final PDF and mandatory report/download. Recover a controlled retry without duplicate effects. |
 | Evidence/report/export | Hash verifies signed metadata, preimages and protected artifacts. This is product evidence, not Flare instrumentation. | Emit only report readiness/verification/export outcome and duration; alert on stuck or failed generation/verification. Check actual artifacts in Hash. Keep their bytes, event payloads, IDs and certificate material out of Flare. |
@@ -194,7 +231,7 @@ that coverage. The controlled package-browser run does not prove Flare ingestion
 | Authentication, RBAC and rate limits | Canonical denials/statuses and shared access traces exist; no configured-provider journey or aggregate outcome/saturation acceptance is established. | Test real OIDC/OAuth/magic-link dependency and expected scope/role/expiry/rate refusals. Aggregate outcomes without identities or tokens; page on system/dependency failure, not every expected403/409/429. Verify isolation and recovery separately. |
 | Object storage and recovery | Health pings and protected artifact controls exist; operation latency/failure and recovery-age alert proof are absent. | Safe exact-operation outcomes/durations, unavailable/recovery and configured backup/restore freshness checks. A health200 is not Object Lock, exact-version retrieval, paired restore or key-continuity acceptance; keep those cutover gates separate. |
 | Database and native admission | Health ping and bounded native resource ownership exist. No accepted DB/native-session saturation or wait/error series is established. | Observe bounded pool/native session use, waiting/denial/timeout, query-operation latency and recovery, without SQL/args/rows. Exercise a bounded dedicated saturation canary under existing limits. Host/container/DB capacity and backup signals need explicit collectors/checks. |
-| Telemetry transport itself | Fixed bounded log projection, queue/rate limits, response-status accounting and finite joined shutdown are implemented. `DeliveryDiagnostics` and `SnapshotOperations` expose local APIs; the former also has a fixed safe native-log projection, including `CheckinResponses` after bounded body read, close and 2xx. That response handling does not prove storage or alert delivery. SDK discard-report ingestion, durable backlog and accepted metrics/admin/alert series remain open. Browser no-cors response remains opaque. | Export and monitor the safe diagnostics with independent receiver/collector health. Reconcile actual completed Flare receipts and stored records, local drops/failures/rejections and shutdown results so collector loss cannot hide itself. |
+| Telemetry transport itself | Fixed bounded log projection, queue/rate limits, response-status accounting and finite joined shutdown are implemented. `DeliveryDiagnostics` and `SnapshotOperations` expose local APIs; the former also has a fixed safe native-log projection, including `CheckinResponses` after bounded body read, close and 2xx. That response handling does not prove storage or alert delivery. SDK discard-report ingestion, actual backlog-signal persistence and accepted metrics/admin/alert series remain open. Browser no-cors response remains opaque. | Export and monitor the safe diagnostics with independent receiver/collector health. Reconcile actual completed Flare receipts and stored records, local drops/failures/rejections and shutdown results so collector loss cannot hide itself. |
 
 ## Applied worker and PDF observations
 
@@ -372,12 +409,18 @@ native metrics/checkins.
    then resolution/regression and recovery as applicable. A native log row alone
    does not page. Verify any proposed metric-threshold alert is actually
    supported/configured before relying on it; use an explicit check where needed.
-6. **Prove freshness, silence and recovery.** Separately configure server and
-   worker role absence, critical-job missing/error, functional availability and
-   backlog/dependency checks with explicit positive interval/grace. Stop or pause
-   only the dedicated canary. Require the missing/stale alert, destination
-   delivery and actual recovered state after a resumed role/job completion.
-   A process heartbeat cannot clear an unfinished business operation.
+6. **Prove freshness, silence and recovery.** Use separately configured role,
+   critical-job and sampler monitors with explicit positive interval/grace where
+   implemented. Current project silence counts events, not native logs, and has
+   a project-wide prior-activity baseline; one reporting role can mask another.
+   It cannot independently prove worker, sampler or collector-log absence.
+   Current failed-checkin delivery deduplicates a continuing failed episode;
+   monitor `ok` updates state without sending a recovery notification. Missing
+   monitors have their separate 24-hour re-notification policy. Stop or pause
+   only a dedicated canary, require the expected failure/missing notification
+   and actual destination delivery, then independently observe a fresh durable
+   resumed state. Do not promise automatic recovery messages, issue resolution
+   or a reset of the log-rule cooldown. A heartbeat cannot clear unfinished work.
 7. **Review loss, privacy and readiness.** Inspect local sender diagnostics and
    scoped rejected/dropped receipts; explain every expected refusal and any
    loss. Verify bounded queues/resources and shutdown after actual joins. Inspect

@@ -9,6 +9,33 @@ import (
 	"time"
 )
 
+// Shutdown observations contain only one of these closed stage labels. They
+// do not carry native errors, URLs, paths, process IDs or document data.
+type hashBrowserShutdownReason string
+
+const (
+	hashShutdownLifecycleBusy hashBrowserShutdownReason = "lifecycle_busy"
+	hashShutdownClose         hashBrowserShutdownReason = "close"
+	hashShutdownJoin          hashBrowserShutdownReason = "join"
+	hashShutdownProxy         hashBrowserShutdownReason = "proxy"
+	hashShutdownStartupChild  hashBrowserShutdownReason = "startup_child"
+	hashShutdownProfile       hashBrowserShutdownReason = "profile"
+	hashShutdownOuterWait     hashBrowserShutdownReason = "outer_wait"
+)
+
+func hashObserveBrowserShutdown(logger *slog.Logger, reason hashBrowserShutdownReason) {
+	if logger == nil {
+		return
+	}
+	switch reason {
+	case hashShutdownLifecycleBusy, hashShutdownClose, hashShutdownJoin,
+		hashShutdownProxy, hashShutdownStartupChild, hashShutdownProfile,
+		hashShutdownOuterWait:
+		logger.ErrorContext(context.Background(), "hash chromium shutdown unconfirmed",
+			slog.Int("schema", 1), slog.String("reason", string(reason)))
+	}
+}
+
 // The initial Run owns command registration and writes only this attempt.
 // Closing done publishes those fields; command process state is inspected only
 // after the allocator joins. No startup timer is a parent of the browser.
@@ -100,7 +127,7 @@ func (b *chromiumBrowser) hashFailStartupLocked(logger *slog.Logger, cause error
 		observation = b.startup.observation
 	}
 	b.hashBeginRetirementLocked(logger)
-	retired := b.hashAwaitRetirementLocked()
+	retired := b.hashAwaitRetirementLocked(logger)
 	observation.reportOutcome(false)
 	return errors.Join(cause, retired)
 }
@@ -149,24 +176,38 @@ func (b *chromiumBrowser) hashBeginRetirementLocked(logger *slog.Logger) {
 		// another generation over possible late profile writers.
 		startedFailedChild := failed && startup != nil && startup.command != nil && startup.command.Process != nil
 		if closeErr != nil || joinErr != nil || proxyErr != nil || startedFailedChild {
+			if closeErr != nil {
+				hashObserveBrowserShutdown(logger, hashShutdownClose)
+			}
+			if joinErr != nil {
+				hashObserveBrowserShutdown(logger, hashShutdownJoin)
+			}
+			if proxyErr != nil {
+				hashObserveBrowserShutdown(logger, hashShutdownProxy)
+			}
+			if startedFailedChild {
+				hashObserveBrowserShutdown(logger, hashShutdownStartupChild)
+			}
 			r.err = errHashBrowserShutdown
 			return
 		}
 		if ownedProfile != "" {
 			if err := os.RemoveAll(ownedProfile); err != nil {
+				hashObserveBrowserShutdown(logger, hashShutdownProfile)
 				r.err = errHashBrowserShutdown
 			}
 		}
 	}()
 }
 
-func (b *chromiumBrowser) hashAwaitRetirementLocked() error {
+func (b *chromiumBrowser) hashAwaitRetirementLocked(logger *slog.Logger) error {
 	timer := time.NewTimer(hashBrowserStopTimeout)
 	defer timer.Stop()
 	select {
 	case <-b.retirement.done:
 		return b.hashReconcileRetirementLocked()
 	case <-timer.C:
+		hashObserveBrowserShutdown(logger, hashShutdownOuterWait)
 		return errHashBrowserShutdown
 	}
 }

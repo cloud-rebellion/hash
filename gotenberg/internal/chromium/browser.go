@@ -312,6 +312,7 @@ func (b *chromiumBrowser) Stop(logger *slog.Logger) error {
 	// Serialize the complete lifecycle, including delayed allocator retirement.
 	// An in-flight startup cannot be treated as a confirmed stopped browser.
 	if !b.startMu.TryLock() {
+		hashObserveBrowserShutdown(logger, hashShutdownLifecycleBusy)
 		return errHashBrowserShutdown
 	}
 	defer b.startMu.Unlock()
@@ -319,7 +320,7 @@ func (b *chromiumBrowser) Stop(logger *slog.Logger) error {
 		return nil
 	}
 	b.hashBeginRetirementLocked(logger)
-	return b.hashAwaitRetirementLocked()
+	return b.hashAwaitRetirementLocked(logger)
 }
 
 func (b *chromiumBrowser) Healthy(logger *slog.Logger) bool {
@@ -485,7 +486,7 @@ func (b *chromiumBrowser) do(ctx context.Context, logger *slog.Logger, url strin
 	// browser-owned context so early caller cancellation cannot lose its ID.
 	b.arguments.taskObservation.observe(hashTaskTargetBefore)
 	allocationCtx, allocationCancel := context.WithTimeout(b.ctx, min(2*time.Second, time.Until(deadline)))
-	ownedTarget, allocationErr := b.hashAllocateTarget(allocationCtx, chromedp.FromContext(b.ctx).Browser)
+	ownedTarget, allocationErr := b.hashAllocateTarget(allocationCtx, chromedp.FromContext(b.ctx).Browser, logger)
 	allocationCancel()
 	allocationPhase := hashTaskTargetAllocated
 	if allocationErr != nil || ownedTarget == "" {
@@ -699,12 +700,47 @@ func (b *chromiumBrowser) do(ctx context.Context, logger *slog.Logger, url strin
 
 var errHashTabCleanup = errors.New("hash chromium tab cleanup unconfirmed")
 
+type hashTabAllocationReason string
+
+const (
+	hashTabAllocationDeadline hashTabAllocationReason = "allocation_deadline"
+	hashTabAllocationCanceled hashTabAllocationReason = "allocation_canceled"
+	hashTabAllocationProtocol hashTabAllocationReason = "allocation_protocol"
+	hashTabAllocationEmpty    hashTabAllocationReason = "allocation_empty"
+)
+
+// Only closed classifications and booleans leave this failed allocation. The
+// actual error and any returned target ID remain private to the existing owner.
+func hashObserveTabAllocation(logger *slog.Logger, ctx context.Context, err error, emptyID bool) {
+	if logger == nil {
+		return
+	}
+	reason := hashTabAllocationProtocol
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = hashTabAllocationDeadline
+	case errors.Is(err, context.Canceled):
+		reason = hashTabAllocationCanceled
+	case err == nil:
+		reason = hashTabAllocationEmpty
+	}
+	ctxErr := ctx.Err()
+	logger.ErrorContext(context.Background(), "hash chromium tab allocation unconfirmed",
+		slog.Int("schema", 1), slog.String("reason", string(reason)),
+		slog.Bool("command_error", err != nil), slog.Bool("empty_target_id", emptyID),
+		slog.Bool("context_deadline", errors.Is(ctxErr, context.DeadlineExceeded)),
+		slog.Bool("context_canceled", errors.Is(ctxErr, context.Canceled)))
+}
+
 // Private protocol phases take an executor explicitly; production supplies only
 // the captured owned browser. Fault executors exist only in tagged tests.
-func (b *chromiumBrowser) hashAllocateTarget(ctx context.Context, executor cdp.Executor) (target.ID, error) {
+func (b *chromiumBrowser) hashAllocateTarget(ctx context.Context, executor cdp.Executor, loggers ...*slog.Logger) (target.ID, error) {
 	id, err := target.CreateTarget("about:blank").Do(cdp.WithExecutor(ctx, executor))
 	if err != nil || id == "" {
 		b.hashCleanupUnconfirmed.Store(true)
+		if len(loggers) == 1 {
+			hashObserveTabAllocation(loggers[0], ctx, err, id == "")
+		}
 		return "", errHashTabCleanup
 	}
 	return id, nil

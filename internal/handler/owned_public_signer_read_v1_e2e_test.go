@@ -283,12 +283,15 @@ func newOwnedPublicReadFixtureAllocatedPool315V1(t *testing.T, withLifecycleDocu
 			t.Error("refuse non-owned history disposal", err)
 			return
 		}
-		if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil {
-			t.Error(err)
-		} //nolint:rawsql -- all rows in this unique synthetic DB
 		if withLifecycleDocument {
+			if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil {
+				t.Error(err)
+			} //nolint:rawsql -- all rows in this unique synthetic DB
 			return // This branch still has original lifecycle cleanup using the pool.
 		}
+		// No legacy lifecycle DELETE cleanup was registered for this branch.
+		// The mandatory isolated-DB DROP disposes its retained rows only after
+		// the original pool/native retirement and independent absence witnesses.
 		// Pool.Close joins client resources; the server may still be retiring
 		// their backends. Join this unique fixture application with a separate
 		// witness before the existing final absence assertion. Never terminate

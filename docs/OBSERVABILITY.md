@@ -129,6 +129,16 @@ still need their own observations. The next deploy
 must connect a stored runtime signal to an issue/rule and delivered alert, then
 independently prove silence/collector-outage detection and recovery.
 
+Local/staging Compose now passes `FLARE_HEARTBEAT` to both roles. Isolated actual
+Compose configuration checks cover explicit off, empty defaults, both role
+identities, worker-only age policies and exclusion of unrelated/admin settings.
+The separate Stage release prerequisite must forward the six supported scalar
+controls from its staging file through the Hash-only projection. Matching outer
+single/double quotes are supported; shell evaluation, interpolation and a full
+dotenv grammar are not provided by that helper. Legacy DSN/OTLP file forwarding
+retains its original raw format; Hash has no runtime OTLP consumer. These wiring
+checks do not prove the deployed effective configuration or accepted signals.
+
 ## Coverage matrix
 
 All live acceptance in this table is **UNPROVEN**. Implemented means current

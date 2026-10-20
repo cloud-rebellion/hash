@@ -78,6 +78,12 @@ export function requiredHTMLContractTerms(kind: HTMLContractProfile['kind']): st
 }
 function onlyKeys(object: object, keys: string[]): boolean { return Object.keys(object).every((key) => keys.includes(key)); }
 
+// Required profile text needs a base character. Preserve exact international
+// content rather than applying the separate schema-3 font policy here.
+function hasContractText(value: unknown): value is string {
+  return typeof value === 'string' && /[\p{L}\p{N}\p{P}\p{S}]/u.test(value);
+}
+
 export function htmlSigningPagePlainText(text: unknown, limit: number): text is string {
   if (typeof text !== 'string' || !text || text !== text.trim()) return false;
   const characters = Array.from(text);
@@ -234,7 +240,7 @@ export function htmlProfileSectionValues(master: HTMLMaster, sections: Record<st
   for (const term of profile.terms) {
     if (!term.section) continue;
     const declaration = master.sections!.find((section) => section.name === term.section)!, text = sections[term.section];
-    if (typeof text !== 'string' || (!deferRequired && !text.trim()) || Array.from(text).length > declaration.max_chars
+    if (typeof text !== 'string' || (!deferRequired && !hasContractText(text)) || Array.from(text).length > declaration.max_chars
         || /[\uD800-\uDFFF\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(text)) {
       throw new Error(`Enter ${term.name.replaceAll('_', ' ')} wording within ${declaration.max_chars} characters.`);
     }
@@ -257,7 +263,7 @@ export function htmlPreviewSections(master: HTMLMaster, sections: Record<string,
 export function htmlProfileIssues(profile: HTMLContractProfile, values: Record<string, string>, sections: Record<string, string> = {}): string[] {
   const issues: string[] = [], emails = new Set<string>(), encoder = new TextEncoder();
   for (const party of profile.parties) {
-    for (const binding of htmlPartyBindings) if (!values[party[binding]]?.trim()) issues.push(`Enter ${party.slot} ${htmlPartyLabels[binding].toLowerCase()}.`);
+    for (const binding of htmlPartyBindings) if (!hasContractText(values[party[binding]])) issues.push(`Enter ${party.slot} ${htmlPartyLabels[binding].toLowerCase()}.`);
     const printedEmail = values[party.representative_email] ?? '', email = printedEmail.trim();
     if (email && (printedEmail !== email || !/^[^\s<>@]+@[^\s<>@]+$/.test(email) || /\p{Cc}/u.test(email) || encoder.encode(email).length > 254)) issues.push(`Enter a plain valid ${party.slot} representative email without surrounding spaces.`);
     else if (email && emails.has(email.toLowerCase())) issues.push('Provider and customer need different representative email addresses.');
@@ -269,8 +275,8 @@ export function htmlProfileIssues(profile: HTMLContractProfile, values: Record<s
     const [provider, customer] = profile.parties, left = values[provider.company_id]?.trim(), right = values[customer.company_id]?.trim();
     if (left && right && left.toLowerCase() === right.toLowerCase()) issues.push('Provider and customer company identifiers conflict.');
   }
-  for (const term of profile.terms) if (term.value && !values[term.value]?.trim()) issues.push(`Enter ${term.name.replaceAll('_', ' ')}.`);
-  for (const term of profile.terms) if (term.section && !sections[term.section]?.trim()) issues.push(`Enter ${term.name.replaceAll('_', ' ')} wording.`);
+  for (const term of profile.terms) if (term.value && !hasContractText(values[term.value])) issues.push(`Enter ${term.name.replaceAll('_', ' ')}.`);
+  for (const term of profile.terms) if (term.section && !hasContractText(sections[term.section])) issues.push(`Enter ${term.name.replaceAll('_', ' ')} wording.`);
   return issues;
 }
 

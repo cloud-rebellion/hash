@@ -123,6 +123,26 @@ func TestHTMLContractProfileRESTCreationRequiresEssentialsAndApprovalE2E(t *test
 	if !bytes.Equal(before, htmlContractInventoryE2E(t, f)) || peer.requests.Load() != storageBefore || len(renderer.sources()) != 0 {
 		t.Fatal("missing essentials left database/render/storage effects")
 	}
+	// Actual approved schema-2 commands must refuse before any rendered,
+	// stored or persisted contract/party effect, not merely show UI warnings.
+	for _, tc := range []struct{ name, key, text string }{
+		{"format-only company", "customer_company", "\u200b"},
+		{"format-only representative", "provider_name", "\u2060"},
+		{"format-only authority", "customer_authority", "\u200d"},
+		{"mark-only price", "price", "\u0301\ufe0f"},
+		{"format-only scope", "scope", "\ufeff"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := htmlCreationInputE2E(template)
+			input.Values = htmlStringMap{tc.key: tc.text}
+			if w := submitHTMLDocumentCreationE2E(t, f, template.ID, input, cookie); w.Code != http.StatusBadRequest {
+				t.Fatalf("empty printed information=%d", w.Code)
+			}
+			if !bytes.Equal(before, htmlContractInventoryE2E(t, f)) || peer.requests.Load() != storageBefore || len(renderer.sources()) != 0 {
+				t.Fatal("incomplete profile left database/render/storage effects")
+			}
+		})
+	}
 	doc := createHTMLContractDocumentE2E(t, f, template, cookie)
 	rows, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
 	if err != nil || len(rows) != 2 {

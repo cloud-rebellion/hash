@@ -49,6 +49,94 @@ func testContractMaster(kind string) (Master, Input) {
 	return master, input
 }
 
+func TestContractReadinessRequiresBaseContentBeforeMaterialization479(t *testing.T) {
+	for _, kind := range []string{"proposal", "b2b_services"} {
+		t.Run(kind, func(t *testing.T) {
+			master, input := testContractMaster(kind)
+			compiled := mustCompile(t, master)
+			for _, tc := range []struct {
+				name, key, text, path string
+				section               bool
+			}{
+				{"format-only company", "customer_company_name", "\u200b", "parties.customer.company_name", false},
+				{"format-only company identifier", "customer_company_id", "\ufeff", "parties.customer.company_id", false},
+				{"format-only representative", "provider_name", "\u2060", "parties.provider.representative_name", false},
+				{"format-only authority", "provider_authority", "\u200d", "parties.provider.representative_authority", false},
+				{"mark-only price", "price", "\u0301\ufe0f", "terms.price", false},
+				{"format-only wording", "scope", "\t\u200b\u2060\n", "terms.scope", true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					changed := Input{Values: maps.Clone(input.Values), Sections: maps.Clone(input.Sections)}
+					if tc.section {
+						changed.Sections[tc.key] = tc.text
+					} else {
+						changed.Values[tc.key] = tc.text
+					}
+					ready, err := compiled.ContractReadiness(changed)
+					if err != nil || ready.Complete {
+						t.Fatalf("empty printed information accepted: complete=%v err=%v", ready.Complete, err)
+					}
+					found := false
+					for _, issue := range ready.Issues {
+						if issue.Code == "missing" && issue.Path == tc.path {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatalf("missing semantic issue at %s", tc.path)
+					}
+					if _, err := compiled.Materialize(changed); !errors.Is(err, ErrContractIncomplete) {
+						t.Fatalf("actual materialization did not refuse incomplete profile: %v", err)
+					}
+				})
+			}
+			for i := range master.Sections {
+				if master.Sections[i].Name == "scope" {
+					master.Sections[i].DefaultText = "\u200b\u2060"
+				}
+			}
+			if _, err := mustCompile(t, master).Materialize(input); !errors.Is(err, ErrContractIncomplete) {
+				t.Fatalf("format-only saved default bypassed the same gate: %v", err)
+			}
+		})
+	}
+}
+
+func TestContractBaseContentPreservesInternationalTextAndLegacyScope479(t *testing.T) {
+	master, input := testContractMaster("b2b_services")
+	input.Values["customer_company_name"] = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 AB"
+	input.Values["provider_name"] = "Zoe\u0308 O\u0308stergard"
+	input.Values["currency"] = "\u20ac"
+	input.Sections["scope"] = "\u0915\u0902\u092a\u0928\u0940\nReviewed scope."
+	before, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled := mustCompile(t, master)
+	canonical := compiled.CanonicalJSON()
+	ready, err := compiled.ContractReadiness(input)
+	if err != nil || !ready.Complete {
+		t.Fatalf("legitimate international profile rejected: %v", err)
+	}
+	result, err := compiled.Materialize(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{input.Values["customer_company_name"], input.Values["provider_name"], input.Values["currency"], input.Sections["scope"]} {
+		if !strings.Contains(result.HTML, text) {
+			t.Fatal("actual materialization changed legitimate text")
+		}
+	}
+	after, err := json.Marshal(input)
+	if err != nil || !bytes.Equal(before, after) || !bytes.Equal(canonical, compiled.CanonicalJSON()) {
+		t.Fatal("profile checking mutated input or approved source", err)
+	}
+	legacy := mustCompile(t, Master{SchemaVersion: SchemaVersion, HTML: `<p data-hash-value="legacy"></p>`, Values: []Value{{Name: "legacy", Required: true, MaxChars: 20}}})
+	if _, err := legacy.Materialize(Input{Values: map[string]string{"legacy": "\u200b"}}); err != nil {
+		t.Fatalf("contract-only policy changed historical generic values: %v", err)
+	}
+}
+
 func TestContractProfileLeavesLegacyCommitmentsByteIdentical(t *testing.T) {
 	master := Master{SchemaVersion: SchemaVersion, HTML: "<p>Approved</p>"}
 	compiled := mustCompile(t, master)

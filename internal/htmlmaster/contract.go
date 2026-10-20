@@ -211,7 +211,7 @@ func (c *Compiled) ContractReadiness(input Input) (ContractReadiness, error) {
 			{"company_name", party.CompanyName}, {"company_id", party.CompanyID}, {"representative_name", party.RepresentativeName},
 			{"representative_email", party.RepresentativeEmail}, {"representative_authority", party.RepresentativeAuthority},
 		} {
-			if isBlank(field.text) {
+			if !hasContractText(field.text) {
 				issue("missing", base+field.name, "Required printed party information is missing.")
 			} else if c.master.SigningPage != nil {
 				if problem := signingPageTextProblem(field.name, field.text); problem != "" {
@@ -238,7 +238,7 @@ func (c *Compiled) ContractReadiness(input Input) (ContractReadiness, error) {
 				text = c.sections[term.Section].DefaultText
 			}
 		}
-		if isBlank(text) {
+		if !hasContractText(text) {
 			issue("missing", "terms."+term.Name, "Required printed commercial information is missing.")
 		}
 	}
@@ -253,6 +253,19 @@ func (c *Compiled) ContractReadiness(input Input) (ContractReadiness, error) {
 	}
 	result.Complete = len(result.Issues) == 0
 	return result, nil
+}
+
+// Required profile information needs a base letter, number, punctuation or
+// symbol. Whitespace, formatting and combining marks alone are not printed
+// business information. Preserve legitimate international text exactly; this
+// does not apply schema-3 font/layout restrictions to schema-2 contracts.
+func hasContractText(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameNonblankIdentity(a, b string) bool {

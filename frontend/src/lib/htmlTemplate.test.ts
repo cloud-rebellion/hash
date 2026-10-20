@@ -4,6 +4,36 @@ import { blankHTMLSigningPage } from './htmlAuthor';
 import type { TemplateResponse } from './api/client';
 import { htmlTemplateFixture, contractTemplateFixture, signingPageTemplateFixture } from './htmlTemplateFixtures';
 
+test('reviewed profile refuses format-only party information and terms before candidate submission', () => {
+  const template = contractTemplateFixture(), master = template.html_master_json!, profile = master.contract_profile!;
+  const values = template.variables_json as Record<string, string>, sections = { scope_text: 'Reviewed scope.' };
+  for (const [key, text, issue] of [
+    ['customer_company_name', '\u200b', 'Enter customer company name.'],
+    ['customer_company_id', '\ufeff', 'Enter customer company or registration identifier.'],
+    ['provider_representative_name', '\u2060', 'Enter provider representative name.'],
+    ['provider_representative_authority', '\u200d', 'Enter provider declared representative authority.'],
+    ['term_price', '\u0301\ufe0f', 'Enter price.'],
+  ]) expect(htmlProfileIssues(profile, { ...values, [key]: text }, sections)).toContain(issue);
+  const emptyWording = { scope_text: '\t\u200b\u2060\n' };
+  expect(htmlProfileIssues(profile, values, emptyWording)).toContain('Enter scope wording.');
+  expect(() => htmlProfileSectionValues(master, emptyWording)).toThrow('scope');
+  expect(() => htmlPreviewSections(master, emptyWording)).toThrow('scope');
+  expect(htmlProfileSectionValues(master, emptyWording, true)).toEqual(emptyWording);
+});
+
+test('contract presence checking preserves international text and legacy generic values', () => {
+  const template = contractTemplateFixture(), master = template.html_master_json!, profile = master.contract_profile!;
+  const values = { ...(template.variables_json as Record<string, string>), customer_company_name: '\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 AB', provider_representative_name: 'Zoe\u0308 O\u0308stergard', term_currency: '\u20ac' };
+  const sections = { scope_text: '\u0915\u0902\u092a\u0928\u0940\nReviewed scope.' };
+  const before = JSON.stringify({ template, values, sections });
+  expect(htmlProfileIssues(profile, values, sections)).toEqual([]);
+  expect(htmlValuesForSubmission(htmlTemplateFields(template), values)).toEqual(values);
+  expect(htmlProfileSectionValues(master, sections)).toEqual(sections);
+  expect(htmlPreviewSections(master, sections)).toEqual(sections);
+  expect(JSON.stringify({ template, values, sections })).toBe(before);
+  expect(htmlValuesForSubmission(htmlTemplateFields(htmlTemplateFixture()), { customer: '\u200b' })).toEqual({ customer: '\u200b' });
+});
+
 test('initial manual candidate defers only required blanks for observed overlay while preserving declared text/empty and size limits', () => {
   const fields = htmlTemplateFields(htmlTemplateFixture());
   expect(htmlValuesForSubmission(fields, { customer: '' }, true)).toEqual({ customer: '' });

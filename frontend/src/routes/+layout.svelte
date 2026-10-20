@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import { FileSignature, LayoutDashboard, FileText, LayoutTemplate, Settings, ShieldCheck } from 'lucide-svelte';
   import { installRuntimeFlareBrowserCapture } from '$lib/flare-client';
+  import LogoutButton from '$lib/components/LogoutButton.svelte';
 
   let { children } = $props();
 
@@ -76,9 +77,7 @@
               <p class="text-[10px] font-mono uppercase tracking-widest text-text-muted">{me.role}</p>
             </div>
           {/if}
-          <form method="POST" action="/auth/logout" class="inline shrink-0">
-            <button class="btn btn-secondary btn-sm" type="submit">Sign out everywhere</button>
-          </form>
+          <LogoutButton compact />
         </div>
       </div>
     </header>

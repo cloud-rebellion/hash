@@ -15,6 +15,14 @@ feature flags and the authorization/run reference together. This mode does not
 create a plan, subscription, customer, invoice or payment. A missing,
 deactivated or unbounded assigned plan fails closed, including after startup.
 
+Before allowing document creation or Send, explicitly prepare each distinct
+assigned plan through the existing controlled M95 measurement command and pass
+the [catalog maintenance acceptance gate](CATALOG-MAINTENANCE.md). A plan row and
+valid operator binding alone are insufficient: startup validates the business
+plan, but does not prepare or certify its intrinsic wire measurement. This also
+applies to a fresh database, because migration95 deliberately does not backfill
+the plans seeded by migration21. Missing measurements continue to fail closed.
+
 Configure **both HTTP server and worker with the same approved bindings**:
 
 ```text
@@ -37,7 +45,8 @@ documents and 62,000 recipients/month before draft headroom. These are planning
 figures, not measured capacity or an SLA. There is no new seat-limit claim.
 
 Changes to plan quotas/features are managed database changes and take effect
-on the next check. Changes to bindings require a coordinated server/worker
+on the next check. A feature/source update that invalidates M95 metadata also
+requires controlled remeasurement and the catalog gate before authoring resumes. Changes to bindings require a coordinated server/worker
 restart. Preserve the reviewed configuration receipt; `review_ref` is
 provenance, not an authorization token or proof that an external approval was
 verified by Hash. Hash has no public endpoint for self-granting entitlements.

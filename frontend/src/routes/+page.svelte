@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { FileSignature, Sparkles, ShieldCheck } from 'lucide-svelte';
+  import LogoutButton from '$lib/components/LogoutButton.svelte';
 
   let user = $state<{ email: string; org_id: string } | null>(null);
   let loading = $state(true);
@@ -30,9 +31,7 @@
         <span class="text-sm text-text-muted">…</span>
       {:else if user}
         <a class="btn btn-secondary" href="/dashboard">Dashboard</a>
-        <form method="POST" action="/auth/logout" class="inline">
-          <button class="btn btn-secondary" type="submit">Sign out everywhere</button>
-        </form>
+        <LogoutButton />
       {:else}
         <a class="btn btn-primary" href="/auth/login">Sign in</a>
       {/if}

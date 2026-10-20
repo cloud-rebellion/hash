@@ -323,6 +323,13 @@ func (b *chromiumBrowser) Stop(logger *slog.Logger) error {
 	return b.hashAwaitRetirementLocked(logger)
 }
 
+// hashReadinessUnavailable is a read-only post-start supervisor observation.
+// The historical cleanup latch can remain set after a clean no-child startup
+// failure, so the supervisor must retain its separate pre-first-start policy.
+func (b *chromiumBrowser) hashReadinessUnavailable() bool {
+	return b.hashCleanupUnconfirmed.Load()
+}
+
 func (b *chromiumBrowser) Healthy(logger *slog.Logger) bool {
 	// Good to know: the supervisor does not call this method if no first start
 	// or if the process is restarting.

@@ -178,6 +178,19 @@ func (s *hashProcessSupervisor) Healthy() bool {
 		return true
 	}
 
+	// Explicit owned-browser quarantine is not a transient CDP probe failure.
+	// This optional observation applies only after a successful first start;
+	// the lazy branch above retains clean no-child retry semantics.
+	knownUnavailable := func() bool {
+		process, ok := s.process.(interface {
+			hashReadinessUnavailable() bool
+		})
+		return ok && process.hashReadinessUnavailable()
+	}
+	if knownUnavailable() {
+		return false
+	}
+
 	if s.isRestarting.Load() {
 		// A restarting process is not yet healthy. This gives load balancers
 		// honest information so they can avoid routing traffic to this node.
@@ -187,7 +200,7 @@ func (s *hashProcessSupervisor) Healthy() bool {
 	// Cache hit: a recent probe succeeded. Skip the CDP roundtrip so probe
 	// spam does not pile commands onto a busy websocket.
 	if s.recentlyHealthy() {
-		return true
+		return !knownUnavailable()
 	}
 
 	// Serialize probes so concurrent callers do not all roundtrip. The
@@ -196,22 +209,31 @@ func (s *hashProcessSupervisor) Healthy() bool {
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
 
+	if knownUnavailable() {
+		return false
+	}
 	if s.recentlyHealthy() {
-		return true
+		return !knownUnavailable()
 	}
 
 	if s.process.Healthy(s.logger) {
+		if knownUnavailable() {
+			return false
+		}
 		s.lastHealthyAt.Store(time.Now().UnixNano())
 		s.consecutiveHealthFailures.Store(0)
 		return true
 	}
 
+	if knownUnavailable() {
+		return false
+	}
 	if s.consecutiveHealthFailures.Add(1) < healthFailureThreshold {
 		// First failure: tolerate it. Under load, a single blown CDP
 		// timeout is more likely transient pressure than a dead process.
 		// A genuinely dead process will fail the next probe as well and
 		// flip us unhealthy then.
-		return true
+		return !knownUnavailable()
 	}
 	return false
 }

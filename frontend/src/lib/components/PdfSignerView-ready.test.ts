@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
 import { PdfLoad } from '../pdfLoad';
+import { PdfCanvasBudget, type CanvasGeneration, type PaintOptions } from '../pdfCanvas';
+import { ContinuousPDFPages } from '../pdfPageResidency';
 import { captureFlarePDFViewError } from '../flare-client';
 import { SignerPDFSession, readSignerFieldResponse, renderSignerPDFPages, signerPDFScopeKey, validateSignerPDFFields, validateSignerPDFObservation, type SignerPDFScope } from '../signerPDF';
 
@@ -22,17 +24,41 @@ function fixture(failure?: 'fields' | 'count' | 'json' | 'utf8', pendingPDF = fa
   let resolveRetirement!: () => void;
   let rejectRetirement!: (reason: unknown) => void;
   const ownedCanvases = new Set<HTMLCanvasElement>();
+  const budget = new PdfCanvasBudget(); let generation!: CanvasGeneration;
+  // This callback suite controls visibility directly, without installing fake
+  // browser globals. The actual residency runner and ledger still execute.
+  class VisiblePages extends ContinuousPDFPages<{ numPages: number }> {
+    constructor(...args: ConstructorParameters<typeof ContinuousPDFPages<{ numPages: number }>>) {
+      super(...args);
+      (this as any).observe = () => { (this as any).visible.add(1); (this as any).visible.add(2); };
+    }
+  }
   const document = pendingPDF ? new Promise<{ numPages: number }>(resolve => { resolveDocument = resolve; }) : Promise.resolve({ numPages: 2 });
   const retirement = pendingRetirement ? new Promise<void>((resolve, reject) => { resolveRetirement = resolve; rejectRetirement = reject; }) : Promise.resolve();
   const env: any = {
+    ContinuousPDFPages: VisiblePages, pageOwners: new WeakMap(), observedPDFRetirements: new WeakSet(), residentPages: [],
     pages: [], fields: [], fieldsLoaded: false, documentReady: false, loading: true, error: null,
     buf: {}, persisted: {}, canvasEls: { 1: { width: 760, height: 1000 }, 2: { width: 760, height: 1000 } },
     validateSignerPDFObservation, validateSignerPDFFields, readSignerFieldResponse, renderSignerPDFPages,
     captureFlarePDFViewError: (...args: unknown[]) => { reported.push(args); captureFlarePDFViewError(); },
     fetchSignerPDF: async () => new Uint8Array([1, 2, 3]),
     fetch: async () => new Response(failure === 'json' ? '{"synthetic_private_excerpt":' : failure === 'utf8' ? new Uint8Array([0xff]) : JSON.stringify({ fields: [], count: failure === 'count' ? 1 : 0 }), { headers, status: failure === 'fields' ? 503 : 200 }),
-    pdfModule: async () => ({ startPdfData: () => new PdfLoad({ promise: document, destroy() { destroyed++; return retirement; } }), unscaledWidth: async () => 760,
-      renderPage: (_doc: unknown, page: number) => new Promise((resolve, reject) => renders.push({ page, resolve, reject })) }),
+    pdfModule: async () => ({ startPdfData: () => {
+      generation = budget.generation();
+      return new PdfLoad({ promise: document, destroy() { destroyed++; return retirement; } }, {
+        closing: () => budget.closing(generation), retired: () => budget.retired(generation), failed: () => budget.retirementFailed(generation),
+      });
+    }, pageGeometry: async (_doc: unknown, num: number) => ({ num, w: 760, h: 1000, scale: 1 }),
+      recyclePage: (_doc: unknown, canvas: HTMLCanvasElement) => budget.recycle(generation, canvas),
+      pageIsResident: (_doc: unknown, canvas: HTMLCanvasElement) => budget.resident(generation, canvas),
+      renderPage: async (_doc: unknown, page: number, canvas: HTMLCanvasElement, _scale: number, options: PaintOptions) => {
+        const lease = await budget.acquire(generation, canvas, 760, 1000, options);
+        try {
+          lease.assertCurrent(); canvas.width = 760; canvas.height = 1000;
+          const original = new Promise<{ width: number; height: number }>((resolve, reject) => renders.push({ page, resolve, reject }));
+          lease.observe(original); return await original;
+        } finally { lease.finish(); }
+      } }),
     tick: async () => {}, emptyValue: () => '', errorMessage: (error: Error) => error.message,
     onFilledChange() {}, onReadyChange: (value: boolean) => ready.push(value)
   };
@@ -209,4 +235,36 @@ test('actual field cancellation releases pre-transfer PDF bytes without publishi
   const pending = f.load(); await flush(); expect(fieldRequests).toBe(1); expect(Array.from(bytes)).toEqual([1, 2, 3]);
   await f.session.destroy(); await pending;
   expect(Array.from(bytes)).toEqual([0, 0, 0]); expect(f.ready).not.toContain(true); expect(f.renders).toHaveLength(0); expect(f.reported).toEqual([]);
+});
+
+
+test('actual signer callback refuses positive readiness if the completed residency owner stopped before publication', async () => {
+  const f = fixture(), ActualOwner = f.env.ContinuousPDFPages;
+  f.env.ContinuousPDFPages = class extends ActualOwner {
+    async start() { const pages = await super.start(); this.stop(); return pages; }
+  };
+  const pending = f.load(); await flush();
+  f.renders[0].resolve({ width: 760, height: 1000 }); await flush();
+  f.renders[1].resolve({ width: 760, height: 1000 }); await pending;
+  expect(f.ready).not.toContain(true); expect(f.env.documentReady).toBe(false);
+  expect(f.env.error).toContain('stopped before review completed'); expect(f.destroyed).toBe(1);
+});
+
+
+test('actual signer retirement reports a native rejection once after disposal and retains the exact original outcome', async () => {
+  const f = fixture(undefined, true, true), pending = f.load(); await flush();
+  const original = f.retire(); expect(f.retire()).toBe(original); expect(f.session.destroy()).toBe(original);
+  f.navigate(); const failure = new Error('PRIVATE native cleanup error /sign/private-token');
+  f.rejectRetirement(failure); await expect(original).rejects.toBe(failure);
+  f.resolveDocument(); await pending;
+  expect(f.retire()).toBe(original); expect(f.destroyed).toBe(1); expect(f.reported).toEqual([[]]);
+  expect(f.ready).not.toContain(true); expect(f.env.documentReady).toBe(false);
+});
+
+test('actual signer fulfilled retirement remains silent and preserves its stable original promise after repeated disposal', async () => {
+  const f = fixture(undefined, true, true), pending = f.load(); await flush();
+  const original = f.retire(); expect(f.retire()).toBe(original); f.navigate(); f.resolveRetirement(); await original;
+  f.resolveDocument(); await pending;
+  expect(f.retire()).toBe(original); expect(f.session.destroy()).toBe(original);
+  expect(f.destroyed).toBe(1); expect(f.reported).toEqual([]); expect(f.ready).not.toContain(true);
 });

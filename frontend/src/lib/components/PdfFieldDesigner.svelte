@@ -2,6 +2,8 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import type { PdfDoc } from '$lib/pdf';
   import type { PdfLoad } from '$lib/pdfLoad';
+  import { captureFlarePDFViewError } from '$lib/flare-client';
+  import { ContinuousPDFPages } from '$lib/pdfPageResidency';
   import {
     listFields,
     addField,
@@ -36,6 +38,8 @@
   let recipientRefreshError = $state<string | null>(null);
   let appliedRecipientRevision = $state(untrack(() => recipientRevision));
   let rendered = $state(false);
+  let residentPages = $state<number[]>([]);
+  let pageResidency: ContinuousPDFPages<PdfDoc> | undefined;
   const placementUnavailable = $derived(readonly || generated || saving || loading || !rendered || refreshingRecipients || recipientRefreshError !== null || error !== null || pages.length === 0);
   let disposed = false;
   let pdfLoad: PdfLoad<PdfDoc> | null = null;
@@ -79,7 +83,6 @@
 
   $effect(() => { const state={busy:saving,dirty:draft!==null}; untrack(()=>onStateChange?.(state)); });
   const canvasEls: Record<number, HTMLCanvasElement> = {};
-  const MAX_W = 760;
 
   // Recipient deletion cascades assigned fields. Refresh both lists after a
   // confirmed recipient change, while retaining this designer through Preview
@@ -119,9 +122,23 @@
     }
   }
 
+  // Observe each original retirement promise once, including after unmount.
+  // Rejected native cleanup remains a real ownership failure; callers still
+  // receive the same promise and rejection, without waiting for telemetry.
+  const observedPDFRetirements = new WeakSet<Promise<void>>();
+  function retirePDF(): Promise<void> {
+    const retirement = pdfLoad?.destroy() ?? Promise.resolve();
+    if (pdfLoad && !observedPDFRetirements.has(retirement)) {
+      observedPDFRetirements.add(retirement);
+      void retirement.catch(() => { captureFlarePDFViewError(); });
+    }
+    return retirement;
+  }
   onMount(async () => {
     const target = documentID;
     let initializationFailed = false;
+    let pdfFailure: { error: unknown } | null = null;
+    const isPDFRejection = (candidate: unknown): boolean => pdfFailure !== null && pdfFailure.error === candidate;
     try {
       emitProof(false);
       htmlPlacementPins(sourceHTML, sourceSHA, sourceCommitment);
@@ -129,15 +146,19 @@
         validateHTMLSource(retainedSource, target, retainedSource.org_id);
         if (retainedSource.pdf_sha256 !== sourceSHA || retainedSource.html_source_commitment !== sourceCommitment) throw new Error('The saved signing locations belong to another PDF. Refresh this document.');
       } else if (sourceHTML && !readonly) throw new Error('Load and verify this document’s retained source before placing signature fields.');
-      const pdf = await import('$lib/pdf');
+      let pdf: typeof import('$lib/pdf');
+      try { pdf = await import('$lib/pdf'); }
+      catch (e) { pdfFailure = { error: e }; throw e; }
       if (!current(target)) return;
       const loadPDF = async () => {
         const bytes = sourceHTML ? await fetchVerifiedDocumentPDF(target, sourceSHA!, abort.signal) : null;
         if (!current(target) || initializationFailed) throw new DOMException('The document view was closed.', 'AbortError');
-        pdfLoad = bytes ? pdf.startPdfData(bytes) : pdf.startPdf(documentPdfURL(target));
-        const loaded = await pdfLoad.promise;
-        if (!current(target) || initializationFailed) { await pdfLoad.destroy(); throw new DOMException('The document view was closed.', 'AbortError'); }
-        return loaded;
+        try {
+          pdfLoad = bytes ? pdf.startPdfData(bytes) : pdf.startPdf(documentPdfURL(target));
+          const loaded = await pdfLoad.promise;
+          if (!current(target) || initializationFailed) { await retirePDF(); throw new DOMException('The document view was closed.', 'AbortError'); }
+          return loaded;
+        } catch (e) { pdfFailure = { error: e }; throw e; }
       };
       const [recs, fs, doc] = await Promise.all([
         listRecipients(target),
@@ -152,39 +173,42 @@
       fields = fs;
       if (recs.length) recipientID = recs[0].id;
 
-      const infos: PageInfo[] = [];
-      for (let n = 1; n <= doc.numPages; n++) {
-        const natural = await pdf.unscaledWidth(doc, n);
+      try {
+        pageResidency = new ContinuousPDFPages(doc, {
+          current: () => { if (!current(target)) throw new DOMException('The document view was closed.', 'AbortError'); },
+          geometry: pdf.pageGeometry,
+          mount: async infos => { pages = infos; loading = false; await tick(); },
+          canvas: num => canvasEls[num],
+          paint: pdf.renderPage,
+          recycle: pdf.recyclePage,
+          isResident: pdf.pageIsResident,
+          resident: (num, ready) => {
+            if (current(target)) residentPages = ready ? [...new Set([...residentPages, num])] : residentPages.filter(page => page !== num);
+          },
+          failed: reason => {
+            if (current(target) && rendered) {
+              if (!(reason instanceof Error && (reason.name === 'AbortError' || reason.name === 'RenderingCancelledException'))) captureFlarePDFViewError();
+              error = (reason as Error).message; rendered = false; emitProof(false);
+              void retirePDF();
+            }
+          }
+        });
+        pages = await pageResidency.start();
         if (!current(target)) return;
-        const scale = Math.min(MAX_W / natural, 2);
-        infos.push({ num: n, w: 0, h: 0, scale });
-      }
-      pages = infos;
-      // Canvas elements must exist before rendering. The loading branch used
-      // to hide them through the entire render loop, leaving every page empty.
-      loading = false;
-      await tick();
-      if (!current(target)) return;
-      // Render each page into its bound canvas, recording the rendered size.
-      for (const p of pages) {
-        const el = canvasEls[p.num];
-        if (!el) throw new Error(`PDF page ${p.num} could not be displayed. Refresh this document.`);
-        const dim = await pdf.renderPage(doc, p.num, el, p.scale);
-        if (!current(target)) return;
-        if (!Number.isFinite(dim.width) || !Number.isFinite(dim.height) || dim.width <= 0 || dim.height <= 0) throw new Error(`PDF page ${p.num} rendered with invalid dimensions.`);
-        p.w = dim.width;
-        p.h = dim.height;
-      }
-      pages = [...pages];
+        if (!pageResidency.allPagesRendered()) throw new Error('The PDF preview stopped before review completed. Reopen the document.');
+      } catch (e) { pdfFailure = { error: e }; throw e; }
       rendered = true;
       emitSignatureFields();
       emitProof(true);
     } catch (e) {
+      const unexpectedPDF = isPDFRejection(e) && !(e instanceof Error && (e.name === 'AbortError' || e.name === 'RenderingCancelledException'));
       initializationFailed = true;
       abort.abort();
+      pageResidency?.stop();
       let retirementFailed = false;
-      try { await pdfLoad?.destroy(); } catch { retirementFailed = true; }
+      try { await retirePDF(); } catch { retirementFailed = true; }
       if (current(target)) {
+        if (unexpectedPDF) captureFlarePDFViewError();
         error = retirementFailed ? 'The PDF preview could not be closed. Refresh this page before trying again.' : (e as Error).message;
         rendered = false; emitProof(false);
       }
@@ -199,7 +223,8 @@
     abort.abort();
     dragStart = null;
     draft = null;
-    void pdfLoad?.destroy();
+    pageResidency?.stop();
+    void retirePDF();
   });
 
   function recipientName(id?: string): string {
@@ -223,7 +248,7 @@
       draft = null;
       return;
     }
-    if (!e.isPrimary || e.button !== 0 || dragStart || readonly || generated || placementUnavailable || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
+    if (!e.isPrimary || e.button !== 0 || dragStart || readonly || generated || placementUnavailable || !pageResidency?.pageReady(page) || !current(documentID) || !pages.find((p) => p.num === page && p.w > 0 && p.h > 0)) return;
     if (tool === 'signature' && !recipientID) {
       error = 'Pick a recipient before placing a signature field.';
       return;
@@ -258,7 +283,7 @@
     const d = draft;
     dragStart = null;
     draft = null;
-    if (!d || readonly || generated || placementUnavailable || !current(documentID)) return;
+    if (!d || readonly || generated || placementUnavailable || !pageResidency?.pageReady(d.page) || !current(documentID)) return;
     // A click (no real drag) drops a sensibly sized default box.
     if (d.w < 1.5 || d.h < 1) {
       d.w = tool === 'signature' ? 26 : 18;
@@ -393,7 +418,8 @@
     <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label="PDF field placement pages" tabindex="0">
       {#each pages as p (p.num)}
         <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px;max-width:100%">
-          <canvas bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block w-full h-auto"></canvas>
+          <canvas width="0" height="0" bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block w-full h-auto" style="aspect-ratio:{p.w}/{p.h}"></canvas>
+          {#if !residentPages.includes(p.num)}<span class="absolute left-2 top-2 text-sm text-text-muted" role="status">Rendering page {p.num}…</span>{/if}
           <!-- The displayed page and overlay scale together; stored coordinates remain percentages. -->
           <div
             class="absolute inset-0 {generated || readonly ? '' : 'cursor-crosshair'}"
@@ -420,7 +446,7 @@
                   type="button"
                   class="shrink-0 hover:text-danger"
                   aria-label="Remove field"
-                  disabled={placementUnavailable}
+                  disabled={placementUnavailable || !residentPages.includes(p.num)}
                   onpointerdown={(e) => e.stopPropagation()}
                   onclick={() => remove(f)}
                 >

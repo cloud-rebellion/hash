@@ -183,6 +183,7 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
     const calls: any[] = [], changed: any[] = [];
     const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64), htmlSourceCommitment: 'a'.repeat(64), disposed: false,
       draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: { pointerID: 1 }, readonly: false, generated: false, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
+      pageResidency: { pageReady: () => true },
       TOOLS: [{ type: 'signature', label: 'Signature' }], fields: [{ id: 'field', document_id: ID }], saving: false, error: null, htmlPlacementPins,
       emitSignatureFields: () => changed.push(true), current: (target: string) => !env.disposed && target === ID && env.htmlSourceCommitment === env.sourceCommitment };
     for (const name of ['addField', 'deleteField']) env[name] = (...args: any[]) => new Promise((resolve) => calls.push({ name, args, resolve }));
@@ -200,6 +201,7 @@ test('canceled or second-pointer navigation cannot place a field and unrelated p
     const calls: any[] = [];
     const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
       readonly: false, generated: false, placementUnavailable: false, current: () => true, pages: [{ num: 1, w: 760, h: 1000 }],
+      pageResidency: { pageReady: () => true },
       tool: 'signature', recipientID: USER, required: true, TOOLS: [{ type: 'signature', label: 'Signature' }],
       draft: null, dragStart: null, fields: [], saving: false, error: null, htmlPlacementPins, emitSignatureFields: () => {},
       addField: async (...args: any[]) => { calls.push(args); return { id: 'new', document_id: ID }; } };

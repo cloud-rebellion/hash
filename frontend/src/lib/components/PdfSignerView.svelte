@@ -3,10 +3,12 @@
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
   import {
     SignerPDFSession, confirmSignerPDFField, fetchSignerPDF, readSignerFieldResponse,
-    renderSignerPDFPages, signerPDFScopeKey, validateSignerPDFFields, validateSignerPDFObservation,
+    signerPDFScopeKey, validateSignerPDFFields, validateSignerPDFObservation,
     type SignerPDFField as Field, type SignerPDFObservation, type SignerPDFScope
   } from '$lib/signerPDF';
   import { t } from '$lib/i18n';
+  import type { PdfDoc } from '$lib/pdf';
+  import { ContinuousPDFPages } from '$lib/pdfPageResidency';
   import { captureFlarePDFViewError } from '$lib/flare-client';
 
   type Props = {
@@ -36,6 +38,9 @@
   const saveErrors = $state<Record<string, string>>({});
   const canvasEls: Record<number, HTMLCanvasElement> = {};
   let session: SignerPDFSession | undefined;
+  let residentPages = $state<number[]>([]);
+  const pageOwners = new WeakMap<SignerPDFSession, ContinuousPDFPages<PdfDoc>>();
+  const observedPDFRetirements = new WeakSet<Promise<void>>();
 
   function emptyValue(f: Field): string {
     return f.type === 'checkbox' ? 'false' : '';
@@ -91,6 +96,7 @@
     untrack(() => {
       session = active;
       pages = [];
+      residentPages = [];
       fields = [];
       fieldsLoaded = false;
       documentReady = false;
@@ -133,18 +139,37 @@
       active.assertCurrent();
       const loadedFields = validateSignerPDFFields(data.fields, scope.observation, doc.numPages);
       if (data.count !== undefined && data.count !== loadedFields.length) throw new Error('The document field list is incomplete.');
-      const rendered = await renderSignerPDFPages(doc, scope.observation, {
+      const owner = new ContinuousPDFPages(doc, {
         current: () => active.assertCurrent(),
-        width: pdf.unscaledWidth,
+        geometry: pdf.pageGeometry,
         mount: async infos => { pages = infos; await tick(); },
         canvas: num => {
           const canvas = canvasEls[num];
           if (canvas) ownedCanvases.add(canvas);
           return canvas;
         },
-        render: pdf.renderPage
-      });
+        paint: pdf.renderPage,
+        recycle: pdf.recyclePage,
+        isResident: pdf.pageIsResident,
+        resident: (num, ready) => {
+          if (active.current()) residentPages = ready ? [...new Set([...residentPages, num])] : residentPages.filter(page => page !== num);
+        },
+        failed: reason => {
+          // Initial failures go through the existing load catch. A later
+          // viewport repaint failure revokes the same source's positive proof.
+          if (active.current() && documentReady) {
+            captureFlarePDFViewError();
+            error = `Unable to load document: ${errorMessage(reason)}`;
+            documentReady = false;
+            onFilledChange?.(false, scope); onReadyChange?.(false, scope);
+            retireDocument(active, ownedCanvases);
+          }
+        }
+      }, scope.observation.page_count ?? doc.numPages);
+      pageOwners.set(active, owner);
+      const rendered = await owner.start();
       active.assertCurrent();
+      if (!owner.allPagesRendered()) throw new Error('The PDF preview stopped before review completed. Reopen the document.');
       pages = rendered;
       fields = loadedFields;
       for (const f of loadedFields) {
@@ -176,14 +201,18 @@
   }
 
   function retireDocument(active: SignerPDFSession, ownedCanvases: Set<HTMLCanvasElement>): Promise<void> {
+    pageOwners.get(active)?.stop();
     const retirement = active.destroy();
-    // PDF.js may still be painting when disposal starts. Release only this
-    // session's backing stores after its real destruction has joined all work.
-    // A stale session never touches canvases mounted by a replacement viewer.
-    void retirement.then(() => {
-      for (const canvas of ownedCanvases) { canvas.width = 0; canvas.height = 0; }
-      ownedCanvases.clear();
-    }, () => {}).catch(() => {});
+    // Report a rejected original cleanup once, including after route disposal.
+    // Observing it never replaces its promise, outcome or once-only owner.
+    if (!observedPDFRetirements.has(retirement)) {
+      observedPDFRetirements.add(retirement);
+      void retirement.catch(() => { captureFlarePDFViewError(); });
+    }
+    pageOwners.delete(active);
+    // The shared ledger releases only exact-generation stores after original
+    // native retirement and render settlement. Never zero DOM by late callback.
+    ownedCanvases.clear();
     return retirement;
   }
 
@@ -266,7 +295,8 @@
   <!-- Canvases must exist while loading, before tick/render begins. -->
     {#each pages as p (p.num)}
       <div class="page" style="width:{p.w}px" aria-label="Document page {p.num}">
-        <canvas bind:this={canvasEls[p.num]}></canvas>
+        <canvas width="0" height="0" bind:this={canvasEls[p.num]} style="aspect-ratio:{p.w}/{p.h}"></canvas>
+        {#if !residentPages.includes(p.num)}<span class="page-loading" role="status">Rendering page {p.num}…</span>{/if}
         {#if documentReady && !error}
         <div class="overlay">
           {#each fieldsOnPage(p.num) as f (f.id)}
@@ -281,9 +311,9 @@
                 class:done={signed}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 onclick={() => {
-                  if (!readOnly && !signed && recomputeFilled() && session?.current()) onSignatureClick?.(session.scope);
+                  if (!readOnly && !signed && residentPages.includes(p.num) && recomputeFilled() && session?.current()) onSignatureClick?.(session.scope);
                 }}
-                disabled={readOnly || signed || !recomputeFilled()}
+                disabled={readOnly || signed || !residentPages.includes(p.num) || !recomputeFilled()}
                 title={!recomputeFilled() ? $t('sign.fillRequiredTitle') : ''}
               >
                 {signed ? $t('pdf.signed') : $t('pdf.signHere')}
@@ -301,7 +331,7 @@
                   class:save-failed={Boolean(saveErrors[f.id])}
                   aria-invalid={Boolean(saveErrors[f.id])}
                   aria-busy={Boolean(saving[f.id])}
-                  disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
+                  disabled={readOnly || signed || !documentReady || !residentPages.includes(p.num) || Boolean(saving[f.id])}
                   onchange={(e) => {
                     buf[f.id] = (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false';
                     void saveField(f);
@@ -318,7 +348,7 @@
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
+                disabled={readOnly || signed || !documentReady || !residentPages.includes(p.num) || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               >
                 <option value="">{f.label || 'Select…'}</option>
@@ -338,7 +368,7 @@
                 class:save-failed={Boolean(saveErrors[f.id])}
                 aria-invalid={Boolean(saveErrors[f.id])}
                 aria-busy={Boolean(saving[f.id])}
-                disabled={readOnly || signed || !documentReady || Boolean(saving[f.id])}
+                disabled={readOnly || signed || !documentReady || !residentPages.includes(p.num) || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               />
             {/if}
@@ -366,6 +396,10 @@
     display: block;
     width: 100%;
     height: auto;
+  }
+  .page-loading {
+    position: absolute; top: 0.5rem; left: 0.5rem;
+    color: var(--color-text-muted, #777); font-size: 0.875rem;
   }
   .overlay {
     position: absolute;

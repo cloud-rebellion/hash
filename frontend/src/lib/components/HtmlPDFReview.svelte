@@ -3,6 +3,7 @@
   import { fetchVerifiedDocumentPDF, reviewHTMLDocument, type DocumentResponse } from '$lib/api/client';
   import type { PdfDoc } from '$lib/pdf';
   import type { PdfLoad } from '$lib/pdfLoad';
+  import { captureFlarePDFViewError } from '$lib/flare-client';
 
   let { document, canReview, revisionBlocked = false, expectedPages, hasSigningPage = false, onReviewed, onRefresh }: {
     document: DocumentResponse;
@@ -52,29 +53,47 @@
       pageNumber = number;
       if (!seenPages.includes(number)) seenPages = [...seenPages, number];
     } catch (e) {
-      if (current() && observed === revision) error = (e as Error).message;
+      if (current() && observed === revision) {
+        if (!(e instanceof Error && (e.name === 'AbortError' || e.name === 'RenderingCancelledException'))) captureFlarePDFViewError();
+        error = (e as Error).message;
+      }
     } finally {
       if (current() && observed === revision) rendering = false;
     }
+  }
+  // Observe each original retirement promise once, including after unmount.
+  // Rejected native cleanup remains a real ownership failure; callers still
+  // receive the same promise and rejection, without waiting for telemetry.
+  const observedPDFRetirements = new WeakSet<Promise<void>>();
+  function retirePDF(): Promise<void> {
+    const retirement = pdfLoad?.destroy() ?? Promise.resolve();
+    if (pdfLoad && !observedPDFRetirements.has(retirement)) {
+      observedPDFRetirements.add(retirement);
+      void retirement.catch(() => { captureFlarePDFViewError(); });
+    }
+    return retirement;
   }
   async function loadPreview() {
     if (!current() || busy || activePDF || loadInFlight) return;
     loadInFlight = true;
     loading = true;
     error = null;
+    let pdfOperation = false;
     try {
       if (pdfLoad) {
-        await pdfLoad.destroy();
+        await retirePDF();
         if (!current()) return;
         pdfLoad = null;
       }
       const bytes = await fetchVerifiedDocumentPDF(sourceID, sourceSHA, abort.signal);
       if (!current()) return;
+      pdfOperation = true;
       const pdf = await import('$lib/pdf');
       if (!current()) return;
       pdfLoad = pdf.startPdfData(bytes);
       const loaded = await pdfLoad.promise;
-      if (!current()) { await pdfLoad.destroy(); return; }
+      pdfOperation = false;
+      if (!current()) { await retirePDF(); return; }
       if (loaded.numPages < 1 || loaded.numPages > 500) {
         throw new Error('This PDF cannot be reviewed here. Ask its owner to inspect it.');
       }
@@ -82,9 +101,13 @@
       pageCount = loaded.numPages;
       await renderPage(1);
     } catch (e) {
+      const unexpectedPDF = pdfOperation && !(e instanceof Error && (e.name === 'AbortError' || e.name === 'RenderingCancelledException'));
       let retirementFailed = false;
-      if (!activePDF) { try { await pdfLoad?.destroy(); } catch { retirementFailed = true; } }
-      if (current()) error = retirementFailed ? 'The PDF preview could not be closed. Refresh this page before trying again.' : (e as Error).message;
+      if (!activePDF) { try { await retirePDF(); } catch { retirementFailed = true; } }
+      if (current()) {
+        if (unexpectedPDF) captureFlarePDFViewError();
+        error = retirementFailed ? 'The PDF preview could not be closed. Refresh this page before trying again.' : (e as Error).message;
+      }
     } finally {
       loadInFlight = false;
       if (current()) loading = false;
@@ -114,7 +137,7 @@
   onMount(() => { void loadPreview(); });
   onDestroy(() => {
     disposed = true; revision++; abort.abort();
-    void pdfLoad?.destroy();
+    void retirePDF();
   });
 </script>
 
@@ -133,7 +156,7 @@
     <button type="button" class="btn btn-secondary" disabled={busy} onclick={onRefresh}>Refresh document</button>
   {/if}
   <div class="overflow-auto border border-border-light rounded-md bg-bg-elevated p-2">
-    <canvas bind:this={canvas} aria-label={`Generated PDF, page ${pageNumber}`} class="max-w-full h-auto mx-auto"></canvas>
+    <canvas width="0" height="0" bind:this={canvas} aria-label={`Generated PDF, page ${pageNumber}`} class="max-w-full h-auto mx-auto"></canvas>
   </div>
   {#if pageCount > 0}
     {#if !pageCountMatches}<p role="alert" class="text-sm text-danger">This PDF’s page count differs from its retained source. Refresh this document before reviewing it.</p>{/if}

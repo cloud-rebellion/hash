@@ -304,6 +304,15 @@ updates and their run audit atomically under fresh owner authorization. Missing
 audit rows are internal failures, not missing resources. Routing-tier changes
 retain sender-or-owner permission and the current draft/document boundary.
 
+Owner rule create and update measure the new source in their owned transaction.
+An update first requires the existing measured source, so it cannot repair an
+unmeasured legacy rule, including an edit that only deactivates it. Send reads
+the complete active rule set before matching predicates; one missing or stale
+measurement can refuse it with HTTP 503. Use the [catalog maintenance runbook](CATALOG-MAINTENANCE.md#existing-eidas-rules-conditional-upgrade-preparation)
+for approved tenant/rule selection, exact source/version preparation and
+postflight. Measurement does not approve or activate a policy; deletion remains
+a separately reviewed policy change, not an automatic repair or retry strategy.
+
 Omitted branding and AI-provider values are resolved from the current row after
 the organization lock, preserving a concurrent change that committed before
 this operation. Effective merged fonts, logo URLs and provider settings are

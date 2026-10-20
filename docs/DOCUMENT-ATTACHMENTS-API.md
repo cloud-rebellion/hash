@@ -187,16 +187,19 @@ expiry finishes the original epoch and atomically lands in expired, with no
 invitations or usable links; it never reopens an ordinary draft. This is Send
 publication, not final signed-PDF publication or the full attachment ceremony.
 
-Nonempty packages stay blocked. Native, plan and provider loans remain owned through
+The earlier worker-only checkpoint kept nonempty packages blocked; the current
+public Send adapter is described above. Native, plan and provider loans remain owned through
 actual cleanup and observation delivery. A cancelled provider call may return
 before local I/O joins; its exact receipt remains registered in the native batch
 until storage confirms actual retirement. Cancellation alone cannot retire the
 batch or its plan. The legacy Send pass precedes it in the
 same loop, so the five-second ticker is not a scheduling-latency guarantee.
 Whole-worker shutdown, uncertain-commit/restart recovery, configured-provider
-conformance and the full recipient/annex consent, signature binding and mandatory
-participant report remain separate qualification work. These private worker
-primitives do not activate a public package Send or amendment endpoint.
+conformance and deployed-service acceptance remain separate qualification work.
+The current public package Send, recipient/annex consent, signature binding and
+mandatory participant report are described in [the API contract](API.md#sender-package-send);
+private worker primitives alone do not prove those complete journeys. Draft
+selection APIs do not activate a later amendment endpoint.
 
 ## Authentication and observation
 
@@ -286,7 +289,7 @@ or generations require reload and review; failures never authorize weaker pins.
 
 ## Product boundary
 
-The planned signing package incorporates the main agreement and named business
+The current package signing workflow incorporates the main agreement and named business
 attachments in one deliberate acceptance of exact presented bytes. The separate
 automatic negotiation/signature evidence report remains mandatory. Later changes
 will follow the agreement's configured process: a new signature, acknowledgement
@@ -294,9 +297,11 @@ or agreed notice. A changed file does not universally force re-signing. Original
 signed bytes/evidence must remain preserved and later versions linked. The
 selected process must be permitted by that agreement, including the notice
 channel and effective-date conditions; a notice must never appear as a signature
-or an explicit acknowledgement. These
-amendment/report/signing workflows are planned and are not enabled by these draft
-selection APIs; technical evidence alone is not a legal sufficiency decision.
+or an explicit acknowledgement. The current package signing and mandatory
+report contracts are documented in [the API](API.md#sender-package-send); later
+amendment workflows remain planned and are not enabled by these draft selection
+APIs. Implementation and controlled-test evidence do not replace the release
+gates or establish legal sufficiency for an agreement.
 
 
 ## Save selected order, labels and removals

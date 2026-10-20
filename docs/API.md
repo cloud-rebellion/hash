@@ -31,9 +31,17 @@ OIDC policy. `POST /auth/logout` requires a current session and advances the
 account's database revocation generation, invalidating every existing Hash
 browser cookie for that account. Collaboration sockets check that generation
 on their next binary frame. A new OIDC login mints the current generation.
-Browser form requests accepting HTML redirect to `/` with HTTP 303; machine
+Logout requests accepting `text/html` redirect to `/` with HTTP 303; machine
 requests receive the JSON logout receipt. Database failures do not return a
-successful revocation receipt.
+successful revocation receipt. The built-in “Sign out everywhere” control uses
+a same-origin `fetch` POST with `mode: 'cors'`,
+`credentials: 'same-origin'`, `Accept: text/html` and redirect following.
+CORS mode preserves the browser's real `Origin` under Hash's global
+`no-referrer` policy; it does not grant cross-origin access. The browser attaches
+the `HttpOnly` session cookie without exposing it to JavaScript. Preserve the
+normal same-origin mutation/CSRF guard rather than forging an Origin, reading
+the cookie or relying on the Referer header. A failed or lost response is not
+a confirmed revocation receipt.
 
 Use HTTPS and same-origin browser requests. The browser mutation guard also
 protects against requests from sibling subdomains. Supply the app's exact
@@ -54,6 +62,15 @@ Its authenticated billing status reports `billing_enabled: true`,
 `payments_enabled: false`, provider `operator` and the approved finite plan.
 Subscription is absent; invoices and purchase catalog are empty. Payment
 operations are disabled while quotas and capabilities remain enforced.
+
+Strict catalog admission also applies to ordinary authoring, Send and their MCP
+counterparts. Missing or stale M95 plan metadata, or M96 metadata for retained
+rules required by the operation, can return HTTP 503 even when login and health
+checks succeed. Follow the [catalog maintenance runbook](CATALOG-MAINTENANCE.md)
+for explicitly approved plan UUIDs and, where applicable, tenant/rule UUIDs,
+exact source/version preparation and postflight. A fresh organization with no
+rules needs no rule seeding. Do not treat this refusal as permission to retry
+blindly, measure an unreviewed inventory or bypass the catalog guards.
 
 ## Sender package Send
 

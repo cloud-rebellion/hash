@@ -372,7 +372,24 @@ func runWorkerMain() (exitCode int) {
 	go runWorker(ctx, "expirations", func() { w.loopExpirations(ctx) })
 	go runWorker(ctx, "webhook_redrive", func() { w.loopWebhookRedrive(ctx) })
 	go runWorker(ctx, "email_dispatch", func() { w.loopEmailDispatch(ctx) })
-	go runWorker(ctx, "telemetry_rollup", func() { w.loopTelemetryRollup(ctx) })
+	// Reuse the existing serial rollup owner for the bounded backlog read.
+	// Join this owner before the earlier deferred pool.Close can run.
+	telemetryRollupDone := make(chan struct{})
+	go func() {
+		defer close(telemetryRollupDone)
+		runWorker(ctx, "telemetry_rollup", func() { w.loopTelemetryRollup(ctx) })
+	}()
+	defer func() {
+		cancel()
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		select {
+		case <-telemetryRollupDone:
+		case <-cleanup.Done():
+			slog.Warn("telemetry rollup observer shutdown incomplete", "category", "deadline")
+			exitCode = 1
+		}
+	}()
 	if optionalWorkerConfigured("compliance_rollup", w.complianceFlagger != nil && w.complianceFeed != nil) {
 		go runWorker(ctx, "compliance_rollup", func() { w.loopComplianceRollup(ctx) })
 	}

@@ -1,0 +1,35 @@
+-- name: GetOperationalBacklogV1 :one
+-- Metadata only. LIMIT bounds observed rows, not rows scanned: the caller owns
+-- a one-second context/acquisition budget. Reaching 1000 means lower bounds;
+-- observed oldest ages are not a claim about an unobserved queue remainder.
+-- No claim/lock, payload, identifiers or tenant labels cross this projection.
+WITH observation AS MATERIALIZED (
+  SELECT statement_timestamp() AS observed_at
+), mail AS MATERIALIZED (
+  SELECT created_at, next_attempt_at
+  FROM email_deliveries
+  WHERE status IN ('pending', 'retrying')
+  ORDER BY next_attempt_at, id
+  LIMIT 1000
+), roots AS MATERIALIZED (
+  SELECT i.document_id IS NOT NULL AS has_intent, i.created_at AS intent_created_at
+  FROM documents d
+  LEFT JOIN document_finalization_intents i ON i.document_id=d.id AND i.org_id=d.org_id
+  WHERE d.status='finalizing' AND d.deleted_at IS NULL AND d.parent_envelope_id IS NULL
+  ORDER BY d.id
+  LIMIT 1000
+)
+SELECT
+  (SELECT count(*) FROM mail)::bigint AS mail_count,
+  (SELECT count(*) FROM mail, observation WHERE isfinite(next_attempt_at) AND next_attempt_at<=observed_at)::bigint AS mail_due_count,
+  (SELECT count(*) FROM mail, observation WHERE created_at IS NULL OR NOT isfinite(created_at) OR created_at>observed_at)::bigint AS mail_unknown_created_count,
+  (SELECT count(*) FROM mail WHERE next_attempt_at IS NULL OR NOT isfinite(next_attempt_at))::bigint AS mail_unknown_due_count,
+  (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_age_seconds,
+  (SELECT COALESCE(max(CASE WHEN isfinite(next_attempt_at) AND next_attempt_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM next_attempt_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_overdue_seconds,
+  ((SELECT count(*) FROM mail)=1000)::boolean AS mail_limit_reached,
+  (SELECT count(*) FROM roots)::bigint AS finalizing_root_count,
+  (SELECT count(*) FROM roots WHERE has_intent)::bigint AS finalizing_intent_count,
+  (SELECT count(*) FROM roots WHERE NOT has_intent)::bigint AS finalizing_missing_intent_count,
+  (SELECT count(*) FROM roots, observation WHERE has_intent AND (intent_created_at IS NULL OR NOT isfinite(intent_created_at) OR intent_created_at>observed_at))::bigint AS finalizing_unknown_intent_age_count,
+  (SELECT COALESCE(max(CASE WHEN has_intent AND isfinite(intent_created_at) AND intent_created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM intent_created_at)) END),0) FROM roots, observation)::bigint AS finalizing_oldest_observed_intent_age_seconds,
+  ((SELECT count(*) FROM roots)=1000)::boolean AS finalizing_limit_reached;

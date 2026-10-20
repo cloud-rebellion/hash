@@ -90,14 +90,42 @@ can be filtered by both `HASH_LOG_LEVEL` and `FLARE_LOG_LEVEL`. Neither successf
 enqueue nor HTTP/flush completion proves Flare persistence or alert delivery.
 Keep the supported concrete SDK transport: wrapping `ClientOptions.Transport`
 would disable its concrete-type discard-recorder setup. Receiver verification of
-native SDK `client_report` discards remains a separate gate.
+native SDK `client_report` discards now has a controlled local receiver check:
+two deliberate event-processor discards produce the exact native reason,
+category and quantity alongside a real accepted operational event. A disabled
+report control must still deliver that event and fail the report-presence oracle.
+This qualifies the concrete SDK path, not Flare persistence, queue/network loss
+coverage or alert delivery. Native reports carry project/time attribution;
+they do not independently carry release or environment. Keep
+`sdk_delivery_accounted=false`.
 
-Selected email/finalizer samples do not measure durable unfinished-work queues.
-Qualify safe cached pending/retrying mail and unfinished finalization counts and
-ages, including leased/backoff and stranded/preparation states. Distinguish total
-age from overdue age; do not use retry-reset `updated_at` as creation age. Bound
-query cost, label truncation/lower bounds and expose stale/unavailable reads.
-Do not add document, recipient or organization labels to Flare. The next deploy
+Selected email/finalizer samples retain their original invocation semantics.
+The worker separately caches a metadata-only durable observation every two
+minutes through its existing serial telemetry loop. It covers pending/retrying
+mail, including future leases/backoff, and finalizing root documents partitioned
+by matching finalization intent. Intent rows overlap roots; do not add them as
+extra contracts. Mail creation age and overdue age are separate; finalization
+age uses intent creation, with missing, nonfinite and future clocks explicit.
+No document, recipient or organization identifiers enter this projection.
+
+Each domain observes at most 1,000 rows. Reaching the cap means counts and oldest
+ages are observed lower bounds, not an exact global queue. LIMIT does not bound
+the scan; a one-second child context covers pool acquisition and SQL execution.
+Read failure preserves the last good sample and its increasing age; a process
+with no sample never reports a known empty queue. The 300-second stale threshold
+describes telemetry freshness, not a business delivery SLA. A delayed existing
+rollup can delay sampling, so independent signal-silence detection is required.
+The fixed native projection retains off, queue, rate, size, cancellation and
+privacy controls. There is no additional worker goroutine or database callback
+inside the telemetry sender.
+
+Controlled PostgreSQL checks cover count/filter/cap semantics, a genuinely
+blocked query interrupted by the unchanged one-second budget, unavailable-state
+reporting, backend query retirement and physical connection cleanup. These use
+session-local metadata shadows; production-schema plans, actual worker-loop
+shutdown and workload capacity remain separate acceptance. Terminal failed mail,
+ordinary/fitted preparation stages, stranded candidates and other recovery work
+still need their own observations. The next deploy
 must connect a stored runtime signal to an issue/rule and delivered alert, then
 independently prove silence/collector-outage detection and recovery.
 

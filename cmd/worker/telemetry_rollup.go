@@ -32,13 +32,19 @@ const (
 func (w *worker) loopTelemetryRollup(ctx context.Context) {
 	tick := time.NewTicker(telemetryRollupInterval)
 	defer tick.Stop()
+	backlogTick := time.NewTicker(operationalBacklogIntervalV1)
+	defer backlogTick.Stop()
+	var backlog operationalBacklogCacheV1
 	w.runTelemetryRollupOnce(ctx)
+	w.observeOperationalBacklogV1(ctx, &backlog)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 			w.runTelemetryRollupOnce(ctx)
+		case <-backlogTick.C:
+			w.observeOperationalBacklogV1(ctx, &backlog)
 		}
 	}
 }

@@ -15,11 +15,13 @@ import (
 
 	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/aiapps"
+	"github.com/bright-interaction/hash/internal/aiauthoring"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
-	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/negotiationauthoring"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 )
 
 // registerAIAppsTools mounts the Phase 11 AI moats: clarifier (11.1),
@@ -104,7 +106,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 				}
 				return runAIAppCompletion(r.Context(), d, id, "suggest_counter_clause", d.Negotiator.Runtime,
 					func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.CounterResult, error) {
-						target, err := authoring.AIAppBlock(doc, p.BlockID)
+						target, err := authoring.AIAppBlockContextV1(ctx, doc, p.BlockID)
 						if err != nil {
 							return aiapps.CounterResult{}, err
 						}
@@ -130,84 +132,47 @@ func registerAIAppsTools(s *Server, d Deps) {
 				"parent_id":     stringSchema("optional parent proposal in a counter-counter chain"),
 			}, []string{"document_id", "block_id", "proposal_kind"}),
 			Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-				u, _ := auth.FromContext(r.Context())
-				var p struct {
-					DocumentID   string `json:"document_id"`
-					BlockID      string `json:"block_id"`
-					ProposalKind string `json:"proposal_kind"`
-					ProposedText string `json:"proposed_text"`
-					Rationale    string `json:"rationale"`
-					AIAssisted   bool   `json:"ai_assisted"`
-					ParentID     string `json:"parent_id"`
-				}
-				if err := MustParseArgs(args, &p); err != nil {
-					return nil, err
-				}
-				id, err := uuid.Parse(p.DocumentID)
-				if err != nil {
-					return nil, errors.New("document_id must be a uuid")
-				}
-				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
-					return nil, err
-				}
-				switch p.ProposalKind {
-				case "edit", "reject", "counter", "block_lock":
-				default:
-					return nil, errors.New("proposal_kind must be edit | reject | counter | block_lock")
-				}
-				parent := pgtype.UUID{}
-				if p.ParentID != "" {
-					pid, err := uuid.Parse(p.ParentID)
-					if err != nil {
-						return nil, errors.New("parent_id must be a uuid")
+				return withManualNegotiationArgumentsV1(r, d, args, func(r *http.Request, args json.RawMessage) (any, error) {
+					var p struct {
+						DocumentID   string `json:"document_id"`
+						BlockID      string `json:"block_id"`
+						ProposalKind string `json:"proposal_kind"`
+						ProposedText string `json:"proposed_text"`
+						Rationale    string `json:"rationale"`
+						AIAssisted   bool   `json:"ai_assisted"`
+						ParentID     string `json:"parent_id"`
 					}
-					parent = pgtype.UUID{Bytes: pid, Valid: true}
-				}
-				row, err := commitAIAppMutation(r.Context(), d, id,
-					func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
-						if _, err := authoring.AIAppBlock(doc, p.BlockID); err != nil {
-							return nil, err
+					if err := MustParseArgs(args, &p); err != nil {
+						return nil, err
+					}
+					id, err := uuid.Parse(p.DocumentID)
+					if err != nil {
+						return nil, errors.New("document_id must be a uuid")
+					}
+					if err := auth.EnforceDocScope(r.Context(), id); err != nil {
+						return nil, err
+					}
+					switch p.ProposalKind {
+					case "edit", "reject", "counter", "block_lock":
+					default:
+						return nil, errors.New("proposal_kind must be edit | reject | counter | block_lock")
+					}
+					parent := pgtype.UUID{}
+					if p.ParentID != "" {
+						pid, err := uuid.Parse(p.ParentID)
+						if err != nil {
+							return nil, errors.New("parent_id must be a uuid")
 						}
-						if parent.Valid {
-							row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: uuid.UUID(parent.Bytes), OrgID: u.OrgID, DocumentID: doc.ID})
-							if errors.Is(err, pgx.ErrNoRows) {
-								return nil, authoring.ErrAIProposalNotFound
-							}
-							if err != nil {
-								return nil, err
-							}
-							if row.BlockID != p.BlockID {
-								return nil, authoring.ErrAIProposalBlockMismatch
-							}
-						}
-						return q.InsertProposal(ctx, generated.InsertProposalParams{
-							DocumentID:   doc.ID,
-							OrgID:        u.OrgID,
-							ProposedBy:   pgtype.UUID{Bytes: u.UserID, Valid: true},
-							BlockID:      p.BlockID,
-							ProposalKind: p.ProposalKind,
-							ProposedText: p.ProposedText,
-							Rationale:    p.Rationale,
-							DiffJson:     []byte("{}"),
-							AiAssisted:   p.AIAssisted,
-							ParentID:     parent,
-						})
-					},
-					func(row *generated.DocumentProposal) audit.Entry {
-						return audit.Entry{
-							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
-							Kind: "negotiation.proposed",
-							Payload: map[string]any{
-								"via": "mcp", "tool": "propose_counter_clause",
-								"proposal_id": row.ID.String(), "block_id": p.BlockID, "kind": p.ProposalKind, "ai_assisted": p.AIAssisted,
-							},
-						}
-					},
-				)
-				if err != nil {
-					return nil, aiAppMutationError(err)
-				}
-				return proposalRow(row), nil
+						parent = pgtype.UUID{Bytes: pid, Valid: true}
+					}
+					result, err := runManualNegotiationV1(r, d, id, negotiationauthoring.InputV1{Operation: pdfadmission.ManualProposalCreateV1, BlockID: p.BlockID, ProposalKind: p.ProposalKind, ProposedText: p.ProposedText, Rationale: p.Rationale, AIAssisted: p.AIAssisted, ParentID: parent})
+					owned := &ownedManualNegotiationResultV1{owner: result}
+					if err != nil {
+						return owned, aiAppMutationError(err)
+					}
+					owned.value = proposalRow(result.Proposal)
+					return owned, nil
+				})
 			},
 		})
 
@@ -220,63 +185,44 @@ func registerAIAppsTools(s *Server, d Deps) {
 				"status":      stringSchema("pending | accepted | rejected | superseded"),
 			}, []string{"proposal_id", "status"}),
 			Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-				u, _ := auth.FromContext(r.Context())
-				var p struct {
-					ProposalID string `json:"proposal_id"`
-					Status     string `json:"status"`
-				}
-				if err := MustParseArgs(args, &p); err != nil {
-					return nil, err
-				}
-				id, err := uuid.Parse(p.ProposalID)
-				if err != nil {
-					return nil, errors.New("proposal_id must be a uuid")
-				}
-				// Confine a doc-scoped agent token: it must not flip a proposal on
-				// a sibling document. Resolve the owning doc (org-scoped) first.
-				ownerDoc, err := d.Queries.GetProposalOwnerDoc(r.Context(), generated.GetProposalOwnerDocParams{ID: id, OrgID: u.OrgID})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("proposal not found")
-				}
-				if err != nil {
-					return nil, err
-				}
-				if err := auth.EnforceDocScope(r.Context(), ownerDoc); err != nil {
-					return nil, err
-				}
-				switch p.Status {
-				case "pending", "accepted", "rejected", "superseded":
-				default:
-					return nil, errors.New("status must be pending | accepted | rejected | superseded")
-				}
-				row, err := commitAIAppMutation(r.Context(), d, ownerDoc,
-					func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
-						row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: id, OrgID: u.OrgID, DocumentID: doc.ID})
-						if errors.Is(err, pgx.ErrNoRows) {
-							return nil, authoring.ErrAIProposalNotFound
-						}
-						if err != nil {
-							return nil, err
-						}
-						if _, err := authoring.AIAppBlock(doc, row.BlockID); err != nil {
-							return nil, err
-						}
-						return q.SetProposalStatus(ctx, generated.SetProposalStatusParams{
-							ID: id, OrgID: u.OrgID, Status: p.Status,
-						})
-					},
-					func(row *generated.DocumentProposal) audit.Entry {
-						return audit.Entry{
-							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &row.DocumentID,
-							Kind:    "negotiation.status_changed",
-							Payload: map[string]any{"via": "mcp", "proposal_id": id.String(), "status": p.Status},
-						}
-					},
-				)
-				if err != nil {
-					return nil, aiAppMutationError(err)
-				}
-				return proposalRow(row), nil
+				return withManualNegotiationArgumentsV1(r, d, args, func(r *http.Request, args json.RawMessage) (any, error) {
+					u, _ := auth.FromContext(r.Context())
+					var p struct {
+						ProposalID string `json:"proposal_id"`
+						Status     string `json:"status"`
+					}
+					if err := MustParseArgs(args, &p); err != nil {
+						return nil, err
+					}
+					id, err := uuid.Parse(p.ProposalID)
+					if err != nil {
+						return nil, errors.New("proposal_id must be a uuid")
+					}
+					// Confine a doc-scoped agent token: it must not flip a proposal on
+					// a sibling document. Resolve the owning doc (org-scoped) first.
+					ownerDoc, err := d.Queries.GetProposalOwnerDoc(r.Context(), generated.GetProposalOwnerDocParams{ID: id, OrgID: u.OrgID})
+					if errors.Is(err, pgx.ErrNoRows) {
+						return nil, errors.New("proposal not found")
+					}
+					if err != nil {
+						return nil, err
+					}
+					if err := auth.EnforceDocScope(r.Context(), ownerDoc); err != nil {
+						return nil, err
+					}
+					switch p.Status {
+					case "pending", "accepted", "rejected", "superseded":
+					default:
+						return nil, errors.New("status must be pending | accepted | rejected | superseded")
+					}
+					result, err := runManualNegotiationV1(r, d, ownerDoc, negotiationauthoring.InputV1{Operation: pdfadmission.ManualProposalStatusV1, ProposalID: id, Status: p.Status})
+					owned := &ownedManualNegotiationResultV1{owner: result}
+					if err != nil {
+						return owned, aiAppMutationError(err)
+					}
+					owned.value = proposalRow(result.Proposal)
+					return owned, nil
+				})
 			},
 		})
 
@@ -351,7 +297,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 				}
 				return runAIAppCompletion(r.Context(), d, id, "run_risk_analysis", d.RiskAnalyzer.Runtime,
 					func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.AnalyzeResult, error) {
-						tree, err := blocks.ParseTree(doc.BlocksJson)
+						tree, err := ai.ParseTreeV1(ctx, doc.BlocksJson)
 						if err != nil {
 							return aiapps.AnalyzeResult{}, err
 						}
@@ -411,6 +357,17 @@ func registerAIAppsTools(s *Server, d Deps) {
 			},
 		})
 	}
+	for _, name := range []string{"clarify_clause", "suggest_counter_clause", "run_risk_analysis", "check_bilingual_equivalence"} {
+		tool, ok := s.tools[name]
+		if !ok {
+			continue
+		}
+		original := tool.Handler
+		tool.Handler = func(r *http.Request, args json.RawMessage) (any, error) {
+			return withAIArgumentsV1(r, d, args, original)
+		}
+		s.tools[name] = tool
+	}
 }
 
 func proposalRow(p *generated.DocumentProposal) map[string]any {
@@ -435,30 +392,57 @@ func proposalRow(p *generated.DocumentProposal) map[string]any {
 	return out
 }
 
-func commitAIAppMutation[T any](ctx context.Context, d Deps, id uuid.UUID,
-	mutate func(context.Context, *generated.Queries, *generated.Document) (T, error), event func(T) audit.Entry,
-) (T, error) {
-	var zero T
-	actor, err := aiAppActor(ctx, id)
+func runManualNegotiationV1(r *http.Request, d Deps, id uuid.UUID, in negotiationauthoring.InputV1) (*negotiationauthoring.ResultV1, error) {
+	actor, err := aiAppActor(r.Context(), id)
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
-	return authoring.CommitNegotiationMutation(ctx, aiAppDependencies(d), actor, id, mutate, event)
+	// Original manual MCP entries have no IP or UserAgent fields.
+	return negotiationauthoring.MutateV1(r.Context(), negotiationauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit}, negotiationauthoring.ActorV1{OrgID: actor.OrgID, UserID: actor.UserID, Authorize: actor.Authorize, Via: "mcp"}, id, in)
+}
+
+type ownedManualNegotiationResultV1 struct {
+	value any
+	owner *negotiationauthoring.ResultV1
+}
+
+func (r *ownedManualNegotiationResultV1) MarshalJSON() ([]byte, error) { return json.Marshal(r.value) }
+func (r *ownedManualNegotiationResultV1) CloseConsumerV1() {
+	if r != nil && r.owner != nil {
+		r.owner.CloseConsumerV1()
+	}
+}
+func withManualNegotiationArgumentsV1(r *http.Request, d Deps, args json.RawMessage, run func(*http.Request, json.RawMessage) (any, error)) (result any, failure error) {
+	// Validation-only compatibility cannot enter the producer or synthesize proof.
+	if d.PDFCreationSessions == nil {
+		return run(r, args)
+	}
+	u, _ := auth.FromContext(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(ctx, u.OrgID, args)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { result = newOwnedBlockToolResultV1(result, input) }()
+	failure = input.WithArgumentsV1(ctx, func(raw []byte) error { result, failure = run(r, json.RawMessage(raw)); return failure })
+	return result, failure
 }
 
 func runAIAppCompletion[T any](ctx context.Context, d Deps, id uuid.UUID, tool string, runtime *ai.Runtime,
 	complete func(context.Context, *ai.Runtime, *generated.Document) (T, error), event func(T) audit.Entry,
-) (T, error) {
-	var zero T
+) (any, error) {
 	actor, err := aiAppActor(ctx, id)
 	if err != nil {
-		return zero, aiAppMutationError(err)
+		return nil, aiAppMutationError(err)
 	}
-	result, err := authoring.CompleteDocumentAI(ctx, aiAppDependencies(d), authoring.AIAppRequest{Actor: actor, DocumentID: id, Via: "mcp", Action: tool}, runtime, complete, event)
+	result, err := aiauthoring.CompleteDocumentAIV1(ctx, aiauthoring.DependenciesV1{Pool: d.Pool, Sessions: d.PDFCreationSessions, Audit: d.Audit}, authoring.AIAppRequest{Actor: actor, DocumentID: id, Via: "mcp", Action: tool}, runtime, complete, event)
+	owned := &ownedAIResultV1[T]{ctx: ctx, owner: result}
 	if err != nil {
-		return zero, aiAppMutationError(err)
+		return owned, aiAppMutationError(err)
 	}
-	return result, nil
+	return owned, nil
 }
 
 func aiAppDependencies(d Deps) authoring.AIAppDeps {

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -24,9 +25,8 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
-	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/recoveryinventory"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -224,7 +224,16 @@ func htmlMaterializationInventoryE2E(t *testing.T, f lifecycleAuthorizationFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := f.pool.Query(f.ctx, string(inventory))
+	inventoryTx, err := recoveryinventory.Begin(f.ctx, f.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := recoveryinventory.Rollback(inventoryTx); err != nil {
+			t.Error("close canonical inventory snapshot", err)
+		}
+	}()
+	rows, err := inventoryTx.Query(f.ctx, string(inventory))
 	if err != nil {
 		t.Fatal("canonical inventory", err)
 	} //nolint:rawsql -- exact operator inventory, not copied fixture SQL
@@ -440,71 +449,102 @@ func htmlMaterializationStageRowE2E(t *testing.T, f lifecycleAuthorizationFixtur
 	return row
 }
 
+// The original native Send receipt is captured before negotiation or retirement.
+// Its canonical payload commits to the persisted sealing-intent deadline; this
+// read neither reconstructs that deadline from an archive nor manufactures a
+// provider acknowledgement. A row hash checks this one receipt, not org-chain
+// completeness or provider conformance.
+func htmlMaterializationOriginalSendDeadlineE2E(t *testing.T, q *ownedPublicReadFixtureV1, doc *generated.Document) time.Time {
+	t.Helper()
+	f := q.f
+	if doc == nil || doc.ID == uuid.Nil || doc.OrgID != f.org || doc.Status != "sent" || !doc.SentAt.Valid || doc.SentAt.InfinityModifier != pgtype.Finite || !doc.Article13NoticeEpochAt.Valid || !doc.Article13NoticeEpochAt.Time.Equal(doc.SentAt.Time) || !doc.Article13NoticeEpochV61Committed {
+		t.Fatal("original native Send result lacks its committed ceremony")
+	}
+	var eventIDText string
+	err := f.pool.QueryRow(f.ctx, `SELECT min(id::text) FROM events WHERE org_id=$1 AND document_id=$2 AND kind='document.sent' HAVING count(*)=1`, f.org, doc.ID).Scan(&eventIDText) //nolint:rawsql -- unique actual native Send receipt, no rows or measurements are written
+	if err != nil {
+		t.Fatal("unique original native Send receipt unavailable", err)
+	}
+	eventID, err := uuid.Parse(eventIDText)
+	if err != nil {
+		t.Fatal("invalid original native Send receipt identity", err)
+	}
+	event, err := f.q.GetEventByID(f.ctx, eventID)
+	if err != nil || event == nil || event.ID != eventID || event.OrgID != f.org || !event.DocumentID.Valid || uuid.UUID(event.DocumentID.Bytes) != doc.ID || !event.ActorUserID.Valid || uuid.UUID(event.ActorUserID.Bytes) != f.user.ID || event.RecipientID.Valid || event.Kind != audit.KindDocumentSent || !event.CreatedAt.Valid || event.CreatedAt.InfinityModifier != pgtype.Finite || len(event.RowHash) != sha256.Size || len(event.PayloadHashed) == 0 {
+		t.Fatal("original native Send receipt scope/actor/hash unavailable", err)
+	}
+	recomputed, err := audit.RecomputeEventRowHash(event)
+	if err != nil || !bytes.Equal(recomputed, event.RowHash) {
+		t.Fatal("original native Send receipt row hash differs", err)
+	}
+	// payload_json is a reserialized JSONB UI copy. The exact hash preimage is
+	// payload_hashed, so derive the independent deadline from those bound bytes.
+	var receipt struct {
+		RetainUntil  string `json:"retain_until"`
+		Retained     bool   `json:"evidence_retained"`
+		NoticeSchema string `json:"required_notice_schema"`
+		NoticeSentAt string `json:"required_notice_sent_at"`
+	}
+	if err := json.Unmarshal(event.PayloadHashed, &receipt); err != nil {
+		t.Fatal("original native Send receipt payload unavailable", err)
+	}
+	epoch, err := article13.CanonicalSentAt(doc.SentAt.Time)
+	if err != nil || !receipt.Retained || receipt.NoticeSchema != doc.Article13NoticeSchema || receipt.NoticeSentAt != epoch {
+		t.Fatal("original native Send receipt lost its Article 13 commitment", err)
+	}
+	deadline, err := time.Parse(time.RFC3339, receipt.RetainUntil)
+	if err != nil || deadline.Nanosecond() != 0 || deadline.UTC().Format(time.RFC3339) != receipt.RetainUntil || !deadline.After(doc.SentAt.Time) {
+		t.Fatal("original native Send receipt deadline unavailable", err)
+	}
+	return deadline.UTC()
+}
+
 func TestHTMLMaterializationReviseArchivesOriginalCeremonyDeadlineE2E(t *testing.T) {
-	f, doc := htmlMaterializationFixtureE2E(t)
-	doc, err := f.q.MarkDocumentHTMLReviewed(f.ctx, generated.MarkDocumentHTMLReviewedParams{ID: doc.ID, OrgID: f.org, ExpectedUpdatedAt: doc.UpdatedAt, ExpectedPdfSha256: doc.PdfSha256, ReviewedBy: f.user.ID})
+	q := newOwnedPublicReadFixtureV1(t)
+	sent, originalParties := q.createSentV1(t)
+	f, doc := q.f, sent
+	originalDeadline := htmlMaterializationOriginalSendDeadlineE2E(t, q, sent)
+	// Real creation, Send and negotiation own their original measurement rows.
+	// The fixture retains its bounded synthetic renderer/storage peers; this is
+	// not a provider, renderer-conformance or combined-capacity claim.
+	bootstrap := q.requestV1(originalParties[0].Token, "")
+	var page signerContextResponse
+	if bootstrap.Code != http.StatusOK || json.Unmarshal(bootstrap.Body.Bytes(), &page) != nil || page.DocumentID != doc.ID || page.Privacy.NoticeDigest == "" || page.PDFObservation == nil {
+		t.Fatal("genuine public context/notice unavailable")
+	}
+	requestBody, err := json.Marshal(signerRequestChangesInput{Message: "Please revise the declared service scope", Proposed: "Human-approved revised synthetic service scope"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipient, err := f.q.CreateRecipient(f.ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "customer", Name: "Retired customer", Email: "retired@synthetic.test", MagicTokenHash: bytes.Repeat([]byte{7}, 32), MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en"})
-	if err != nil {
-		t.Fatal(err)
+	request := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/sign/"+originalParties[0].Token+"/request-changes", bytes.NewReader(requestBody)).WithContext(f.ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", f.s.PublicURL)
+	request.Header.Set(signerNoticeDigestHeader, page.Privacy.NoticeDigest)
+	response := httptest.NewRecorder()
+	f.s.Routes().ServeHTTP(response, request)
+	var changed map[string]string
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &changed) != nil || changed["status"] != "changes_requested" {
+		t.Fatalf("genuine notice-bound public change request=%d", response.Code)
 	}
-	tx, err := f.pool.BeginTx(f.ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		t.Fatal(err)
+	var noticeEvents int
+	var noticeBound bool
+	if err := f.pool.QueryRow(f.ctx, "SELECT count(*)::integer,coalesce(bool_and(payload_json->>$4=$5),false) FROM events WHERE org_id=$1 AND document_id=$2 AND recipient_id=$3 AND kind='document.changes_requested'", f.org, doc.ID, originalParties[0].RecipientID, article13.AuditNoticeDigestKey, page.Privacy.NoticeDigest).Scan(&noticeEvents, &noticeBound); err != nil || noticeEvents != 1 || !noticeBound {
+		t.Fatal("actual change response did not bind original server notice", err)
+	} //nolint:rawsql -- exact fresh response evidence, never insertion or repair
+	ownedRevisionConsumedV1(t, q)
+	requests, err := f.q.ListChangeRequests(f.ctx, doc.ID)
+	if err != nil || len(requests) != 1 {
+		t.Fatal("actual change request missing", err)
 	}
-	defer tx.Rollback(context.Background())
-	q := f.q.WithTx(tx)
-	if _, err = q.GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
+	base := "/api/v1/documents/" + doc.ID.String()
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/change-requests/"+requests[0].ID.String()+"/approve", "", q.cookie); w.Code != http.StatusOK {
+		t.Fatalf("genuine sender approval=%d", w.Code)
 	}
-	// A synthetic complete default branding snapshot satisfies the real draft
-	// exit guard. No renderer/provider work or notice acknowledgement is implied.
-	if _, err = tx.Exec(f.ctx, `INSERT INTO document_branding_override(document_id,primary_hex,accent_hex,surface_hex,text_hex,muted_hex,logo_url,logo_alt,font_heading,font_body,signature_color)
-		VALUES($1,'#0F172A','#3B82F6','#FFFFFF','#0F172A','#64748B','','','Inter','Inter','#0F172A')`, doc.ID); err != nil {
-		t.Fatal(err)
-	} //nolint:rawsql -- exact synthetic frozen-branding fixture, guards stay enabled
-	intent, err := q.CreateSendSealingIntent(f.ctx, generated.CreateSendSealingIntentParams{DocumentID: doc.ID, OrgID: f.org, ActorUserID: pgtype.UUID{Bytes: f.user.ID, Valid: true}, Via: "fixture", Tool: "html_materialization_retention"})
-	if err != nil {
-		t.Fatal(err)
+	paused, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+	if err != nil || paused.Status != "changes_requested" || !sameSignerDocumentSource(doc, paused) {
+		t.Fatal("HTML approval auto-applied unreviewed prose or lost paused state", err)
 	}
-	if _, err = q.BeginDocumentSendSealing(f.ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
-	// Query checkpoints model completed provider work for a source-only test;
-	// they are not Object Lock acceptance receipts.
-	if n, err := q.MarkSendSealingRetentionStarted(f.ctx, generated.MarkSendSealingRetentionStartedParams{DocumentID: doc.ID, OrgID: f.org}); err != nil || n != 1 {
-		t.Fatal("start fixture retention", err)
-	}
-	if n, err := q.MarkSendSealingRetentionComplete(f.ctx, generated.MarkSendSealingRetentionCompleteParams{DocumentID: doc.ID, OrgID: f.org}); err != nil || n != 1 {
-		t.Fatal("complete fixture retention", err)
-	}
-	sent, err := q.CompleteDocumentSendSealing(f.ctx, generated.CompleteDocumentSendSealingParams{ID: doc.ID, OrgID: f.org})
-	if err != nil {
-		t.Fatal(err)
-	}
-	epoch, err := article13.CanonicalSentAt(sent.SentAt.Time)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, err := f.s.Audit.LogTx(f.ctx, tx, audit.Entry{OrgID: f.org, DocumentID: &doc.ID, ActorUserID: &f.user.ID, Kind: audit.KindDocumentSent, Payload: map[string]any{article13.AuditRequiredNoticeSchemaKey: sent.Article13NoticeSchema, article13.AuditRequiredNoticeSentAtKey: epoch}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n, err := q.DeleteSendSealingIntent(f.ctx, generated.DeleteSendSealingIntentParams{DocumentID: doc.ID, OrgID: f.org}); err != nil || n != 1 {
-		t.Fatal("consume fixture sealing intent", err)
-	}
-	if _, err = q.RequestChangesOnDocument(f.ctx, generated.RequestChangesOnDocumentParams{ID: doc.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(f.ctx); err != nil {
-		t.Fatal(err)
-	}
-	f.s.Audit.Publish(pending)
-	f.s.Sign = &sign.Engine{Pool: f.pool, Queries: f.q, Audit: f.s.Audit}
-	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/revise", "", cookie)
+	w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/revise", "", q.cookie)
 	if w.Code != http.StatusOK {
 		t.Fatalf("revise source history status=%d", w.Code)
 	}
@@ -522,15 +562,20 @@ func TestHTMLMaterializationReviseArchivesOriginalCeremonyDeadlineE2E(t *testing
 		Schema  string    `json:"schema"`
 	}
 	decodeErr := json.Unmarshal(notice, &retainedNotice)
-	if err != nil || decodeErr != nil || !retainedNotice.SentAt.Equal(sent.SentAt.Time) || !retainedNotice.EpochAt.Equal(sent.SentAt.Time) || retainedNotice.Schema != sent.Article13NoticeSchema || !deadline.Equal(intent.RetainUntil.Time) || !oldEpoch.Equal(sent.SentAt.Time) || retainedVersion != doc.PdfStorageVersionID.String || !bytes.Contains(events, []byte(article13.AuditRequiredNoticeSchemaKey)) || !bytes.Contains(parties, []byte(recipient.ID.String())) {
+	if err != nil || decodeErr != nil || !retainedNotice.SentAt.Equal(sent.SentAt.Time) || !retainedNotice.EpochAt.Equal(sent.SentAt.Time) || retainedNotice.Schema != sent.Article13NoticeSchema || !deadline.Equal(originalDeadline) || !oldEpoch.Equal(sent.SentAt.Time) || retainedVersion != doc.PdfStorageVersionID.String || !bytes.Contains(events, []byte(article13.AuditRequiredNoticeSchemaKey)) {
 		t.Fatal("retired ceremony deadline/notice/evidence/parties lost", err)
 	}
 	if bytes.Contains(parties, []byte("magic_token")) {
 		t.Fatal("history stored recipient credentials")
 	}
-	freshRecipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: f.org})
-	if err != nil || !freshRecipient.MagicTokenExpiresAt.Valid || freshRecipient.MagicTokenExpiresAt.InfinityModifier != pgtype.Finite || freshRecipient.MagicTokenExpiresAt.Time.After(time.Now()) {
-		t.Fatal("old ceremony credential remains unexpired in editable draft", err)
+	for _, originalParty := range originalParties {
+		if !bytes.Contains(parties, []byte(originalParty.RecipientID.String())) {
+			t.Fatal("retired ceremony deadline/notice/evidence/parties lost")
+		}
+		freshRecipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: originalParty.RecipientID, OrgID: f.org})
+		if err != nil || !freshRecipient.MagicTokenExpiresAt.Valid || freshRecipient.MagicTokenExpiresAt.InfinityModifier != pgtype.Finite || freshRecipient.MagicTokenExpiresAt.Time.After(time.Now()) {
+			t.Fatal("old ceremony credential remains unexpired in editable draft", err)
+		}
 	}
 	retained, err := f.q.HasRetainedDraftEvidenceForPurge(f.ctx, generated.HasRetainedDraftEvidenceForPurgeParams{DocumentID: doc.ID, OrgID: f.org})
 	if err != nil || !retained {
@@ -540,4 +585,5 @@ func TestHTMLMaterializationReviseArchivesOriginalCeremonyDeadlineE2E(t *testing
 	if err != nil || signing {
 		t.Fatal("retired history prevented next editable materialization", err)
 	}
+	ownedRevisionConsumedV1(t, q)
 }

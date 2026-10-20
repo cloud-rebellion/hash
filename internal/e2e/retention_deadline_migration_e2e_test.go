@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pressly/goose/v3"
 
 	"github.com/bright-interaction/hash/internal/article13"
 	mdb "github.com/bright-interaction/hash/internal/db"
@@ -39,14 +38,14 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 	// Keep one true pre-00059 terminal row in the fixture. Migration 00059
 	// recovers its exact historical completion instant; 00060 must not fabricate
 	// a retention commitment for evidence already written by an older binary.
-	must(t, mdb.RunMigrationsUpTo(migConn, 58), "migrate scratch database to pre-completion version 58")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 58), "migrate scratch database to pre-completion version 58")
 	historicalID := seedDocument(t, ctx, pool, "retention historical completion")
 	historicalCompletedAt := time.Date(2026, time.August, 29, 9, 8, 7, 0, time.UTC)
 	_, err := pool.Exec(ctx,
 		`UPDATE documents SET status = 'completed', completed_at = $2 WHERE id = $1`,
 		historicalID, historicalCompletedAt)
 	must(t, err, "seed historical completed document")
-	must(t, mdb.RunMigrationsUpTo(migConn, 59), "migrate scratch database to completion version 59")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 59), "migrate scratch database to completion version 59")
 
 	// Although 00059 itself required a drained inventory, an old application
 	// instance could start another finalization before 00060 is applied. Refuse
@@ -58,7 +57,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 		 SET status = 'finalizing', completion_effective_at = $2
 		 WHERE id = $1`, cutoverID, cutoverAt)
 	must(t, err, "seed post-00059 in-flight finalization")
-	err = mdb.RunMigrationsUpTo(migConn, 60)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 60)
 	if err == nil || !strings.Contains(err.Error(), "in-flight finalization") {
 		t.Fatalf("migration 00060 with active finalization = %v, want explicit inventory refusal", err)
 	}
@@ -73,7 +72,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 		     completion_effective_at_bound = TRUE, completed_at = $2
 		 WHERE id = $1`, post59CompletedID, cutoverAt)
 	must(t, err, "seed post-00059 completed document without a recoverable retention target")
-	err = mdb.RunMigrationsUpTo(migConn, 60)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 60)
 	if err == nil || !strings.Contains(err.Error(), "post-00059 completion") {
 		t.Fatalf("migration 00060 with post-00059 completion = %v, want explicit unrecoverable-inventory refusal", err)
 	}
@@ -95,7 +94,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 		 SELECT id, org_id, $2::timestamptz, $2::timestamptz - interval '1 minute', $2::timestamptz
 		 FROM documents WHERE id = $1`, legacySendID, legacyStartedAt)
 	must(t, err, "seed legacy started send retention")
-	err = mdb.RunMigrationsUpTo(migConn, 60)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 60)
 	if err == nil || !strings.Contains(err.Error(), "pre-control send sealing") {
 		t.Fatalf("migration 00060 with legacy send intent = %v, want explicit unrecoverable-inventory refusal", err)
 	}
@@ -105,7 +104,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 	must(t, err, "drain legacy send intent")
 	_, err = pool.Exec(ctx, `DELETE FROM documents WHERE id = $1`, legacySendID)
 	must(t, err, "drain legacy sealing document")
-	must(t, mdb.RunMigrationsUpTo(migConn, 60), "apply durable retention deadline migration")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 60), "apply durable retention deadline migration")
 	assertAppliedMigrationVersion(t, ctx, pool, 60)
 	assertRetentionDeadlineColumns(t, ctx, pool, true)
 	leapAnchor := time.Date(2024, time.February, 29, 23, 59, 59, 123456000, time.FixedZone("migration-test", 2*60*60))
@@ -226,11 +225,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 	// A down migration must first refuse every durable/in-flight commitment and
 	// leave its schema intact. Once this scratch inventory is explicitly drained,
 	// a clean rollback is supported and removes all three columns atomically.
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
-	err = goose.DownTo(migConn, "../db/migrations", 59)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 59)
 	if err == nil || !strings.Contains(err.Error(), "durable retention commitments") {
 		t.Fatalf("migration 00060 down with durable claims = %v, want safe refusal", err)
 	}
@@ -249,7 +244,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 		 SET status = 'completed', completed_at = completion_effective_at
 		 WHERE id = $1`, finalID)
 	must(t, err, "publish completed document while preserving durable retention commitment")
-	err = goose.DownTo(migConn, "../db/migrations", 59)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 59)
 	if err == nil || !strings.Contains(err.Error(), "durable retention commitments") {
 		t.Fatalf("migration 00060 down after completed retained evidence = %v, want permanent-commitment refusal", err)
 	}
@@ -257,7 +252,7 @@ func TestRetentionDeadlineMigrationCutoverAndRetryGuardsE2E(t *testing.T) {
 	assertRetentionDeadlineColumns(t, ctx, pool, true)
 	_, err = pool.Exec(ctx, `DELETE FROM documents WHERE id = $1`, finalID)
 	must(t, err, "remove completed scratch commitment before clean rollback")
-	must(t, goose.DownTo(migConn, "../db/migrations", 59), "roll back retention deadline migration after drain")
+	must(t, mdb.RunMigrationsDownToContext(ctx, migConn, 59), "roll back retention deadline migration after drain")
 	assertAppliedMigrationVersion(t, ctx, pool, 59)
 	assertRetentionDeadlineColumns(t, ctx, pool, false)
 	var helperRemoved bool

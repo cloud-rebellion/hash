@@ -15,10 +15,18 @@ FROM draft_document d
 RETURNING *;
 
 -- name: RotateRecipientMagicToken :exec
-UPDATE recipients
-SET magic_token_hash       = $3,
-    magic_token_expires_at = $4
-WHERE id = $1 AND document_id = $2;
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
+SET magic_token_hash = sqlc.arg(magic_token_hash),
+    magic_token_expires_at = sqlc.arg(magic_token_expires_at)
+FROM locked_document d
+WHERE r.id = sqlc.arg(id) AND r.document_id = sqlc.arg(document_id)
+  AND d.id = r.document_id;
 
 -- name: GetRecipient :one
 SELECT r.* FROM recipients r
@@ -62,43 +70,73 @@ RETURNING r.*;
 -- accepted, or declined) cannot be transitioned again. This prevents captured
 -- signature/acknowledgement evidence from being self-downgraded by a stale
 -- decline/view request; terminal double-writes are no-ops.
-UPDATE recipients
-SET status = $3,
-    sent_at = CASE WHEN $3 = 'sent' THEN now() ELSE sent_at END,
-    first_viewed_at = CASE WHEN $3 = 'viewed' AND first_viewed_at IS NULL THEN now() ELSE first_viewed_at END,
-    signed_at = CASE WHEN $3 = 'signed' THEN now() ELSE signed_at END,
-    declined_reason = CASE WHEN $3 = 'declined' THEN $4 ELSE declined_reason END
-WHERE id = $1 AND document_id = $2
-  AND status NOT IN ('signed','accepted','declined');
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
+SET status = sqlc.arg(status),
+    sent_at = CASE WHEN sqlc.arg(status) = 'sent' THEN now() ELSE r.sent_at END,
+    first_viewed_at = CASE WHEN sqlc.arg(status) = 'viewed' AND r.first_viewed_at IS NULL THEN now() ELSE r.first_viewed_at END,
+    signed_at = CASE WHEN sqlc.arg(status) = 'signed' THEN now() ELSE r.signed_at END,
+    declined_reason = CASE WHEN sqlc.arg(status) = 'declined' THEN sqlc.arg(declined_reason) ELSE r.declined_reason END
+FROM locked_document d
+WHERE r.id = sqlc.arg(id) AND r.document_id = sqlc.arg(document_id)
+  AND d.id = r.document_id
+  AND r.status NOT IN ('signed','accepted','declined');
 
 -- name: MarkRecipientSent :execrows
 -- Send holds the parent document row lock and re-lists recipients inside the
 -- same transaction. This guarded row-counting update turns any stale/deleted
 -- or non-pending recipient into a hard rollback instead of silently issuing a
 -- link for a row that was not transitioned.
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET status = 'sent',
     sent_at = now()
-WHERE id = $1 AND document_id = $2 AND status = 'pending';
+FROM locked_document d
+WHERE r.id = sqlc.arg(id) AND r.document_id = sqlc.arg(document_id)
+  AND d.id = r.document_id AND r.status = 'pending';
 
 -- name: InvalidateRecipientTokens :exec
 -- Expire every magic link when a ceremony terminates
 -- (completed/declined/voided/expired) or is reopened to an editable draft for
 -- revision. Defense-in-depth alongside the document-status gates ensures an
 -- old signer credential can neither mutate a terminal record nor read a draft.
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET magic_token_expires_at = now()
-WHERE document_id = $1;
+FROM locked_document d
+WHERE r.document_id = sqlc.arg(document_id) AND d.id = r.document_id;
 
 -- name: SetCompletedArtifactTokenExpiry :exec
 -- Ordinary signer routes remain status-gated after completion. Preserve only a
 -- bounded read-only final-artifact window for recipients who actually signed
 -- or accepted; informational/pending recipients keep the immediate expiry set
 -- by InvalidateRecipientTokens.
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET magic_token_expires_at = sqlc.arg(magic_token_expires_at)
-WHERE document_id = sqlc.arg(document_id)
-  AND status IN ('signed','accepted');
+FROM locked_document d
+WHERE r.document_id = sqlc.arg(document_id)
+  AND d.id = r.document_id AND r.status IN ('signed','accepted');
 
 -- name: RotateCompletedArtifactToken :execrows
 -- Completion credentials are separate from the ceremony credential. Rotate to
@@ -107,14 +145,19 @@ WHERE document_id = sqlc.arg(document_id)
 -- limits recipients to the document's required roles (or non-cc acceptors),
 -- while this query supplies the fail-closed state/status boundary and a row
 -- count so the whole completion transaction rolls back on a stale recipient.
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id) AND d.status = 'completed'
+  FOR UPDATE OF d
+)
 UPDATE recipients r
 SET magic_token_hash = sqlc.arg(magic_token_hash),
     magic_token_expires_at = sqlc.arg(magic_token_expires_at)
-FROM documents d
+FROM locked_document d
 WHERE r.id = sqlc.arg(id)
   AND r.document_id = sqlc.arg(document_id)
   AND d.id = r.document_id
-  AND d.status = 'completed'
   AND r.status IN ('signed','accepted');
 
 -- name: DeleteRecipient :one

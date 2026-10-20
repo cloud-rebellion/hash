@@ -10,13 +10,16 @@ import (
 )
 
 func TestPrivateResponseCachingDisabledAcrossStatuses(t *testing.T) {
-	for _, path := range []string{"/api/v1/me", "/api/v1/documents/123/pdf", "/api/automation/v1/signature-requests", "/auth/login", "/auth/callback?code=secret", "/auth/logout", "/mcp", "/mcp/tools"} {
+	for _, path := range []string{"/api/v1/me", "/api/v1/documents/123/pdf", "/api/automation/v1/signature-requests", "/auth/login", "/auth/callback?code=secret", "/auth/logout", "/mcp", "/mcp/tools", "/sign/synthetic-credential", "/completed/synthetic-credential", "/completed/"} {
 		for _, status := range []int{200, 302, 401, 403, 500} {
 			h := (&Server{}).securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }))
 			response := httptest.NewRecorder()
 			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 			if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" {
 				t.Fatalf("path=%s status=%d cache headers missing", path, status)
+			}
+			if response.Header().Get("Referrer-Policy") != "no-referrer" {
+				t.Fatalf("path=%s status=%d credential referrer guard missing", path, status)
 			}
 		}
 	}

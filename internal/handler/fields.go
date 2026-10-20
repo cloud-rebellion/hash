@@ -15,7 +15,6 @@
 package handler
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,10 +30,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	fieldmutations "github.com/bright-interaction/hash/internal/fields"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -166,16 +165,19 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 	actor.ExpectedPDFSHA256 = in.ExpectedPDFSHA256
 	actor.ExpectedHTMLSourceCommitment = in.ExpectedHTMLSourceCommitment
 	engine := fieldmutations.MutationEngine{Pool: s.Pool, Audit: s.Audit}
-	row, err := engine.Create(r.Context(), actor, docID, fieldmutations.CreateInput{
+	owned, err := engine.CreateOwnedV1(r.Context(), s.HTMLCreationSessions, actor, docID, fieldmutations.CreateInput{
 		RecipientID: recipientID, Type: in.Type, Page: in.Page,
 		XPct: in.XPct, YPct: in.YPct, WPct: in.WPct, HPct: in.HPct,
 		Required: required, Label: in.Label, Options: optionsJSON,
 	})
+	if owned != nil {
+		defer owned.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeFieldMutationError(w, "create field", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, fieldToDTO(row))
+	writeJSON(w, http.StatusCreated, fieldToDTO(owned.Field))
 }
 
 // GET /api/v1/documents/{id}/fields
@@ -301,42 +303,31 @@ func (s *Server) writeFieldMutationError(w http.ResponseWriter, operation string
 // (plus any unassigned fields). Used by the signer page to render input
 // widgets above the document body.
 func (s *Server) handleSignerListFields(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticFieldsV1)
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	observation, err := s.captureSignerReadObservation(r, rc)
 	if err != nil {
 		writeSignerReadError(w, err)
 		return
 	}
-	rows, err := s.Queries.ListFieldsByRecipient(r.Context(), generated.ListFieldsByRecipientParams{
-		DocumentID:  rc.Document.ID,
-		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
+	page, err := s.Sign.SignerFieldListV1(r.Context(), rc, func(fresh *sign.RecipientContext) error {
+		return s.validateSignerReadObservation(r, rc, observation, fresh)
 	})
 	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	out := make([]map[string]any, 0, len(rows))
-	for _, f := range rows {
-		// Signature fields are included so the signer page can show "sign
-		// here" at the right spot on a pdf-source document; they are filled
-		// via /sign/{token}/sign, not the field-submit path (guarded below).
-		out = append(out, fieldToDTO(f))
-	}
-	if err := s.recheckSignerRead(r, rc, observation); err != nil {
 		writeSignerReadError(w, err)
 		return
 	}
+	defer page.CloseConsumerV1()
 	setSignerPDFObservationHeaders(w, observation.pdf)
-	writeJSON(w, http.StatusOK, map[string]any{"fields": out, "count": len(out)})
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(page.JSON)
 }
 
-type submitFieldValueInput struct {
-	FieldID string `json:"field_id"`
-	Value   string `json:"value"`
-}
+type submitFieldValueInput = pdfadmission.SignerFieldValueInputV1
 
 type submitFieldsInput struct {
 	Values []submitFieldValueInput `json:"values"`
@@ -447,196 +438,7 @@ func prepareSignerFieldValues(allowed []*generated.DocumentField, values []submi
 // `value` + `completed_at`. Emits document.field_filled for each value
 // so the audit timeline reflects the submission.
 func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	r = r.WithContext(ctx)
-	rc, ok := s.lookupTokenOrError(w, r)
-	if !ok {
-		return
-	}
-	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
-	if !ok {
-		return
-	}
-	originalPDF, err := signerPDFObservationFor(rc)
-	if err != nil {
-		writeSignerReadError(w, err)
-		return
-	}
-	// Only an active document accepts field fills. Without this a recipient with a
-	// still-live token could mutate field values (and fire a viewed/fill event) on a
-	// voided/completed/declined/expired legal record. The query below re-checks the
-	// status under the row so a concurrent void mid-submit can't slip through (TOCTOU).
-	if rc.Document.Status != "sent" && rc.Document.Status != "in_progress" {
-		writeError(w, http.StatusConflict, "document is not accepting field updates")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
-	var in submitFieldsInput
-	if err := decodeSignerJSON(r, &in); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-		return
-	}
-	if len(in.Values) == 0 {
-		writeError(w, http.StatusBadRequest, "values required")
-		return
-	}
-	tx, err := s.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	q := s.Queries.WithTx(tx)
-	lockedDoc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{
-		ID: rc.Document.ID, OrgID: rc.Document.OrgID,
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := sign.ValidateLockedNoticeEvidence(rc, lockedDoc, noticeEvidence); err != nil {
-		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
-		return
-	}
-	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
-		writeError(w, http.StatusConflict, "document is not accepting field updates")
-		return
-	}
-	// Keep the admitted recipient credential stable through field/audit writes.
-	freshRecipient, err := q.GetRecipientForShare(r.Context(), generated.GetRecipientForShareParams{
-		ID: rc.Recipient.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
-		} else {
-			writeInternalError(w, err)
-		}
-		return
-	}
-
-	if err := sign.ValidateLockedRecipientCredential(rc, freshRecipient, lockedDoc, time.Now()); err != nil {
-		writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
-		return
-	}
-	if rc.Recipient.Name != freshRecipient.Name || rc.Recipient.Email != freshRecipient.Email ||
-		rc.Recipient.Role != freshRecipient.Role || rc.Recipient.Locale != freshRecipient.Locale ||
-		rc.Recipient.OrderIndex != freshRecipient.OrderIndex {
-		writeSignerReadError(w, errSignerReadChanged)
-		return
-	}
-	lockedContext := *rc
-	lockedContext.Document = lockedDoc
-	lockedPDF, err := signerPDFObservationFor(&lockedContext)
-	if err != nil || !sameSignerDocumentSource(rc.Document, lockedDoc) || !sameSignerPDFObservation(originalPDF, lockedPDF) {
-		writeSignerReadError(w, errSignerReadChanged)
-		return
-	}
-	if err := validateSignerMaterialization(r.Context(), q, lockedDoc); err != nil {
-		writeSignerReadError(w, errSignerReadChanged)
-		return
-	}
-	if lockedDoc.SourceKind == "pdf" {
-		signatures, err := q.ListSignaturesByDocument(r.Context(), lockedDoc.ID)
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		rows, err := q.ListRecipientsByDocument(r.Context(), lockedDoc.ID)
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		contentFrozen := len(signatures) > 0
-		for _, row := range rows {
-			contentFrozen = contentFrozen || row.Status == "signed" || row.SignedAt.Valid
-		}
-		if contentFrozen {
-			writeError(w, http.StatusConflict, "PDF content is frozen after the first signature; create a new revision to change it")
-			return
-		}
-	}
-	if freshRecipient.DocumentID != lockedDoc.ID || !recipientCanFillFields(freshRecipient.Status) {
-		writeError(w, http.StatusConflict, "recipient has already completed or declined this ceremony")
-		return
-	}
-	allowed, err := q.ListFieldsByRecipient(r.Context(), generated.ListFieldsByRecipientParams{
-		DocumentID:  rc.Document.ID,
-		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	prepared, validationErr := prepareSignerFieldValues(allowed, in.Values)
-	if validationErr != nil {
-		writeError(w, validationErr.status, validationErr.message)
-		return
-	}
-	updated := make([]map[string]any, 0, len(prepared))
-	pendingAudits := make([]audit.PendingEvent, 0, len(prepared))
-	for _, item := range prepared {
-		row, err := q.UpdateFieldValue(r.Context(), generated.UpdateFieldValueParams{
-			ID:          item.field.ID,
-			DocumentID:  rc.Document.ID,
-			Value:       textOrNull(item.value),
-			RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The document went terminal between the pre-check and this write (or the
-			// field isn't on this doc): refuse rather than mutate a sealed record.
-			writeError(w, http.StatusConflict, "document is not accepting field updates")
-			return
-		}
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		fieldAuditPayload, err := bindSignerNoticeAuditPayload(noticeEvidence, map[string]any{
-			"field_id":   item.field.ID.String(),
-			"type":       item.field.Type,
-			"label":      item.field.Label.String,
-			"value_len":  len(item.value),
-			"value_hash": hashFieldValueForAudit(item.value),
-		})
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		pendingAudit, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-			OrgID:       rc.Document.OrgID,
-			DocumentID:  &rc.Document.ID,
-			RecipientID: &rc.Recipient.ID,
-			Kind:        audit.KindDocumentFieldFill,
-			IP:          clientIP(r),
-			UserAgent:   r.UserAgent(),
-			Payload:     fieldAuditPayload,
-		})
-		if err != nil {
-			writeInternalError(w, err)
-			return
-		}
-		pendingAudits = append(pendingAudits, pendingAudit)
-		updated = append(updated, fieldToDTO(row))
-	}
-	// A link can expire naturally while the immutable audit head is busy.
-	// The retained recipient lock prevents rotation; recheck the deadline now.
-	if err := sign.ValidateLockedRecipientCredential(rc, freshRecipient, lockedDoc, time.Now()); err != nil {
-		writeError(w, http.StatusUnauthorized, "signing link is no longer valid")
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	for _, pending := range pendingAudits {
-		s.Audit.Publish(pending)
-	}
-	// This receipt describes the source validated under the retained document
-	// lock. A new lookup after commit cannot retroactively revoke a durable save.
-	setSignerPDFObservationHeaders(w, lockedPDF)
-	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "count": len(updated)})
+	s.handleSignerSubmitFieldsOwnedV1(w, r)
 }
 
 func recipientCanFillFields(status string) bool {
@@ -653,33 +455,7 @@ func recipientCanFillFields(status string) bool {
 // previously-submitted values; `completed_at` lets the UI badge a
 // field as already-filled.
 func fieldToDTO(f *generated.DocumentField) map[string]any {
-	out := map[string]any{
-		"id":          f.ID.String(),
-		"document_id": f.DocumentID.String(),
-		"type":        f.Type,
-		"page":        f.Page,
-		"x_pct":       numericToFloat(f.XPct),
-		"y_pct":       numericToFloat(f.YPct),
-		"w_pct":       numericToFloat(f.WPct),
-		"h_pct":       numericToFloat(f.HPct),
-		"required":    f.Required,
-	}
-	if f.RecipientID.Valid {
-		out["recipient_id"] = uuid.UUID(f.RecipientID.Bytes).String()
-	}
-	if f.Label.Valid {
-		out["label"] = f.Label.String
-	}
-	if f.Value.Valid {
-		out["value"] = f.Value.String
-	}
-	if f.CompletedAt.Valid {
-		out["completed_at"] = f.CompletedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")
-	}
-	if len(f.OptionsJson) > 0 {
-		out["options"] = json.RawMessage(f.OptionsJson)
-	}
-	return out
+	return pdfadmission.DocumentFieldDTOV1(f)
 }
 
 // audit log records the SHA-256 hash of the submitted value, never the

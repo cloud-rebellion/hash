@@ -5,7 +5,6 @@ package e2e
 
 import (
 	"context"
-	"github.com/pressly/goose/v3"
 	"os"
 	"strings"
 	"sync"
@@ -25,12 +24,12 @@ func TestCollabGenerationTracksCanonicalCommitE2E(t *testing.T) {
 	defer cleanup()
 	conn := stdlibConn(t, pool)
 	defer conn.Close()
-	must(t, mdb.RunMigrationsUpTo(conn, 67), "migrate to67")
+	must(t, mdb.RunMigrationsUpToContext(ctx, conn, 67), "migrate to67")
 	var org, doc, user uuid.UUID
 	must(t, pool.QueryRow(ctx, `INSERT INTO orgs(name,plan) VALUES('generation fixture','pro') RETURNING id`).Scan(&org), "create org")
 	must(t, pool.QueryRow(ctx, `INSERT INTO users(org_id,email,name) VALUES($1,'generation@example.test','fixture') RETURNING id`, org).Scan(&user), "create sender")
 	must(t, pool.QueryRow(ctx, `INSERT INTO documents(org_id,sender_id,name,source_kind,blocks_json,variables_json) VALUES($1,$2,'fixture','blocks','{"version":1,"blocks":[]}','{}') RETURNING id`, org, user).Scan(&doc), "create existing document")
-	must(t, mdb.RunMigrationsUpTo(conn, 68), "apply generation migration")
+	must(t, mdb.RunMigrationsUpToContext(ctx, conn, 68), "apply generation migration")
 	generation := func() int64 {
 		var value int64
 		must(t, pool.QueryRow(ctx, `SELECT generation FROM collab_document_generations WHERE document_id=$1`, doc).Scan(&value), "read generation")
@@ -75,9 +74,7 @@ func TestCollabGenerationTracksCanonicalCommitE2E(t *testing.T) {
 	if generation() != 4 {
 		t.Fatal("concurrent generation increment lost")
 	}
-	goose.SetBaseFS(nil)
-	must(t, goose.SetDialect("postgres"), "set rollback dialect")
-	err = goose.DownTo(conn, "../db/migrations", 67)
+	err = mdb.RunMigrationsDownToContext(ctx, conn, 67)
 	if err == nil || !strings.Contains(err.Error(), "preserve advanced collaboration generations") {
 		t.Fatalf("rollback guard=%v", err)
 	}

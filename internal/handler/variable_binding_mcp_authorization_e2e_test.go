@@ -23,7 +23,7 @@ func setupVariableBindingMCPE2E(t *testing.T) variableBindingAuthorizationFixtur
 	t.Helper()
 	f := setupVariableBindingAuthorizationE2E(t, "owner")
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Resolver: f.s.Resolver, PublicURL: f.s.PublicURL})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Resolver: f.s.Resolver, PDFCreationSessions: f.s.HTMLCreationSessions, PublicURL: f.s.PublicURL})
 	return f
 }
 
@@ -73,11 +73,11 @@ func TestVariableBindingMCPCredentialRecheckedAfterDocumentWaitE2E(t *testing.T)
 				owner := seedSessionOwnerE2E(t, f.ctx, f.q, f.org)
 				mint, keyID := mintRecipientMCPKeyE2E(t, f.lifecycleAuthorizationFixture, change == "token-revocation", 1)
 				blocked := holdBindingParentE2E(t, f)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() {
-					result <- submitVariableBindingMCPE2E(f, context.Background(), tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
-				}()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+					return submitVariableBindingMCPE2E(f, ctx, tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
+				})
+				defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockVariableBindingMutationRootV1", "transactionid")
 				var err error
 				switch change {
 				case "key-delete":
@@ -128,17 +128,17 @@ func TestVariableBindingMCPAuditWaitExpiryRollsBackE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer blocked.Rollback(context.Background())
+			defer nativeReminderRollback255(t, blocked)
 			if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := f.pool.Exec(f.ctx, `UPDATE api_keys SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`, keyID); err != nil {
 				t.Fatal(err)
 			} //nolint:rawsql
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitVariableBindingMCPE2E(f, context.Background(), tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
-			}()
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitVariableBindingMCPE2E(f, ctx, tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 			var expired bool
 			deadline := time.Now().Add(3 * time.Second)
@@ -177,16 +177,14 @@ func TestVariableBindingMCPCancellationDuringAuditWaitRollsBackE2E(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer blocked.Rollback(context.Background())
+			defer nativeReminderRollback255(t, blocked)
 			if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitVariableBindingMCPE2E(f, ctx, tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
-			}()
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitVariableBindingMCPE2E(f, ctx, tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 			cancel()
 			fieldMCPTextE2E(t, receiveSessionOperationE2E(t, result), true)
@@ -305,11 +303,11 @@ func TestVariableBindingMCPSoftDeleteAfterParentWaitE2E(t *testing.T) {
 			f := setupVariableBindingMCPE2E(t)
 			mint, _ := mintRecipientMCPKeyE2E(t, f.lifecycleAuthorizationFixture, false, 0)
 			blocked := holdBindingParentE2E(t, f)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitVariableBindingMCPE2E(f, context.Background(), tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
-			}()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitVariableBindingMCPE2E(f, ctx, tool, mint.Plaintext, variableBindingMCPArgumentsE2E(f, tool))
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockVariableBindingMutationRootV1", "transactionid")
 			if _, err := blocked.Exec(f.ctx, `UPDATE documents SET deleted_at=now() WHERE id=$1`, f.doc.ID); err != nil {
 				t.Fatal(err)
 			} //nolint:rawsql

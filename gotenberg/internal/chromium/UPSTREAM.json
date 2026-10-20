@@ -1,0 +1,236 @@
+{
+  "upstream_module": "github.com/gotenberg/gotenberg/v8",
+  "upstream_version": "v8.36.0",
+  "upstream_h1": "h1:K4VDxqHRBIh/yKJbEStzQlaWOl286AnNjFwRFDtoKYc=",
+  "files": [
+    {
+      "file": "attrs_test.go",
+      "bytes": 2605,
+      "sha256": "2c44d02dec07a075c70691b106940e68d5fedf6f7cf8fa0a102024afb1cd620e"
+    },
+    {
+      "file": "browser.go",
+      "bytes": 22816,
+      "sha256": "027fa8bf2238b8c0d726200801fc86c346d1e33023a83215e779708399fbf96a"
+    },
+    {
+      "file": "browser_test.go",
+      "bytes": 1345,
+      "sha256": "be154aa0c066e594f1d4608331cbea6fcae82966359774a347b1b9d1d06ae2ac"
+    },
+    {
+      "file": "chromium.go",
+      "bytes": 38918,
+      "sha256": "6072ada3ee5d237b3f990d34c149cbd3dfd195f1d3f6027fae555a6f33b87f11"
+    },
+    {
+      "file": "debug.go",
+      "bytes": 632,
+      "sha256": "85ef445fd58b5f482e3252ad4334b1cd19c4c992869271e54f78767a6413af2c"
+    },
+    {
+      "file": "doc.go",
+      "bytes": 126,
+      "sha256": "0a70c46a32612512ebfab098771729173016584ee97838413f259818122376a2"
+    },
+    {
+      "file": "errortype_test.go",
+      "bytes": 1684,
+      "sha256": "311239f8b35c4706e95178603943df07968cbb6ef357126c31c0960cfd4a7c50"
+    },
+    {
+      "file": "events.go",
+      "bytes": 22601,
+      "sha256": "9ad0635be615e188ea1fba6ea7f427ff2b297f5f3e2a9d3fa98c74723583f022"
+    },
+    {
+      "file": "events_test.go",
+      "bytes": 3379,
+      "sha256": "61672dbcf7e2fddf4f2f53da391413e0942b4aad72545155d8218e8cd3309d5b"
+    },
+    {
+      "file": "mocks.go",
+      "bytes": 1739,
+      "sha256": "652cee3617484688101249baf733fdd93354e9e1c9386a6214d57f265e02cd18"
+    },
+    {
+      "file": "network_aggregate.go",
+      "bytes": 2980,
+      "sha256": "15dadc1e66f91b46ba7d15adf541bc599f4ab4e34d8bd7393437551b4335f871"
+    },
+    {
+      "file": "network_aggregate_test.go",
+      "bytes": 3020,
+      "sha256": "6c8dfbfbb76e9b82ba32fc6a534641bcd63a2617839aabeb9ed0f6e95a7b8189"
+    },
+    {
+      "file": "pinning_proxy.go",
+      "bytes": 14595,
+      "sha256": "8687b4cba65f1271e889cfb369c7494b6192c56e32e927caebd8f9b89e35e37f"
+    },
+    {
+      "file": "pinning_proxy_test.go",
+      "bytes": 28671,
+      "sha256": "3164149fa9622175daea302f1a708592d6389735a56e55c2070d07c24c2159f1"
+    },
+    {
+      "file": "pinning_proxy_upstream_test.go",
+      "bytes": 2478,
+      "sha256": "2e963f75a9e16c1e79c552a3269dc214409e2fbaecdf88b946451dbdb9452cfd"
+    },
+    {
+      "file": "routes.go",
+      "bytes": 35428,
+      "sha256": "ab6e6fb3a2eec132951f96cd1bbb4a5b41f819004d5c6a6f5756c086be542f2f"
+    },
+    {
+      "file": "scopebudget.go",
+      "bytes": 1529,
+      "sha256": "e3d668141b8ed00cb07bded8c812f929d4c844872686590af4170c6f0fbac209"
+    },
+    {
+      "file": "scopebudget_test.go",
+      "bytes": 3306,
+      "sha256": "2757d4a26d3560c5021442165b8977733a701f79b1ab2d1ab16ea07b70cca904"
+    },
+    {
+      "file": "stream.go",
+      "bytes": 2398,
+      "sha256": "35b1902975884a2021956f989657e26baf6e7dbd5ff2ca199e4678dd96873128"
+    },
+    {
+      "file": "tasks.go",
+      "bytes": 23573,
+      "sha256": "b903cbdf126144847f87a4284ea720e109681c63ecac2c81dc6d1d534fbe5c9f"
+    },
+    {
+      "file": "tasks_test.go",
+      "bytes": 1420,
+      "sha256": "f6f226f239579e6cb4636ce8bed3f4e73854a3ce51155e2d6057ed7bec050aad"
+    },
+    {
+      "file": "version_test.go",
+      "bytes": 1353,
+      "sha256": "284ca49a32ac89473a63ff9e9f26dcd04dfaa075826e061ca10c5e7aa2b75273"
+    }
+  ],
+  "license_sha256": "24b9edd14f44d08af320e1d4fc63535636cb71f7c8e7d3827dc831692f27e1aa",
+  "additional_owned_sources": [
+    {
+      "source": "pkg/gotenberg/supervisor.go",
+      "bytes": 19456,
+      "sha256": "7e966c132be9992f0680b7d34746e9bbed65fa1be0e9d6670d20812eb9cbde1d",
+      "owned_file": "hash_supervisor.go",
+      "adaptations": "Private Chromium namespace and upstream interfaces/sentinels/tracer; conversion joins callback with pre/post cancellation checks; unconfirmed owned browser shutdown refuses restart; other queue/health/start/idle policy retained."
+    },
+    {
+      "source": "pkg/gotenberg/supervisor_test.go",
+      "bytes": 29150,
+      "sha256": "2862fd97e6021709cea3f2b9b0c9b485e1419054c0b23d64e01f130fe513359d",
+      "owned_file": "hash_supervisor_upstream_test.go",
+      "adaptations": "Private namespace and upstream mocks/sentinels; canceled lifecycle helper case uses a deterministic barrier and joins its callback."
+    },
+    {
+      "source": "pkg/gotenberg/cmd_test.go",
+      "bytes": 3745,
+      "sha256": "b9b2a900ffc8955f082e8d21b6650ec82e511bf952f19e4be63c6bf35626a0a9",
+      "owned_file": "hash_supervisor_test.go",
+      "adaptations": "Only upstream newTestSpanRecorder helper is retained as hashTestSpanRecorder; other content is Hash-owned regression tests."
+    },
+    {
+      "source": "pkg/gotenberg/outbound.go",
+      "bytes": 26116,
+      "sha256": "c3927a9e8b18d1d6950e7e08dd288524fd12e146bc33da3b789a6c119f5c2f12",
+      "owned_file": "hash_proxy_connect.go",
+      "adaptations": "Only DialThroughProxy/default-port/Basic-auth/bufferedConn half-close seam adapted. Successful 2xx CONNECT uses a bounded MIME-only response head, ignores body framing and preserves all prefetched tunnel bytes; rejection never drains a body. TLS certificate verification, target policy, tracked dial and request/generation lifetime retained. Existing Gotenberg MIT notice applies."
+    }
+  ],
+  "additional_owned_dependencies": [
+    {
+      "module": "github.com/chromedp/chromedp",
+      "version": "v0.14.2",
+      "license": "MIT",
+      "license_file": "LICENSE.chromedp",
+      "license_sha256": "a0420372ef7d3cf6d111994ee3ed30e606d5043ee9be12b270f6441b60e19bab",
+      "sources": [
+        {
+          "source": "allocate_linux.go",
+          "bytes": 414,
+          "sha256": "64a6b52b5cf64375e4695fb5cf2d05761751d1bdb1c3c469aa8d1b9fa6691b08",
+          "owned_file": "hash_cmd_linux.go",
+          "adaptations": "Private Chromium package/function name; preserves pinned command setup behavior."
+        },
+        {
+          "source": "allocate_other.go",
+          "bytes": 115,
+          "sha256": "cf8efd953bae3eedb751d31f7729d3112563406589fd21c4025e7cee78e73217",
+          "owned_file": "hash_cmd_other.go",
+          "adaptations": "Private Chromium package/function name; preserves pinned command setup behavior."
+        }
+      ]
+    }
+  ],
+  "hash_proxy_adaptations": {
+    "files": [
+      "pinning_proxy.go",
+      "hash_proxy_retirement.go",
+      "hash_proxy_retirement_test.go",
+      "hash_proxy_deadline_test.go",
+      "hash_proxy_retirement_renderer_test.go",
+      "hash_proxy_connect.go"
+    ],
+    "changes": "Retained proxy generations own accepted/client/upstream sockets, request cancellation and detached dials; exact shared retirement joins serving/admitted requests/dials/relays and retains close uncertainty; preserves buffered Hijack input/upstream reader, pinned/direct/corporate outbound policy and half-close. Corporate handshake deadline is independent of established tunnel lifetime. Owned corporate CONNECT helper limits response heads to64KiB and ignores Content-Length/Transfer-Encoding on2xx without draining tunnel payload."
+  },
+  "hash_signature_measurement_adaptations": {
+    "files": [
+      "browser.go",
+      "chromium.go",
+      "hash_signature_measurement.go",
+      "hash_signature_measurement_test.go",
+      "hash_signature_measurement_renderer_test.go"
+    ],
+    "changes": "Additive private measurement-only seam: generated inert pinned-font document, exact source/geometry/span/all-target decimal commitment, bounded isolated-world full-text fitting and actual per-line CDP platform font attribution. Public options cannot arm it; success still refuses before PrintToPDF. PDF sealing, immutable retention, ordered composition, recovery and printed-glyph admission remain unimplemented."
+  },
+  "hash_loading_failure_adaptations": {
+    "files": [
+      "events.go",
+      "hash_proxy_retirement_renderer_test.go"
+    ],
+    "changes": "Reject content-length mismatch/incomplete or invalid chunked response loading failures so a truncated main document cannot silently print; actual Chromium regression binds framing failure to ErrLoadingFailed/no PDF after exact CONNECT retirement."
+  },
+  "hash_signature_pdf_seal_adaptations": {
+    "files": [
+      "hash_signature_pdf_seal.go",
+      "hash_signature_pdf_seal_test.go",
+      "hash_signature_pdf_seal_renderer_test.go"
+    ],
+    "scope": "Additive private supervised per-page exact PDF/report/source/font package. Closed generated recipe, bounded stream/explicit close, pre/post DOM and actual-font observations, canonical exact-plan/package binding and callback/target/source cleanup before publication. No route, app signing/storage/evidence activation or PDF glyph/paint/restore proof. Ordinary printing and measurement-only refusal unchanged."
+  },
+  "hash_navigation_adaptations": {
+    "files": [
+      "hash_navigation.go",
+      "hash_navigation_test.go",
+      "hash_navigation_renderer_test.go",
+      "tasks.go",
+      "events.go",
+      "browser.go",
+      "hash_signature_pdf_seal.go",
+      "hash_proxy_retirement_renderer_test.go",
+      "hash_browser_recovery_renderer_test.go",
+      "hash_browser_startup_renderer_test.go",
+      "hash_supervisor_renderer_test.go"
+    ],
+    "scope": "Conversion-local bounded early-event journal; initial root plus Page.navigate frame/loader joins exact Document request identity and keyed lifecycle/terminal success. Missing/same-document/download/failure/ambiguous identity refuses. Main failure and redirected status classification use protocol identity; iframe errors preserve optional resource policy. Plain nonjoining event/caller abort; sole deferred exact-target cleanup. Sticky failure/root replacement and current-frame command barriers before/after ordinary/private rendering. Framed held CONNECT fixture logs exact terminal identities before assertions. No application retention, release, production or complete glyph proof. Ordinary lifecycle synthetic file calls now set exact owned AllowedFilePrefixes like production HTML routes; blocked-main-file case refuses AccessDenied/no PDF. Prior prefix-only smoke cannot establish intended payload. Three synthetic successful ordinary PDFs exported for independent intended-content checks. Selector wait cancellation and deadline errors preserve their returned cause without changing invalid-selector classification or event-error priority; genuine public cancellation/queue/target assertions remain unchanged."
+  },
+  "hash_api_identity_adaptations": {
+    "files": [
+      "attrs_test.go",
+      "chromium.go",
+      "hash_ordinary_pdf.go",
+      "hash_signature_pdf_route.go",
+      "hash_signature_pdf_route_test.go",
+      "routes.go"
+    ],
+    "changes": "Use the pinned local Hash API and PDF-engine helper package identities. Upstream module IDs, provider interfaces, optional PDF validation, flags and render-only engine selection are unchanged. The owned API is MIT-derived with separate original-file provenance and explicitly scoped listener changes."
+  }
+}

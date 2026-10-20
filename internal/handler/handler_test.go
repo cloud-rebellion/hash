@@ -101,6 +101,8 @@ func TestSecurityHeadersDisableSignerCredentialCaching(t *testing.T) {
 func TestSafeAccessPathRedactsURLCredentials(t *testing.T) {
 	tests := map[string]string{
 		"/sign/signer-secret/document":           "/sign/:token/document",
+		"/completed/completion-secret":           "/completed/:token",
+		"/completed/completion-secret/original":  "/completed/:token/original",
 		"/e/o/open-beacon-secret":                "/e/o/:token",
 		"/webhooks/billing/provider-path-secret": "/webhooks/billing/:secret",
 		"/qes/callback/provider-session-secret":  "/qes/callback/:provider_session_id",
@@ -109,6 +111,14 @@ func TestSafeAccessPathRedactsURLCredentials(t *testing.T) {
 	for input, want := range tests {
 		if got := safeAccessPath(input); got != want {
 			t.Errorf("safeAccessPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+	// The loggers consume URL.Path, after net/http has decoded path escapes.
+	for _, input := range []string{"/completed%2fcompletion-secret", "/%63ompleted/completion-secret", "/sign/signer%2dsecret/document"} {
+		path := httptest.NewRequest(http.MethodGet, input, nil).URL.Path
+		got := safeAccessPath(path)
+		if strings.Contains(got, "completion-secret") || strings.Contains(got, "signer-secret") || !strings.Contains(got, ":token") {
+			t.Errorf("escaped credential path was logged: %q", got)
 		}
 	}
 }

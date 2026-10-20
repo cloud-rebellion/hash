@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
 import { blankHTMLAuthorDraft, blankHTMLSigningPage, draftFromHTMLTemplate, htmlAuthorFingerprint, htmlAuthorInput, htmlAssetFromFile } from '../htmlAuthor';
 import { htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '../htmlTemplate';
-import { signingPageTemplateFixture } from '../htmlTemplate.test';
+import { signingPageTemplateFixture } from '../htmlTemplateFixtures';
 
 // Execute the actual production callbacks without a second implementation of
 // the protocol. Rendering and Svelte reactivity are separately browser-tested.

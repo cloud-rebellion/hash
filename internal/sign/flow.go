@@ -22,6 +22,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -37,10 +38,11 @@ import (
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
-	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/documentpackage"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/i18n"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
@@ -149,15 +151,21 @@ var (
 type Engine struct {
 	// Pool backs the transactional sign/decline/finalize path: row locks
 	// (SELECT ... FOR UPDATE) and the per-document finalize advisory lock.
-	Pool    *pgxpool.Pool
-	Queries *generated.Queries
-	Storage EvidenceStorage
-	PDF     *render.Gotenberg
-	Audit   *audit.Logger
-	Mailer  dispatch.Mailer
-	Signer  *CertSigner // ed25519 signer for audit certs; nil = signing disabled
-	OrgName string
-	BaseURL string
+	Pool *pgxpool.Pool
+	// This exact process runtime is shared with the HTTP writer. Nil grants no
+	// fitted-request admission; it does not enable a compatibility signer.
+	WorkRuntime              *pdfadmission.WorkRuntimeV1
+	applicationJournalMu     sync.Mutex
+	applicationJournal       *applicationRequestJournalV1
+	applicationJournalClosed bool
+	Queries                  *generated.Queries
+	Storage                  EvidenceStorage
+	PDF                      *render.Gotenberg
+	Audit                    *audit.Logger
+	Mailer                   dispatch.Mailer
+	Signer                   *CertSigner // ed25519 signer for audit certs; nil = signing disabled
+	OrgName                  string
+	BaseURL                  string
 	// ActionSecret signs one-click email action links (approve/deny). Derived
 	// from the instance signer key; empty disables the email action buttons.
 	ActionSecret string
@@ -198,11 +206,12 @@ type EvidenceStorage interface {
 
 // SignInput is what the signer page POSTs when they finalize.
 type SignInput struct {
-	TypedName string
-	Font      string
-	IP        string
-	UserAgent string
-	Notice    article13.Evidence
+	PackageResponse *documentpackage.ResponseV1
+	TypedName       string
+	Font            string
+	IP              string
+	UserAgent       string
+	Notice          article13.Evidence
 }
 
 // Keep the signing API names source-readable while the canonical encoding and
@@ -217,9 +226,10 @@ type Article13NoticeEvidence = article13.Evidence
 // participant audit events. Notice has already been compared with the digest
 // presented for the current server-authored Article 13 notice by the handler.
 type ParticipantResponseEvidence struct {
-	IP        string
-	UserAgent string
-	Notice    article13.Evidence
+	PackageResponse *documentpackage.ResponseV1
+	IP              string
+	UserAgent       string
+	Notice          article13.Evidence
 }
 
 func responseAuditPayload(payload map[string]any, notice article13.Evidence) (map[string]any, error) {
@@ -236,19 +246,7 @@ func validateNoticeEvidence(rc *RecipientContext, notice article13.Evidence) err
 	if rc == nil || rc.Document == nil || rc.Recipient == nil {
 		return ErrInvalidNoticeEvidence
 	}
-	if err := notice.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidNoticeEvidence, err)
-	}
-	snapshot := notice.Snapshot
-	if snapshot.OrgID != rc.Document.OrgID || snapshot.DocumentID != rc.Document.ID ||
-		snapshot.RecipientID != rc.Recipient.ID || !rc.Document.SentAt.Valid ||
-		!rc.Document.Article13NoticeEpochAt.Valid ||
-		!rc.Document.Article13NoticeEpochAt.Time.Equal(rc.Document.SentAt.Time) ||
-		snapshot.Schema != rc.Document.Article13NoticeSchema ||
-		snapshot.SentAt != rc.Document.SentAt.Time.UTC().Format(time.RFC3339Nano) {
-		return ErrInvalidNoticeEvidence
-	}
-	return nil
+	return validateHTMLCeremonyNoticePinsV1(htmlCeremonyDocumentPinsForV1(rc.Document), rc.Recipient.ID, notice)
 }
 
 // ValidateLockedNoticeEvidence rebinds a previously authenticated Article 13
@@ -278,7 +276,9 @@ type Result struct {
 	// FinalPDFURL is the freshly rotated, bounded recipient credential. The
 	// ceremony token used for the POST is invalidated atomically on completion
 	// and must never be echoed as a final-artifact URL.
-	FinalPDFURL string
+	FinalPDFURL      string
+	AuditCertURL     string
+	PackagePortalURL string
 }
 
 // RecipientContext bundles the verified recipient row with the parent
@@ -286,10 +286,15 @@ type Result struct {
 // exact document. The handler uses ControllerOrg for the GDPR Article 13
 // notice; it must never infer the controller from instance-wide branding.
 type RecipientContext struct {
+	// Owns actual retained read models; successful public callers close after
+	// their last response/operation consumer. It grants no mutation authority.
+	readLease               *signerReadLeaseV1
 	Recipient               *generated.GetRecipientByTokenHashRow
 	Document                *generated.Document
 	ControllerOrg           *generated.Org
 	LawfulBasisConfirmation *generated.DocumentLawfulBasisConfirmation
+	// Only LookupByToken issues this private original-request snapshot.
+	presentedCredential *presentedCredentialV1
 }
 
 // ErrMagicLinkExpired is returned by LookupByToken when the recipient's
@@ -303,19 +308,33 @@ const completedArtifactAccessTTL = 24 * time.Hour
 // LookupByToken resolves a magic-link token into a verified recipient + the
 // parent document. Returns ErrMagicLinkExpired when the per-recipient TTL
 // or the doc-level expiry has passed.
-func (e *Engine) LookupByToken(ctx context.Context, tokenHash []byte) (*RecipientContext, error) {
-	row, err := e.Queries.GetRecipientByTokenHash(ctx, tokenHash)
+func (e *Engine) lookupByTokenQueriesV1(ctx context.Context, tokenHash []byte, queries signerContextQueriesV1) (*RecipientContext, error) {
+	if ctx == nil || e == nil || queries == nil || len(tokenHash) != sha256.Size {
+		return nil, errors.New("invalid magic link")
+	}
+	// Own the exact presented digest before the database wait; neither the
+	// caller slice nor a subsequently rewritten result row is provenance.
+	var presentedHash [sha256.Size]byte
+	copy(presentedHash[:], tokenHash)
+	row, err := queries.GetRecipientByTokenHash(ctx, presentedHash[:])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errors.New("invalid magic link")
 	}
 	if err != nil {
 		return nil, err
 	}
-	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{
+	if row == nil || row.ID == uuid.Nil || row.DocumentID == uuid.Nil || row.DocOrgID == uuid.Nil ||
+		len(row.MagicTokenHash) != sha256.Size || subtle.ConstantTimeCompare(presentedHash[:], row.MagicTokenHash) != 1 {
+		return nil, errors.New("invalid magic link")
+	}
+	doc, err := queries.GetDocument(ctx, generated.GetDocumentParams{
 		ID: row.DocumentID, OrgID: row.DocOrgID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("load parent document: %w", err)
+	}
+	if doc == nil || doc.ID != row.DocumentID || doc.OrgID != row.DocOrgID {
+		return nil, errors.New("invalid magic link")
 	}
 	if err := checkMagicLinkExpiry(row, doc, e.now()); err != nil {
 		return nil, err
@@ -323,7 +342,7 @@ func (e *Engine) LookupByToken(ctx context.Context, tokenHash []byte) (*Recipien
 	if err := checkActiveCeremonyAccess(doc); err != nil {
 		return nil, err
 	}
-	confirmation, err := e.Queries.GetDocumentLawfulBasisConfirmation(ctx, generated.GetDocumentLawfulBasisConfirmationParams{
+	confirmation, err := queries.GetDocumentLawfulBasisConfirmation(ctx, generated.GetDocumentLawfulBasisConfirmationParams{
 		DocumentID: doc.ID,
 		OrgID:      doc.OrgID,
 	})
@@ -335,19 +354,25 @@ func (e *Engine) LookupByToken(ctx context.Context, tokenHash []byte) (*Recipien
 		!supportedSignerLawfulBasis(confirmation.LawfulBasis) {
 		return nil, ErrSignerLawfulBasisUnavailable
 	}
-	controllerOrg, err := e.Queries.GetOrg(ctx, doc.OrgID)
+	controllerOrg, err := queries.GetOrg(ctx, doc.OrgID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: load document organization: %v", ErrSignerControllerUnavailable, err)
 	}
 	if controllerOrg == nil || controllerOrg.ID != doc.OrgID || strings.TrimSpace(controllerOrg.Name) == "" {
 		return nil, ErrSignerControllerUnavailable
 	}
-	return &RecipientContext{
-		Recipient:               row,
-		Document:                doc,
-		ControllerOrg:           controllerOrg,
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rc := &RecipientContext{
+		Recipient: row, Document: doc, ControllerOrg: controllerOrg,
 		LawfulBasisConfirmation: confirmation,
-	}, nil
+	}
+	rc.presentedCredential, err = e.capturePresentedCredentialV1(presentedHash[:], rc)
+	if err != nil {
+		return nil, err
+	}
+	return rc, nil
 }
 
 func supportedSignerLawfulBasis(value string) bool {
@@ -360,15 +385,18 @@ func supportedSignerLawfulBasis(value string) bool {
 // signer route remains closed by the document-state gate.
 //
 // This method must never be used for a mutation or an active document.
-func (e *Engine) LookupCompletedArtifactByToken(ctx context.Context, tokenHash []byte) (*RecipientContext, error) {
-	row, err := e.Queries.GetRecipientByTokenHash(ctx, tokenHash)
+func (e *Engine) lookupCompletedArtifactQueriesV1(ctx context.Context, tokenHash []byte, queries signerContextQueriesV1) (*RecipientContext, error) {
+	if ctx == nil || e == nil || queries == nil || len(tokenHash) != sha256.Size {
+		return nil, ErrCompletedArtifactUnavailable
+	}
+	row, err := queries.GetRecipientByTokenHash(ctx, tokenHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errors.New("invalid magic link")
 	}
 	if err != nil {
 		return nil, err
 	}
-	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{
+	doc, err := queries.GetDocument(ctx, generated.GetDocumentParams{
 		ID: row.DocumentID, OrgID: row.DocOrgID,
 	})
 	if err != nil {
@@ -378,6 +406,55 @@ func (e *Engine) LookupCompletedArtifactByToken(ctx context.Context, tokenHash [
 		return nil, err
 	}
 	return &RecipientContext{Recipient: row, Document: doc}, nil
+}
+
+// RecheckCompletedArtifactByToken retains the original admission deadline and
+// artifact identity across a potentially slow storage read. Renewing the same
+// credential may authorize a new request; it cannot extend an in-flight read.
+func (e *Engine) RecheckCompletedArtifactByToken(ctx context.Context, tokenHash []byte, original *RecipientContext) error {
+	return e.recheckCompletedOwnedV1(ctx, tokenHash, original, false)
+}
+
+func (e *Engine) RecheckCompletedAuditCertificateByTokenV1(ctx context.Context, tokenHash []byte, original *RecipientContext) error {
+	return e.recheckCompletedOwnedV1(ctx, tokenHash, original, true)
+}
+
+func checkCompletedArtifactObservation(original, current *RecipientContext, now time.Time) error {
+	if original == nil || current == nil ||
+		checkCompletedArtifactAccess(original.Recipient, original.Document, now) != nil ||
+		checkCompletedArtifactAccess(current.Recipient, current.Document, now) != nil {
+		return ErrCompletedArtifactUnavailable
+	}
+	if original.Recipient.ID != current.Recipient.ID ||
+		original.Recipient.DocumentID != current.Recipient.DocumentID ||
+		original.Document.ID != current.Document.ID || original.Document.OrgID != current.Document.OrgID ||
+		original.Document.FinalPdfKey != current.Document.FinalPdfKey ||
+		original.Document.FinalPdfVersionID != current.Document.FinalPdfVersionID ||
+		!bytes.Equal(original.Document.FinalPdfSha, current.Document.FinalPdfSha) {
+		return ErrCompletedArtifactUnavailable
+	}
+	return nil
+}
+
+func completedAuditCertificatePinsV1(doc *generated.Document) bool {
+	return doc != nil && doc.AuditCertKey.Valid && strings.TrimSpace(doc.AuditCertKey.String) != "" &&
+		doc.AuditCertVersionID.Valid && strings.TrimSpace(doc.AuditCertVersionID.String) != "" &&
+		len(doc.AuditCertSha256) == sha256.Size
+}
+
+// The certificate has its own immutable identity. A final-PDF-only recheck
+// cannot authorize it after a storage await.
+func checkCompletedAuditCertificateObservationV1(original, current *RecipientContext, now time.Time) error {
+	if err := checkCompletedArtifactObservation(original, current, now); err != nil {
+		return err
+	}
+	if !completedAuditCertificatePinsV1(original.Document) || !completedAuditCertificatePinsV1(current.Document) ||
+		original.Document.AuditCertKey != current.Document.AuditCertKey ||
+		original.Document.AuditCertVersionID != current.Document.AuditCertVersionID ||
+		!bytes.Equal(original.Document.AuditCertSha256, current.Document.AuditCertSha256) {
+		return ErrCompletedArtifactUnavailable
+	}
+	return nil
 }
 
 // checkCompletedArtifactAccess is the deliberately small, time-bounded
@@ -404,14 +481,14 @@ func checkCompletedArtifactAccess(row *generated.GetRecipientByTokenHashRow, doc
 // is non-null and has passed. Pure function so we can unit-test the TTL
 // matrix without a Postgres dependency.
 func checkMagicLinkExpiry(row *generated.GetRecipientByTokenHashRow, doc *generated.Document, now time.Time) error {
-	if row != nil && row.MagicTokenExpiresAt.Valid && !row.MagicTokenExpiresAt.Time.IsZero() &&
-		now.After(row.MagicTokenExpiresAt.Time) {
-		return ErrMagicLinkExpired
+	var recipient, document pgtype.Timestamptz
+	if row != nil {
+		recipient = row.MagicTokenExpiresAt
 	}
-	if doc != nil && doc.ExpiresAt.Valid && !doc.ExpiresAt.Time.IsZero() && now.After(doc.ExpiresAt.Time) {
-		return ErrMagicLinkExpired
+	if doc != nil {
+		document = doc.ExpiresAt
 	}
-	return nil
+	return checkSignerReadExpiryV1(recipient, document, now)
 }
 
 // checkLockedMagicLinkExpiry checks fresh deadlines after acquiring the document
@@ -440,17 +517,7 @@ func checkActiveCeremonyAccess(doc *generated.Document) error {
 // through document and audit waits. Callers must retain the recipient row lock
 // before using this as a final pre-commit check.
 func ValidateLockedRecipientCredential(rc *RecipientContext, fresh *generated.Recipient, doc *generated.Document, now time.Time) error {
-	if rc == nil || rc.Recipient == nil || rc.Document == nil || fresh == nil || doc == nil ||
-		fresh.ID != rc.Recipient.ID || fresh.DocumentID != doc.ID || doc.ID != rc.Document.ID || doc.OrgID != rc.Document.OrgID ||
-		len(rc.Recipient.MagicTokenHash) == 0 || subtle.ConstantTimeCompare(rc.Recipient.MagicTokenHash, fresh.MagicTokenHash) != 1 {
-		return ErrMagicLinkExpired
-	}
-	// A later deadline extension cannot revive a request admitted under an
-	// earlier expiry. Both the original receipt and retained row must be live.
-	if err := checkMagicLinkExpiry(rc.Recipient, rc.Document, now); err != nil {
-		return err
-	}
-	return checkLockedMagicLinkExpiry(fresh, doc, now)
+	return validateLockedRecipientPinsV1(rc, fresh, htmlCeremonyDocumentPinsForV1(doc), now)
 }
 
 // now returns the current time, override via Engine.Now for tests.
@@ -536,6 +603,37 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	if err := validateNoticeEvidence(rc, in.Notice); err != nil {
 		return nil, err
 	}
+	if doc.SigningAdmissionPolicy == "pdf-static-v1" {
+		// Require real presented-request provenance at the actual entry point,
+		// before the existing fail-closed readiness gate. The intent itself is
+		// issued and consumed by the fitted policy/insert seams, not discarded here.
+		if _, err := e.validateFittedRequestV1(ctx, rc, in); err != nil {
+			return nil, err
+		}
+	}
+	if err := requireHistoricalSigningAdmissionV1(doc); err != nil {
+		return nil, err
+	}
+	// Preserve the original shared policy/provenance refusal order before native dispatch.
+	if ownedBlocksSignatureEntryV1(rc) {
+		return e.signBlocksOwnedV1(ctx, rc, in)
+	}
+	if in.PackageResponse != nil {
+		return nil, ErrPackageResponseUnavailableV1
+	}
+	// Bind all PDF targets before preparation. Future field-dependent fitting
+	// must use this snapshot, rather than measurements of later query results.
+	var pdfTargets *manualSignatureTargets
+	if doc.SourceKind == "pdf" {
+		fields, err := e.Queries.ListFieldsByDocument(ctx, doc.ID)
+		if err != nil {
+			return nil, fmt.Errorf("prepare PDF signature targets: %w", err)
+		}
+		pdfTargets, err = captureManualSignatureTargets(doc, rec.ID, fields)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Render the signature span and resolve its field, but do not retain any
 	// object yet. Authoritative state/recipient/required-field checks happen
 	// under the document lock before immutable storage is touched.
@@ -543,6 +641,7 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	if err != nil {
 		return nil, err
 	}
+	prep.pdfTargets = pdfTargets
 
 	tx, err := e.Pool.Begin(ctx)
 	if err != nil {
@@ -555,6 +654,9 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
 	if err != nil {
 		return nil, fmt.Errorf("lock document: %w", err)
+	}
+	if err := requireHistoricalSigningAdmissionV1(lockedDoc); err != nil {
+		return nil, err
 	}
 	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, in.Notice); err != nil {
 		return nil, err
@@ -605,7 +707,16 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 		return nil, fmt.Errorf("%d required field(s) unfilled", unfilled)
 	}
 
-	fieldRow, err := e.findOrInsertFieldTx(ctx, q, lockedDoc, rec.ID, prep.fieldBlockID)
+	var fieldRow *generated.DocumentField
+	if doc.SourceKind == "pdf" || lockedDoc.SourceKind == "pdf" {
+		fields, ferr := q.ListFieldsByDocument(ctx, doc.ID)
+		if ferr != nil {
+			return nil, fmt.Errorf("recheck PDF signature targets: %w", ferr)
+		}
+		fieldRow, err = validateLockedManualSignatureTargets(prep.pdfTargets, lockedDoc, rec.ID, fields)
+	} else {
+		fieldRow, err = e.findOrInsertFieldTx(ctx, q, lockedDoc, rec.ID, prep.fieldBlockID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -685,6 +796,9 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	// signer's request.
 	completionCredential := &completionCredentialCapture{recipientID: rec.ID}
 	finalKey, _, _, ferr := e.finalize(ctx, doc.OrgID, doc.ID, completionCredential)
+	if err := e.retainHistoricalPublicationForRecipientV1(rc, completionCredential); err != nil {
+		return nil, err
+	}
 	if ferr != nil {
 		// ErrFinalizeInProgress (another finalize holds the lock) and
 		// ErrDocumentRevisedDuringFinalize (revised/voided under us) are
@@ -702,7 +816,7 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	}
 	return &Result{
 		DocumentID: doc.ID, Status: "completed", Completed: true, FinalPDFKey: finalKey,
-		FinalPDFURL: completedArtifactPath(completionCredential.rawToken),
+		FinalPDFURL: completedArtifactPath(completionCredential.rawToken), AuditCertURL: completedAuditCertificatePath(completionCredential.rawToken), PackagePortalURL: completedPackagePortalPathV1(completionCredential.rawToken),
 	}, nil
 }
 
@@ -728,106 +842,7 @@ func (e *Engine) Accept(ctx context.Context, rc *RecipientContext, evidence Part
 	if err := validateNoticeEvidence(rc, evidence.Notice); err != nil {
 		return nil, err
 	}
-	doc := rc.Document
-	rec := rc.Recipient
-
-	tx, err := e.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := e.Queries.WithTx(tx)
-
-	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return nil, fmt.Errorf("lock document: %w", err)
-	}
-	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
-		return nil, err
-	}
-	if lockedDoc.RequiresSignature {
-		return nil, ErrNotAcknowledgement
-	}
-	if err := requireSESTypedSignature(lockedDoc); err != nil {
-		return nil, err
-	}
-	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
-		return nil, ErrDocumentNotSignable
-	}
-	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return nil, err
-	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
-		return nil, err
-	}
-	if freshRec.DocumentID != doc.ID || !recipients.CanRespond(freshRec.Role) {
-		return nil, ErrRecipientNotEligibleForResponse
-	}
-	if freshRec.Status == "accepted" {
-		return nil, ErrAlreadyAccepted
-	}
-	if freshRec.Status == "declined" {
-		return nil, errors.New("recipient already declined")
-	}
-
-	if err := q.SetRecipientStatus(ctx, generated.SetRecipientStatusParams{
-		ID: rec.ID, DocumentID: doc.ID,
-		Status: "accepted", DeclinedReason: pgtype.Text{},
-	}); err != nil {
-		return nil, fmt.Errorf("set recipient accepted: %w", err)
-	}
-	if lockedDoc.Status == "sent" {
-		if _, err := q.SetDocumentStatus(ctx, generated.SetDocumentStatusParams{
-			ID: doc.ID, OrgID: doc.OrgID, Status: "in_progress",
-		}); err != nil {
-			return nil, fmt.Errorf("transition to in_progress: %w", err)
-		}
-	}
-	remaining, err := q.CountPendingAcceptors(ctx, doc.ID)
-	if err != nil {
-		return nil, err
-	}
-	acceptedPayload, err := responseAuditPayload(map[string]any{
-		"recipient_email": rec.Email,
-	}, evidence.Notice)
-	if err != nil {
-		return nil, fmt.Errorf("bind acceptance notice evidence: %w", err)
-	}
-	acceptedEvent := audit.Entry{
-		OrgID: doc.OrgID, DocumentID: &doc.ID, RecipientID: &rec.ID,
-		Kind:      audit.KindDocumentAccepted,
-		IP:        evidence.IP,
-		UserAgent: evidence.UserAgent,
-		Payload:   acceptedPayload,
-	}
-	pendingAudit, err := e.Audit.LogTx(ctx, tx, acceptedEvent)
-	if err != nil {
-		return nil, fmt.Errorf("audit acceptance: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit accept: %w", err)
-	}
-	e.Audit.Publish(pendingAudit)
-
-	if remaining > 0 {
-		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
-	}
-
-	// Every acceptor has accepted: seal the acknowledged PDF. Completion,
-	// bounded download credentials, notification outbox, reminder cancellation,
-	// and audit event commit together; transient render/storage failure leaves
-	// the doc in_progress for the finalize-retry worker.
-	completionCredential := &completionCredentialCapture{recipientID: rec.ID}
-	completedDoc, did, cerr := e.completeAcknowledgedDocument(ctx, doc.OrgID, doc.ID, completionCredential)
-	if cerr != nil || !did {
-		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
-	}
-	finalKey := acknowledgedFinalKey(completedDoc)
-	return &Result{
-		DocumentID: doc.ID, Status: "completed", Completed: true, FinalPDFKey: finalKey,
-		FinalPDFURL: completedArtifactPath(completionCredential.rawToken),
-	}, nil
+	return e.acceptAcknowledgementOwnedV1(ctx, rc, evidence)
 }
 
 // completeAcknowledgedDocument seals an acknowledgement with the same
@@ -835,20 +850,23 @@ func (e *Engine) Accept(ctx context.Context, rc *RecipientContext, evidence Part
 // source becomes a digest-addressed final PDF, and a separate Ed25519 audit
 // certificate binds that exact digest plus the pre-final audit-chain head.
 func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID uuid.UUID, capture *completionCredentialCapture) (*generated.Document, bool, error) {
+	serialization, err := e.acquireHistoricalFinalizationLockV1(ctx, orgID, docID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer closeHistoricalFinalizationLockV1(ctx, serialization, orgID, docID)
+	// The remaining lifecycle transactions are ported as their own fixed native phases.
 	conn, err := e.Pool.Acquire(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer conn.Release()
-	lockKey := advisoryLockKey(docID)
-	var got bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&got); err != nil { //nolint:rawsql
-		return nil, false, err
-	}
-	if !got {
-		return nil, false, ErrFinalizeInProgress
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey) }() //nolint:rawsql
+	var nativeClaim *ownedHistoricalFinalizationClaimV1
+	defer func() {
+		if nativeClaim != nil {
+			nativeClaim.closeV1()
+		}
+	}()
 
 	prepared, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: orgID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -861,20 +879,20 @@ func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID 
 		return prepared, false, nil
 	}
 	if prepared.Status == "finalizing" && !prepared.RequiresSignature {
-		prepared, err = e.claimDocumentFinalizing(ctx, conn, prepared.OrgID, prepared.ID, "acknowledgement")
+		prepared, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, prepared.OrgID, prepared.ID, "acknowledgement")
 		if err != nil {
 			return nil, false, err
 		}
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: prepared.ID, OrgID: prepared.OrgID,
 		}); ierr == nil {
-			return e.resumeDocumentFinalization(ctx, conn, prepared, capture)
+			return e.resumeDocumentFinalizationAfterSerializedClaimOwnedV1(ctx, conn, prepared, capture, nativeClaim, serialization)
 		} else if !errors.Is(ierr, pgx.ErrNoRows) {
 			return nil, false, fmt.Errorf("load acknowledgement finalization intent: %w", ierr)
 		}
 		// A crash can happen after the durable in_progress -> finalizing claim
 		// but before the staged-object intent is inserted. Rebuild the exact
-		// artifacts below; content-addressed keys make this retry idempotent.
+		// artifacts below from any existing durable ordinary preparation.
 	}
 	if prepared.Status != "in_progress" && prepared.Status != "finalizing" {
 		return nil, false, nil
@@ -883,66 +901,57 @@ func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID 
 		return nil, false, nil
 	}
 	if prepared.Status == "in_progress" {
-		prepared, err = e.claimDocumentFinalizing(ctx, conn, prepared.OrgID, prepared.ID, "acknowledgement")
+		prepared, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, prepared.OrgID, prepared.ID, "acknowledgement")
 		if err != nil {
 			return nil, false, err
 		}
 	}
-	prepared, err = e.ensureDocumentSourceVersions(ctx, prepared)
+	reference, err := e.captureHistoricalFinalizationStageReferenceV1(ctx, prepared, serialization, nativeClaim)
 	if err != nil {
 		return nil, false, err
 	}
-	retainUntil, err := finalizationRetentionDeadline(prepared)
+	// The scalar serialization reference, rather than an old Claim row, now
+	// establishes the independent native source operation. End only that
+	// Claim after its actual last view use and before the fresh source header.
+	prepared = nil
+	if err = nativeClaim.retireForStageV1(ctx, e, reference); err != nil {
+		return nil, false, err
+	}
+	nativeClaim = nil
+	var sourceOwner *ownedHistoricalFinalizationSourceV1
+	defer func() {
+		if sourceOwner != nil {
+			retainHistoricalFinalizationInputV1(capture, sourceOwner)
+		}
+	}()
+	prepared, sourceOwner, err = e.loadHistoricalFinalizationSourceOwnedV1(ctx, reference)
+	if err != nil {
+		return nil, false, err
+	}
+	_, err = finalizationRetentionDeadline(prepared)
 	if err != nil {
 		return nil, false, fmt.Errorf("finalize acknowledgement: %w", err)
 	}
-	brandCSS, err := e.resolveBrandingCSS(ctx, prepared)
+	frozenCertificate, err := e.ordinaryCertificateInputFrozenV1(ctx, reference)
 	if err != nil {
-		return nil, false, fmt.Errorf("finalize acknowledgement: resolve branding: %w", err)
+		return nil, false, err
+	}
+	if !frozenCertificate {
+		_, err = e.resolveBrandingCSSForFinalizationOwnedV1(ctx, reference, sourceOwner)
+		if err != nil {
+			return nil, false, fmt.Errorf("finalize acknowledgement: resolve branding: %w", err)
+		}
 	}
 
-	// The document is now durably non-interactive. No accept/decline/change,
-	// reminder, view, or field event can enter the certificate's pre-final
-	// document-event set while the slow storage/render work runs.
-	pdfBytes, err := e.loadSourcePDF(ctx, prepared)
-	if err != nil {
-		return nil, false, fmt.Errorf("load acknowledgement source: %w", err)
+	retired, err := e.prepareOrdinaryHistoricalFinalizationV1(ctx, reference, sourceOwner, prepared, nil)
+	if retired {
+		sourceOwner = nil
 	}
-	finalSum := sha256.Sum256(pdfBytes)
-	artifactDir := path.Join("org", prepared.OrgID.String(), "documents", prepared.ID.String())
-	finalKey := path.Join(artifactDir, "final-"+hex.EncodeToString(finalSum[:])+".pdf")
-	storedFinal, err := e.Storage.PutEvidenceVersioned(ctx, finalKey, "application/pdf", pdfBytes, retainUntil)
-	if err != nil {
-		return nil, false, fmt.Errorf("store acknowledgement final PDF: %w", err)
-	}
-	if storedFinal.SHA256 != finalSum || strings.TrimSpace(storedFinal.VersionID) == "" {
-		return nil, false, errors.New("store acknowledgement final PDF: storage digest mismatch")
-	}
-	chainHead, err := e.Queries.LatestEventChainHeadForOrg(ctx, prepared.OrgID)
-	if err != nil {
-		return nil, false, fmt.Errorf("load acknowledgement pre-final audit chain head: %w", err)
-	}
-	documentEvents, err := e.loadCertificateDocumentEvents(ctx, prepared.ID)
 	if err != nil {
 		return nil, false, err
 	}
-	claims, err := newCertificateEvidenceClaims(prepared, finalSum[:], chainHead, documentEvents)
-	if err != nil {
-		return nil, false, err
-	}
-	certArtifacts, err := e.renderAndStoreAuditCertificate(ctx, prepared, nil, claims, artifactDir, brandCSS, retainUntil)
-	if err != nil {
-		return nil, false, fmt.Errorf("stage acknowledgement audit certificate: %w", err)
-	}
-	staged := stagedDocumentFinalization{
-		Mode: "acknowledgement", FinalKey: finalKey, FinalSHA256: finalSum,
-		FinalVersionID: storedFinal.VersionID, Certificate: certArtifacts,
-	}
-	if err := e.beginDocumentFinalization(ctx, conn, prepared, staged); err != nil {
-		return nil, false, err
-	}
-	prepared.Status = "finalizing"
-	return e.resumeDocumentFinalization(ctx, conn, prepared, capture)
+	return e.resumeDocumentFinalizationFromStageReferenceOwnedV1(ctx, conn, reference, capture)
+
 }
 
 func acknowledgedFinalKey(doc *generated.Document) string {
@@ -950,6 +959,13 @@ func acknowledgedFinalKey(doc *generated.Document) string {
 		return doc.FinalPdfKey.String
 	}
 	return ""
+}
+
+func completedAuditCertificatePath(rawToken string) string {
+	if strings.TrimSpace(rawToken) == "" {
+		return ""
+	}
+	return "/sign/" + rawToken + "/audit-cert"
 }
 
 func completedArtifactPath(rawToken string) string {
@@ -964,6 +980,9 @@ func completedArtifactPath(rawToken string) string {
 // finalize-retry worker loop. Idempotent: a no-op if the document is already
 // finalized or another finalize is in flight.
 func (e *Engine) FinalizeStranded(ctx context.Context, orgID, docID uuid.UUID) error {
+	backgroundCapture := &completionCredentialCapture{ownerOnly: true}
+	defer func() { _ = backgroundCapture.closeHistoricalPublicationV1() }()
+
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: orgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -982,13 +1001,13 @@ func (e *Engine) FinalizeStranded(ctx context.Context, orgID, docID uuid.UUID) e
 	// touching evidence, including a crash before the artifact intent exists.
 	if doc.Status == "finalizing" {
 		if doc.RequiresSignature {
-			_, _, _, err := e.finalize(ctx, orgID, docID, nil)
+			_, _, _, err := e.finalize(ctx, orgID, docID, backgroundCapture)
 			if errors.Is(err, ErrFinalizeInProgress) {
 				return nil
 			}
 			return err
 		}
-		_, _, err := e.completeAcknowledgedDocument(ctx, orgID, docID, nil)
+		_, _, err := e.completeAcknowledgedDocument(ctx, orgID, docID, backgroundCapture)
 		if errors.Is(err, ErrFinalizeInProgress) {
 			return nil
 		}
@@ -1002,7 +1021,7 @@ func (e *Engine) FinalizeStranded(ctx context.Context, orgID, docID uuid.UUID) e
 		if !allRequiredAcceptorsAccepted(recipients) {
 			return nil
 		}
-		_, _, err := e.completeAcknowledgedDocument(ctx, orgID, docID, nil)
+		_, _, err := e.completeAcknowledgedDocument(ctx, orgID, docID, backgroundCapture)
 		if err != nil {
 			return err
 		}
@@ -1016,7 +1035,7 @@ func (e *Engine) FinalizeStranded(ctx context.Context, orgID, docID uuid.UUID) e
 		return nil
 	}
 
-	_, _, did, err := e.finalize(ctx, orgID, docID, nil)
+	_, _, did, err := e.finalize(ctx, orgID, docID, backgroundCapture)
 	if errors.Is(err, ErrFinalizeInProgress) {
 		return nil
 	}
@@ -1051,8 +1070,11 @@ type completedRecipientCredential struct {
 }
 
 type completionCredentialCapture struct {
-	recipientID uuid.UUID
-	rawToken    string
+	finalizationInput *ownedHistoricalFinalizationSourceV1
+	publication       *ownedHistoricalFinalizationPublicationV1
+	ownerOnly         bool
+	recipientID       uuid.UUID
+	rawToken          string
 }
 
 // prepareCompletionNotificationsTx rotates every eligible recipient away from
@@ -1131,17 +1153,10 @@ func (e *Engine) rotateCompletedArtifactCredentials(ctx context.Context, q compl
 }
 
 func recipientReceivesCompletedArtifact(doc *generated.Document, rec *generated.Recipient, requiredRoles map[string]struct{}) bool {
-	if doc == nil || rec == nil {
+	if doc == nil {
 		return false
 	}
-	if !doc.RequiresSignature {
-		return rec.Role != "cc" && rec.Status == "accepted"
-	}
-	if rec.Status != "signed" {
-		return false
-	}
-	_, required := requiredRoles[rec.Role]
-	return required
+	return recipients.ReceivesCompletedArtifactV1(doc.RequiresSignature, rec, requiredRoles)
 }
 
 // receivesCompletionEmail retains the signature-role policy helper used by
@@ -1169,6 +1184,8 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 			OrgName:           e.OrgName,
 			Locale:            credential.rec.Locale,
 			DownloadURL:       baseURL + "/sign/" + credential.rawToken + "/final-pdf",
+			AuditCertURL:      baseURL + "/sign/" + credential.rawToken + "/audit-cert",
+			PackagePortalURL:  baseURL + completedPackagePortalPathV1(credential.rawToken),
 			DownloadExpiresAt: credential.expiresAt.UTC().Format(time.RFC3339),
 			Acknowledgement:   !doc.RequiresSignature,
 		})
@@ -1185,6 +1202,7 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 		RecipientName:   sender.Name,
 		OrgName:         e.OrgName,
 		DownloadURL:     senderURL,
+		AuditCertURL:    baseURL + "/api/v1/documents/" + doc.ID.String() + "/audit-cert",
 		Acknowledgement: !doc.RequiresSignature,
 	})
 	if err != nil {
@@ -1428,7 +1446,7 @@ type ChangeRequestInput struct {
 	Notice    Article13NoticeEvidence
 }
 
-func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in ChangeRequestInput) error {
+func (e *Engine) requestChangesLegacyV1(ctx context.Context, rc *RecipientContext, in ChangeRequestInput) error {
 	if err := validateNoticeEvidence(rc, in.Notice); err != nil {
 		return err
 	}
@@ -1444,6 +1462,15 @@ func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in Ch
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := e.Queries.WithTx(tx)
+	// A mutable/internal recipient model cannot select a generic HTML write.
+	// Inspect only real locked nullable-column presence before any full body.
+	html, err := q.GetHTMLCeremonyImplementationV1(ctx, generated.GetHTMLCeremonyImplementationV1Params{DocumentID: doc.ID, OrgID: doc.OrgID})
+	if err != nil {
+		return fmt.Errorf("lock document: %w", err)
+	}
+	if html {
+		return ErrSigningAdmissionUnavailableV1
+	}
 
 	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
 	if err != nil {
@@ -1589,21 +1616,7 @@ func rejectUnsupportedEnvelopeTransition(doc *generated.Document, transition str
 // org's change_approval_mode is auto_apply and the request carries a marked span
 // plus a proposed replacement, the marked text is swapped in the block in place;
 // otherwise approval is recorded for the sender to apply during Revise.
-func (e *Engine) ResolveChange(ctx context.Context, orgID, docID, crID uuid.UUID, approve bool) (*generated.ChangeRequest, error) {
-	return e.resolveChange(ctx, orgID, docID, crID, uuid.Nil, approve, nil)
-}
-
-// ResolveChangeWithAuthorization binds a sender action to the original admitted
-// credential and retains the live member lock through the resolution commit.
-// The separate ResolveChange method serves signed email action capabilities.
-func (e *Engine) ResolveChangeWithAuthorization(ctx context.Context, orgID, docID, crID, userID uuid.UUID, approve bool, authorize auth.TransactionAuthorization) (*generated.ChangeRequest, error) {
-	if userID == uuid.Nil || authorize == nil {
-		return nil, auth.ErrMutationPermissionRevoked
-	}
-	return e.resolveChange(ctx, orgID, docID, crID, userID, approve, authorize)
-}
-
-func (e *Engine) resolveChange(ctx context.Context, orgID, docID, crID, userID uuid.UUID, approve bool, authorize auth.TransactionAuthorization) (*generated.ChangeRequest, error) {
+func (e *Engine) resolveChangeLegacyV1(ctx context.Context, orgID, docID, crID, userID uuid.UUID, approve bool, authorize auth.TransactionAuthorization) (*generated.ChangeRequest, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -1616,6 +1629,19 @@ func (e *Engine) resolveChange(ctx context.Context, orgID, docID, crID, userID u
 		_ = tx.Rollback(rollbackCtx)
 	}()
 	q := e.Queries.WithTx(tx)
+	// Fixed parent-locked implementation selection expands no source/body.
+	// A missing native runtime is never permission to read/mutate HTML through
+	// the generic legacy transaction. Non-HTML retains the original sequence.
+	html, err := q.GetHTMLCeremonyImplementationV1(ctx, generated.GetHTMLCeremonyImplementationV1Params{DocumentID: docID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChangeRequestNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if html {
+		return nil, ErrSigningAdmissionUnavailableV1
+	}
 
 	// Lock parent first, matching Revise's UPDATE documents -> UPDATE
 	// change_requests ordering. This serializes revise versus resolve without a
@@ -1662,6 +1688,9 @@ func (e *Engine) resolveChange(ctx context.Context, orgID, docID, crID, userID u
 	}
 	if !changeRequestCanResolve(cr.Status) {
 		return nil, ErrChangeAlreadyResolved
+	}
+	if len(doc.HtmlSourceJson) != 0 {
+		return nil, ErrSigningAdmissionUnavailableV1
 	}
 	resolution := "denied"
 	if approve {
@@ -1777,212 +1806,30 @@ func replaceBlockQuote(raw json.RawMessage, blockID, quote, proposed string) (js
 	return updated, true, nil
 }
 
-// SignerComment posts a comment from a recipient on the shared document thread
-// and emails the sender.
+// These legacy raw-string entrypoints cannot retain the transport's decoded
+// input or response. Production routes use the typed native methods. Keep only
+// fail-closed validation while older direct-call fixtures migrate; never reopen
+// ordinary SQL/audit as an alternate writer.
 func (e *Engine) SignerComment(ctx context.Context, rc *RecipientContext, body string, evidence ParticipantResponseEvidence) (*generated.DocumentComment, error) {
-	if err := validateNoticeEvidence(rc, evidence.Notice); err != nil {
-		return nil, err
-	}
 	if err := validateCommentBody(body); err != nil {
 		return nil, err
 	}
-	rec := rc.Recipient
-	doc := rc.Document
-	tx, err := e.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := e.Queries.WithTx(tx)
-
-	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return nil, fmt.Errorf("lock document for signer comment: %w", err)
-	}
-	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
-		return nil, err
-	}
-	if err := checkDocumentCommentable(lockedDoc); err != nil {
-		return nil, err
-	}
-	freshRec, err := q.GetRecipientForShare(ctx, generated.GetRecipientForShareParams{ID: rec.ID, DocumentID: lockedDoc.ID, OrgID: lockedDoc.OrgID})
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
-		return nil, err
-	}
-	if freshRec.DocumentID != lockedDoc.ID {
-		return nil, ErrDocumentNotCommentable
-	}
-	c, err := q.CreateComment(ctx, generated.CreateCommentParams{
-		DocumentID:  doc.ID,
-		RecipientID: pgtype.UUID{Bytes: rec.ID, Valid: true},
-		AuthorName:  freshRec.Name,
-		AuthorSide:  "signer",
-		Body:        body,
-	})
-	if err != nil {
-		return nil, err
-	}
-	var notificationMessages []dispatch.Message
-	if e.Mailer != nil {
-		sender, err := q.GetUser(ctx, lockedDoc.SenderID)
-		if err != nil {
-			return nil, fmt.Errorf("load signer-comment notification sender: %w", err)
-		}
-		notificationMessages, err = e.prepareNotificationTx(ctx, q, dispatch.KindNewComment, sender.Email, dispatch.TemplateContext{
-			DocumentName:  lockedDoc.Name,
-			SenderName:    sender.Name,
-			SenderEmail:   sender.Email,
-			RecipientName: freshRec.Name,
-			OrgName:       e.OrgName,
-			DeclineReason: body,
-			OpenURL:       strings.TrimRight(e.BaseURL, "/") + "/documents/" + doc.ID.String(),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("prepare signer-comment notification: %w", err)
-		}
-	}
-	commentPayload, err := responseAuditPayload(map[string]any{"side": "signer"}, evidence.Notice)
-	if err != nil {
-		return nil, fmt.Errorf("bind signer-comment notice evidence: %w", err)
-	}
-	pendingAudit, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: doc.OrgID, DocumentID: &doc.ID, RecipientID: &rec.ID,
-		Kind:      audit.KindCommentPosted,
-		IP:        evidence.IP,
-		UserAgent: evidence.UserAgent,
-		Payload:   commentPayload,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("audit signer comment: %w", err)
-	}
-	if err := ValidateLockedRecipientCredential(rc, freshRec, lockedDoc, e.now()); err != nil {
-		return nil, err
-	}
-	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit signer comment: %w", err)
-	}
-	e.Audit.Publish(pendingAudit)
-	e.deliverPostCommitEmails(notificationMessages)
-	return c, nil
+	return nil, ErrSigningAdmissionUnavailableV1
 }
-
-// SenderComment posts a comment from the sending org on the shared thread and
-// emails each signer recipient.
 func (e *Engine) SenderComment(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string) (*generated.DocumentComment, error) {
-	return e.senderComment(ctx, orgID, docID, userID, authorName, body, nil)
+	if err := validateCommentBody(body); err != nil {
+		return nil, err
+	}
+	return nil, ErrSigningAdmissionUnavailableV1
 }
-
-// SenderCommentWithAuthorization binds a transport's admitted identity to the
-// live member after lock waits and checks its expiry immediately before commit.
-// The callback must not perform response writes or external side effects.
 func (e *Engine) SenderCommentWithAuthorization(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string, authorize func(context.Context, *generated.User) error) (*generated.DocumentComment, error) {
 	if authorize == nil {
 		return nil, ErrSenderCommentNotAuthorized
 	}
-	return e.senderComment(ctx, orgID, docID, userID, authorName, body, authorize)
-}
-
-func (e *Engine) senderComment(ctx context.Context, orgID, docID, userID uuid.UUID, authorName, body string, authorize func(context.Context, *generated.User) error) (*generated.DocumentComment, error) {
 	if err := validateCommentBody(body); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer rollbackCancel()
-		_ = tx.Rollback(rollbackCtx)
-	}()
-	q := e.Queries.WithTx(tx)
-	doc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrCommentDocumentNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock document for sender comment: %w", err)
-	}
-	if err := checkDocumentCommentable(doc); err != nil {
-		return nil, err
-	}
-	user, err := q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: userID, OrgID: orgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrSenderCommentNotAuthorized
-	}
-	if err != nil {
-		return nil, fmt.Errorf("load sender-comment authorization: %w", err)
-	}
-	if user.Role != string(auth.RoleSender) && user.Role != string(auth.RoleOwner) {
-		return nil, ErrSenderCommentNotAuthorized
-	}
-	if authorize != nil {
-		if err := authorize(ctx, user); err != nil {
-			return nil, err
-		}
-	}
-	authorName = user.Name
-	if authorName == "" {
-		authorName = user.Email
-	}
-	c, err := q.CreateComment(ctx, generated.CreateCommentParams{
-		DocumentID: docID,
-		UserID:     pgtype.UUID{Bytes: userID, Valid: true},
-		AuthorName: authorName,
-		AuthorSide: "sender",
-		Body:       body,
-	})
-	if err != nil {
-		return nil, err
-	}
-	var notificationMessages []dispatch.Message
-	if e.Mailer != nil {
-		recs, err := q.ListRecipientsByDocument(ctx, docID)
-		if err != nil {
-			return nil, fmt.Errorf("list sender-comment notification recipients: %w", err)
-		}
-		for _, r := range recs {
-			if !recipientReceivesSenderComment(r) {
-				continue
-			}
-			messages, err := e.prepareNotificationTx(ctx, q, dispatch.KindNewComment, r.Email, dispatch.TemplateContext{
-				DocumentName:  doc.Name,
-				OrgName:       e.OrgName,
-				RecipientName: authorName,
-				DeclineReason: body,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("prepare sender-comment notification: %w", err)
-			}
-			notificationMessages = append(notificationMessages, messages...)
-		}
-	}
-	pendingAudit, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: orgID, DocumentID: &docID, ActorUserID: &userID,
-		Kind: audit.KindCommentPosted, Payload: map[string]any{"side": "sender"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("audit sender comment: %w", err)
-	}
-	if authorize != nil {
-		if err := authorize(ctx, user); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit sender comment: %w", err)
-	}
-	e.Audit.Publish(pendingAudit)
-	e.deliverPostCommitEmails(notificationMessages)
-	return c, nil
+	return nil, ErrSigningAdmissionUnavailableV1
 }
 
 const (
@@ -2018,7 +1865,11 @@ func checkDocumentCommentable(doc *generated.Document) error {
 	if doc == nil {
 		return ErrDocumentNotCommentable
 	}
-	switch doc.Status {
+	return checkCommentStatusV1(doc.Status)
+}
+
+func checkCommentStatusV1(status string) error {
+	switch status {
 	case "sent", "in_progress", "changes_requested":
 		return nil
 	default:
@@ -2030,21 +1881,7 @@ func checkDocumentCommentable(doc *generated.Document) error {
 // response has yet been captured. The current schema has no superseding
 // ceremony/version relation for signatures and acceptances; mutating those
 // rows in place would destroy evidence, so such revisions fail closed.
-func (e *Engine) Revise(ctx context.Context, orgID, docID uuid.UUID) (*generated.Document, error) {
-	return e.revise(ctx, orgID, docID, uuid.Nil, nil)
-}
-
-// ReviseWithAuthorization checks a transport's original admitted identity
-// against the live member after the document lock, then checks expiry again
-// immediately before commit. The callback must have no external side effects.
-func (e *Engine) ReviseWithAuthorization(ctx context.Context, orgID, docID, userID uuid.UUID, authorize auth.TransactionAuthorization) (*generated.Document, error) {
-	if userID == uuid.Nil || authorize == nil {
-		return nil, ErrRevisionNotAuthorized
-	}
-	return e.revise(ctx, orgID, docID, userID, authorize)
-}
-
-func (e *Engine) revise(ctx context.Context, orgID, docID, userID uuid.UUID, authorize auth.TransactionAuthorization) (*generated.Document, error) {
+func (e *Engine) reviseLegacyV1(ctx context.Context, orgID, docID, userID uuid.UUID, authorize auth.TransactionAuthorization) (*generated.Document, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := e.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -2057,6 +1894,18 @@ func (e *Engine) revise(ctx context.Context, orgID, docID, userID uuid.UUID, aut
 		_ = tx.Rollback(rollbackCtx)
 	}()
 	q := e.Queries.WithTx(tx)
+	// Only a fixed scalar implementation selector may precede the unchanged
+	// non-HTML legacy body. HTML requires the genuine native workflow owner.
+	html, err := q.GetHTMLCeremonyImplementationV1(ctx, generated.GetHTMLCeremonyImplementationV1Params{DocumentID: docID, OrgID: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRevisionDocumentNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock document for revision: %w", err)
+	}
+	if html {
+		return nil, ErrSigningAdmissionUnavailableV1
+	}
 
 	locked, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2093,6 +1942,9 @@ func (e *Engine) revise(ctx context.Context, orgID, docID, userID uuid.UUID, aut
 	}
 	if captured {
 		return nil, ErrRevisionWouldDestroyEvidence
+	}
+	if len(locked.HtmlSourceJson) != 0 {
+		return nil, ErrSigningAdmissionUnavailableV1
 	}
 	if err := htmlmaterialization.CaptureRetiredCeremony(ctx, q, locked, userID); err != nil {
 		return nil, fmt.Errorf("archive retired HTML ceremony: %w", err)
@@ -2291,73 +2143,14 @@ func (e *Engine) renderEnvelopeChildrenBody(ctx context.Context, envelope *gener
 // MarkViewed flips status pending→viewed (idempotent for already-viewed)
 // and emits an audit event the first time it happens.
 func (e *Engine) MarkViewed(ctx context.Context, rc *RecipientContext, evidence ParticipantResponseEvidence) error {
-	if err := validateNoticeEvidence(rc, evidence.Notice); err != nil {
-		return err
-	}
-	rec := rc.Recipient
-	doc := rc.Document
-	tx, err := e.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := e.Queries.WithTx(tx)
-
-	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return fmt.Errorf("lock document for viewed event: %w", err)
-	}
-	if err := ValidateLockedNoticeEvidence(rc, lockedDoc, evidence.Notice); err != nil {
-		return err
-	}
-	if err := checkActiveCeremonyAccess(lockedDoc); err != nil {
-		return err
-	}
-	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return err
-	}
-	if err := checkLockedMagicLinkExpiry(freshRec, lockedDoc, e.now()); err != nil {
-		return err
-	}
-	if freshRec.DocumentID != lockedDoc.ID {
-		return ErrDocumentNotSignable
-	}
-	if freshRec.Status != "pending" && freshRec.Status != "sent" {
-		return nil
-	}
-	if err := q.SetRecipientStatus(ctx, generated.SetRecipientStatusParams{
-		ID: rec.ID, DocumentID: rec.DocumentID,
-		Status:         "viewed",
-		DeclinedReason: pgtype.Text{},
-	}); err != nil {
-		return err
-	}
-	viewPayload, err := responseAuditPayload(nil, evidence.Notice)
-	if err != nil {
-		return fmt.Errorf("bind view notice evidence: %w", err)
-	}
-	pendingAudit, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: lockedDoc.OrgID, DocumentID: &rec.DocumentID, RecipientID: &rec.ID,
-		Kind:      audit.KindDocumentViewed,
-		IP:        evidence.IP,
-		UserAgent: evidence.UserAgent,
-		Payload:   viewPayload,
-	})
-	if err != nil {
-		return fmt.Errorf("audit document view: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit document view: %w", err)
-	}
-	e.Audit.Publish(pendingAudit)
-	return nil
+	return e.markViewedOwnedV1(ctx, rc, evidence)
 }
 
 // preparedSignature holds a rendered span. Immutable storage happens only
 // after the authoritative transaction checks pass.
 type preparedSignature struct {
 	fieldBlockID string
+	pdfTargets   *manualSignatureTargets
 	imgKey       string
 	imgVersionID string
 	span         []byte
@@ -2526,23 +2319,29 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	// Per-document finalize mutex. pg_try_advisory_lock returns immediately;
 	// if another finalize holds it, bail with ErrFinalizeInProgress and let
 	// that one (or the retry worker) complete.
+	serialization, err := e.acquireHistoricalFinalizationLockV1(ctx, orgID, docID)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer closeHistoricalFinalizationLockV1(ctx, serialization, orgID, docID)
+	// The remaining lifecycle transactions are ported as their own fixed native phases.
 	conn, err := e.Pool.Acquire(ctx)
 	if err != nil {
 		return "", "", false, err
 	}
 	defer conn.Release()
-	lockKey := advisoryLockKey(docID)
-	var got bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&got); err != nil { //nolint:rawsql
-		return "", "", false, err
-	}
-	if !got {
-		return "", "", false, ErrFinalizeInProgress
-	}
-	defer func() { _, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey) }() //nolint:rawsql
+	var nativeClaim *ownedHistoricalFinalizationClaimV1
+	defer func() {
+		if nativeClaim != nil {
+			nativeClaim.closeV1()
+		}
+	}()
 
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: orgID})
 	if err != nil {
+		return "", "", false, err
+	}
+	if err := requireHistoricalSigningAdmissionV1(doc); err != nil {
 		return "", "", false, err
 	}
 	// Idempotency: already finalized.
@@ -2559,14 +2358,14 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		return "", "", false, fmt.Errorf("finalize block evidence: %w", err)
 	}
 	if doc.Status == "finalizing" {
-		doc, err = e.claimDocumentFinalizing(ctx, conn, doc.OrgID, doc.ID, "signature")
+		doc, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, doc.OrgID, doc.ID, "signature")
 		if err != nil {
 			return "", "", false, err
 		}
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: doc.ID, OrgID: doc.OrgID,
 		}); ierr == nil {
-			completed, did, rerr := e.resumeDocumentFinalization(ctx, conn, doc, capture)
+			completed, did, rerr := e.resumeDocumentFinalizationAfterSerializedClaimOwnedV1(ctx, conn, doc, capture, nativeClaim, serialization)
 			if rerr != nil || completed == nil {
 				return "", "", false, rerr
 			}
@@ -2575,30 +2374,48 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 			return "", "", false, fmt.Errorf("load signature finalization intent: %w", ierr)
 		}
 		// The process may have exited after claiming finalizing but before it
-		// could persist the staged-object intent. Re-render below from the now
-		// frozen ceremony state.
+		// could persist the staged-object intent. Reuse the durable original
+		// preparation below; only absent captures may produce new bytes.
 	} else if doc.Status == "in_progress" {
-		doc, err = e.claimDocumentFinalizing(ctx, conn, doc.OrgID, doc.ID, "signature")
+		doc, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, doc.OrgID, doc.ID, "signature")
 		if err != nil {
 			return "", "", false, err
 		}
 	} else {
 		return "", "", false, ErrDocumentRevisedDuringFinalize
 	}
-	doc, err = e.ensureDocumentSourceVersions(ctx, doc)
+	reference, err := e.captureHistoricalFinalizationStageReferenceV1(ctx, doc, serialization, nativeClaim)
 	if err != nil {
 		return "", "", false, err
 	}
-	if err := e.ensureSignatureVersions(ctx, doc.ID); err != nil {
+	doc = nil
+	if err = nativeClaim.retireForStageV1(ctx, e, reference); err != nil {
 		return "", "", false, err
 	}
-	retainUntil, err := finalizationRetentionDeadline(doc)
+	nativeClaim = nil
+	var sourceOwner *ownedHistoricalFinalizationSourceV1
+	defer func() {
+		if sourceOwner != nil {
+			retainHistoricalFinalizationInputV1(capture, sourceOwner)
+		}
+	}()
+	doc, sourceOwner, err = e.loadHistoricalFinalizationSignatureSourceOwnedV1(ctx, reference)
+	if err != nil {
+		return "", "", false, err
+	}
+	_, err = finalizationRetentionDeadline(doc)
 	if err != nil {
 		return "", "", false, fmt.Errorf("finalize document: %w", err)
 	}
-	brandCSS, err := e.resolveBrandingCSS(ctx, doc)
+	frozenCertificate, err := e.ordinaryCertificateInputFrozenV1(ctx, reference)
 	if err != nil {
-		return "", "", false, fmt.Errorf("finalize document: resolve branding: %w", err)
+		return "", "", false, err
+	}
+	if !frozenCertificate {
+		_, err = e.resolveBrandingCSSForFinalizationOwnedV1(ctx, reference, sourceOwner)
+		if err != nil {
+			return "", "", false, fmt.Errorf("finalize document: resolve branding: %w", err)
+		}
 	}
 
 	// From this point onward the durable finalizing state closes every
@@ -2609,94 +2426,34 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	// Load one immutable child snapshot for both the body render and the signed
 	// terminal manifest. Envelope send freezes content and draft-only topology
 	// guards prevent either set from changing after the ceremony starts.
-	var envelopeChildren []*generated.Document
-	var manifestHTML *string
-	if doc.IsEnvelope {
-		envelopeChildren, err = e.ensureEnvelopeChildrenEvidenceVersions(ctx, doc)
-		if err != nil {
+	var manifest *pdfadmission.ApplicationHistoricalTerminalManifestV1
+	if doc.IsEnvelope && !frozenCertificate {
+		if _, err = sourceOwner.ensureEnvelopeChildrenEvidenceVersionsV1(e); err != nil {
 			return "", "", false, err
 		}
-		manifest, merr := envelopes.BuildTerminalManifest(doc, envelopeChildren)
-		if merr != nil {
-			return "", "", false, fmt.Errorf("finalize envelope: build terminal manifest: %w", merr)
-		}
-		section := manifest.HTMLSection()
-		if section == "" {
-			return "", "", false, errors.New("finalize envelope: terminal manifest is empty")
-		}
-		manifestHTML = &section
-	}
-	// Render the exact contract body first. The audit certificate is a separate
-	// artifact and signs this body's SHA-256. Keeping it separate avoids the
-	// impossible self-hash cycle that occurs when a certificate claims the hash
-	// of a PDF that contains the certificate itself.
-	var pdfBytes []byte
-	if doc.SourceKind == "blocks" {
-		var signedHTML string
-		var rerr error
-		if doc.IsEnvelope {
-			signedHTML, rerr = e.renderEnvelopeChildrenBody(ctx, doc, envelopeChildren, "en")
-		} else {
-			signedHTML, rerr = e.renderFinalBlocksBody(ctx, doc, "en")
-		}
-		if rerr != nil {
-			return "", "", false, rerr
-		}
-		contractHTML := buildHTMLDocument(brandCSS, signedHTML, "")
-		pdfBytes, err = e.PDF.HTMLToPDF(ctx, contractHTML, render.PDFOptions{WaitDelay: "1500ms"})
+		manifest, err = sourceOwner.terminalManifestV1(e)
 		if err != nil {
-			return "", "", false, fmt.Errorf("gotenberg render: %w", err)
+			return "", "", false, fmt.Errorf("finalize envelope: build terminal manifest: %w", err)
 		}
-	} else {
-		original, lerr := e.loadSourcePDF(ctx, doc)
-		if lerr != nil {
-			return "", "", false, lerr
-		}
-		stamped, serr := e.stampFieldsAndSignatures(ctx, doc, original)
-		if serr != nil {
-			return "", "", false, fmt.Errorf("stamp pdf: %w", serr)
-		}
-		pdfBytes = stamped
+		defer manifest.CloseConsumerV1()
 	}
-
-	artifactDir := path.Join("org", doc.OrgID.String(), "documents", doc.ID.String())
-	finalSum := sha256.Sum256(pdfBytes)
-	chainHead, err := e.Queries.LatestEventChainHeadForOrg(ctx, doc.OrgID)
-	if err != nil {
-		return "", "", false, fmt.Errorf("load pre-final audit chain head: %w", err)
+	retired, err := e.prepareOrdinaryHistoricalFinalizationV1(ctx, reference, sourceOwner, doc, manifest)
+	if retired {
+		sourceOwner = nil
 	}
-	documentEvents, err := e.loadCertificateDocumentEvents(ctx, doc.ID)
 	if err != nil {
 		return "", "", false, err
 	}
-	claims, err := newCertificateEvidenceClaims(doc, finalSum[:], chainHead, documentEvents)
-	if err != nil {
-		return "", "", false, err
+	if manifest != nil {
+		manifest.CloseConsumerV1()
+		manifest = nil
 	}
-	finalKey = path.Join(artifactDir, "final-"+hex.EncodeToString(finalSum[:])+".pdf")
-	storedFinal, err := e.Storage.PutEvidenceVersioned(ctx, finalKey, "application/pdf", pdfBytes, retainUntil)
-	if err != nil {
-		return "", "", false, fmt.Errorf("store final pdf: %w", err)
-	}
-	if storedFinal.SHA256 != finalSum || strings.TrimSpace(storedFinal.VersionID) == "" {
-		return "", "", false, errors.New("store final pdf: storage digest mismatch")
-	}
-	certArtifacts, err := e.renderAndStoreAuditCertificate(ctx, doc, manifestHTML, claims, artifactDir, brandCSS, retainUntil)
-	if err != nil {
-		return "", "", false, err
-	}
-	staged := stagedDocumentFinalization{
-		Mode: "signature", FinalKey: finalKey, FinalSHA256: finalSum,
-		FinalVersionID: storedFinal.VersionID, Certificate: certArtifacts,
-	}
-	if err := e.beginDocumentFinalization(ctx, conn, doc, staged); err != nil {
-		return "", "", false, err
-	}
-	completedDoc, did, err := e.resumeDocumentFinalization(ctx, conn, doc, capture)
+	completedDoc, did, err := e.resumeDocumentFinalizationFromStageReferenceOwnedV1(ctx, conn, reference, capture)
 	if err != nil || completedDoc == nil {
 		return "", "", false, err
 	}
 	return completedDoc.FinalPdfKey.String, completedDoc.AuditCertKey.String, did, nil
+
 }
 
 // verifyCompletedEnvelopeChildren makes the terminal propagation all-or-none.
@@ -2873,7 +2630,7 @@ func (e *Engine) signerRolesForDocument(ctx context.Context, doc *generated.Docu
 	return e.signerRolesForDocumentTx(ctx, e.Queries, doc)
 }
 
-func (e *Engine) signerRolesForDocumentTx(ctx context.Context, q *generated.Queries, doc *generated.Document) ([]string, error) {
+func (e *Engine) signerRolesForDocumentTx(ctx context.Context, q signerRoleQueriesV1, doc *generated.Document) ([]string, error) {
 	if doc == nil {
 		return nil, errors.New("resolve signer roles: nil document")
 	}
@@ -2881,7 +2638,7 @@ func (e *Engine) signerRolesForDocumentTx(ctx context.Context, q *generated.Quer
 		if doc.SourceKind == "blocks" {
 			return projectedBlockSignerRoles(doc)
 		}
-		if q == nil {
+		if signerRoleQueriesNilV1(q) {
 			return nil, errors.New("resolve signer roles: PDF field store unavailable")
 		}
 		if err := htmlsource.ValidateSigningPageState(ctx, q, doc, 0); err != nil {
@@ -3200,11 +2957,14 @@ func (e *Engine) renderSignedHTML(ctx context.Context, tree *blocks.Tree, docID 
 			return "", err
 		}
 	}
-	spanBySigner := map[string]string{}
+	spanBySigner := map[string]render.ArchivedSignatureSpan{}
 	for _, s := range sigs {
-		span, err := render.RenderSignatureSpan(s.TypedName, s.Font)
+		span, err := e.archivedSignatureSpan(ctx, docID, s)
 		if err != nil {
-			return "", fmt.Errorf("render stored signature %s: %w", s.ID, err)
+			return "", fmt.Errorf("render stored signature: %w", err)
+		}
+		if _, duplicate := spanBySigner[s.RecipientID.String()]; duplicate {
+			return "", errors.New("render stored signature: duplicate recipient")
 		}
 		spanBySigner[s.RecipientID.String()] = span
 	}
@@ -3217,8 +2977,9 @@ func (e *Engine) renderSignedHTML(ctx context.Context, tree *blocks.Tree, docID 
 		}
 	}
 
-	var replaceFields func([]blocks.Block)
-	replaceFields = func(bs []blocks.Block) {
+	spanByField := map[string]render.ArchivedSignatureSpan{}
+	var bindFields func([]blocks.Block)
+	bindFields = func(bs []blocks.Block) {
 		for i := range bs {
 			b := &bs[i]
 			if b.Type == blocks.TypeSignatureField {
@@ -3226,30 +2987,21 @@ func (e *Engine) renderSignedHTML(ctx context.Context, tree *blocks.Tree, docID 
 				if role == "" {
 					role = "signer"
 				}
-				var signedSpan string
 				for _, rec := range recs {
 					if rec.Role != role {
 						continue
 					}
 					if span, ok := spanBySigner[rec.ID.String()]; ok {
-						signedSpan = span
+						spanByField[b.ID] = span
 						break
 					}
 				}
-				if signedSpan == "" {
-					signedSpan = `<span class="hash-field--unsigned">` + htmlEscape(i18n.T(i18n.Normalize(locale), "sign.signaturePending", nil)) + `</span>`
-				} else {
-					signedSpan = `<span class="hash-field--signed">` + signedSpan + `</span>`
-				}
-				b.Type = blocks.TypeRawHTML
-				b.Text = signedSpan
-				b.Attrs = nil
 			}
-			replaceFields(b.Content)
+			bindFields(b.Content)
 		}
 	}
-	replaceFields(tree.Blocks)
-	return blocks.RenderHTML(tree, vars), nil
+	bindFields(tree.Blocks)
+	return blocks.RenderHTMLWithSignatures(tree, vars, spanByField, i18n.T(i18n.Normalize(locale), "sign.signaturePending", nil)), nil
 }
 
 // renderAuditCertificateWithManifest accepts the terminal envelope manifest
@@ -3315,7 +3067,11 @@ func (e *Engine) renderAuditCertificateWithManifest(ctx context.Context, doc *ge
 	// dropdown/initial) so the audit cert binds the structured signer
 	// inputs alongside the typed-name signatures. Empty rendering when
 	// no fields were filled keeps unchanged docs identical to pre-v1.2.
-	if section := renderFieldValuesSection(ctx, e.Queries, doc.ID); section != "" {
+	section, err := renderFieldValuesSection(ctx, e.Queries, doc.ID)
+	if err != nil {
+		return "", "", "", err
+	}
+	if section != "" {
 		sb.WriteString(section)
 	}
 
@@ -3376,6 +3132,7 @@ func (e *Engine) renderAuditCertificateWithManifest(ctx context.Context, doc *ge
 // exact signed payload and detached signature under digest-addressed immutable
 // keys. Both signature and acknowledgement ceremonies use this same path.
 type storedAuditCertificate struct {
+	nativeReport       *pdfadmission.ApplicationHistoricalAuditCertificateV1
 	CertKey            string
 	CertSHA256         [sha256.Size]byte
 	CertVersionID      string
@@ -3482,13 +3239,13 @@ func formatNullableTS(t pgtype.Timestamptz) string {
 // completed_at timestamp. Values are HTML-escaped so a malicious signer
 // can't inject markup into the cert; long values are truncated at 200
 // chars with an indicator so the cert stays readable on a printed page.
-func renderFieldValuesSection(ctx context.Context, q *generated.Queries, docID uuid.UUID) string {
+func renderFieldValuesSection(ctx context.Context, q *generated.Queries, docID uuid.UUID) (string, error) {
 	if q == nil {
-		return ""
+		return "", errors.New("audit certificate: field queries unavailable")
 	}
 	rows, err := q.ListFieldsByDocument(ctx, docID)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("audit certificate: load filled fields: %w", err)
 	}
 	var visible []*generated.DocumentField
 	for _, f := range rows {
@@ -3503,7 +3260,7 @@ func renderFieldValuesSection(ctx context.Context, q *generated.Queries, docID u
 		visible = append(visible, f)
 	}
 	if len(visible) == 0 {
-		return ""
+		return "", nil
 	}
 	var sb strings.Builder
 	sb.WriteString(`<h3 style="margin-top:24px">Filled fields</h3>`)
@@ -3523,7 +3280,7 @@ func renderFieldValuesSection(ctx context.Context, q *generated.Queries, docID u
 		)
 	}
 	sb.WriteString(`</tbody></table>`)
-	return sb.String()
+	return sb.String(), nil
 }
 
 // truncateFieldValueForCert caps a value at 200 chars with a marker so
@@ -3539,74 +3296,7 @@ func truncateFieldValueForCert(v string) string {
 }
 
 func buildHTMLDocument(brandCSS, body, cert string) string {
-	certificateStart := ""
-	if strings.TrimSpace(body) == "" && strings.TrimSpace(cert) != "" {
-		// Standalone evidence has no preceding contract body. Forcing a page
-		// break here otherwise leaves a blank branded page before the cert.
-		certificateStart = ".hash-doc > .hash-cert-page { page-break-before: auto; break-before: auto; }"
-	}
-	// Branding CSS is emitted FIRST so its custom properties on :root are
-	// available to the base stylesheet's rules below. The base styles use
-	// var(--hash-text) etc. with safe fallbacks so an unconfigured
-	// org still renders with the system defaults.
-	// Layout note: every visible rule is scoped under .hash-doc so injecting
-	// this whole document into the signer SPA via {@html} can't leak typography
-	// onto the app chrome. The content lives in a centered, fixed-measure column
-	// (Google-Docs feel); page geometry/margins are set by Gotenberg on render.
-	return fmt.Sprintf(`<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8" />
-%s
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; }
-  .hash-doc { max-width: 46rem; margin: 0 auto; font-family: var(--hash-font-body, Inter), system-ui, -apple-system, sans-serif; font-size: 11.5px; line-height: 1.65; color: var(--hash-text, #18181b); }
-  .hash-doc__rule { height: 3px; border-radius: 2px; background: var(--hash-accent, #0891B2); margin: 0 0 26px; }
-  .hash-doc h1 { font-family: var(--hash-font-heading, Geist), sans-serif; font-weight: 600; font-size: 24px; line-height: 1.2; letter-spacing: -0.01em; margin: 6px 0 14px; color: var(--hash-primary, #18181b); }
-  .hash-doc h2 { font-family: var(--hash-font-heading, Geist), sans-serif; font-weight: 600; font-size: 14.5px; margin: 22px 0 9px; padding-left: 11px; border-left: 3px solid var(--hash-accent, #0891B2); color: var(--hash-primary, #18181b); }
-  .hash-doc h3 { font-family: var(--hash-font-heading, Geist), sans-serif; font-weight: 600; font-size: 12.5px; margin: 16px 0 6px; color: var(--hash-primary, #18181b); }
-  .hash-doc p { margin: 8px 0; }
-  /* Pagination: keep each section (heading + its content) whole; if it would be
-     cut by a page edge, move it to the next page instead of splitting it. */
-  .hash-doc .doc-section { break-inside: avoid; page-break-inside: avoid; margin: 0 0 12px; }
-  .hash-doc .doc-section:first-child { margin-top: 0; }
-  .hash-doc a { color: var(--hash-accent, #0891B2); }
-  .hash-doc ul, .hash-doc ol { margin: 9px 0; padding-left: 22px; }
-  .hash-doc li { margin: 5px 0; }
-  .hash-doc strong { font-weight: 600; color: var(--hash-primary, #18181b); }
-  .hash-doc table { border-collapse: collapse; width: 100%%; margin: 10px 0; break-inside: auto; }
-  .hash-doc th, .hash-doc td { padding: 6px 9px; border-bottom: 1px solid #e7e5e4; text-align: left; vertical-align: top; }
-  .hash-doc th { font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hash-muted, #52525b); }
-  /* A table may span pages, but never split a row; repeat the header on each page. */
-  .hash-doc thead { display: table-header-group; }
-  .hash-doc tr, .hash-doc th, .hash-doc td { break-inside: avoid; page-break-inside: avoid; }
-  .hash-doc hr { border: 0; border-top: 1px solid #e7e5e4; margin: 16px 0; }
-  .hash-doc p, .hash-doc li, .hash-doc blockquote { break-inside: avoid; page-break-inside: avoid; }
-  .hash-doc h1, .hash-doc h2, .hash-doc h3 { break-after: avoid; page-break-after: avoid; }
-  .hash-doc blockquote { margin: 12px 0; padding: 11px 16px; border-left: 3px solid var(--hash-accent, #0891B2); background: rgba(8,145,178,0.06); color: var(--hash-text, #18181b); border-radius: 0 7px 7px 0; }
-  .hash-doc blockquote p { margin: 0; }
-  .hash-doc pre { background: #f5f5f4; border: 1px solid #e7e5e4; border-radius: 6px; padding: 10px; font-size: 11px; overflow-x: auto; }
-  .hash-doc img { max-width: 100%%; }
-  %s
-  .hash-doc .hash-cert-page table { table-layout: fixed; }
-  .hash-doc .hash-cert-page td, .hash-doc .hash-cert-page code { overflow-wrap: anywhere; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(1) { width: 12%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(2) { width: 26%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(3) { width: 9%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(4) { width: 17%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(5) { width: 10%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(6) { width: 26%%; }
-  %s
-  .hash-field--signed { display: inline-block; min-width: 340px; border-bottom: 1.5px solid var(--hash-primary, #18181b); padding: 0.15em 0.4em 0.3em; background: transparent; }
-  .hash-field--unsigned { display: inline-block; min-width: 340px; border-bottom: 1.5px dashed var(--hash-accent, #0891B2); padding: 0.5em 0.4em; color: var(--hash-muted, #52525b); font-style: italic; }
-</style>
-</head><body>
-<div class="hash-doc">
-<div class="hash-doc__rule"></div>
-%s
-%s
-</div>
-</body></html>`, brandCSS, render.SignatureCSS(), certificateStart, body, cert)
+	return render.BuildHTMLDocumentV1(brandCSS, body, cert)
 }
 
 func htmlEscape(s string) string {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/bright-interaction/hash/internal/nethard"
@@ -21,11 +22,13 @@ import (
 // US-routing tradeoff. Shield-tokenization is mandatory in front of
 // this provider so no PII reaches Anthropic infra.
 type AnthropicProvider struct {
-	BaseURL string // default https://api.anthropic.com/v1/messages
-	APIKey  string
-	ModelID string // e.g. "claude-sonnet-4-6" or "claude-opus-4-7"
-	Version string // anthropic-version header
-	Client  HTTPDoer
+	BaseURL            string // default https://api.anthropic.com/v1/messages
+	APIKey             string
+	ModelID            string // e.g. "claude-sonnet-4-6" or "claude-opus-4-7"
+	Version            string // anthropic-version header
+	Client             HTTPDoer
+	nativeClient       *http.Client
+	nativeAllowPrivate bool
 }
 
 // NewAnthropicProvider builds a provider. allowPrivate=false (production) uses
@@ -39,12 +42,13 @@ func NewAnthropicProvider(baseURL, apiKey, model string, allowPrivate bool) *Ant
 	if model == "" {
 		model = "claude-sonnet-4-6"
 	}
+	client := nethard.Client(30*time.Second, func() bool { return allowPrivate })
 	return &AnthropicProvider{
 		BaseURL: baseURL,
 		APIKey:  apiKey,
 		ModelID: model,
 		Version: "2023-06-01",
-		Client:  nethard.Client(30*time.Second, func() bool { return allowPrivate }),
+		Client:  client, nativeClient: client, nativeAllowPrivate: allowPrivate,
 	}
 }
 
@@ -129,14 +133,21 @@ func (a *AnthropicProvider) Complete(ctx context.Context, req Request) (Response
 	if len(parsed.Content) == 0 {
 		return Response{}, errors.New("anthropic: empty response")
 	}
-	out := ""
+	var out strings.Builder
+	textBytes := 0
 	for _, c := range parsed.Content {
 		if c.Type == "text" {
-			out += c.Text
+			textBytes += len(c.Text)
+		}
+	}
+	out.Grow(textBytes)
+	for _, c := range parsed.Content {
+		if c.Type == "text" {
+			out.WriteString(c.Text)
 		}
 	}
 	return Response{
-		Text:         out,
+		Text:         out.String(),
 		InputTokens:  parsed.Usage.InputTokens,
 		OutputTokens: parsed.Usage.OutputTokens,
 		Model:        parsed.Model,

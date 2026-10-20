@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
-
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // loopQuotaWarnings emails an org at most once per billing period when
@@ -39,45 +39,55 @@ func (w *worker) loopQuotaWarnings(ctx context.Context) {
 }
 
 func (w *worker) runQuotaWarningsOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runQuotaWarningsOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobQuotaWarnings, started, state)
+}
+func (w *worker) runQuotaWarningsOnceObserved(ctx context.Context) flarereport.JobInvocationState {
+	state := flarereport.InvocationReturned
 	if w.billing.OperatorMode() {
 		for _, orgID := range w.billing.OperatorOrgIDs() {
 			if ctx.Err() != nil {
-				return
+				return state
 			}
-			w.sendOperatorQuotaWarning(ctx, orgID)
+			state = mergeWorkerInvocation385(state, w.sendOperatorQuotaWarningObserved(ctx, orgID))
 		}
-		return
+		return state
 	}
 	rows, err := w.queries.ListSubscriptionsOverQuotaWarning(ctx, quotaWarningThreshold)
 	if err != nil {
 		slog.Warn("quota_warnings: list", "err", err)
-		return
+		return flarereport.InvocationUnavailable
 	}
 	for _, row := range rows {
-		w.sendQuotaWarning(ctx, row)
+		state = mergeWorkerInvocation385(state, w.sendQuotaWarningObserved(ctx, row))
 	}
+	return state
 }
 
 // sendQuotaWarning picks the quota that tripped first (documents wins
 // ties), emails every user on the org, then marks the subscription so
 // the next tick within the same billing period skips it.
 func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscriptionsOverQuotaWarningRow) {
+	w.sendQuotaWarningObserved(ctx, row)
+}
+func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.ListSubscriptionsOverQuotaWarningRow) flarereport.JobInvocationState {
 	if row == nil {
-		return
+		return flarereport.InvocationReturned
 	}
 	quotaKind, used, limit, pct := pickTrippedQuota(row, quotaWarningThreshold)
 	if quotaKind == "" {
-		return
+		return flarereport.InvocationReturned
 	}
 	org, err := w.queries.GetOrg(ctx, row.OrgID)
 	if err != nil {
 		slog.Warn("quota_warnings: load org", "org_id", row.OrgID, "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	users, err := w.queries.ListUsersByOrg(ctx, row.OrgID)
 	if err != nil {
 		slog.Warn("quota_warnings: list users", "org_id", row.OrgID, "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	periodResetAt := ""
 	if row.CurrentPeriodEnd.Valid {
@@ -97,17 +107,17 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 	subj, html, text, err := dispatch.Render(dispatch.KindQuotaWarning80, tplCtx)
 	if err != nil {
 		slog.Warn("quota_warnings: render", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 
 	if w.pool == nil || w.audit == nil {
 		slog.Warn("quota_warnings: atomic dependencies unavailable", "org_id", row.OrgID)
-		return
+		return flarereport.InvocationPartial
 	}
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
 		slog.Warn("quota_warnings: begin", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -121,10 +131,10 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 		WHERE id = $1
 		FOR UPDATE`, row.SubscriptionID).Scan(&lastSent, &periodStart); err != nil {
 		slog.Warn("quota_warnings: lock subscription", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	if lastSent.Valid && periodStart.Valid && !lastSent.Time.Before(periodStart.Time) {
-		return
+		return flarereport.InvocationReturned
 	}
 
 	q := w.queries.WithTx(tx)
@@ -133,12 +143,12 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 			ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`),
 		}); err != nil {
 			slog.Warn("quota_warnings: enqueue", "to", dispatch.MaskEmail(u.Email), "err", dispatch.ScrubEmails(err.Error()))
-			return
+			return flarereport.InvocationPartial
 		}
 	}
 	if err := q.MarkQuotaWarningSent(ctx, row.SubscriptionID); err != nil {
 		slog.Warn("quota_warnings: mark sent", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	pending, err := w.audit.LogTx(ctx, tx, audit.Entry{
 		OrgID: row.OrgID,
@@ -154,16 +164,17 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 	})
 	if err != nil {
 		slog.Warn("quota_warnings: audit", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	if err := tx.Commit(ctx); err != nil {
 		slog.Warn("quota_warnings: commit", "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	w.audit.Publish(pending)
 	if len(users) == 0 {
 		slog.Info("quota_warnings: no users on org, marked for period", "org_id", row.OrgID)
 	}
+	return flarereport.InvocationReturned
 }
 
 // pickTrippedQuota returns whichever quota has crossed the threshold,

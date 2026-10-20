@@ -635,6 +635,7 @@ func TestLoad_BrightCRMEncryptionRequiredLocallyWhenIntegrationEnabled(t *testin
 func TestLoad_BrightCRMSecretSkippedWhenIntegrationOff(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("HASH_PUBLIC_URL", "https://hash.brightinteraction.com")
+	t.Setenv("HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS", "")
 	t.Setenv("HASH_BRIGHTCRM_URL", "")
 	t.Setenv("HASH_BRIGHTCRM_WEBHOOK_SECRET", "")
 	if _, err := Load(); err != nil {

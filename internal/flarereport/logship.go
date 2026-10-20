@@ -41,49 +41,34 @@ var logShipOnce sync.Once
 // untouched, a full buffer drops rather than blocks, and a per-minute cap bounds
 // any storm. Called once from InitFlare after sentry.Init; no-op when FLARE_DSN
 // is unset/unparseable or FLARE_LOG_LEVEL=off.
-func installLogShipper(service string) {
-	logShipOnce.Do(func() { installLogShipperOnce(service) })
-}
+var installedLogShipper *logShipper
 
-func installLogShipperOnce(service string) {
-	if strings.EqualFold(os.Getenv("FLARE_LOG_LEVEL"), "off") {
-		return
-	}
-	// The flare service IS the ingest endpoint; shipping its own warn+ logs back
-	// to itself risks a self-amplification loop (a batch that 401s on a stale key
-	// logs a warn, which ships, which 401s...). Flare reports its own errors to
-	// its project via sentry already, so never HTTP self-ship.
-	if service == "flare" {
-		return
+func installLogShipper(service string) {
+	installLogShipperWithContext(context.Background(), service, "development", "development")
+}
+func installLogShipperWithContext(ctx context.Context, service, release, environment string) *logShipper {
+	logShipOnce.Do(func() { installedLogShipper = installLogShipperOnce(ctx, service, release, environment) })
+	return installedLogShipper
+}
+func installLogShipperOnce(ctx context.Context, service, release, environment string) *logShipper {
+	if strings.EqualFold(os.Getenv("FLARE_LOG_LEVEL"), "off") || service == "flare" {
+		return nil
 	}
 	base, key, ok := parseDSNForLogs(os.Getenv("FLARE_DSN"))
 	if !ok {
-		return
+		return nil
 	}
-	sh := &logShipper{
-		endpoint: base,
-		key:      key,
-		service:  service,
-		ch:       make(chan nativeLogLine, logShipBuffer),
-		client:   &http.Client{Timeout: 5 * time.Second},
-	}
-	go sh.run()
-	// slog.SetDefault re-routes the standard log package through the new default
-	// handler. slog's built-in defaultHandler itself writes VIA the standard log
-	// package, so wrapping it and then SetDefault-ing the wrapper forms a cycle
-	// (wrapper -> defaultHandler -> std log -> wrapper -> ...) that self-deadlocks
-	// the non-reentrant std log mutex on the first log line after install. A service
-	// that never installed a concrete slog handler (bare default) then hangs at
-	// startup before it binds its port. Break the cycle: when the current handler is
-	// the built-in default, pass through to a concrete stderr handler instead (it
-	// writes straight to os.Stderr, never back through the std log package). A
-	// concrete handler the app already installed is safe to wrap as-is.
+	owned, cancel := context.WithCancel(ctx)
+	sh := &logShipper{endpoint: base, key: key, service: service, release: release, environment: environment, ch: make(chan nativeLogLine, logShipBuffer), client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, ctx: owned, cancel: cancel, done: make(chan struct{})}
+	// A concrete stderr fallback is essential: wrapping slog.defaultHandler and
+	// SetDefault would recurse through the standard logger and deadlock.
 	next := slog.Default().Handler()
 	if fmt.Sprintf("%T", next) == "*slog.defaultHandler" {
 		next = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
-	h := &flareSlogHandler{next: next, shipper: sh, minLvl: logShipLevel()}
-	slog.SetDefault(slog.New(h))
+	slog.SetDefault(slog.New(&flareSlogHandler{next: next, shipper: sh, minLvl: logShipLevel()}))
+	go sh.run()
+	return sh
 }
 
 // sensitiveLogKeyParts are case-insensitive substrings whose attribute values
@@ -139,19 +124,21 @@ func logShipLevel() slog.Level {
 // parseDSNForLogs turns a Sentry-style DSN ({scheme}://{key}@{host}/{dsnID})
 // into the native-logs endpoint URL and the ingest key.
 func parseDSNForLogs(dsn string) (endpoint, key string, ok bool) {
-	if dsn == "" {
+	public, _, valid := publicDSN(dsn, "development")
+	if !valid {
 		return "", "", false
 	}
-	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil || u.Host == "" {
+	u, err := url.Parse(public)
+	if err != nil {
 		return "", "", false
 	}
-	k := u.User.Username()
-	id := strings.Trim(u.Path, "/")
-	if k == "" || id == "" {
-		return "", "", false
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	id := parts[len(parts)-1]
+	base := ""
+	if len(parts) > 1 {
+		base = "/" + strings.Join(parts[:len(parts)-1], "/")
 	}
-	return u.Scheme + "://" + u.Host + "/api/" + id + "/logs", k, true
+	return u.Scheme + "://" + u.Host + base + "/api/" + id + "/logs", u.User.Username(), true
 }
 
 type nativeLogLine struct {
@@ -163,12 +150,20 @@ type nativeLogLine struct {
 }
 
 type logShipper struct {
-	endpoint string
-	key      string
-	service  string
-	ch       chan nativeLogLine
-	dropped  atomic.Int64
-	client   *http.Client
+	endpoint    string
+	key         string
+	service     string
+	release     string
+	environment string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	closeCtx    context.Context
+	failed      atomic.Int64
+	rejected    atomic.Int64
+	ch          chan nativeLogLine
+	dropped     atomic.Int64
+	client      *http.Client
 
 	mu          sync.Mutex
 	windowStart time.Time
@@ -195,46 +190,101 @@ func (s *logShipper) allow() bool {
 // enqueue is non-blocking: a full buffer drops the line so logging never stalls
 // the app on a slow or unreachable Flare.
 func (s *logShipper) enqueue(l nativeLogLine) {
+	if s.ctx != nil && s.ctx.Err() != nil {
+		s.dropped.Add(1)
+		return
+	}
 	select {
 	case s.ch <- l:
 	default:
 		s.dropped.Add(1)
 	}
 }
-
+func (s *logShipper) beginClose(ctx context.Context) {
+	s.mu.Lock()
+	if s.closeCtx == nil {
+		s.closeCtx = ctx
+	}
+	s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
 func (s *logShipper) run() {
-	t := time.NewTicker(logShipFlushEach)
-	defer t.Stop()
+	defer close(s.done)
+	ticker := time.NewTicker(logShipFlushEach)
+	defer ticker.Stop()
 	batch := make([]nativeLogLine, 0, logShipBatch)
-	flush := func() {
+	flush := func(ctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
+		count := len(batch)
 		body, err := json.Marshal(batch)
 		batch = batch[:0]
 		if err != nil {
+			s.failed.Add(int64(count))
 			return
 		}
-		req, err := http.NewRequest(http.MethodPost, s.endpoint, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(body))
 		if err != nil {
+			s.failed.Add(int64(count))
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Flare-Key", s.key)
-		if resp, err := s.client.Do(req); err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
-			_ = resp.Body.Close()
+		resp, err := s.client.Do(req)
+		if err != nil {
+			s.failed.Add(int64(count))
+			return
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Accepted int `json:"accepted"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&result)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || err != nil || result.Accepted < 0 || result.Accepted > count {
+			s.failed.Add(int64(count))
+			return
+		}
+		if result.Accepted < count {
+			s.rejected.Add(int64(count - result.Accepted))
 		}
 	}
 	for {
 		select {
-		case l := <-s.ch:
-			batch = append(batch, l)
-			if len(batch) >= logShipBatch {
-				flush()
+		case <-s.ctx.Done():
+			s.mu.Lock()
+			cleanup := s.closeCtx
+			s.mu.Unlock()
+			var cancel context.CancelFunc
+			if cleanup == nil {
+				cleanup, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 			}
-		case <-t.C:
-			flush()
+			// A producer sees ctx cancellation before enqueue. Drain at most the
+			// original fixed queue capacity, using ONE finite cleanup budget.
+			for n := 0; n < logShipBuffer; n++ {
+				select {
+				case line := <-s.ch:
+					batch = append(batch, line)
+					if len(batch) >= logShipBatch {
+						flush(cleanup)
+					}
+				default:
+					flush(cleanup)
+					return
+				}
+			}
+			flush(cleanup)
+			return
+		case line := <-s.ch:
+			batch = append(batch, line)
+			if len(batch) >= logShipBatch {
+				flush(s.ctx)
+			}
+		case <-ticker.C:
+			flush(s.ctx)
 		}
 	}
 }
@@ -255,71 +305,79 @@ func (h *flareSlogHandler) Enabled(ctx context.Context, l slog.Level) bool {
 
 func (h *flareSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= h.minLvl && h.shipper != nil {
-		h.ship(r)
+		h.ship(ctx, r)
 	}
 	return h.next.Handle(ctx, r)
 }
 
-func (h *flareSlogHandler) ship(r slog.Record) {
-	// Rate-cap first, before any allocation: an over-cap storm/loop pays nothing.
+func (h *flareSlogHandler) ship(ctx context.Context, r slog.Record) {
 	if !h.shipper.allow() {
 		h.shipper.dropped.Add(1)
 		return
 	}
-	m := make(map[string]any)
+	operation := logOperation(r.Message)
+	attributes := map[string]any{"service": h.shipper.service, "release": h.shipper.release, "environment": h.shipper.environment, "operation": operation, "category": "operational_log"}
 	traceID := ""
-	prefix := ""
-	if len(h.groups) > 0 {
-		prefix = strings.Join(h.groups, ".") + "."
-	}
-	var addAttr func(pfx string, a slog.Attr)
-	addAttr = func(pfx string, a slog.Attr) {
-		if a.Value.Kind() == slog.KindGroup {
-			gp := pfx
-			if a.Key != "" {
-				gp = pfx + a.Key + "."
-			}
-			for _, ga := range a.Value.Group() {
-				addAttr(gp, ga)
-			}
+	// Raw message/Any maps/structs/errors are deliberately NOT serialized.
+	// Only fixed enum values and bounded numeric primitives cross this boundary.
+	add := func(a slog.Attr) {
+		// Keep the key scrub before the fixed allowlist, including future additions.
+		key := a.Key
+		if isSensitiveLogKey(key) {
 			return
 		}
-		key := pfx + a.Key
-		if key == "trace_id" {
+		if a.Key == "operation" && a.Value.Kind() == slog.KindString && validOperation(Operation(a.Value.String())) {
+			attributes["operation"] = a.Value.String()
+			return
+		}
+		if a.Key == "outcome" && a.Value.Kind() == slog.KindString && validOutcome(Outcome(a.Value.String())) {
+			attributes["outcome"] = a.Value.String()
+			return
+		}
+		if a.Key == "trace_id" && a.Value.Kind() == slog.KindString && validHexID(a.Value.String(), 32) {
 			traceID = a.Value.String()
 			return
 		}
-		// Redact sensitive attribute values before they leave the process for the
-		// shared Flare logs store. Log records are an egress boundary just like the
-		// sentry event path (which BeforeSend already scrubs); a stray
-		// slog.Error("...", "token", t) must not ship the token. Key-based so it
-		// stays cheap and never touches legit values.
-		if isSensitiveLogKey(key) {
-			m[key] = "[redacted]"
-			return
+		switch a.Key {
+		case "count", "status", "duration_ms", "attempts":
+			if a.Value.Kind() == slog.KindInt64 {
+				value := a.Value.Int64()
+				if value >= 0 && value <= 86400000 {
+					attributes[a.Key] = value
+				}
+			}
 		}
-		m[key] = a.Value.Any()
 	}
 	for _, a := range h.attrs {
-		addAttr(prefix, a)
+		add(a)
 	}
-	r.Attrs(func(a slog.Attr) bool {
-		addAttr(prefix, a)
-		return true
-	})
-	var attrs json.RawMessage
-	if len(m) > 0 {
-		if b, err := json.Marshal(m); err == nil && len(b) <= logShipMaxAttrs {
-			attrs = scrubLogJSON(b)
+	r.Attrs(func(a slog.Attr) bool { add(a); return true })
+	if ctx != nil {
+		if span := contextSpan(ctx); span != nil {
+			traceID = span.TraceID.String()
 		}
 	}
-	h.shipper.enqueue(nativeLogLine{
-		Severity:   strings.ToLower(r.Level.String()),
-		Body:       scrubLogText(r.Message),
-		Attributes: attrs,
-		TraceID:    traceID,
-		Timestamp:  r.Time.UTC().Format(time.RFC3339),
-	})
+	raw, _ := json.Marshal(attributes)
+	h.shipper.enqueue(nativeLogLine{Severity: strings.ToLower(r.Level.String()), Body: "Hash operational log", Attributes: raw, TraceID: traceID, Timestamp: r.Time.UTC().Format(time.RFC3339)})
+}
+func logOperation(message string) string {
+	for _, item := range []struct{ prefix, operation string }{{"reminders:", "reminder"}, {"reminder:", "reminder"}, {"email_dispatch:", "email_dispatch"}, {"finalize_retry:", "evidence"}, {"document finalization failed", "evidence"}, {"webhook", "webhook"}, {"mcp ", "mcp"}, {"health check failed", "health"}, {"internal error serving request", "http"}, {"http handler panicked", "http"}, {"send_sealing:", "signing"}} {
+		if strings.HasPrefix(message, item.prefix) {
+			return item.operation
+		}
+	}
+	return "application"
+}
+func validHexID(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *flareSlogHandler) WithAttrs(as []slog.Attr) slog.Handler {
@@ -371,6 +429,7 @@ func scrubLogText(s string) string {
 	if s == "" {
 		return s
 	}
+	s = redactCredentialPath(s)
 	s = scrubLogPEM.ReplaceAllString(s, "[private-key]")
 	s = scrubLogURLCreds.ReplaceAllString(s, "${1}[redacted]@")
 	s = scrubLogQuery.ReplaceAllString(s, "${1}[secret]")

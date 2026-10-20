@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,39 +11,18 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/bright-interaction/hash/internal/aiapps"
-	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
-// signerRateLimitNoRowsDB lets the actual signer routes authenticate an
-// unknown token without needing Postgres. Requests which pass the middleware
-// deterministically reach the handler and return 404; a limited request is 429.
-type signerRateLimitNoRowsDB struct{}
-
-func (signerRateLimitNoRowsDB) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, fmt.Errorf("unexpected exec")
-}
-
-func (signerRateLimitNoRowsDB) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
-	return nil, fmt.Errorf("unexpected query")
-}
-
-func (signerRateLimitNoRowsDB) QueryRow(context.Context, string, ...interface{}) pgx.Row {
-	return signerRateLimitNoRowsRow{}
-}
-
-type signerRateLimitNoRowsRow struct{}
-
-func (signerRateLimitNoRowsRow) Scan(...interface{}) error { return pgx.ErrNoRows }
-
+// These tests exercise the real outer route limiters with no configured signing
+// runtime. Requests admitted by the limiter reach the actual controlled503 gate;
+// they do not authenticate a token or claim successful signer access. The SPA
+// bootstrap remains204 and an exhausted real limiter remains429.
 func newSignerRateLimitRouter(withClarifier bool) http.Handler {
-	queries := generated.New(signerRateLimitNoRowsDB{})
 	srv := &Server{
-		Sign: &sign.Engine{Queries: queries},
+		Sign: &sign.Engine{},
 		Frontend: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		}),
@@ -69,6 +47,13 @@ func signerRateLimitRequest(h http.Handler, method, path string) *httptest.Respo
 	return res
 }
 
+func assertSignerRateLimitRuntimeUnavailable(t *testing.T, res *httptest.ResponseRecorder) {
+	t.Helper()
+	if res.Code != http.StatusServiceUnavailable || res.Body.String() != "{\"error\":\"signer access is temporarily unavailable\"}\n" {
+		t.Fatalf("admitted route did not reach controlled missing-runtime gate: status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
 func TestSignerRouteRiskClassesUseIndependentTokenBudgets(t *testing.T) {
 	h := newSignerRateLimitRouter(true)
 	tests := []struct {
@@ -79,15 +64,18 @@ func TestSignerRouteRiskClassesUseIndependentTokenBudgets(t *testing.T) {
 		status int
 	}{
 		{name: "bootstrap read", method: http.MethodGet, path: "/sign/read-token/", limit: signerReadRequestsPerMinute, status: http.StatusNoContent},
-		{name: "legal mutation", method: http.MethodPost, path: "/sign/mutation-token/view", limit: signerMutationRequestsPerMinute, status: http.StatusNotFound},
-		{name: "artifact download", method: http.MethodGet, path: "/sign/download-token/pdf", limit: signerDownloadRequestsPerMinute, status: http.StatusNotFound},
-		{name: "paid clarification", method: http.MethodPost, path: "/sign/clarify-token/clarify", limit: signerClarifyRequestsPerMinute, status: http.StatusNotFound},
+		{name: "legal mutation", method: http.MethodPost, path: "/sign/mutation-token/view", limit: signerMutationRequestsPerMinute, status: http.StatusServiceUnavailable},
+		{name: "artifact download", method: http.MethodGet, path: "/sign/download-token/pdf", limit: signerDownloadRequestsPerMinute, status: http.StatusServiceUnavailable},
+		{name: "paid clarification", method: http.MethodPost, path: "/sign/clarify-token/clarify", limit: signerClarifyRequestsPerMinute, status: http.StatusServiceUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			res := signerRateLimitRequest(h, test.method, test.path)
 			if res.Code != test.status {
 				t.Fatalf("%s %s status = %d, want %d; body=%s", test.method, test.path, res.Code, test.status, res.Body.String())
+			}
+			if test.status == http.StatusServiceUnavailable {
+				assertSignerRateLimitRuntimeUnavailable(t, res)
 			}
 			if got := res.Header().Get("X-RateLimit-Limit"); got != fmt.Sprint(test.limit) {
 				t.Fatalf("%s %s rate limit = %q, want %d", test.method, test.path, got, test.limit)
@@ -108,27 +96,21 @@ func TestSignerReadTrafficDoesNotExhaustMutationBudget(t *testing.T) {
 		}
 	}
 	res := signerRateLimitRequest(h, http.MethodPost, "/sign/same-token/view")
-	if res.Code != http.StatusNotFound {
-		t.Fatalf("first mutation after 61 reads status = %d, want handler's 404", res.Code)
-	}
+	assertSignerRateLimitRuntimeUnavailable(t, res)
 }
 
 func TestSignerMutationLimitIsolatedByTokenBehindSharedNAT(t *testing.T) {
 	h := newSignerRateLimitRouter(false)
 	for i := 0; i < signerMutationRequestsPerMinute; i++ {
 		res := signerRateLimitRequest(h, http.MethodPost, "/sign/token-a/view")
-		if res.Code != http.StatusNotFound {
-			t.Fatalf("token A mutation %d status = %d, want 404", i+1, res.Code)
-		}
+		assertSignerRateLimitRuntimeUnavailable(t, res)
 	}
 	if res := signerRateLimitRequest(h, http.MethodPost, "/sign/token-a/view"); res.Code != http.StatusTooManyRequests {
 		t.Fatalf("token A over-limit mutation status = %d, want 429", res.Code)
 	}
 	// Same office IP, different ceremony credential: token A's abuse cannot
 	// starve a second legitimate signer.
-	if res := signerRateLimitRequest(h, http.MethodPost, "/sign/token-b/view"); res.Code != http.StatusNotFound {
-		t.Fatalf("token B first mutation status = %d, want handler's 404", res.Code)
-	}
+	assertSignerRateLimitRuntimeUnavailable(t, signerRateLimitRequest(h, http.MethodPost, "/sign/token-b/view"))
 	// Nor does mutation exhaustion block token A from reading its ceremony.
 	if res := signerRateLimitRequest(h, http.MethodGet, "/sign/token-a/"); res.Code != http.StatusNoContent {
 		t.Fatalf("token A read after mutation exhaustion status = %d, want 204", res.Code)

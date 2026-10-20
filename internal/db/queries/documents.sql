@@ -59,7 +59,12 @@ SELECT d.id, d.org_id, d.template_id, d.name,
     d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
     NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
     d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
-    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment,
+    d.signature_fit_reserved_bytes, d.fits_index_required, d.fits_index_preparation_id, d.fits_index_storage_key,
+    d.fits_index_version_id, d.fits_index_sha256, d.fits_index_bytes, d.signature_fit_original_payload_bytes,
+    d.signature_fit_original_authority_bytes, d.signature_fit_original_authority_count, d.signing_admission_policy, d.signing_admission_active_id,
+    d.signing_admission_sealed_id, d.signing_admission_count, d.signing_admission_static_bytes, d.signing_admission_ordinary_bytes,
+    d.signing_admission_plan_bytes, d.signature_fit_request_binding_bytes, d.signature_fit_request_binding_count, d.participant_report_schema
 FROM documents d
 WHERE d.org_id = $1
   AND d.deleted_at IS NULL
@@ -319,7 +324,8 @@ WHERE id = sqlc.arg(id) AND org_id = sqlc.arg(org_id)
 FOR UPDATE SKIP LOCKED;
 
 -- name: HasPendingDocumentPrivacyRequests :one
--- Caller holds document FOR UPDATE and the organization privacy fence.
+-- Caller holds document FOR UPDATE and the organization privacy fence, OR
+-- the actual M102 linked-document shared fence plus that organization fence.
 -- A fresh statement snapshot observes both linked and organization-wide review.
 SELECT EXISTS(SELECT 1 FROM data_subject_requests
 WHERE org_id = sqlc.arg(org_id)::uuid
@@ -339,6 +345,10 @@ SELECT EXISTS(
     WHERE sqlc.arg(object_key)::text IN (i.final_pdf_key,i.audit_cert_key,i.audit_payload_key,i.audit_signature_key)
   UNION ALL
   SELECT 1 FROM signatures s WHERE s.image_storage_key = sqlc.arg(object_key)::text
+  UNION ALL
+  SELECT 1 FROM document_package_capture_members_v1 c WHERE c.pdf_key = sqlc.arg(object_key)::text
+  UNION ALL
+  SELECT 1 FROM document_attachment_drafts_v1 a WHERE a.pdf_key = sqlc.arg(object_key)::text
   UNION ALL
   SELECT 1 FROM html_document_materializations m WHERE m.pdf_key = sqlc.arg(object_key)::text
   UNION ALL
@@ -362,6 +372,14 @@ SELECT EXISTS(
   SELECT 1 FROM document_finalization_intents WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
   SELECT 1 FROM send_sealing_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_package_responses_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_ordinary_finalization_preparations_v1 WHERE document_id=sqlc.arg(document_id)::uuid AND org_id=sqlc.arg(org_id)::uuid AND (retain_until>=clock_timestamp() OR bodies_retired_at IS NULL)
+  UNION ALL
+  SELECT 1 FROM document_participant_reports_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_participant_report_legacy_intents_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
   UNION ALL
   SELECT 1 FROM signatures WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
@@ -387,6 +405,22 @@ SELECT EXISTS(
   SELECT 1 FROM document_finalization_intents WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
   SELECT 1 FROM send_sealing_intents WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_package_send_attempts_v1 WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_package_responses_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_ordinary_finalization_preparations_v1 WHERE document_id=sqlc.arg(document_id)::uuid AND org_id=sqlc.arg(org_id)::uuid AND (retain_until>=clock_timestamp() OR bodies_retired_at IS NULL)
+  UNION ALL
+  SELECT 1 FROM document_participant_reports_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_participant_report_legacy_intents_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_packages_v1 WHERE document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_package_capture_members_v1 WHERE member_document_id = sqlc.arg(document_id)::uuid
+  UNION ALL
+  SELECT 1 FROM document_attachment_drafts_v1 WHERE member_document_id = sqlc.arg(document_id)::uuid
   UNION ALL
   SELECT 1 FROM html_document_materializations WHERE document_id = sqlc.arg(document_id)::uuid
   UNION ALL
@@ -439,7 +473,12 @@ SELECT d.id, d.org_id, d.template_id, d.name,
     d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
     NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
     d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
-    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment,
+    d.signature_fit_reserved_bytes, d.fits_index_required, d.fits_index_preparation_id, d.fits_index_storage_key,
+    d.fits_index_version_id, d.fits_index_sha256, d.fits_index_bytes, d.signature_fit_original_payload_bytes,
+    d.signature_fit_original_authority_bytes, d.signature_fit_original_authority_count, d.signing_admission_policy, d.signing_admission_active_id,
+    d.signing_admission_sealed_id, d.signing_admission_count, d.signing_admission_static_bytes, d.signing_admission_ordinary_bytes,
+    d.signing_admission_plan_bytes, d.signature_fit_request_binding_bytes, d.signature_fit_request_binding_count, d.participant_report_schema
 FROM documents d
 WHERE d.org_id = $1 AND d.deleted_at IS NULL AND d.name ILIKE '%' || $2 || '%'
 ORDER BY d.updated_at DESC
@@ -459,4 +498,15 @@ UPDATE documents
 SET variables_json = $3, updated_at = clock_timestamp()
 WHERE id = $1 AND org_id = $2 AND status = 'draft' AND deleted_at IS NULL
   AND updated_at = sqlc.arg(expected_updated_at)
+RETURNING *;
+
+-- Native fixed HTML creation writer owns this explicit fresh INSERT. The
+-- target is the physical session accounting scope, never an existing-row hint.
+-- Original variables are known literal {} before the admitted values write.
+-- name: CreateFreshHTMLPDFDocumentV1 :one
+INSERT INTO documents (id,org_id,template_id,name,source_kind,variables_json,
+ pdf_storage_key,pdf_sha256,pdf_storage_version_id,evidence_version_pins_required,sender_id,expires_at)
+VALUES (sqlc.arg(id),sqlc.arg(org_id),sqlc.arg(template_id),sqlc.arg(name),
+ 'pdf','{}'::jsonb,sqlc.arg(pdf_storage_key),sqlc.arg(pdf_sha256),sqlc.arg(pdf_storage_version_id),
+ sqlc.arg(evidence_version_pins_required),sqlc.arg(sender_id),sqlc.arg(expires_at))
 RETURNING *;

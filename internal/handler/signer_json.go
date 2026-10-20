@@ -21,10 +21,16 @@ const maxSignerJSONBody = 1 << 20
 // unknown typed fields. This prevents different parsers or evidence readers
 // from disagreeing about which submitted value controlled the mutation.
 func decodeSignerJSON(r *http.Request, dst any) error {
-	raw, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxSignerJSONBody))
+	raw, err := readHTMLAuthoringInputJSONV1(r, maxSignerJSONBody)
 	if err != nil {
 		return err
 	}
+	return decodeSignerJSONBytesV1(raw, dst)
+}
+
+// Decode the exact original bytes; CRM null validation shares this same owned
+// buffer rather than cloning/rereading it under a separate interpretation.
+func decodeSignerJSONBytesV1(raw []byte, dst any) error {
 	if err := validateUniqueJSONObject(raw); err != nil {
 		return err
 	}

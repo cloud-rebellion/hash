@@ -303,8 +303,8 @@ func TestPDFMetadataWorkerRoundTripAndStrictProtocol(t *testing.T) {
 	for _, header := range []string{
 		`{"operation":"probe","length":0}`,
 		`{"protocol_version":1,"operation":"probe","length":0}`,
-		`{"protocol_version":2,"protocol_version":2,"operation":"probe","length":0}`,
-		`{"protocol_version":2,"operation":"probe"}`,
+		`{"protocol_version":3,"protocol_version":3,"operation":"probe","length":0}`,
+		`{"protocol_version":3,"operation":"probe"}`,
 	} {
 		var out bytes.Buffer
 		if ServePDFWorker(strings.NewReader(header+"\n"), &out) == nil || out.Len() != 0 {
@@ -312,11 +312,11 @@ func TestPDFMetadataWorkerRoundTripAndStrictProtocol(t *testing.T) {
 		}
 	}
 	for _, header := range []string{
-		`{"protocol_version":2,"length":0,"length":0,"pages":1}`,
-		`{"protocol_version":2,"pages":1}`,
-		`{"protocol_version":2,"length":0,"pages":1,"unknown":true}`,
-		`{"protocol_version":2,"length":0,"Length":0,"pages":1}`,
-		`{"protocol_version":2,"length":0,"pages":1,"report":null}`,
+		`{"protocol_version":3,"length":0,"length":0,"pages":1}`,
+		`{"protocol_version":3,"pages":1}`,
+		`{"protocol_version":3,"length":0,"pages":1,"unknown":true}`,
+		`{"protocol_version":3,"length":0,"Length":0,"pages":1}`,
+		`{"protocol_version":3,"length":0,"pages":1,"report":null}`,
 	} {
 		var response pdfWorkerResponse
 		if readPDFWorkerHeader(bufio.NewReader(strings.NewReader(header+"\n")), &response) == nil {

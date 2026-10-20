@@ -66,7 +66,12 @@ SELECT d.id, d.org_id, d.template_id, d.name,
     d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
     NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
     d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
-    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment,
+    d.signature_fit_reserved_bytes, d.fits_index_required, d.fits_index_preparation_id, d.fits_index_storage_key,
+    d.fits_index_version_id, d.fits_index_sha256, d.fits_index_bytes, d.signature_fit_original_payload_bytes,
+    d.signature_fit_original_authority_bytes, d.signature_fit_original_authority_count, d.signing_admission_policy, d.signing_admission_active_id,
+    d.signing_admission_sealed_id, d.signing_admission_count, d.signing_admission_static_bytes, d.signing_admission_ordinary_bytes,
+    d.signing_admission_plan_bytes, d.signature_fit_request_binding_bytes, d.signature_fit_request_binding_count, d.participant_report_schema
 FROM documents d
 WHERE d.id = $1 AND d.org_id = $2 AND d.deleted_at IS NULL;
 

@@ -21,10 +21,12 @@ import (
 // configurable so a self-hosted Llama 3 70B can plug in with the same
 // shape later.
 type MistralProvider struct {
-	BaseURL string // default "https://openrouter.ai/api/v1/chat/completions"
-	APIKey  string // OpenRouter or self-hosted bearer
-	ModelID string // e.g. "mistralai/mistral-large-latest"
-	Client  HTTPDoer
+	BaseURL            string // default "https://openrouter.ai/api/v1/chat/completions"
+	APIKey             string // OpenRouter or self-hosted bearer
+	ModelID            string // e.g. "mistralai/mistral-large-latest"
+	Client             HTTPDoer
+	nativeClient       *http.Client
+	nativeAllowPrivate bool
 }
 
 // HTTPDoer is the minimal http.Client interface, swappable in tests.
@@ -42,13 +44,14 @@ func NewMistralProvider(baseURL, apiKey, model string, allowPrivate bool) *Mistr
 	if model == "" {
 		model = "mistralai/mistral-large-latest"
 	}
+	client := nethard.Client(30*time.Second, func() bool { return allowPrivate })
 	return &MistralProvider{
 		BaseURL: baseURL,
 		APIKey:  apiKey,
 		ModelID: model,
 		// SSRF-hardened transport: a rebound tenant BYOAI base_url cannot reach
 		// an internal IP at call time. allowPrivate=true only in local dev.
-		Client: nethard.Client(30*time.Second, func() bool { return allowPrivate }),
+		Client: client, nativeClient: client, nativeAllowPrivate: allowPrivate,
 	}
 }
 

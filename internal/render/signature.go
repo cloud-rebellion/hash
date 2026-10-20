@@ -83,7 +83,11 @@ func FontAssets() []FontAsset {
 // body before sending to Gotenberg so signatures resolve. Font URLs are
 // relative to index.html so Gotenberg + the embedded SPA both resolve them
 // from the same multipart attachment set / self-hosted /fonts/ tree.
-func SignatureCSS() string {
+func SignatureCSS() string { return SignatureCSSV1() }
+
+// SignatureCSSV1 is the retained manual-signature stylesheet. New rendering
+// recipes must use a new version instead of changing historical appearance.
+func SignatureCSSV1() string {
 	return strings.TrimSpace(fmt.Sprintf(`
 @font-face { font-family: 'Caveat';         font-style: normal; font-weight: 400; font-display: swap; src: url('./%s') format('woff2'); }
 @font-face { font-family: 'Dancing Script'; font-style: normal; font-weight: 400; font-display: swap; src: url('./%s') format('woff2'); }

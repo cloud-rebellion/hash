@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -49,6 +50,8 @@ func (db *controllerLookupTestDB) QueryRow(_ context.Context, query string, args
 			3:  db.recipient.Email,
 			4:  db.recipient.Name,
 			6:  db.recipient.Status,
+			7:  db.recipient.MagicTokenHash,
+			13: db.recipient.MagicTokenExpiresAt,
 			14: db.recipient.Locale,
 			15: db.recipient.DocOrgID,
 			16: db.recipient.DocStatus,
@@ -130,15 +133,16 @@ func newControllerLookupEngine(documentOrgID uuid.UUID, controllerName string) (
 	documentID := uuid.New()
 	db := &controllerLookupTestDB{
 		recipient: &generated.GetRecipientByTokenHashRow{
-			ID:         uuid.New(),
-			DocumentID: documentID,
-			Role:       "signer",
-			Email:      "signer@example.test",
-			Name:       "Signer",
-			Status:     "sent",
-			Locale:     "en",
-			DocOrgID:   documentOrgID,
-			DocStatus:  "sent",
+			ID:             uuid.New(),
+			DocumentID:     documentID,
+			Role:           "signer",
+			Email:          "signer@example.test",
+			Name:           "Signer",
+			Status:         "sent",
+			MagicTokenHash: auth.HashMagicToken("token-hash"),
+			Locale:         "en",
+			DocOrgID:       documentOrgID,
+			DocStatus:      "sent",
 		},
 		document: &generated.Document{
 			ID:          documentID,
@@ -168,7 +172,7 @@ func TestLookupByTokenLoadsControllerFromEachDocumentOrganization(t *testing.T) 
 			documentOrgID := uuid.New()
 			engine, db := newControllerLookupEngine(documentOrgID, controllerName)
 
-			rc, err := engine.LookupByToken(context.Background(), []byte("token-hash"))
+			rc, err := engine.lookupByTokenQueriesV1(context.Background(), auth.HashMagicToken("token-hash"), engine.Queries)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +218,7 @@ func TestLookupByTokenFailsClosedWhenDocumentControllerUnavailable(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			engine, db := newControllerLookupEngine(documentOrgID, "Customer Alpha AB")
 			test.configure(db)
-			if _, err := engine.LookupByToken(context.Background(), []byte("token-hash")); !errors.Is(err, ErrSignerControllerUnavailable) {
+			if _, err := engine.lookupByTokenQueriesV1(context.Background(), auth.HashMagicToken("token-hash"), engine.Queries); !errors.Is(err, ErrSignerControllerUnavailable) {
 				t.Fatalf("LookupByToken error = %v, want ErrSignerControllerUnavailable", err)
 			}
 		})
@@ -251,7 +255,7 @@ func TestLookupByTokenFailsClosedWithoutExplicitLawfulBasisConfirmation(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			engine, db := newControllerLookupEngine(documentOrgID, "Customer Alpha AB")
 			test.configure(db)
-			if _, err := engine.LookupByToken(context.Background(), []byte("token-hash")); !errors.Is(err, ErrSignerLawfulBasisUnavailable) {
+			if _, err := engine.lookupByTokenQueriesV1(context.Background(), auth.HashMagicToken("token-hash"), engine.Queries); !errors.Is(err, ErrSignerLawfulBasisUnavailable) {
 				t.Fatalf("LookupByToken error = %v, want ErrSignerLawfulBasisUnavailable", err)
 			}
 		})

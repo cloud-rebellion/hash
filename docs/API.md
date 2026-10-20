@@ -55,6 +55,13 @@ Its authenticated billing status reports `billing_enabled: true`,
 Subscription is absent; invoices and purchase catalog are empty. Payment
 operations are disabled while quotas and capabilities remain enforced.
 
+## Sender package Send
+
+The ordinary browser Send endpoint accepts the exact reviewed main-plus-attachment
+selection and returns a durable asynchronous sealing receipt. Ordinary documents
+omit that observation. See [document attachments API](DOCUMENT-ATTACHMENTS-API.md#send-the-reviewed-main-document-and-attachments)
+for request fields, HTTP202, unknown commit handling and read-only reconciliation.
+
 ## Recipient PDF observations
 
 For PDF documents, `GET /sign/{token}` returns `pdf_observation` with the exact
@@ -97,6 +104,70 @@ retained document lock after the field/audit commit. Clients must confirm the
 exact saved field and value before enabling signing. A later source change
 requires a fresh view and mutation authorization; it does not retroactively
 turn a durable field-save receipt into a failed save.
+
+## Recipient package metadata
+
+`GET /sign/{token}/package` uses the current recipient magic link and returns
+`{"package":null}` for an ordinary ceremony without a bound package. A package
+response contains `schema` (`hash-recipient-package-v1`), `package_id`, decimal
+string `revision`, `manifest_sha256`, `legal_commitment_sha256`, `main` and ordered
+`annexes`. Each member contains `title`, open-ended `category`, `pdf_sha256`,
+`bytes` and `pages`. The response contains no object keys, provider version IDs
+or internal source/intake-report bodies. Reads use `Cache-Control: no-store`.
+
+The server resolves the exact completed Send and immutable capture for the
+current ceremony epoch, validates its original recipient membership and checks
+the current credential and captured members' privacy fences. Missing or
+inconsistent current package history refuses delivery. An older aborted attempt
+does not turn a later ordinary ceremony into a package ceremony.
+
+This endpoint supplies descriptors only; reading it does not record consent.
+The package-aware Send, frozen member PDF delivery, explicit incorporation consent,
+signature binding and mandatory participant evidence report are implemented.
+The controlled package browser and downloaded artifacts passed checkpoint423;
+configured services and other business variants retain their separate gates.
+See the [attachment API](DOCUMENT-ATTACHMENTS-API.md#recipient-frozen-package-descriptors)
+and the package ceremony below for the actual request and consent contract.
+
+## Recipient package PDF
+
+`GET /sign/{token}/package/members/{position}/pdf` reads an exact frozen member
+of the authenticated recipient's current package. Position `0` is the main
+contract and positions `1` through `16` are the ordered attachments. Obtain both
+commitments from the current package metadata response and supply one strong
+`If-Match` tag in this format:
+
+```text
+"<64 lowercase hex manifest_sha256>.<64 lowercase hex legal_commitment_sha256>"
+```
+
+The tag is a precondition, not an access credential. Missing preconditions return
+`428`; malformed, weak, wildcard or multiple tags return `400`; changed
+commitments return `412`. An unavailable current member returns `404`. Expired,
+revoked or privacy-blocked credentials never obtain document bytes. Clients must
+reload the current ceremony after a refusal rather than retry with an older
+package or a caller-selected object version.
+
+Successful responses are `application/pdf` with `Cache-Control: no-store`, an
+exact `Content-Length`, the matching `ETag`, and these member observations:
+
+- `X-Hash-Package-Manifest-SHA256`
+- `X-Hash-Package-Legal-Commitment-SHA256`
+- `X-Hash-Package-Member-Position`
+- `X-Hash-PDF-SHA256`, `X-Hash-PDF-Bytes` and `X-Hash-PDF-Pages`
+
+The server resolves storage locators from the immutable completed Send capture
+and its verified member-retention receipt. It reads the captured version and
+checks its size and digest, then rechecks the original recipient, package,
+source, notice and all captured privacy subjects before delivery. Storage keys
+and provider version IDs are not exposed. Approved HTML contracts use their
+captured reviewed PDFs without rerendering. These downloads share the signer
+PDF rate limits and the package limits of sixteen attachments, 50 MiB and
+500 pages in total.
+
+A successful download does not record acceptance or a signature. Nonempty
+package Send remains guarded until whole-package consent, signature binding and
+the mandatory participant evidence report qualify together.
 
 ## Roles and scopes
 
@@ -330,14 +401,39 @@ Supported regional tags such as `sv-SE` normalize to the base language `sv`,
 using the same rules as recipient authoring. Unknown languages return400
 before database mutation instead of creating an unusable recipient default.
 
+### Reminder scheduling and delivery
+
 Automatic reminder offsets (`days_after_send`) use the document's send
 timestamp, not the previous reminder's processing time. The default second
 reminder is day7 after send, rather than day10 after a day3 first reminder.
-Overdue schedules remain due; delivered mail still requires outbox acceptance.
-Manual Remind moves an existing schedule's `next_fire_at` to three days after
-the manual transaction's time and records `last_fired_at`; it does not replenish
-`fires_remaining` or recreate a missing schedule. Remaining automatic offsets
-still use the original send timestamp.
+Overdue schedules remain due. Manual Remind moves an existing schedule's
+`next_fire_at` to three days after the manual transaction's time and records
+`last_fired_at`; it does not replenish `fires_remaining` or recreate a missing
+schedule. Remaining automatic offsets still use the original send timestamp.
+
+REST `POST /api/v1/documents/{id}/remind` returns `{"reminded": count}` for the
+actual pending recipients. It requires the current sender/owner authority and a
+sent or in-progress, unexpired document. Expired credentials return401,
+revoked credentials/permissions403, missing documents404 and a document outside
+the remindable state409. MCP retains tool-error reporting and its original
+API/document credential, scope, expiry and usage checks.
+
+Both manual and scheduled reminders lock and recheck the actual family,
+recipients and schedule. Rotated capabilities, schedule changes, durable queued
+mail and fresh measured audit rows commit atomically; the final policy deadline
+and manual credential are checked after waits. An exhausted, absent or non-due
+automatic schedule produces no reminder effects. Concurrent workers do not fire
+the same schedule twice. A reminder after a partial signature remains part of
+the eventual mandatory report. This does not reserve future report headroom for
+all later history writes.
+
+Queued mail still needs worker/provider/inbox acceptance. A configured direct
+mailer consumes the already rendered message after commit within a finite
+delivery context; those real resources remain charged until its call finishes,
+including after request cancellation. A nil mailer preserves link rotation and
+audit without claiming delivery. Direct-message rendering errors refuse before
+commit. No successful reminder response promises inbox delivery; configured
+SMTP and outage/retry acceptance remain release gates.
 
 Machine-readable request/response contracts for the automation command are in
 [openapi-automation.json](openapi-automation.json), using
@@ -346,6 +442,39 @@ signature-request command only. UTF-8 byte limits are described and annotated
 with `x-maxUtf8Bytes`; generic schema tooling does not enforce these extensions
 or dynamic template, role, expiry and lifecycle rules. Server validation remains
 authoritative. The Go contract test guards property/required-field drift.
+
+CI runs route-inventory freshness and OpenAPI validation as separate required
+steps. Run the same checks from the Hash module root:
+
+~~~sh
+go run ./cmd/apidocgen -check
+bash scripts/check-automation-openapi.sh
+~~~
+
+The OpenAPI entrypoint requires CPython 3.11 through 3.14 with `venv` and pip.
+Set `HASH_OPENAPI_PYTHON=/absolute/path/to/python3` when the default `python3`
+is unsuitable. It creates and removes a private temporary environment, installs
+only binary wheels from the complete version-and-SHA256 lock in
+`scripts/requirements-openapi.txt`, checks dependency consistency, then runs
+specification validation and all16 request-boundary fixtures. Missing tools,
+dependencies, hash mismatches and validation errors fail the check, without
+skipping it. Normal installation uses PyPI with certificate verification. For an
+offline run, set `HASH_OPENAPI_WHEELHOUSE` to a local directory containing all
+compatible locked wheels; pip then uses no index. No application or global
+Python environment is changed.
+
+The lock includes conditional `typing-extensions` for Python3.11 and3.12.
+Dependency updates must resolve the full closure for supported Python versions,
+retain reviewed wheel hashes and repeat successful and refusal checks; do not
+replace the lock with a direct-package-only pin. Local qualification uses the
+immutable official Python3.14.7 Linux image; other interpreter and architecture
+combinations need their own execution receipts. Managed workers must provide
+the interpreter and venv prerequisite before CI can pass.
+
+These checks do not prove runtime response conformance, format enforcement,
+dynamic authorization, UTF-8 byte limits or complete schemas for every route.
+The current automation specification uses local references only; introducing
+external references requires an explicit offline-bundling decision.
 
 CRM/scanner HTTP resolver responses must be unambiguous UTF-8 JSON objects.
 Duplicate decoded keys anywhere in the response (including escaped aliases),
@@ -973,3 +1102,109 @@ The handler rechecks after the tenant audit lock to cover concurrent first-desig
 creation. Archiving preserves revisions. This is a preservation and truthful
 refusal boundary, not an approved indefinite retention policy or a complete
 HTML privacy disposal/export workflow.
+
+### Designed PDF import size limits
+
+The designed-HTML document import retains its 20 MiB JSON body limit and returns
+413 for oversized JSON, including unknown-length trailing whitespace. Exactly
+one JSON value is accepted before scanning or rendering. Raw HTML
+and every growing sanitized HTML/CSS output are limited to 20 MiB; an expanding
+attribute or CSS rewrite that exceeds this bound returns a specific 413 before
+PDF rendering or persistence. The registered MCP create_pdf_document tool uses
+the same sanitizer; its existing HTTP transport limit remains 1 MiB.
+
+All application HTML-to-PDF requests are capped at 24 MiB for the complete
+encoded multipart body, including assets, MIME headers, fields and closing
+boundary. Oversize components are refused before header assembly or conversion
+to request bytes, and exact serialization overflow is refused before HTTP
+dispatch. Existing retries replay the same accepted body within one deadline.
+This is a request-body limit, not a bound on HTTP headers or process memory.
+The independent renderer listener ingress, timeout-retirement and operating
+profile qualification remain separate release requirements.
+
+
+## Response report-capacity admission
+
+New `POST /sign/{token}/sign` and `POST /sign/{token}/accept` responses measure
+the complete unsigned participant-report certificate payload in the same native
+transaction as their provisional response, audit and optional package receipt.
+A deterministic report/payload size refusal returns HTTP 409 with:
+
+```json
+{"error":"this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing"}
+```
+
+That refusal rolls back legal response/receipt/audit/notification/finalization
+database effects. The original authenticated link remains usable; another
+response still refuses while the report exceeds its limit. Existing external
+signature-object preparation can have occurred and is not a database rollback.
+Missing measurements, malformed history, unavailable funding and native
+availability failures return HTTP 503, rather than claiming a size conflict.
+No history is silently dropped and the existing limits are unchanged.
+
+The final required response atomically freezes the actual locked family before
+committing. Its original deadline/credential is rechecked after admission work.
+This boundary does not reserve future report headroom after partial responses;
+later-writer admission and configured/browser qualification remain tracked in
+`COMPLETION-STATUS.md`. A successful acknowledgement's cleanup checks its own
+operation; unrelated pending consumers retain their resources independently.
+
+
+## Completed contract and audit certificate downloads
+
+A terminal successful signer `POST /sign/{token}/sign` or acknowledgement `POST /sign/{token}/accept` returns `completed: true` with `final_pdf_url` and `audit_cert_url`. Both relative routes carry the same freshly rotated completion credential. Pending responses provide neither link. A terminal context reload never recreates these credentials from the original invitation.
+
+`GET /sign/{completed-token}/final-pdf` downloads the completed contract. `GET /sign/{completed-token}/audit-cert` downloads its separately stored audit certificate; it has no paid evidence-export requirement. Completion emails include both links for every eligible signed/accepted recipient and authenticated artifact links for the sender. Historical certificates retain their original scope. New participant reports bind the participant-visible negotiation/revision history at their stated cutoff; internal discussion is excluded.
+
+Recipient download credentials are read-only and expire after24hours. Both routes use the existing download IP/token rate limits. The certificate route requires exact key/SHA-256/storage VersionId pins, verifies stored bytes, and rechecks the original credential deadline, current authority and certificate identity after storage work. A revoked/expired token, changed certificate or incomplete certificate commitment does not expose certificate bytes. Preserve the digital originals and certificate; the separate optional evidence-bundle export remains a different capability.
+
+
+## Explicit package responses and archived originals
+
+`POST /sign/{token}/sign` and `POST /sign/{token}/accept` accept an optional
+`package_response` object. It is required when the current ceremony has a bound
+package, and must be omitted for ordinary or legacy-envelope ceremonies:
+
+```json
+{"package_response":{"manifest_sha256":"<64 lowercase hex>","legal_commitment_sha256":"<64 lowercase hex>","incorporation_version":"hash-package-incorporation-v1","incorporation_sha256":"<server copy digest>","consent":true}}
+```
+
+Signing also supplies `typed_name` and `font`. The privacy-notice digest header
+remains independently required; it cannot supply whole-package consent. Obtain
+the incorporation copy and commitments from authenticated package metadata.
+Missing package consent returns428, malformed/unchecked consent400, and changed
+observations412. The same response transaction binds the real audit row,
+signature where applicable, exact Send/capture and incorporation version. An
+identical retry with a still-current credential observes the original receipt.
+
+Successful terminal Sign/Accept responses additionally provide
+`package_portal_url` at `/completed/{fresh-completion-token}`. Completion emails
+include this reloadable read-only portal alongside final PDF and report links.
+The invitation credential grants no terminal access. The fresh credential has
+the same24-hour limit as final/report downloads; completed access does not reopen
+the contract's former signing deadline or authorize a mutation.
+
+`GET /sign/{completed-token}/completed-package` returns the same frozen public
+package descriptor shape, including the server-authored incorporation copy, with
+document/recipient binding headers and `Cache-Control: no-store`. Genuine
+ordinary or legacy-envelope absence returns `{"package":null}`. Inconsistent or
+unresolved current package history refuses delivery; it is never treated as
+ordinary absence. Package presence requires that recipient's exact M107 response
+and the M108 participant report tied to the published final/detached artifacts.
+Historical ordinary absence does not invent a retrospective package or report.
+
+`GET /sign/{completed-token}/completed-package/members/{position}/pdf` downloads
+the exact original main document at position0 or ordered annex1..16. It requires
+the same strong commitment-pair `If-Match` header and returns the same exact
+length/SHA/pages/package headers as the active member endpoint. Missing or
+malformed preconditions return428/400, stale observations412, absent members404,
+and native availability failures503. Revoked, expired, nonparticipant or
+privacy-blocked access never returns PDF bytes. It revalidates original expiry,
+all captured subjects and exact receipt/artifact associations after provider IO.
+Downloads are read-only and do not create consent or new contractual terms.
+
+The active `/package` routes retain their active-only guards. These terminal
+routes grant no Send authority. Native package Send requires the exact reviewed
+capture, intent and retained completion guarded by migration110; legacy Send
+cannot bypass that lifecycle. Current browser, configured-service and release
+qualification is tracked separately in `COMPLETION-STATUS.md`.

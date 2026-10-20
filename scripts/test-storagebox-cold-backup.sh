@@ -254,7 +254,35 @@ case "${1:-}" in
     container="$(resolve_name "$1")" || exit 2; shift
     case "${1:-}" in
       psql)
-        if [[ " $* " == *' --command '* ]]; then
+        if [[ " $* " == *' --file - '* ]]; then
+          # Exercise the actual production argv before emitting a finite fake
+          # inventory. A policy command must precede the canonical stdin file.
+          argv=("$@")
+          quiet=0; transaction=0; command_at=-1; file_at=-1; commands=0; files=0
+          for ((i=1; i<${#argv[@]}; i++)); do
+            case "${argv[i]}" in
+              --quiet) quiet=1 ;;
+              --single-transaction) transaction=1 ;;
+              --command)
+                commands=$((commands+1)); command_at=$i
+                [[ "${argv[i+1]:-}" == 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' ]] || exit 43
+                ;;
+              --file)
+                files=$((files+1)); file_at=$i
+                [[ "${argv[i+1]:-}" == - ]] || exit 43
+                ;;
+            esac
+          done
+          [[ "$quiet" == 1 && "$transaction" == 1 && "$commands" == 1 && "$files" == 1 && "$command_at" -lt "$file_at" ]] || exit 43
+          capture=1
+          [[ ! -f "$root/state/inventory.capture-count" ]] || capture=$(( $(cat "$root/state/inventory.capture-count") + 1 ))
+          printf '%s\n' "$capture" > "$root/state/inventory.capture-count"
+          cat > "$root/state/inventory.$capture.sql"
+          cmp -s "$root/state/inventory.$capture.sql" "$root/opt/hash/releases/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/recovery-object-inventory.sql" || exit 43
+          printf '%s\0' "$@" > "$root/state/inventory.$capture.argv"
+          case "${FAKE_INVENTORY_FAIL_STAGE:-}" in policy|query|commit) exit 44 ;; esac
+          printf '%b\n' 'YQ==\t"a"\tdocument_final_pdf\tdocument:1\torg\t-\tf\tt\t1\tversion-fixture\tf\tf\t2035-01-01T00:00:00Z'
+        elif [[ " $* " == *' --command '* ]]; then
           if [[ " $* " == *pg_control_system* ]]; then
             printf '%s\t%s\t%s\n' hash_fixture \
               "${FAKE_POSTGRES_SYSTEM_IDENTIFIER:-1234567890123456789}" \
@@ -551,6 +579,96 @@ run_subject() {
 }
 
 bash -n "$subject"
+bash -n "$script_dir/verify-recovery-objects.sh"
+bash -n "$script_dir/backup-restore-drill.sh"
+
+# Execute only the real inventory command fragments with hermetic psql/Docker
+# interceptors. This covers all five capture sites without simulating provider
+# verification or claiming that a fake psql proves PostgreSQL transaction state.
+test_inventory_command_policy() (
+  set -euo pipefail
+  local capture_root="$fixture_root/inventory-command-policy" capture_count=0
+  local inventory_sql="$script_dir/../ops/recovery-object-inventory.sql"
+  local inventory_tsv="$capture_root/verifier.tsv" database=hash_fixture
+  local output_dir="$capture_root/drill" stage_dir="$capture_root/cold"
+  local pg_source=source-fixture pg_restore_container=restore-fixture
+  local postgres_container_id=pg-fixture postgres_user=hash_fixture postgres_database=hash_fixture
+  local DB_USER=hash_fixture DB_NAME=hash_fixture DB_PASSWORD=inventory-fixture-only DOCKER=docker
+  local expected_pgoptions='-c statement_timeout=5000 -c lock_timeout=3000'
+  local PGOPTIONS="$expected_pgoptions"
+  mkdir -p "$capture_root" "$output_dir/snapshot" "$output_dir/restored" "$stage_dir/postgresql"
+  inventory_policy_psql() {
+    local args=("$@") quiet=0 transaction=0 stop=0 command_at=-1 file_at=-1 commands=0 files=0 source=''
+    local i
+    [[ "$PGOPTIONS" == "$expected_pgoptions" ]] || fail 'inventory command rewrote ambient PGOPTIONS'
+    for ((i=0; i<${#args[@]}; i++)); do
+      case "${args[i]}" in
+        --quiet) quiet=1 ;;
+        --single-transaction) transaction=1 ;;
+        --set) [[ "${args[i+1]:-}" != ON_ERROR_STOP=1 ]] || stop=1 ;;
+        --command)
+          commands=$((commands+1)); command_at=$i
+          [[ "${args[i+1]:-}" == 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' ]] || fail 'inventory policy command changed'
+          ;;
+        --file) files=$((files+1)); file_at=$i; source="${args[i+1]:-}" ;;
+      esac
+    done
+    [[ "$quiet" == 1 && "$transaction" == 1 && "$stop" == 1 && "$commands" == 1 && "$files" == 1 && "$command_at" -lt "$file_at" ]] || fail 'inventory argv lost ordered one-session transaction policy'
+    capture_count=$((capture_count+1))
+    printf '%s\0' "$@" > "$capture_root/$capture_count.argv"
+    if [[ "$source" == - ]]; then
+      cat > "$capture_root/$capture_count.sql"
+    else
+      [[ "$source" == "$inventory_sql" ]] || fail 'verifier selected a different SQL file'
+      cat "$source" > "$capture_root/$capture_count.sql"
+    fi
+    cmp -s "$inventory_sql" "$capture_root/$capture_count.sql" || fail 'inventory command changed canonical query bytes'
+    printf '%b\n' 'YQ==\t"a"\tdocument_source_pdf\tdocument:1\torg\t-\tf\tf\t1\tversion-fixture\tf\tf\t-'
+  }
+  psql() { inventory_policy_psql "$@"; }
+  docker() {
+    [[ "${1:-}" == exec && "${2:-}" == -i ]] || fail 'inventory capture lost interactive stdin Docker exec'
+    shift 2
+    if [[ "${1:-}" == -e ]]; then
+      [[ "${2:-}" == "PGPASSWORD=$DB_PASSWORD" ]] || fail 'drill credential forwarding changed'
+      shift 2
+    fi
+    case "${1:-}" in source-fixture|restore-fixture|pg-fixture) shift ;; *) fail 'inventory capture changed target container' ;; esac
+    [[ "${1:-}" == psql ]] || fail 'inventory Docker command changed client'
+    shift
+    inventory_policy_psql "$@"
+  }
+  inventory_command_fragments() {
+    awk '
+      function finish() {
+        if (index(statement,"< \"$inventory_sql\"") || index(statement,"--file \"$inventory_sql\"")) print statement
+        statement=""
+      }
+      {
+        if (statement!="") statement=statement ORS $0
+        else if ($0 ~ /^[[:space:]]*docker exec/ || index($0,"\"$DOCKER\" exec") || index($0,"\"${psql_args[@]}\" --file")) statement=$0
+        if (statement!="" && $0 !~ /\\[[:space:]]*$/) finish()
+      }
+      END { if (statement!="") finish() }
+    ' "$1"
+  }
+  sed -n '/^psql_args=(psql /,/^fi$/p' "$script_dir/verify-recovery-objects.sh" > "$capture_root/verifier-array.sh"
+  [[ -s "$capture_root/verifier-array.sh" ]] || fail 'actual verifier psql array not found'
+  . "$capture_root/verifier-array.sh"
+  for subject_file in verify-recovery-objects.sh backup-restore-drill.sh storagebox-cold-backup.sh; do
+    inventory_command_fragments "$script_dir/$subject_file" > "$capture_root/$subject_file.commands"
+    [[ -s "$capture_root/$subject_file.commands" ]] || fail 'actual inventory command fragments missing'
+    . "$capture_root/$subject_file.commands"
+  done
+  [[ "$capture_count" == 5 ]] || fail 'not all five actual inventory capture commands were exercised'
+  for result in "$inventory_tsv" "$output_dir/snapshot/recovery-object-inventory.tsv" "$output_dir/restored/recovery-object-inventory.tsv" "$stage_dir/postgresql/recovery-object-inventory.before.tsv" "$stage_dir/postgresql/recovery-object-inventory.tsv"; do
+    awk -F '\t' 'NF != 13 {bad=1} END {exit bad || NR != 1}' "$result" || fail 'inventory command stdout is not one clean13-column TSV row'
+  done
+  cmp -s "$output_dir/snapshot/recovery-object-inventory.tsv" "$output_dir/restored/recovery-object-inventory.tsv" || fail 'drill source/restored invocation policies differ'
+  cmp -s "$stage_dir/postgresql/recovery-object-inventory.before.tsv" "$stage_dir/postgresql/recovery-object-inventory.tsv" || fail 'cold pre/post invocation policies differ'
+)
+
+test_inventory_command_policy
 
 missing="$fixture_root/missing-receipt"
 setup_fixture "$missing"
@@ -1248,6 +1366,11 @@ if ! run_subject "$success" backup --config "$success/config.json" \
     --key-escrow-receipt "$success/key-escrow.json" >"$success/output" 2>"$success/error"; then
   fail "valid cold backup failed: $(<"$success/error")"
 fi
+[[ "$(cat "$success/state/inventory.capture-count")" == 2 ]] || fail 'cold backup did not capture exactly two canonical inventories'
+for capture in 1 2; do
+  cmp -s "$success/state/inventory.$capture.sql" "$(fixture_release_dir "$success")/recovery-object-inventory.sql" || fail 'cold backup changed canonical stdin bytes'
+  [[ -s "$success/state/inventory.$capture.argv" ]] || fail 'cold backup did not retain intercepted psql argv'
+done
 actions="$(grep -E '^(stop|start) ' "$success/docker.log")"
 expected_actions="$(printf 'stop --time 5 %s\nstop --time 5 %s\nstop --time 5 %s\nstart %s\nstart %s\nstart %s' \
   "$(<"$success/state/hash-worker.original-id")" \
@@ -1328,6 +1451,25 @@ done
 [[ -f "$(fixture_recovery_sentinel "$replaced_before_capture")" \
     && -d "$replaced_before_capture/state/.hash-cold-backup.lock" ]] \
   || fail 'pre-capture identity uncertainty did not retain both recovery alarms'
+
+# A nonzero psql result at any transaction stage must abort before Restic.
+# These hermetic failures exercise shell propagation only; actual policy/query/
+# COMMIT behavior and transaction setting restoration require the real PG test.
+for stage in policy query commit; do
+  inventory_failed="$fixture_root/inventory-$stage-failure"
+  setup_fixture "$inventory_failed"
+  if FAKE_INVENTORY_FAIL_STAGE="$stage" run_subject "$inventory_failed" backup \
+      --config "$inventory_failed/config.json" \
+      --maintenance-receipt "$inventory_failed/maintenance.json" \
+      --key-escrow-receipt "$inventory_failed/key-escrow.json" >/dev/null 2>&1; then
+    fail "inventory $stage failure returned success"
+  fi
+  [[ "$(grep -c '^backup --json' "$inventory_failed/restic.log" || true)" == 0 ]] || fail "inventory $stage failure reached Restic backup"
+  [[ "$(find "$inventory_failed/state/receipts" -name '*.receipt.json' | wc -l | tr -d ' ')" == 0 ]] || fail "inventory $stage failure wrote a successful receipt"
+  for name in hash-app hash-worker minio-fixture; do
+    [[ "$(<"$inventory_failed/state/$name.running")" == 1 ]] || fail "$name stayed stopped after inventory $stage failure"
+  done
+done
 
 failed="$fixture_root/restic-failure"
 setup_fixture "$failed"

@@ -19,10 +19,13 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
+	"github.com/bright-interaction/hash/internal/pdftemplateauthoring"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sign"
@@ -136,8 +139,18 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input, err := s.HTMLCreationSessions.NewBlocksHTTPInputV1(r.Context(), u.OrgID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "document input capacity unavailable")
+		return
+	}
+	defer input.CloseConsumerV1()
 	var in createDocumentInput
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err := input.WithHTTPBodyV1(r.Context(), r.Body, func(raw []byte) error { return decodeSignerJSONBytesV1(raw, &in) }); err != nil {
+		if errors.Is(err, pdfadmission.ErrBlocksInputV1) {
+			writeError(w, http.StatusServiceUnavailable, "document input capacity unavailable")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -183,129 +196,41 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		writeInternalErrorMsg(w, "create document failed", errors.New("document creation dependencies unavailable"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		writeInternalErrorMsg(w, "begin document creation", err)
-		return
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	var doc *generated.Document
-	var guard *authoring.MemberGuard
-	var layoutEvents []audit.PendingEvent
-	create := func() error {
-		switch in.SourceKind {
-		case "blocks":
-			if err := s.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-				return err
-			}
-			seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, templateID, in.SourceKind, in.BlocksJSON, in.VariablesJSON)
-			if err != nil {
-				return err
-			}
-			guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
-			if err != nil {
-				return err
-			}
-			doc, err = q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-				OrgID: u.OrgID, TemplateID: templateID, Name: in.Name,
-				BlocksJson: seed.BlocksJSON, VariablesJson: seed.VariablesJSON,
-				SenderID: u.UserID, ExpiresAt: expiresAt,
-			})
-			if err != nil {
-				return err
-			}
-			return s.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID)
-		case "pdf":
-			if err := s.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-				return err
-			}
-			seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, templateID, in.SourceKind, nil, in.VariablesJSON)
-			if err != nil {
-				return err
-			}
-			guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
-			if err != nil {
-				return err
-			}
-			rep, err := authoring.PDFTemplateDocumentReport(seed.Template)
-			if err != nil {
-				return err
-			}
-			tpl := seed.Template
-			layout, parties, err := pdflayout.Prepare(tpl, in.ExpectedTemplateVersion, in.Parties)
-			if err != nil {
-				return err
-			}
-			doc, err = q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
-				OrgID: u.OrgID, TemplateID: templateID, Name: in.Name,
-				PdfStorageKey: tpl.PdfStorageKey, PdfSha256: tpl.PdfSha256,
-				PdfStorageVersionID: tpl.PdfStorageVersionID, EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
-				SenderID: u.UserID, ExpiresAt: expiresAt,
-			})
-			if err != nil {
-				return err
-			}
-			if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{ID: doc.ID, MetadataRedactionReport: rep}); err != nil {
-				return err
-			}
-			// The redaction report updates the row's timestamp. Resolve the
-			// transaction's own new row before the guarded values update.
-			doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: u.OrgID})
-			if err != nil {
-				return err
-			}
-			// Preserve declared values for PDF designs too. This populates
-			// contract data; it does not rewrite already-rendered PDF bytes.
-			doc, err = q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
-				ID: doc.ID, OrgID: u.OrgID, VariablesJson: seed.VariablesJSON, ExpectedUpdatedAt: doc.UpdatedAt,
-			})
-			if err != nil {
-				return err
-			}
-			if err := s.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-				return err
-			}
-			layoutEvents, err = pdflayout.Materialize(ctx, tx, q, s.Billing, s.Audit, doc, u.UserID, layout, parties, "rest")
-			return err
+	if in.SourceKind == "blocks" {
+		result, err := blockauthoring.CreateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
+			blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, blockauthoring.CreateInputV1{Name: in.Name, TemplateID: templateID, BlocksJSON: in.BlocksJSON, VariablesJSON: in.VariablesJSON, ExpiresAt: expiresAt})
+		if result != nil {
+			defer result.CloseConsumerV1()
 		}
-		return authoring.ErrCreationInput
-	}
-	if err := create(); err != nil {
-		s.writeDocumentCreationError(w, err)
+		if err != nil {
+			if errors.Is(err, pdfadmission.ErrBlocksTemplateSourceV1) || errors.Is(err, pdfadmission.ErrBlocksWriterV1) || errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+				writeError(w, http.StatusServiceUnavailable, "document creation capacity unavailable")
+				return
+			}
+			s.writeDocumentCreationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, toDocumentResponse(result.Document))
 		return
 	}
-	creationPayload := map[string]any{"name": doc.Name, "source_kind": doc.SourceKind}
-	if len(layoutEvents) > 0 {
-		creationPayload["template_id"] = in.TemplateID
-		creationPayload["template_version"] = *in.ExpectedTemplateVersion
-		creationPayload["layout_version"] = 1
-		creationPayload["party_count"] = len(in.Parties)
+	result, err := pdftemplateauthoring.CreateV1(r.Context(), pdftemplateauthoring.CreateDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
+		pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, pdftemplateauthoring.CreateInputV1{TemplateID: templateID, Source: pdfadmission.PDFTemplateDocumentInputV1{Name: in.Name, TemplateText: in.TemplateID, Variables: in.VariablesJSON, ExpiresAt: expiresAt, ExpectedTemplateVersion: in.ExpectedTemplateVersion, Parties: in.Parties}})
+	if result != nil {
+		defer result.CloseConsumerV1()
 	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-		Kind:    audit.KindDocumentCreated,
-		Payload: creationPayload,
-	})
 	if err != nil {
-		writeInternalErrorMsg(w, "audit document creation", err)
-		return
-	}
-	if err := guard.Recheck(ctx); err != nil {
+		if pdftemplateauthoring.IsRetiredCreateStatementFailureV1(err) {
+			s.writeDocumentCreationError(w, err)
+			return
+		}
+		if errors.Is(err, pdfadmission.ErrPDFTemplateDocumentV1) || errors.Is(err, pdfadmission.ErrPDFTemplateSourceV1) || errors.Is(err, pdfadmission.ErrPlainPDFWriterV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+			writeError(w, http.StatusServiceUnavailable, "document creation capacity unavailable")
+			return
+		}
 		s.writeDocumentCreationError(w, err)
 		return
 	}
-	if err := tx.Commit(ctx); err != nil {
-		writeInternalErrorMsg(w, "commit document creation", err)
-		return
-	}
-	for _, event := range layoutEvents {
-		s.Audit.Publish(event)
-	}
-	s.Audit.Publish(pending)
-	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
+	writeJSON(w, http.StatusCreated, toDocumentResponse(result.Document))
 }
 
 func (s *Server) writeDocumentCreationError(w http.ResponseWriter, err error) {
@@ -455,8 +380,13 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input, ok := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	var in updateDocumentInput
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err := decodePlainDraftInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -485,6 +415,19 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 
 	if s.Pool == nil || s.Queries == nil || s.Audit == nil {
 		writeInternalErrorMsg(w, "update document unavailable", errors.New("atomic document update dependencies unavailable"))
+		return
+	}
+	peek, err := s.Queries.GetRecipientMutationSourceDiscriminatorV1(r.Context(), generated.GetRecipientMutationSourceDiscriminatorV1Params{DocumentID: id, OrgID: u.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.writeDraftAuthoringError(w, "authorize document update", authoring.ErrDocumentNotFound)
+		return
+	}
+	if err != nil {
+		writeInternalErrorMsg(w, "inspect document source", err)
+		return
+	}
+	if peek != nil && (peek.SourceKind == "pdf" || peek.SourceKind == "blocks") && !peek.HasHtmlOrigin && !peek.HasHtmlCurrent && !peek.HasHtmlMaterialization {
+		s.finishOwnedPlainDraftPatchV1(w, r, u.OrgID, u.UserID, id, authorize, in)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
@@ -552,9 +495,9 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Metadata path: name, expires_at. Merge in Go because the SQL uses
-	// COALESCE on positional args and pgx doesn't pass Go zero-value strings
-	// as NULL.
+	// This edit carries name/expiry intent only. Omit metadata entirely so
+	// its exact stored JSONB and derived-size record survive unchanged.
+	// The original parent/CAS/member guards remain held through commit.
 	name := existing.Name
 	if in.Name != "" {
 		name = in.Name
@@ -568,12 +511,11 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		}
 		expiresArg = pgtype.Timestamptz{Time: t, Valid: true}
 	}
-	d, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
+	d, err := q.UpdateDraftDocumentDetailsV1(r.Context(), generated.UpdateDraftDocumentDetailsV1Params{
 		ID:        id,
 		OrgID:     u.OrgID,
 		Name:      name,
 		ExpiresAt: expiresArg,
-		Metadata:  existing.Metadata,
 	})
 	if err != nil {
 		writeInternalErrorMsg(w, "update document failed", err)
@@ -724,7 +666,8 @@ func (s *Server) resolveChangeRequest(w http.ResponseWriter, r *http.Request, ap
 	if !ok {
 		return
 	}
-	if _, err := s.Sign.ResolveChangeWithAuthorization(r.Context(), u.OrgID, id, crID, u.UserID, approve, authorize); err != nil {
+	resolved, err := s.Sign.ResolveChangeWithAuthorization(r.Context(), u.OrgID, id, crID, u.UserID, approve, authorize)
+	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrMutationCredentialExpired):
 			writeError(w, http.StatusUnauthorized, auth.ErrMutationCredentialExpired.Error())
@@ -740,11 +683,15 @@ func (s *Server) resolveChangeRequest(w http.ResponseWriter, r *http.Request, ap
 			writeError(w, http.StatusConflict, "change cannot be applied after legal evidence has been captured")
 		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
 			writeError(w, http.StatusConflict, "change resolution is not supported for envelopes")
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "change resolution temporarily unavailable")
 		default:
 			writeInternalErrorMsg(w, "resolve change request failed", err)
 		}
 		return
 	}
+	defer resolved.CloseConsumerV1()
 	resolution := "denied"
 	if approve {
 		resolution = "approved"
@@ -849,10 +796,16 @@ func (s *Server) handleReviseDocument(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "revision blocked because this ceremony already contains captured legal evidence; void and create a superseding document instead")
 			return
 		}
+		if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "revision temporarily unavailable")
+			return
+		}
 		writeInternalErrorMsg(w, "revise document", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	defer doc.CloseConsumerV1()
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 type commentResponse struct {
@@ -890,16 +843,28 @@ func (s *Server) handleListComments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := s.Queries.GetActiveDocumentIdentity(r.Context(), generated.GetActiveDocumentIdentityParams{ID: id, OrgID: u.OrgID}); err != nil {
-		writeError(w, http.StatusNotFound, "document not found")
+	session, cookie, ok := s.transactionSession(w, r, u)
+	if !ok {
 		return
 	}
-	rows, err := s.Queries.ListComments(r.Context(), id)
+	authorize := func(ctx context.Context, user *generated.User) error {
+		if user == nil || user.ID != session.UserID || user.OrgID != u.OrgID || user.SessionGeneration != session.Generation {
+			return errCommentSessionRevoked
+		}
+		if _, err := s.Cookies.Verify(cookie); err != nil {
+			return errCommentSessionExpired
+		}
+		return ctx.Err()
+	}
+	page, err := s.Sign.StaffCommentPageV1(r.Context(), u.OrgID, id, u.UserID, r.URL.RawQuery, authorize)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list comments failed")
+		s.writeCommentPageErrorV1(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"comments": toCommentResponses(rows)})
+	defer page.CloseConsumerV1()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(page.JSON)
 }
 
 type createCommentInput struct {
@@ -920,11 +885,29 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var in createCommentInput
-	if err := decodeJSON(r, &in); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if s.Sign == nil || s.Sign.WorkRuntime == nil || !s.Sign.WorkRuntime.MatchesPoolV1(s.Sign.Pool) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "comments temporarily unavailable")
 		return
 	}
+	input, err := s.Sign.WorkRuntime.SessionsV1().NewStaffCommentHTTPInputV1(r.Context(), u.OrgID)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "comments temporarily unavailable")
+		return
+	}
+	defer input.CloseConsumerV1()
+	_, finishDecode, err := input.DecodeStaffJSONV1(r.Context(), r.Body)
+	if err != nil {
+		if errors.Is(err, pdfadmission.ErrCommentInputV1) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "comments temporarily unavailable")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid json")
+		}
+		return
+	}
+	defer finishDecode()
 	session, cookie, ok := s.transactionSession(w, r, u)
 	if !ok {
 		return
@@ -938,7 +921,7 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		}
 		return ctx.Err()
 	}
-	c, err := s.Sign.SenderCommentWithAuthorization(r.Context(), u.OrgID, id, u.UserID, u.Email, in.Body, authorize)
+	c, err := s.Sign.SenderCommentOwnedV1(input, u.OrgID, id, u.UserID, authorize)
 	if err != nil {
 		switch {
 		case errors.Is(err, errCommentSessionExpired):
@@ -951,12 +934,16 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "document is not open for comments")
 		case errors.Is(err, sign.ErrCommentDocumentNotFound):
 			writeError(w, http.StatusNotFound, "document not found")
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "comments temporarily unavailable")
 		default:
 			writeInternalErrorMsg(w, "post sender comment", err)
 		}
 		return
 	}
-	writeJSON(w, http.StatusCreated, toCommentResponse(c))
+	defer c.CloseConsumerV1()
+	writeJSON(w, http.StatusCreated, toCommentResponse(c.DocumentComment))
 }
 
 func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {

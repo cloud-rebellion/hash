@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -47,12 +48,12 @@ func htmlCreationRequestIDs(w http.ResponseWriter, r *http.Request) (uuid.UUID, 
 // A read can cross the instant a concurrent creation commits. If the terminal
 // registry now says committed, reread its immutable receipt with a fresh
 // ReadCommitted statement snapshot rather than returning a misleading 404.
-func readHTMLCreationResolution(ctx context.Context, q *generated.Queries, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string) (*htmlCreationOutcome, *generated.HtmlDocumentCreationResolution, error) {
-	committed, err := readHTMLCreationRequest(ctx, q, actor, templateID, requestID, inputDigest)
+func readHTMLCreationResolution(ctx context.Context, q *generated.Queries, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string, readers ...*pdfadmission.ApplicationHTMLAuthoringReaderV1) (*htmlCreationOutcome, *generated.HtmlDocumentCreationResolution, error) {
+	committed, err := readHTMLCreationRequest(ctx, q, actor, templateID, requestID, inputDigest, readers...)
 	if err != nil || committed != nil {
 		return committed, nil, err
 	}
-	row, err := q.GetHTMLDocumentCreationResolutionForShare(ctx, generated.GetHTMLDocumentCreationResolutionForShareParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID})
+	row, err := q.GetHTMLDocumentCreationResolution(ctx, generated.GetHTMLDocumentCreationResolutionParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, nil
 	}
@@ -68,7 +69,7 @@ func readHTMLCreationResolution(ctx context.Context, q *generated.Queries, actor
 	if row.State != "committed" {
 		return nil, nil, errHTMLCreationClosureUnavailable
 	}
-	committed, err = readHTMLCreationRequest(ctx, q, actor, templateID, requestID, inputDigest)
+	committed, err = readHTMLCreationRequest(ctx, q, actor, templateID, requestID, inputDigest, readers...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -78,30 +79,39 @@ func readHTMLCreationResolution(ctx context.Context, q *generated.Queries, actor
 	return committed, nil, nil
 }
 
-func (s *Server) findHTMLCreationResolution(ctx context.Context, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string) (*htmlCreationOutcome, *generated.HtmlDocumentCreationResolution, error) {
-	if s.Pool == nil {
-		return nil, nil, errHTMLCreationClosureUnavailable
-	}
+func (s *Server) findHTMLCreationResolution(ctx context.Context, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string) (committed *htmlCreationOutcome, closed *generated.HtmlDocumentCreationResolution, failure error) {
 	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, requestID)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
+	defer func() {
+		_ = o.closeSQLV1(ctx)
+		if committed == nil {
+			o.closeConsumerV1(ctx)
+		}
+	}()
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
+		if err != nil {
+			return err
+		}
+		committed, closed, err = readHTMLCreationResolution(ctx, generated.New(tx), actor, templateID, requestID, inputDigest, o.reader)
+		if err != nil {
+			return err
+		}
+		return guard.Recheck(ctx)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	committed, closed, err := readHTMLCreationResolution(ctx, generated.New(tx), actor, templateID, requestID, inputDigest)
-	if err != nil {
+	if err = o.session.CommitV1(ctx); err != nil {
 		return nil, nil, err
 	}
-	if err = guard.Recheck(ctx); err != nil {
-		return nil, nil, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return nil, nil, err
+	if committed != nil {
+		committed.addOwnedConsumerV1(func() { o.closeConsumerV1(ctx) })
 	}
 	return committed, closed, nil
 }
@@ -115,59 +125,68 @@ func htmlCreationClosedResponse(row *generated.HtmlDocumentCreationResolution) m
 // Closure retires the nonce even when its original renderer is still running.
 // Take the unconditional DB lock used by final creation before author locks;
 // the unique terminal registry additionally enforces mutual exclusion in SQL.
-func (s *Server) closeHTMLCreationRequest(ctx context.Context, actor authoring.Actor, templateID, requestID uuid.UUID) (*htmlCreationOutcome, *generated.HtmlDocumentCreationResolution, error) {
-	if s.Pool == nil || s.Audit == nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || templateID == uuid.Nil || requestID == uuid.Nil {
+func (s *Server) closeHTMLCreationRequest(ctx context.Context, actor authoring.Actor, templateID, requestID uuid.UUID) (committed *htmlCreationOutcome, closed *generated.HtmlDocumentCreationResolution, failure error) {
+	if s.Audit == nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || templateID == uuid.Nil || requestID == uuid.Nil {
 		return nil, nil, errHTMLCreationClosureUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, requestID)
 	if err != nil {
 		return nil, nil, errors.Join(errHTMLCreationClosureUnavailable, err)
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	if err = q.LockBillingUsageForOrg(ctx, actor.OrgID.String()); err != nil {
-		return nil, nil, errors.Join(errHTMLCreationClosureUnavailable, err)
-	}
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
-	if err != nil {
-		return nil, nil, err
-	}
-	committed, closed, err := readHTMLCreationResolution(ctx, q, actor, templateID, requestID, "")
-	if err != nil {
-		return nil, nil, err
-	}
-	var pending *audit.PendingEvent
-	if committed == nil && closed == nil {
-		closed, err = q.InsertHTMLDocumentCreationClosure(ctx, generated.InsertHTMLDocumentCreationClosureParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID, TemplateID: templateID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			// A unique-key loser has not closed anything. Read and verify the
-			// winning terminal outcome; absence still proves no safe retry.
-			committed, closed, err = readHTMLCreationResolution(ctx, q, actor, templateID, requestID, "")
-			if err != nil || (committed == nil && closed == nil) {
-				return nil, nil, errors.Join(errHTMLCreationClosureUnavailable, err)
-			}
-		} else if err != nil {
-			return nil, nil, errors.Join(errHTMLCreationClosureUnavailable, err)
-		} else {
-			event, auditErr := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID,
-				Kind: "html.document.creation.closed", Payload: map[string]any{"template_id": templateID, "request_id": requestID,
-					"closed_at": closed.ResolvedAt.Time.UTC().Format(time.RFC3339Nano)}})
-			if auditErr != nil {
-				return nil, nil, errors.Join(errHTMLCreationClosureAudit, auditErr)
-			}
-			pending = &event
+	defer func() {
+		_ = o.closeSQLV1(ctx)
+		if committed == nil {
+			o.closeConsumerV1(ctx)
 		}
-	}
-	if err = guard.Recheck(ctx); err != nil {
+	}()
+	var pending *audit.PendingEvent
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		q := generated.New(tx)
+		if err := q.LockBillingUsageForOrg(ctx, actor.OrgID.String()); err != nil {
+			return errors.Join(errHTMLCreationClosureUnavailable, err)
+		}
+		guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
+		if err != nil {
+			return err
+		}
+		committed, closed, err = readHTMLCreationResolution(ctx, q, actor, templateID, requestID, "", o.reader)
+		if err != nil {
+			return err
+		}
+		if committed == nil && closed == nil {
+			closed, err = q.InsertHTMLDocumentCreationClosure(ctx, generated.InsertHTMLDocumentCreationClosureParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID, TemplateID: templateID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				committed, closed, err = readHTMLCreationResolution(ctx, q, actor, templateID, requestID, "", o.reader)
+				if err != nil || (committed == nil && closed == nil) {
+					return errors.Join(errHTMLCreationClosureUnavailable, err)
+				}
+			} else if err != nil {
+				return errors.Join(errHTMLCreationClosureUnavailable, err)
+			} else {
+				event, auditErr := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, Kind: "html.document.creation.closed",
+					Payload: map[string]any{"template_id": templateID, "request_id": requestID, "closed_at": closed.ResolvedAt.Time.UTC().Format(time.RFC3339Nano)}})
+				if auditErr != nil {
+					return errors.Join(errHTMLCreationClosureAudit, auditErr)
+				}
+				pending = &event
+			}
+		}
+		return guard.Recheck(ctx)
+	})
+	if err != nil {
 		return nil, nil, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = o.session.CommitV1(ctx); err != nil {
 		return nil, nil, errors.Join(errHTMLCreationClosureUnavailable, err)
 	}
 	if pending != nil {
-		s.Audit.Publish(*pending)
+		s.Audit.Publish(detachHTMLCreationEventIDsV1(*pending))
+	}
+	if committed != nil {
+		committed.addOwnedConsumerV1(func() { o.closeConsumerV1(ctx) })
 	}
 	return committed, closed, nil
 }
@@ -182,9 +201,18 @@ func (s *Server) handleCloseHTMLCreationRequest(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, user.OrgID, pdfadmission.HTMLCreationClosureInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<10)
 	var in htmlCreationCloseInput
-	if err := decodeCRMTemplateJSON(r, &in); err != nil || !in.Confirmed {
+	decodeErr := decodeCRMTemplateJSON(r, &in)
+	if writeHTMLAuthoringInputFailureV1(w, decodeErr) {
+		return
+	}
+	if decodeErr != nil || !in.Confirmed {
 		writeError(w, 400, "the original actor and explicit confirmation are required")
 		return
 	}
@@ -214,7 +242,7 @@ func (s *Server) handleCloseHTMLCreationRequest(w http.ResponseWriter, r *http.R
 			writeError(w, 404, "creation request not found")
 		case errors.Is(err, errHTMLCreationClosureAudit):
 			writeError(w, 500, "creation request closure audit unavailable")
-		case errors.Is(err, errHTMLCreationClosureUnavailable), errors.Is(err, context.DeadlineExceeded):
+		case errors.Is(err, errHTMLCreationClosureUnavailable), errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1), errors.Is(err, context.DeadlineExceeded):
 			writeError(w, 503, "creation request closure unavailable; inspect this same request")
 		default:
 			s.writeDraftAuthoringError(w, "close creation request", err)
@@ -222,6 +250,7 @@ func (s *Server) handleCloseHTMLCreationRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 	if committed != nil {
+		defer committed.closeOwnedWriterV1()
 		writeJSON(w, 200, htmlCreationCommittedResponse(committed))
 		return
 	}

@@ -15,9 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/pdftemplateauthoring"
 )
 
 // registerReadTools mounts the safe, read-only tools. These are the same
@@ -31,25 +33,35 @@ func registerReadTools(s *Server, d Deps) {
 			"limit":  intSchema("max rows", 1, 200, 50),
 			"offset": intSchema("offset", 0, 100000, 0),
 		}, nil),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				Limit  int `json:"limit"`
 				Offset int `json:"offset"`
 			}
-			_ = MustParseArgs(args, &p)
+			if err = input.WithArgumentsV1(r.Context(), func(raw []byte) error { _ = MustParseArgs(raw, &p); return nil }); err != nil {
+				return nil, err
+			}
 			limit := int32(50)
 			if p.Limit > 0 && p.Limit <= 200 {
 				limit = int32(p.Limit)
 			}
 			offset := int32(p.Offset)
-			rows, err := d.Queries.ListTemplates(r.Context(), generated.ListTemplatesParams{
-				OrgID: u.OrgID, Limit: limit, Offset: offset,
-			})
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeRead)
 			if err != nil {
-				return nil, fmt.Errorf("list templates: %w", err)
+				return nil, err
 			}
-			return map[string]any{"templates": rows, "count": len(rows)}, nil
+			rows, err := blockauthoring.ListTemplatesV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "list_templates"}, limit, offset, false)
+			if err != nil {
+				return rows, fmt.Errorf("list templates: %w", err)
+			}
+			return rows, nil
+
 		},
 	})
 
@@ -59,17 +71,51 @@ func registerReadTools(s *Server, d Deps) {
 		InputSchema: schemaObject(map[string]any{
 			"id": stringSchema("template id (uuid)"),
 		}, []string{"id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ID string `json:"id"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.ID)
 			if err != nil {
 				return nil, errors.New("id must be a uuid")
+			}
+			header, err := d.Queries.GetNonHTMLTemplateSourceHeaderForShareV1(r.Context(), generated.GetNonHTMLTemplateSourceHeaderForShareV1Params{TemplateID: id, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("template not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if header.SourceKind == "blocks" {
+				authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeRead)
+				if err != nil {
+					return nil, err
+				}
+				result, err := blockauthoring.ReadTemplateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "get_template"}, id)
+				if errors.Is(err, blockauthoring.ErrTemplateNotFoundV1) {
+					return result, errors.New("template not found")
+				}
+				return result, err
+			}
+			if header.SourceKind == "pdf" {
+				authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeRead)
+				if err != nil {
+					return nil, err
+				}
+				result, err := pdftemplateauthoring.ReadV1(r.Context(), d.PDFCreationSessions, pdftemplateauthoring.ReadActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
+				if errors.Is(err, pdftemplateauthoring.ErrTemplateNotFoundV1) {
+					return result, errors.New("template not found")
+				}
+				return result, err
 			}
 			t, err := d.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{ID: id, OrgID: u.OrgID})
 			if errors.Is(err, pgx.ErrNoRows) {

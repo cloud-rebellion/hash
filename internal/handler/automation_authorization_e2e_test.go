@@ -18,8 +18,6 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/dispatch"
-	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/templatepin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -37,18 +35,39 @@ type automationAuthorizationFixture struct {
 
 func setupAutomationAuthorizationE2E(t *testing.T, expires time.Time) automationAuthorizationFixture {
 	t.Helper()
-	ctx, pool, q, s, org, user := setupDSRE2E(t)
-	template, err := q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
-		OrgID: org, CreatedBy: user, Name: "Authorization template",
-		BlocksJson:    json.RawMessage(`{"version":1,"blocks":[{"id":"agreement","type":"paragraph","text":"Agreement for {{customer}}"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`),
-		VariablesJson: json.RawMessage(`{"customer":"Fixture customer"}`),
+	// Preserve the caller's short credential lease from actual key creation;
+	// genuine template/runtime preparation must not consume the test lease.
+	var lease time.Duration
+	if !expires.IsZero() {
+		lease = time.Until(expires)
+	}
+	owned := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, owned)
+	ownedAutomationAuthorizationPrepareFreePlanV1(t, owned)
+	base := owned.f
+	ctx, pool, q, s, org, user := base.ctx, base.pool, base.q, base.s, base.org, base.user.ID
+	created := ownedBlocksTemplateCallV1(t, base, owned.cookie, http.MethodPost, "/api/v1/templates", map[string]any{
+		"name":           "Authorization template",
+		"blocks_json":    json.RawMessage(`{"version":1,"blocks":[{"id":"agreement","type":"paragraph","text":"Agreement for {{customer}}"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`),
+		"variables_json": map[string]string{"customer": "Fixture customer"},
 	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("actual authorization template=%d %s", created.Code, created.Body.String())
+	}
+	var published templateResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &published); err != nil || published.ID == uuid.Nil {
+		t.Fatal("actual authorization template response", err)
+	}
+	template, err := q.GetTemplate(ctx, generated.GetTemplateParams{ID: published.ID, OrgID: org})
 	if err != nil {
 		t.Fatal(err)
 	}
 	key, err := auth.MintAPIKey()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !expires.IsZero() {
+		expires = time.Now().Add(lease)
 	}
 	row, err := q.CreateAPIKey(ctx, generated.CreateAPIKeyParams{
 		OrgID: org, UserID: user, KeyPrefix: key.Prefix, KeyHash: key.Hash, Name: "Synthetic automation authorization",
@@ -59,32 +78,57 @@ func setupAutomationAuthorizationE2E(t *testing.T, expires time.Time) automation
 	}
 	s.APIKeys = &auth.PgVerifier{Queries: q}
 	s.Billing = billing.New(q, billing.MockProvider{}, "", "")
-	s.Send = &send.Engine{Pool: pool, Queries: q, Audit: s.Audit, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: s.PublicURL, OrgName: "Automation fixture"}
+	// Keep the same genuinely configured native Send/runtime/storage/render peers.
 	content, err := templatepin.Canonicalize(template.BlocksJson, template.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, err := json.Marshal(automationSignatureRequestInput{
 		TemplateID: template.ID.String(), TemplateVersion: template.Version, TemplateContentSHA256: content.SHA256Hex(),
-		Name: "Authorized machine agreement", LawfulBasis: "contract",
-		Variables:  map[string]string{},
+		Name: "Authorized machine agreement", LawfulBasis: "contract", Variables: map[string]string{},
 		Recipients: []automationSignatureRecipientInput{{Name: "Synthetic signer", Email: uuid.NewString() + "@automation-authorization.test", Locale: "en"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := automationAuthorizationFixture{ctx, pool, q, s, org, user, row.ID, key.Plaintext, string(body), uuid.NewString()}
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := pool.Exec(cleanupCtx, `DELETE FROM email_deliveries WHERE to_email IN (SELECT r.email FROM recipients r JOIN documents d ON d.id=r.document_id WHERE d.org_id=$1)`, org); err != nil {
-			t.Error(err)
-		}
-		if _, err := pool.Exec(cleanupCtx, `DELETE FROM orgs WHERE id=$1`, org); err != nil {
-			t.Error(err)
-		}
-	})
-	return f
+	// The owned fixture independently joins and removes its entire disposable
+	// database; per-org DELETE would collide with genuine immutable audit history.
+	return automationAuthorizationFixture{ctx, pool, q, s, org, user, row.ID, key.Plaintext, string(body), uuid.NewString()}
+}
+
+// The original non-subscription billing fixture selects the free catalog row.
+// Measure that exact real source explicitly before exercising the route; no
+// route reads or repairs its cache, and its original free quota is unchanged.
+func ownedAutomationAuthorizationPrepareFreePlanV1(t *testing.T, owned *ownedPublicReadFixtureV1) {
+	t.Helper()
+	var plan uuid.UUID
+	if err := owned.f.pool.QueryRow(owned.f.ctx, "SELECT id FROM billing_plans WHERE slug='free'").Scan(&plan); err != nil || plan == uuid.Nil {
+		t.Fatal("actual free plan identity unavailable", err)
+	} //nolint:rawsql -- exact fixture catalog identity only
+	owner, err := owned.runtime.SessionsV1().ControlledMeasurePlanSourceV1(owned.f.ctx, plan)
+	if owner != nil {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := owner.CloseV1(ctx); err != nil {
+				t.Error("free catalog source cleanup", err)
+			}
+		})
+	}
+	if err != nil || owner == nil {
+		t.Fatal("actual free catalog source preparation", err)
+	}
+	receipt, err := owner.ReceiptV1()
+	if err != nil || receipt.Kind != "plan" || receipt.SourceID != plan || receipt.OrgID != uuid.Nil || receipt.WireBytes <= 0 || receipt.ServerVersionNum != 160015 || !receipt.CreatedAt.Valid || !receipt.MeasuredAt.Valid {
+		t.Fatal("actual free catalog source receipt", err)
+	}
+	owner.CloseConsumerV1()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = owner.CloseV1(ctx); err != nil {
+		t.Fatal("actual free catalog source did not join", err)
+	}
+	ownedCreationAssertDrainedV1(t, owned, 2)
 }
 
 func (f automationAuthorizationFixture) submit() *httptest.ResponseRecorder {

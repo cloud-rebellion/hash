@@ -13,10 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
 )
@@ -98,11 +98,29 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusServiceUnavailable, "pdf renderer unavailable")
 		return
 	}
+	if r.ContentLength > maxProposalHTML {
+		writeError(w, http.StatusRequestEntityTooLarge, "designed import JSON exceeds the 20 MiB body limit")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxProposalHTML)
 	var in importProposalInput
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "designed import JSON exceeds the 20 MiB body limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := requireJSONEOF(dec); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "designed import JSON exceeds the 20 MiB body limit")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -116,11 +134,19 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 	}
 	// Preserve the page's design; strip only the JS + remote-fetch (SSRF)
 	// surface before Chromium sees it.
+	if err := render.ValidateDesignedHTMLSize(in.HTML); err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
 	if err := malwarescan.ScanActive(r.Context(), []byte(in.HTML)); err != nil {
 		writeScanError(w, err)
 		return
 	}
-	safe := render.SanitizeForRender(in.HTML)
+	safe, err := render.SanitizeForRenderBoundedV1(in.HTML)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
 	opts := render.PDFOptions{
 		PreferCSSPageSize: true,
 		WaitDelay:         "1000ms",
@@ -146,27 +172,10 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 	defer cancel()
-	r = r.WithContext(ctx)
-	tx, err := s.Pool.Begin(r.Context())
-	if err != nil {
-		writeInternalErrorMsg(w, "begin document import", err)
-		return
+	result, err := docintake.CreateOwnedPDFSourceDocumentV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit, Store: s.Storage}, docintake.OwnedPDFActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest"}, name, data, nil)
+	if result != nil {
+		defer result.CloseConsumerV1()
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := s.Queries.WithTx(tx)
-	if err := s.Billing.LockDocumentQuotaMutation(ctx, q, orgID); err != nil {
-		if s.writeAuthoringQuotaError(w, err) {
-			return
-		}
-		writeInternalErrorMsg(w, "lock document quota", err)
-		return
-	}
-	guard, err := authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize})
-	if err != nil {
-		s.writeDraftAuthoringError(w, "authorize document import", err)
-		return
-	}
-	d, pageCount, err := docintake.CreatePDFSourceDocument(ctx, q, s.Storage, orgID, userID, name, data)
 	if err != nil {
 		if writePDFWorkerError(w, err) {
 			return
@@ -183,54 +192,17 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeInternalErrorMsg(w, "create document failed", err)
-		return
-	}
-	cleanupObject, err := requiredDraftSourceObjectVersion(d)
-	if err != nil {
-		writeInternalErrorMsg(w, "create document returned an incomplete storage commitment", err)
-		return
-	}
-	if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, orgID); err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
-		if cleanupErr != nil {
-			writeInternalErrorMsg(w, "create document failed; orphan cleanup failed", errors.Join(err, cleanupErr))
+		if errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) || errors.Is(err, pdfadmission.ErrPlainPDFWriterV1) {
+			writeError(w, http.StatusServiceUnavailable, "PDF creation temporarily unavailable")
 			return
 		}
 		if s.writeAuthoringQuotaError(w, err) {
 			return
 		}
-		writeInternalErrorMsg(w, "create document failed", err)
+		s.writeDraftAuthoringError(w, "create document failed", err)
 		return
 	}
-	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID: orgID, ActorUserID: &userID, DocumentID: &d.ID,
-		Kind:    audit.KindDocumentCreated,
-		Payload: map[string]any{"name": name, "source_kind": "pdf", "intake": "import"},
-	})
-	if err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
-		writeInternalErrorMsg(w, "audit document import failed", errors.Join(err, cleanupErr))
-		return
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		if cleanupErr := deleteObjectDetached(ctx, s.Storage, cleanupObject); cleanupErr != nil {
-			writeInternalErrorMsg(w, "document import authorization failed; orphan cleanup failed", errors.Join(err, cleanupErr))
-		} else {
-			s.writeDraftAuthoringError(w, "authorize document import commit", err)
-		}
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
-		writeInternalErrorMsg(w, "commit document import failed", errors.Join(err, cleanupErr))
-		return
-	}
-	s.Audit.Publish(pending)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"document":   toDocumentResponse(d),
-		"page_count": pageCount,
-	})
+	writeJSON(w, http.StatusCreated, map[string]any{"document": toDocumentResponse(result.Document), "page_count": result.PageCount})
 }
 
 func writePDFWorkerError(w http.ResponseWriter, err error) bool {

@@ -6,17 +6,17 @@
   import { CRM_KINDS, CRMDocumentController, crmBaseline, crmDocumentPin, initialCRMDocumentState, validCRMSearch,
     type CRMDocumentActor, type CRMDocumentState, type CRMKind } from '$lib/crmDocument';
 
-  let { document: doc, actor, editorClean, otherBusy = false, refreshRevision = 0, onApplied, onStateChange }: {
-    document: DocumentResponse; actor: CRMDocumentActor; editorClean: boolean; otherBusy?: boolean; refreshRevision?: number;
-    onApplied: (document: DocumentResponse) => boolean; onStateChange: (blocked: boolean, busy: boolean) => void;
+  let { document: doc, actor, editorClean, otherBusy = false, reconciliationBusy = false, refreshRevision = 0, onApplied, onStateChange }: {
+    document: DocumentResponse; actor: CRMDocumentActor; editorClean: boolean; otherBusy?: boolean; reconciliationBusy?: boolean; refreshRevision?: number;
+    onApplied: (document: DocumentResponse, reconciliation?: boolean) => boolean; onStateChange: (blocked: boolean, busy: boolean, localIntent?: boolean) => void;
   } = $props();
   let crmState = $state.raw<CRMDocumentState>(initialCRMDocumentState());
   let searchKind = $state<CRMKind>('crm.company'), query = $state(''), clock = $state(0);
-  let mounted = false;
+  let mounted = false, reconciling = false;
   const originalActor = untrack(() => ({ ...actor }));
   const controller = new CRMDocumentController(untrack(() => doc), originalActor, crmDocumentTransport,
-    (next) => { crmState = next; }, () => editorClean && !otherBusy, (next) => {
-      if (!onApplied(next)) return false;
+    (next) => { crmState = next; }, () => editorClean && !(reconciling ? reconciliationBusy : otherBusy), (next) => {
+      if (!onApplied(next,reconciling)) return false;
       seenDocument = crmDocumentPin(next); return true;
     });
   let seenDocument = untrack(() => crmDocumentPin(doc)), seenActor = untrack(() => JSON.stringify(actor));
@@ -43,7 +43,8 @@
     const request = refreshRevision;
     untrack(() => { if (request !== seenRefresh) { seenRefresh = request; controller.interrupt(); if (mounted && !crmState.needsReadback) void controller.refresh(); } });
   });
-  $effect(() => { crmState; untrack(() => onStateChange(controller.sendBlocked(), crmState.busy === 'apply' || crmState.busy === 'readback')); });
+  $effect(() => { crmState; untrack(() => onStateChange(controller.sendBlocked(), crmState.busy === 'apply' || crmState.busy === 'readback', controller.hasLocalIntent())); });
+  function useReadback() { if(reconciliationBusy || !editorClean) return; if(controller.hasLocalIntent() && !window.confirm('Replace local CRM mapping choices with the inspected saved document and mappings?')) return; reconciling=true; try { controller.adoptReadback(); } finally { reconciling=false; } }
   function map(variable: string, value: string) {
     if (!value) { controller.map(variable); return; }
     const [kind, path] = value.split(':');
@@ -72,9 +73,9 @@
   {#if crmState.needsReadback}
     <div class="space-y-3 text-sm border border-warning rounded-md p-4">
       <p>{crmState.readbackReason === 'stale' ? 'The saved document changed. Inspect its current source and mappings before choosing to load it. Local wording is retained.' : 'Another Apply is blocked until you inspect the saved document, its retained source and complete mappings. Local wording is retained.'}</p>
-      <button type="button" class="btn btn-secondary" disabled={!!crmState.busy || otherBusy} onclick={() => controller.inspectReadback()}>Inspect saved CRM result</button>
+      <button type="button" class="btn btn-secondary" disabled={!!crmState.busy || reconciliationBusy} onclick={() => controller.inspectReadback()}>Inspect saved CRM result</button>
       {#if crmState.readback}<p>Saved document: {crmState.readback.document.name} · {crmState.readback.document.updated_at}. {crmState.readback.context.mapping_review_required ? 'A fresh CRM review is still required.' : 'The saved mapping review matches this document.'}</p>
-        <button type="button" class="btn btn-secondary" disabled={!!crmState.busy || !editorClean || otherBusy} onclick={() => controller.adoptReadback()}>Use inspected saved document and mappings</button>{/if}
+        <button type="button" class="btn btn-secondary" disabled={!!crmState.busy || !editorClean || reconciliationBusy} onclick={useReadback}>Use inspected saved document and mappings</button>{/if}
     </div>
   {/if}
   {#if context}

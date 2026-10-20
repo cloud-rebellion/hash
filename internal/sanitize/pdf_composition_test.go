@@ -84,7 +84,7 @@ func TestPDFCompositionPreservesBodyAndBindsFinalObservedBytes(t *testing.T) {
 	if err != nil || decodeErr != nil || decoded != result.Composition {
 		t.Fatal("manifest did not round-trip strictly", err, decodeErr)
 	}
-	response, err := json.Marshal(pdfWorkerResponse{ProtocolVersion: 2, Length: len(result.Bytes), Report: &result.Report, Composition: &result.Composition})
+	response, err := json.Marshal(pdfWorkerResponse{ProtocolVersion: pdfWorkerProtocolVersion, Length: len(result.Bytes), Report: &result.Report, Composition: &result.Composition})
 	if err != nil || len(response)+1 > pdfWorkerHeaderLimit {
 		t.Fatal("composition exceeds the unchanged protocol header bound")
 	}
@@ -237,25 +237,25 @@ func TestPDFCompositionRealChildProtocolAndLegacyOperationIsolation(t *testing.T
 		})
 	}
 	for _, header := range []string{
-		`{"protocol_version":2,"operation":"probe","length":0,"body_length":0}`,
-		`{"protocol_version":2,"operation":"pages","length":0,"signing_page_length":0}`,
-		`{"protocol_version":2,"operation":"compose-signing-page-v1","length":2,"body_length":1}`,
-		`{"protocol_version":2,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":null}`,
-		`{"protocol_version":2,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":2}`,
-		`{"protocol_version":2,"operation":"compose-signing-page-v1","length":2,"body_length":0,"signing_page_length":2}`,
-		`{"protocol_version":2,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":1,"Body_Length":1}`,
+		`{"protocol_version":3,"operation":"probe","length":0,"body_length":0}`,
+		`{"protocol_version":3,"operation":"pages","length":0,"signing_page_length":0}`,
+		`{"protocol_version":3,"operation":"compose-signing-page-v1","length":2,"body_length":1}`,
+		`{"protocol_version":3,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":null}`,
+		`{"protocol_version":3,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":2}`,
+		`{"protocol_version":3,"operation":"compose-signing-page-v1","length":2,"body_length":0,"signing_page_length":2}`,
+		`{"protocol_version":3,"operation":"compose-signing-page-v1","length":2,"body_length":1,"signing_page_length":1,"Body_Length":1}`,
 	} {
 		var out bytes.Buffer
 		if ServePDFWorker(strings.NewReader(header+"\nab"), &out) == nil || out.Len() != 0 {
 			t.Fatal("ambiguous component framing accepted")
 		}
 	}
-	request, _ := json.Marshal(pdfWorkerRequest{ProtocolVersion: 2, Operation: "pages", Length: len(body)})
+	request, _ := json.Marshal(pdfWorkerRequest{ProtocolVersion: pdfWorkerProtocolVersion, Operation: "pages", Length: len(body)})
 	var legacy bytes.Buffer
-	if err := ServePDFWorker(io.MultiReader(bytes.NewReader(append(request, '\n')), bytes.NewReader(body)), &legacy); err != nil || legacy.String() != "{\"protocol_version\":2,\"length\":0,\"pages\":1}\n" {
+	if err := ServePDFWorker(io.MultiReader(bytes.NewReader(append(request, '\n')), bytes.NewReader(body)), &legacy); err != nil || legacy.String() != "{\"protocol_version\":3,\"length\":0,\"pages\":1}\n" {
 		t.Fatal("legacy pages response bytes changed", err)
 	}
-	response, _ := json.Marshal(pdfWorkerResponse{ProtocolVersion: 2, Pages: 1, Composition: &result.Composition})
+	response, _ := json.Marshal(pdfWorkerResponse{ProtocolVersion: pdfWorkerProtocolVersion, Pages: 1, Composition: &result.Composition})
 	legacyWorker := &pdfWorker{path: workerTestScript(t, "printf '%s\\n' "+shellTestQuote(string(response))), slots: make(chan struct{}, 2)}
 	if _, _, err := legacyWorker.run(context.Background(), pdfWorkerRequest{Operation: "probe"}, nil); !errors.Is(err, ErrPDFWorkerUnavailable) {
 		t.Fatal("composition proof accepted on a legacy operation", err)
@@ -277,7 +277,7 @@ func serveMalformedCompositionForTest(mode string) error {
 	if err != nil {
 		return err
 	}
-	response := pdfWorkerResponse{ProtocolVersion: 2, Length: len(result.Bytes), Report: &result.Report, Composition: &result.Composition}
+	response := pdfWorkerResponse{ProtocolVersion: pdfWorkerProtocolVersion, Length: len(result.Bytes), Report: &result.Report, Composition: &result.Composition}
 	switch mode {
 	case "composition-wrong-input":
 		response.Composition.BodySHA256 = strings.Repeat("0", 64)

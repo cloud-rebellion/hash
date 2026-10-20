@@ -10,6 +10,22 @@ container and run it (Docker Compose, Kubernetes, a plain VM) works.
 > GitHub Actions, GitLab CI, Jenkins, Drone, or a manual `docker build` are all
 > equally fine.
 
+## Private BrightCRM connectivity
+
+The default CRM client remains public-only in production. The optional
+HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS operator setting selects a separate strict
+lane bound to the canonical HTTPS HASH_BRIGHTCRM_URL and exact effective port.
+Its new startup bound permits at most16 distinct canonical private/CGNAT host
+prefixes; it does not increase business, network or worker capacity. It has no
+blanket development exception, proxy, redirect, public fallback or insecure TLS
+option. Known metadata, loopback and link-local targets remain hard-denied.
+
+Provision the real origin, exact destinations and normal OS/container CA trust
+separately. Follow the [CRM connector's finite policy and acceptance gates](docs/CRM-CONNECTOR.md#operator-pinned-private-crm-egress),
+including the genuine private DNS/socket/TLS fixture and real owner/account/read
+journey. A source unit, parsed setting or green synthetic test is not live CRM
+acceptance. No shared global CRM bearer or webhook-secret fallback is restored.
+
 ## Components
 
 | Component | What | Notes |
@@ -443,10 +459,14 @@ Promotion requires
 
 ## 1. Configure
 
-Copy `.env.example` to `.env` and fill it in. `.env.example` is the
-authoritative, annotated list of every variable (kept in lockstep with
-`internal/config/config.go`); each is marked `[required]`, `[required-prod]`,
-or `[optional]`.
+Start from `.env.example` and configure the selected features using their linked
+references. Work admission has an all-or-none set of 17 explicit per-process
+allocations in [WORK-RUNTIME.md](docs/WORK-RUNTIME.md). With all of them absent,
+startup, authentication and health may succeed while admission-dependent
+authoring/signing remains unavailable. Empty assignments are configuration errors.
+The base development Compose file does not forward these keys from `.env`; use
+the per-process overlay described in that reference. A successful config or health
+check does not establish a successful authoring/signing journey.
 
 Generate the secrets:
 
@@ -545,7 +565,8 @@ tags. This keeps an untested or partially published image pair ineligible.
 One image contains both runtime binaries plus the release-administration
 binaries. The Dockerfile builds the SvelteKit frontend with Bun (embedded into
 the server), then compiles `cmd/server`, `cmd/worker`, `cmd/configcheck`,
-`cmd/migrate`, `cmd/auditverify`, and `cmd/rollbackcheck`.
+`cmd/migrate`, `cmd/auditverify`, `cmd/rollbackcheck`, `cmd/pdfworker`, and
+`cmd/storagecheck`.
 
 The second image builds the nested `gotenberg/` module and installs only its
 patched Alpine Chromium runtime. Do not substitute the full upstream Gotenberg
@@ -555,8 +576,13 @@ Production release manifests must bind both the Hash application image and
 renderer image by the exact staging-tested local content ID (or registry
 digest), never by a mutable tag.
 
-To build binaries without Docker: `cd frontend && bun install && bun run build`,
-copy `frontend/build` to `cmd/server/frontend/build`, then `go build ./...`.
+To build the server and worker without Docker, run `make build` from the Hash
+root with the pinned Go and Bun toolchains. It installs the frozen frontend lock,
+builds the SPA, removes stale embedded assets while preserving source placeholders,
+and writes `bin/server` and `bin/worker`. This target does not build the release
+administration tools or isolated PDF worker; the Dockerfile builds that full set.
+Qualify the Linux PDF worker and configure `HASH_PDF_WORKER` before using the
+standalone binaries for parser-isolated acceptance.
 
 ## 3. Run
 

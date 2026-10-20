@@ -179,6 +179,10 @@ func TestSanitizeForRender(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := SanitizeForRender(tc.in)
+			bounded, err := SanitizeForRenderBoundedV1(tc.in)
+			if err != nil || bounded != got {
+				t.Fatalf("bounded sanitizer changed accepted legacy bytes: %v", err)
+			}
 			for _, k := range tc.mustKeep {
 				if !strings.Contains(got, k) {
 					t.Errorf("expected output to keep %q\n got: %s", k, got)

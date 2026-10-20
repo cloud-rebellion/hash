@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/evidence"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
@@ -28,9 +29,10 @@ import (
 
 // Deps gathers the runtime dependencies the tool + resource handlers need.
 type Deps struct {
-	Pool    *pgxpool.Pool
-	Queries *generated.Queries
-	Storage *storage.Client
+	PDFCreationSessions *pdfadmission.ApplicationSessionFactoryV1
+	Pool                *pgxpool.Pool
+	Queries             *generated.Queries
+	Storage             *storage.Client
 	// PDF renders designed HTML proposals to a signable PDF (create_pdf_document).
 	PDF          *render.Gotenberg
 	Audit        *audit.Logger
@@ -69,6 +71,7 @@ type Deps struct {
 // New builds a fully-registered MCP server bound to deps.
 func New(d Deps) *Server {
 	s := NewServer()
+	s.nativeInput = d.PDFCreationSessions
 	s.billing = d.Billing // central MinFeature enforcement in handleToolsCall
 
 	registerReadTools(s, d)
@@ -80,6 +83,7 @@ func New(d Deps) *Server {
 	registerAITools(s, d)
 	registerBrandingTools(s, d)
 	registerEnvelopeTools(s, d)
+	registerDocumentPackageToolsV1(s, d)
 	registerTimelineTools(s, d)
 	registerEIDASTools(s, d)
 	registerEvidenceTools(s, d)

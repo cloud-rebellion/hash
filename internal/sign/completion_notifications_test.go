@@ -72,6 +72,7 @@ func TestPrepareCompletionNotificationsTxQueuesRecipientCredentialsAndSenderURL(
 			t.Fatalf("email credential for %s does not match persisted token hash", recipient.Email)
 		}
 		assertContains(t, message.HTML+message.Text, "https://hash.example.test/sign/"+rawToken+"/final-pdf")
+		assertContains(t, message.HTML+message.Text, "https://hash.example.test/sign/"+rawToken+"/audit-cert")
 		assertNotContains(t, message.HTML+message.Text, "/api/v1/documents/")
 	}
 	if capture.rawToken == "" || capture.rawToken == oldCeremonyToken {
@@ -86,6 +87,7 @@ func TestPrepareCompletionNotificationsTxQueuesRecipientCredentialsAndSenderURL(
 
 	senderMessage := messageTo(t, messages, store.sender.Email)
 	assertContains(t, senderMessage.HTML+senderMessage.Text, "https://hash.example.test/api/v1/documents/"+doc.ID.String()+"/final-pdf")
+	assertContains(t, senderMessage.HTML+senderMessage.Text, "https://hash.example.test/api/v1/documents/"+doc.ID.String()+"/audit-cert")
 	assertNotContains(t, senderMessage.HTML+senderMessage.Text, "/sign/")
 }
 
@@ -117,7 +119,8 @@ func TestPrepareCompletionNotificationsTxAcknowledgementIncludesAcceptedNonCC(t 
 		t.Fatalf("messages/enqueued = %d/%d, want accepted recipient plus sender", len(messages), len(store.enqueued))
 	}
 	acceptedMessage := messageTo(t, messages, accepted.Email)
-	_ = completionTokenFromMessage(t, acceptedMessage)
+	acceptedToken := completionTokenFromMessage(t, acceptedMessage)
+	assertContains(t, acceptedMessage.HTML+acceptedMessage.Text, "/sign/"+acceptedToken+"/audit-cert")
 	acceptedCopy := strings.ToLower(acceptedMessage.Subject + "\n" + acceptedMessage.HTML + "\n" + acceptedMessage.Text)
 	assertContains(t, acceptedCopy, "acknowledgements are complete")
 	assertContains(t, acceptedCopy, "no signature image or representation")

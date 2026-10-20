@@ -4,8 +4,6 @@
 package handler
 
 import (
-	"errors"
-	"github.com/bright-interaction/hash/internal/malwarescan"
 	"strings"
 
 	"context"
@@ -72,28 +70,28 @@ func TestReplacementImportCapacityRejectedBeforeBodyRead(t *testing.T) {
 	}
 }
 
-func TestReplacementImportScannerUnavailableBeforePersistence(t *testing.T) {
+// Without a genuine configured native input factory, refuse before reading the
+// body. Scanner ordering itself is tested with a real runtime in the E2E suite.
+func TestReplacementImportRequiresOwnedRuntimeBeforeBodyRead(t *testing.T) {
 	ctx := context.Background()
-	defer malwarescan.Configure(ctx, "", "development")
-	if err := malwarescan.Configure(ctx, "", "production"); !errors.Is(err, malwarescan.ErrUnavailable) {
-		t.Fatal(err)
-	}
 	org := uuid.New()
 	ctx = context.WithValue(ctx, auth.OrgIDKey, org)
 	ctx = context.WithValue(ctx, auth.UserIDKey, uuid.New())
 	ctx = context.WithValue(ctx, auth.RoleKey, "owner")
-	for _, input := range []struct{ kind, body string }{{"html", `{"html":"<p>content</p>","expected_updated_at":"2026-10-05T00:00:00Z"}`}, {"md", `{"markdown":"content","expected_updated_at":"2026-10-05T00:00:00Z"}`}} {
+	for _, kind := range []string{"html", "md"} {
 		router := chi.NewRouter()
-		if input.kind == "html" {
+		if kind == "html" {
 			router.Post("/{id}", (&Server{}).handleImportHTML)
 		} else {
 			router.Post("/{id}", (&Server{}).handleImportMarkdown)
 		}
-		req := httptest.NewRequest(http.MethodPost, "/"+uuid.New().String(), strings.NewReader(input.body)).WithContext(ctx)
+		body := &unreadImportBody{}
+		req := httptest.NewRequest(http.MethodPost, "/"+uuid.New().String(), nil).WithContext(ctx)
+		req.Body = body
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, req)
-		if response.Code != 503 || !strings.Contains(response.Body.String(), "upload scanning unavailable") {
-			t.Fatalf("%s scanner gate: %d %s", input.kind, response.Code, response.Body.String())
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "block input capacity unavailable") || body.reads != 0 {
+			t.Fatalf("%s unowned input gate=%d reads=%d", kind, response.Code, body.reads)
 		}
 		release, err := importguard.Shared.Acquire(org)
 		if err != nil {

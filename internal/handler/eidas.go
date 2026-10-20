@@ -16,8 +16,10 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/catalogrules"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 )
 
 var errEIDASRuleNotFound = errors.New("rule not found")
@@ -30,6 +32,10 @@ type eidasRuleInputError struct {
 func (e *eidasRuleInputError) Error() string { return e.message }
 
 func (s *Server) writeEIDASMutationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pdfadmission.ErrCatalogRuleInputV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+		writeError(w, http.StatusServiceUnavailable, "eIDAS policy is temporarily unavailable")
+		return
+	}
 	var input *eidasRuleInputError
 	if errors.As(err, &input) {
 		writeError(w, input.status, input.message)
@@ -100,16 +106,14 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
-	var in struct {
-		Name         string          `json:"name"`
-		Priority     int32           `json:"priority"`
-		Predicate    json.RawMessage `json:"predicate_json"`
-		RequiredTier string          `json:"required_tier"`
-		Reason       string          `json:"reason"`
-		Active       *bool           `json:"active"`
+	input, err := s.HTMLCreationSessions.NewCatalogRuleHTTPInputV1(r.Context(), sess.OrgID)
+	if err != nil {
+		s.writeEIDASMutationError(w, err)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	defer input.CloseConsumerV1()
+	in, err := input.DecodeCreateV1(r.Context(), w, r.Body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -125,7 +129,11 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "predicate_json required")
 		return
 	}
-	if err := eidas.ValidateRule(in.Predicate, eidas.Tier(in.RequiredTier)); err != nil {
+	if err := input.ValidateRuleV1(r.Context(), in.Predicate, eidas.Tier(in.RequiredTier)); err != nil {
+		if errors.Is(err, pdfadmission.ErrCatalogRuleInputV1) {
+			s.writeEIDASMutationError(w, err)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid eIDAS rule: "+err.Error())
 		return
 	}
@@ -142,9 +150,9 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
-	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
-		func(ctx context.Context, q *generated.Queries) (*generated.EidasRoutingRule, error) {
-			return q.InsertEIDASRule(ctx, generated.InsertEIDASRuleParams{
+	row, release, err := catalogrules.CommitCatalogOwnerMutationV1(r.Context(), s.HTMLCreationSessions, s.Audit, actor, uuid.New(),
+		func(ctx context.Context, q *generated.Queries, reader *pdfadmission.ApplicationHTMLAuthoringReaderV1) (*generated.EidasRoutingRule, error) {
+			return reader.CreateCatalogRuleV1(ctx, generated.InsertEIDASRuleParams{
 				OrgID:         sess.OrgID,
 				Name:          in.Name,
 				Priority:      in.Priority,
@@ -166,6 +174,7 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
+	defer release()
 	writeJSON(w, http.StatusCreated, toRuleDTO(row))
 }
 
@@ -180,16 +189,14 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
-	var in struct {
-		Name         *string          `json:"name"`
-		Priority     *int32           `json:"priority"`
-		Predicate    *json.RawMessage `json:"predicate_json"`
-		RequiredTier *string          `json:"required_tier"`
-		Reason       *string          `json:"reason"`
-		Active       *bool            `json:"active"`
+	input, err := s.HTMLCreationSessions.NewCatalogRuleHTTPInputV1(r.Context(), sess.OrgID)
+	if err != nil {
+		s.writeEIDASMutationError(w, err)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	defer input.CloseConsumerV1()
+	in, err := input.DecodePatchV1(r.Context(), w, r.Body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -198,11 +205,11 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
-	row, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
-		func(ctx context.Context, q *generated.Queries) (*generated.EidasRoutingRule, error) {
+	row, release, err := catalogrules.CommitCatalogOwnerMutationV1(r.Context(), s.HTMLCreationSessions, s.Audit, actor, id,
+		func(ctx context.Context, q *generated.Queries, reader *pdfadmission.ApplicationHTMLAuthoringReaderV1) (*generated.EidasRoutingRule, error) {
 			// All active policy writers serialize through the organization lock.
 			// Resolve omitted values from the row read after that lock was acquired.
-			existing, err := q.GetEIDASRule(ctx, generated.GetEIDASRuleParams{ID: id, OrgID: sess.OrgID})
+			existing, err := reader.ReadCatalogRuleV1(ctx, id)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, errEIDASRuleNotFound
 			}
@@ -236,13 +243,16 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 			if in.Active != nil {
 				active = *in.Active
 			}
-			if err := eidas.ValidateRule(predicate, eidas.Tier(tier)); err != nil {
+			if err := input.ValidateRuleV1(ctx, predicate, eidas.Tier(tier)); err != nil {
+				if errors.Is(err, pdfadmission.ErrCatalogRuleInputV1) {
+					return nil, err
+				}
 				return nil, &eidasRuleInputError{http.StatusBadRequest, "invalid eIDAS rule: " + err.Error()}
 			}
 			if err := eidas.ValidateRuleActivation(eidas.Tier(tier), active); err != nil {
 				return nil, &eidasRuleInputError{http.StatusConflict, err.Error()}
 			}
-			updated, err := q.UpdateEIDASRule(ctx, generated.UpdateEIDASRuleParams{
+			updated, err := reader.UpdateCatalogRuleV1(ctx, generated.UpdateEIDASRuleParams{
 				ID:            id,
 				OrgID:         sess.OrgID,
 				Name:          name,
@@ -269,6 +279,7 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
+	defer release()
 	writeJSON(w, http.StatusOK, toRuleDTO(row))
 }
 
@@ -288,15 +299,15 @@ func (s *Server) handleDeleteEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
-	_, err = authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
-		func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
-			if _, err := q.GetEIDASRule(ctx, generated.GetEIDASRuleParams{ID: id, OrgID: sess.OrgID}); err != nil {
+	_, release, err := catalogrules.CommitCatalogOwnerMutationV1(r.Context(), s.HTMLCreationSessions, s.Audit, actor, id,
+		func(ctx context.Context, q *generated.Queries, reader *pdfadmission.ApplicationHTMLAuthoringReaderV1) (uuid.UUID, error) {
+			if err := reader.DeleteCatalogRuleV1(ctx, id); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return uuid.Nil, errEIDASRuleNotFound
 				}
 				return uuid.Nil, err
 			}
-			return id, q.DeleteEIDASRule(ctx, generated.DeleteEIDASRuleParams{ID: id, OrgID: sess.OrgID})
+			return id, nil
 		},
 		func(uuid.UUID) audit.Entry {
 			return audit.Entry{
@@ -310,6 +321,7 @@ func (s *Server) handleDeleteEIDASRule(w http.ResponseWriter, r *http.Request) {
 		s.writeEIDASMutationError(w, err)
 		return
 	}
+	defer release()
 	w.WriteHeader(http.StatusNoContent)
 }
 

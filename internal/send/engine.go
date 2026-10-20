@@ -40,13 +40,14 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/blocks"
-	"github.com/bright-interaction/hash/internal/crmreview"
+	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -83,14 +84,14 @@ var (
 	ErrNotRemindable                = errors.New("document not in a remindable state")
 	ErrInvalidRecipient             = errors.New("document has invalid recipient data")
 	ErrUnsupportedRecipientRole     = errors.New("viewer and cc recipient workflows are unavailable in this production release")
-	ErrExpiryTooSoon                = errors.New("document expiry must be at least 5 minutes in the future")
+	ErrExpiryTooSoon                = pdfadmission.ErrSendExpiryTooSoonV1
 	ErrDelegatedRecoveryUnavailable = errors.New("delegated execution requires its own verified recovery path")
 )
 
 // MinimumExpiryLead prevents a document from entering the irreversible send
 // pipeline with a signing deadline that can elapse during ordinary sealing and
 // invite delivery. An omitted expiry remains valid.
-const MinimumExpiryLead = 5 * time.Minute
+const MinimumExpiryLead = pdfadmission.MinimumSendExpiryLeadV1
 
 // Actor identifies who is driving a transition. The explicit org + actor (no
 // http.Request) means the worker and automatic paths use the same engine.
@@ -108,12 +109,14 @@ type Actor struct {
 	// initial send surface. A database default is never treated as consent to
 	// make an Article 13 representation to the signer.
 	LawfulBasis string
+	PackageSend pdfadmission.HTMLSendPackageSelectionV1
 }
 
 // Engine ties together the dependencies the lifecycle transitions need. The
 // Resolver/EIDAS/Billing/Envelopes engines are nil-safe so unit tests + dev
 // can run without them.
 type Engine struct {
+	WorkRuntime *pdfadmission.WorkRuntimeV1
 	Pool        *pgxpool.Pool
 	Queries     *generated.Queries
 	Audit       *audit.Logger
@@ -157,13 +160,7 @@ func (e *Engine) now() time.Time {
 // send surfaces and durable sealing recovery. The caller must repeat this
 // check under the document row lock before creating a sealing intent.
 func ValidateExpiryForSend(expiresAt pgtype.Timestamptz, now time.Time) error {
-	if !expiresAt.Valid {
-		return nil
-	}
-	if !expiresAt.Time.After(now.Add(MinimumExpiryLead)) {
-		return ErrExpiryTooSoon
-	}
-	return nil
+	return pdfadmission.ValidateSendExpiryV1(expiresAt, now)
 }
 
 // SignLink is one recipient's signing URL, returned to the caller so it can be
@@ -178,8 +175,10 @@ type SignLink struct {
 
 // SendResult is what Send returns on success.
 type SendResult struct {
-	Status string     `json:"status"`
-	Links  []SignLink `json:"links"`
+	owner            *ownedSendOperationV1
+	Status           string     `json:"status"`
+	Links            []SignLink `json:"links"`
+	PackageAttemptID uuid.UUID  `json:"-"`
 }
 
 // Send transitions a draft -> sent: enforces the billing quota, freezes
@@ -187,52 +186,28 @@ type SendResult struct {
 // recipient (always with an expiry), flips statuses, sets the reminder
 // schedule, and queues invite emails. Returns billing.ErrQuotaExceeded /
 // *eidas.GuardError for the caller to surface.
-func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult, error) {
-	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
-		return SendResult{}, errors.New("send document: lifecycle store unavailable")
-	}
-	if err := requireActorAuthorization(a); err != nil {
-		return SendResult{}, err
-	}
-	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: a.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return SendResult{}, ErrDocumentNotFound
-	}
-	if err != nil {
-		return SendResult{}, err
-	}
-	if doc.Status != "draft" {
-		return SendResult{}, ErrNotDraft
-	}
-	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
-		return SendResult{}, err
-	}
-	if err := requireLifecycleRoot(doc); err != nil {
-		return SendResult{}, err
-	}
-	if err := validateAcknowledgementSend(doc); err != nil {
-		return SendResult{}, err
-	}
-	// AES/QES routing existed before either proof path was bound to the exact
-	// signed digest. Advertising those tiers while accepting typed SES input is
-	// a security downgrade, so reject a directly selected higher tier before
-	// billing, freezing, token minting, or any lifecycle transition.
-	if err := requireSupportedSignatureTier(eidas.Tier(doc.RoutingTier), eidas.TierSES); err != nil {
-		return SendResult{}, err
-	}
-	if err := ValidateLawfulBasis(a.LawfulBasis); err != nil {
-		return SendResult{}, err
-	}
 
-	if e.Billing != nil {
-		if err := e.Billing.EnforceDocumentQuota(ctx, a.OrgID); err != nil {
-			return SendResult{}, err
-		}
-	}
+// Finite preflight runs inside the original owned preparation callback, so
+// the Current12 read can occur after the original resolver/review decision.
+// No exported caller continuation or replacement context grants SQL authority.
+type ownedSendPreparedV1 struct {
+	read                       *ownedSendReadV1
+	doc, originalDoc           *generated.Document
+	originalChildren, children []*generated.Document
+	roles                      []string
+	bindingPreparation         *sendBindingPreparation
+	pageCount                  int
+}
 
-	recs, err := e.Queries.ListRecipientsByDocument(ctx, doc.ID)
+func (e *Engine) prepareOwnedSendV1(ctx context.Context, read *ownedSendReadV1) (*ownedSendPreparedV1, error) {
+	if read == nil || read.models == nil || read.models.Document == nil || read.source == nil {
+		return nil, pdfadmission.ErrHTMLSendWorkV1
+	}
+	doc := read.models.Document
+	var err error
+	recs := read.models.Recipients
 	if err != nil {
-		return SendResult{}, err
+		return nil, err
 	}
 
 	// An envelope's signing contract lives in its children, not in the empty
@@ -243,15 +218,16 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	var envelopeRoles []string
 	if doc.IsEnvelope {
 		if e.Envelopes == nil || e.Envelopes.Q == nil {
-			return SendResult{}, errors.New("send envelope: child store unavailable")
+			return nil, errors.New("send envelope: child store unavailable")
 		}
-		envelopeChildren, err = e.Envelopes.Children(ctx, doc.ID, doc.OrgID)
+		read.members, err = readOwnedEnvelopeMembersV1(ctx, read.work)
 		if err != nil {
-			return SendResult{}, fmt.Errorf("send envelope: list children: %w", err)
+			return nil, fmt.Errorf("send envelope: list children: %w", err)
 		}
-		if err = validateEnvelopeChildrenStructure(doc.ID, envelopeChildren, "draft"); err != nil {
-			return SendResult{}, err
+		if _, err = validateOwnedEnvelopeMembersV1(ctx, doc.ID, read.members, "draft", false); err != nil {
+			return nil, err
 		}
+		envelopeChildren = ownedEnvelopeDocumentsV1(read.members)
 	}
 
 	// Resolver preflight must not write either document variables or binding
@@ -260,26 +236,49 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	originalDoc := doc
 	originalChildren := append([]*generated.Document(nil), envelopeChildren...)
 	var bindingPreparation *sendBindingPreparation
-	var preparedResolver *resolver.Resolver
+
+	validationSource := read.source
 	if e.Resolver != nil {
-		bindingPreparation = &sendBindingPreparation{reader: e.Resolver.Q, definitions: make(map[uuid.UUID][]*generated.DocumentVariableBinding)}
-		copyResolver := *e.Resolver
-		copyResolver.Q = bindingPreparation
-		preparedResolver = &copyResolver
-	}
-	if e.Resolver != nil {
-		frozen, _, ferr := preparedResolver.FreezeForSend(ctx, doc)
-		if ferr != nil {
-			return SendResult{}, fmt.Errorf("freeze variables: %w", ferr)
+		if read.resolution == nil && doc.IsEnvelope {
+			read.resolution, err = read.work.NewResolverV1(ctx, read.source, e.Resolver)
+			if err != nil {
+				return nil, err
+			}
 		}
+		if read.resolution == nil {
+			return nil, pdfadmission.ErrHTMLSendWorkV1
+		}
+		if ferr := read.resolution.FreezeV1(); ferr != nil {
+			return nil, fmt.Errorf("freeze variables: %w", ferr)
+		}
+		view, ferr := read.resolution.SnapshotV1()
+		if ferr != nil {
+			return nil, ferr
+		}
+		bindingPreparation = ownedSendBindingPreparationV1(doc, view)
 		candidate := *doc
-		candidate.VariablesJson = frozen
-		if verr := validateResolvedBlockVariables(&candidate); verr != nil {
-			return SendResult{}, verr
+		candidate.VariablesJson = view.Frozen
+		validationSource, ferr = read.resolution.NewResolvedSourceV1()
+		if ferr != nil {
+			return nil, ferr
+		}
+		if ferr = validateOwnedResolvedBlockVariablesV1(validationSource); ferr != nil {
+			return nil, ferr
+		}
+		if !validationSource.MatchesDocumentV1(&candidate) {
+			return nil, pdfadmission.ErrHTMLSendWorkV1
 		}
 		doc = &candidate
-	} else if verr := validateResolvedBlockVariables(doc); verr != nil {
-		return SendResult{}, verr
+		if ferr = validationSource.ValidateCurrentV1(); ferr != nil {
+			return nil, ferr
+		}
+	} else {
+		if verr := validateOwnedResolvedBlockVariablesV1(validationSource); verr != nil {
+			return nil, verr
+		}
+		if verr := validationSource.ValidateCurrentV1(); verr != nil {
+			return nil, verr
+		}
 	}
 
 	// The wrapper does not contain the legal content. Prepare every child as a
@@ -288,52 +287,97 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	// skipping a child freeze would make the signed artifact depend on live data.
 	if doc.IsEnvelope {
 		if e.Resolver == nil {
-			return SendResult{}, errors.New("send envelope: variable resolver unavailable")
+			return nil, errors.New("send envelope: variable resolver unavailable")
 		}
-		envelopeChildren, err = prepareFrozenEnvelopeChildren(ctx, preparedResolver, envelopeChildren)
-		if err != nil {
-			return SendResult{}, err
+		if err = e.freezeOwnedEnvelopeMembersV1(ctx, read.members, bindingPreparation); err != nil {
+			return nil, err
 		}
-		envelopeRoles, err = validateEnvelopeChildren(doc.ID, envelopeChildren)
+		envelopeChildren = ownedEnvelopeDocumentsV1(read.members)
+		envelopeRoles, err = validateOwnedEnvelopeMembersV1(ctx, doc.ID, read.members, "draft", true)
 		if err != nil {
-			return SendResult{}, err
+			return nil, err
 		}
 	}
-	if err := validateSendRecipients(doc, envelopeRoles, recs); err != nil {
-		return SendResult{}, err
+	if err := validateOwnedSendRecipientsV1(validationSource, doc, envelopeRoles, recs); err != nil {
+		return nil, err
 	}
 
 	// eIDAS tier guard against the frozen variables.
 	if e.EIDAS != nil {
 		if doc.IsEnvelope {
-			family := make([]*generated.Document, 0, len(envelopeChildren)+1)
-			family = append(family, doc)
-			family = append(family, envelopeChildren...)
-			if _, gerr := guardEnvelopeEIDASSend(ctx, e.EIDAS, doc.OrgID, eidas.Tier(doc.RoutingTier), family); gerr != nil {
-				return SendResult{}, gerr
+			if _, gerr := guardOwnedEnvelopeEIDASV1(doc, validationSource, read.members); gerr != nil {
+				return nil, gerr
 			}
 		} else {
-			evalInput, ierr := BuildEIDASEvaluateInput(doc)
-			if ierr != nil {
-				return SendResult{}, fmt.Errorf("build eIDAS evaluation input: %w", ierr)
+			decision, gerr := validationSource.EvaluateEIDASV1()
+			if errors.Is(gerr, pdfadmission.ErrHTMLSendEIDASInputV1) {
+				return nil, fmt.Errorf("build eIDAS evaluation input: %w", gerr)
 			}
-			decision, gerr := e.EIDAS.Evaluate(ctx, doc.OrgID, evalInput)
 			if gerr != nil {
-				return SendResult{}, gerr
+				return nil, gerr
 			}
 			if gerr := enforceEIDASSendDecision(eidas.Tier(doc.RoutingTier), decision); gerr != nil {
-				return SendResult{}, gerr
+				return nil, gerr
 			}
 		}
 	}
-	preparedPDFPageCount, err := inspectSendSourcePDF(ctx, e.Storage, doc)
+	concreteStore, ok := e.Storage.(*storage.Client)
+	if !ok || concreteStore == nil {
+		return nil, errors.New("send PDF: evidence reader unavailable")
+	}
+	preflightEvidence, err := read.work.NewDraftEvidenceV1(validationSource, concreteStore)
 	if err != nil {
-		return SendResult{}, err
+		return nil, err
+	}
+	preparedPDFPageCount, err := preflightEvidence.InspectPDFV1()
+	if errors.Is(err, pdfadmission.ErrHTMLSendPDFMissingV1) {
+		return nil, ErrAcknowledgementNeedsPDF
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	preparedDoc := doc
-	preparedChildren := envelopeChildren
+	return &ownedSendPreparedV1{read: read, doc: doc, originalDoc: originalDoc, originalChildren: originalChildren, children: envelopeChildren, roles: envelopeRoles, bindingPreparation: bindingPreparation, pageCount: preparedPDFPageCount}, nil
 
+}
+func (e *Engine) sendOwnedStagesV1(ctx context.Context, operation *ownedSendOperationV1, a Actor, docID uuid.UUID) (SendResult, error) {
+	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
+		return SendResult{}, errors.New("send document: lifecycle store unavailable")
+	}
+	if err := requireActorAuthorization(a); err != nil {
+		return SendResult{}, err
+	}
+	prepared, err := e.readOwnedDraftForSendV1(ctx, operation, a)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SendResult{}, ErrDocumentNotFound
+	}
+	if err != nil {
+		if a.PackageSend.PresentV1() {
+			packageSendFailureDiagnosticV1("preparation", err)
+		}
+		return SendResult{}, err
+	}
+	read := prepared.read
+	if read.packageDraft != nil {
+		client, ok := e.Storage.(*storage.Client)
+		if !ok || client == nil {
+			return SendResult{}, pdfadmission.ErrHTMLSendPackageCaptureV1
+		}
+		// The preparation callback/COMMIT/physical SQL retirement has returned.
+		// Every selected version is measured before the fresh admission phase.
+		if err = read.packageDraft.MeasurePDFsV1(client); err != nil {
+			packageSendFailureDiagnosticV1("measurement", err)
+			return SendResult{}, err
+		}
+	}
+	doc := prepared.doc
+	originalDoc := prepared.originalDoc
+	originalChildren := prepared.originalChildren
+	envelopeChildren := prepared.children
+	envelopeRoles := prepared.roles
+	bindingPreparation := prepared.bindingPreparation
+	preparedPDFPageCount := prepared.pageCount
+	preparedDoc := doc
 	// Transactional core: lock the document, re-check draft UNDER the lock, then mint
 	// tokens + flip recipient/doc/child statuses + set the reminder schedule
 	// atomically. Without this, two concurrent sends (REST + MCP) both passed the
@@ -341,259 +385,351 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	// other's just-emailed link), and any mid-loop error left some recipients invited
 	// + emailed while the document stayed draft with no reminder schedule. This is the
 	// airtight pattern the Sign path already uses; Send had never adopted it.
-	txCtx, cancelTransaction := context.WithTimeout(ctx, 10*time.Second)
-	defer cancelTransaction()
-	tx, err := e.Pool.BeginTx(txCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return SendResult{}, err
-	}
-	defer rollbackLifecycleTransaction(txCtx, tx)
-	q := e.Queries.WithTx(tx)
-	// Only the admission transaction is bounded here. Retention/sealing recovery
-	// below must keep the original caller context after this transaction ends.
-	requestCtx := ctx
-	ctx = txCtx
-
-	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return SendResult{}, ErrDocumentNotFound
-	}
-	if err != nil {
-		return SendResult{}, fmt.Errorf("lock document: %w", err)
-	}
-	if lockedDoc.Status != "draft" {
-		// A concurrent send won the race (or it was already sent): lose cleanly.
-		return SendResult{}, ErrNotDraft
-	}
-	if err := verifyPreparedSendDocument(originalDoc, lockedDoc); err != nil {
-		return SendResult{}, err
-	}
-	if err := verifyOriginalDocumentTimestamp(originalDoc, lockedDoc); err != nil {
-		return SendResult{}, err
-	}
-	if err := requireLifecycleRoot(lockedDoc); err != nil {
-		return SendResult{}, err
-	}
-	if err := validateAcknowledgementSend(lockedDoc); err != nil {
-		return SendResult{}, err
-	}
-	doc = lockedDoc
-
-	// Lock and re-check every prepared child while the parent is locked. The
-	// envelope topology queries take the same parent lock, so membership cannot
-	// change after this point. Comparing the prepared bytes also catches an edit
-	// that raced the preflight/freeze and prevents signing an unvalidated tree.
-	if doc.IsEnvelope {
-		listed, lerr := q.ListEnvelopeChildren(ctx, generated.ListEnvelopeChildrenParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: doc.ID, Valid: true},
-			OrgID:            doc.OrgID,
-		})
-		if lerr != nil {
-			return SendResult{}, fmt.Errorf("send envelope: re-list children: %w", lerr)
-		}
-		lockedChildren := make([]*generated.Document, 0, len(listed))
-		for _, listedChild := range listed {
-			lockedChild, lerr := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{
-				ID: listedChild.ID, OrgID: doc.OrgID,
-			})
-			if lerr != nil {
-				return SendResult{}, fmt.Errorf("send envelope: lock child %s: %w", listedChild.ID, lerr)
-			}
-			lockedChildren = append(lockedChildren, lockedChild)
-		}
-		if verr := validateEnvelopeChildrenStructure(doc.ID, lockedChildren, "draft"); verr != nil {
-			return SendResult{}, verr
-		}
-		if verr := verifyOriginalEnvelopeChildren(originalChildren, lockedChildren); verr != nil {
-			return SendResult{}, verr
-		}
-		envelopeChildren = lockedChildren
-	}
-	actorUser, err := authorizeLifecycleActor(ctx, tx, q, &a)
-	if err != nil {
-		return SendResult{}, err
-	}
-	// A reviewed CRM mapping is part of the authoring contract, even if all of
-	// its bindings were subsequently deleted. Check every locked document before
-	// writing observations/frozen values; nil resolver/report wiring refuses a
-	// currently mapped document rather than silently removing its obligation.
-	for _, reviewedDoc := range append([]*generated.Document{doc}, envelopeChildren...) {
-		var reports []resolver.ResolveReport
-		if bindingPreparation != nil {
-			reports = bindingPreparation.reportsForDocument(reviewedDoc.ID)
-		}
-		if err := crmreview.CheckForSend(ctx, q, reviewedDoc, reports); err != nil {
-			return SendResult{}, err
-		}
-	}
-	if bindingPreparation != nil {
-		if err := bindingPreparation.verifyAndPersist(ctx, q); err != nil {
-			return SendResult{}, err
-		}
-		doc, err = persistAuthorizedFrozenDocument(ctx, q, doc, preparedDoc.VariablesJson)
+	packageStep := "admission"
+	err = operation.phaseV1(pdfadmission.HTMLSendAdmissionV1, func(ctx context.Context, phase *ownedSendPhaseV1, q *generated.Queries, tx pgx.Tx) error {
+		state, err := phase.work.StateV1(ctx)
 		if err != nil {
-			return SendResult{}, fmt.Errorf("persist frozen variables: %w", err)
+			return err
 		}
-		for i, child := range envelopeChildren {
-			updated, freezeErr := persistAuthorizedFrozenDocument(ctx, q, child, preparedChildren[i].VariablesJson)
-			if freezeErr != nil {
-				return SendResult{}, fmt.Errorf("persist frozen envelope child %s: %w", child.ID, freezeErr)
-			}
-			envelopeChildren[i] = updated
+		if state.BoundedStatus != "draft" {
+			return ErrNotDraft
 		}
-	}
-	if doc.IsEnvelope {
-		envelopeRoles, err = validateEnvelopeChildren(doc.ID, envelopeChildren)
+		// This cheap original timestamp pin precedes the new body/cache gate. A
+		// live revoked actor is rechecked before any newly admitted full models.
+		if !sameLifecycleTimestamp(originalDoc.UpdatedAt, state.UpdatedAt) {
+			return fmt.Errorf("%w: original timestamp changed", ErrDraftChangedDuringSend)
+		}
+		actorUser, err := authorizeOwnedLifecycleActorV1(ctx, phase, tx, &a)
 		if err != nil {
-			return SendResult{}, err
+			return err
 		}
-	}
-	// Recheck the locked, persisted authoring snapshot before creating an
-	// irreversible sealing intent. HTML-origin PDFs must still contain exactly
-	// their reviewed printed values after resolver freezing and lock waits.
-	if err := validateResolvedSealedSnapshot(doc, envelopeChildren); err != nil {
-		return SendResult{}, err
-	}
-	// Non-CRM live bindings can also change a block's frozen values. The review
-	// must cover this actual post-freeze content, not only the draft checked
-	// above. A refusal rolls the observation/freeze writes back with this tx.
-	for _, reviewedDoc := range append([]*generated.Document{doc}, envelopeChildren...) {
-		var reports []resolver.ResolveReport
-		if bindingPreparation != nil {
-			reports = bindingPreparation.reportsForDocument(reviewedDoc.ID)
+		lockedModels, err := phase.work.ReadModelsV1(ctx)
+		var lockedDoc *generated.Document
+		if lockedModels != nil {
+			lockedDoc = lockedModels.Document
 		}
-		if err := crmreview.CheckForSend(ctx, q, reviewedDoc, reports); err != nil {
-			return SendResult{}, err
-		}
-	}
-
-	// Recipient CRUD shares this parent row lock. Re-list only after acquiring
-	// it, then validate and mint exclusively from this stable snapshot; the
-	// earlier list is advisory preflight and cannot authorize a ceremony.
-	lockedRecipients, err := q.ListRecipientsByDocument(ctx, doc.ID)
-	if err != nil {
-		return SendResult{}, fmt.Errorf("send document: re-list recipients: %w", err)
-	}
-	if err := validateSendRecipients(doc, envelopeRoles, lockedRecipients); err != nil {
-		return SendResult{}, err
-	}
-	if doc.SourceKind == "pdf" {
-		fields, ferr := q.ListFieldsByDocument(ctx, doc.ID)
-		if ferr != nil {
-			return SendResult{}, fmt.Errorf("send PDF: list fields: %w", ferr)
-		}
-		if doc.RequiresSignature {
-			if ferr := validatePDFSignatureFields(doc, lockedRecipients, fields, preparedPDFPageCount); ferr != nil {
-				return SendResult{}, ferr
-			}
-		} else if ferr := validateAcknowledgementFields(fields); ferr != nil {
-			return SendResult{}, ferr
-		}
-	}
-	confirmedBy := pgtype.UUID{}
-	if a.UserID != nil {
-		confirmedBy = pgtype.UUID{Bytes: *a.UserID, Valid: true}
-	}
-	confirmation, err := q.ConfirmDocumentLawfulBasis(ctx, generated.ConfirmDocumentLawfulBasisParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID, LawfulBasis: strings.TrimSpace(a.LawfulBasis),
-		ConfirmedBy: confirmedBy, Via: a.Via,
-	})
-	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return SendResult{}, ErrDraftChangedDuringSend
+			return ErrDocumentNotFound
 		}
-		return SendResult{}, fmt.Errorf("confirm document lawful basis: %w", err)
-	}
-	confirmedDoc := *doc
-	confirmedDoc.LawfulBasis = confirmation.LawfulBasis
-	if err := requireConfirmedLawfulBasis(&confirmedDoc, confirmation); err != nil {
-		return SendResult{}, err
-	}
-	doc = &confirmedDoc
-	if err := requireValidSignerDisclosure(doc, confirmation); err != nil {
-		return SendResult{}, err
-	}
-	// The unlocked preflight above can perform storage and resolver work. Check
-	// the persisted deadline again while holding the document lock, immediately
-	// before committing the durable/possibly irreversible sealing intent.
-	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
-		return SendResult{}, err
-	}
-	// Resolve and persist the complete effective theme while the document rows
-	// are locked and before any irreversible lifecycle transition. Later org
-	// branding changes cannot alter signer or terminal rendering. Envelope
-	// children get complete snapshots too, even though the current renderer uses
-	// the root theme, so their independent evidence state remains self-contained.
-	brandingDocs := append([]*generated.Document{doc}, envelopeChildren...)
-	for _, brandingDoc := range brandingDocs {
-		logoURL, ferr := freezeDocumentBranding(ctx, tx, brandingDoc)
-		if ferr != nil {
-			return SendResult{}, ferr
-		}
-		if logoURL != "" {
-			return SendResult{}, ErrUnsupportedBrandingLogo
-		}
-	}
-	// Durable cross-system boundary: commit a non-editable/non-deletable
-	// `sealing` state and actor intent before applying irreversible Object Lock.
-	// A crash or SQL commit failure after retention therefore leaves a resumable
-	// sealing ceremony, never an ordinary draft containing seven-year WORM PII.
-	actorUserID := pgtype.UUID{}
-	if a.UserID != nil {
-		actorUserID = pgtype.UUID{Bytes: *a.UserID, Valid: true}
-	}
-	if _, err := q.CreateSendSealingIntent(ctx, generated.CreateSendSealingIntentParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID, ActorUserID: actorUserID,
-		ActorEmail: a.Email, ActorIp: a.IP, Via: a.Via, Tool: a.Tool,
-	}); err != nil {
-		return SendResult{}, fmt.Errorf("create send sealing intent: %w", err)
-	}
-	if doc.IsEnvelope {
-		sealedChildren, serr := q.BeginEnvelopeChildrenSendSealing(ctx, generated.BeginEnvelopeChildrenSendSealingParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: doc.ID, Valid: true}, OrgID: doc.OrgID,
-		})
-		if serr != nil {
-			return SendResult{}, fmt.Errorf("seal envelope children: %w", serr)
-		}
-		if len(sealedChildren) != len(envelopeChildren) {
-			return SendResult{}, fmt.Errorf("seal envelope children: updated %d of %d", len(sealedChildren), len(envelopeChildren))
-		}
-	}
-	if _, err := q.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: doc.OrgID}); err != nil {
-		return SendResult{}, fmt.Errorf("begin document send sealing: %w", err)
-	}
-	if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
-		return SendResult{}, err
-	}
-	// The intent and credential queries may also wait. Keep the admission
-	// deadline valid at commit rather than relying on the earlier snapshot.
-	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
-		return SendResult{}, err
-	}
-	var pendingCRMAudits []audit.PendingEvent
-	if bindingPreparation != nil && len(bindingPreparation.crmReports) > 0 {
-		pendingCRMAudits, err = appendAuditEntriesTx(ctx, e.Audit, tx, bindingPreparation.auditEntries(e, a))
 		if err != nil {
-			return SendResult{}, err
+			return fmt.Errorf("lock document: %w", err)
+		}
+		if lockedDoc.Status != "draft" {
+			// A concurrent send won the race (or it was already sent): lose cleanly.
+			return ErrNotDraft
+		}
+		if err := phase.work.CheckPackageSendSelectionV1(ctx, a.PackageSend); err != nil {
+			return err
+		}
+		if err := verifyPreparedSendDocument(originalDoc, lockedDoc); err != nil {
+			return err
+		}
+		if err := verifyOriginalDocumentTimestamp(originalDoc, lockedDoc); err != nil {
+			return err
+		}
+		if err := requireLifecycleRoot(lockedDoc); err != nil {
+			return err
+		}
+		if err := validateAcknowledgementSend(lockedDoc); err != nil {
+			return err
+		}
+		doc = lockedDoc
+		lockedSource, err := phase.work.NewSourceV1(ctx)
+		if err != nil {
+			return err
+		}
+
+		// Lock and re-check every prepared child while the parent is locked. The
+		// envelope topology queries take the same parent lock, so membership cannot
+		// change after this point. Comparing the prepared bytes also catches an edit
+		// that raced the preflight/freeze and prevents signing an unvalidated tree.
+		var lockedMembers []*ownedSendFamilyMemberV1
+		if doc.IsEnvelope {
+			lockedMembers, err = readOwnedEnvelopeMembersV1(ctx, phase.work)
+			if err != nil {
+				return fmt.Errorf("send envelope: re-list children: %w", err)
+			}
+			if _, err = validateOwnedEnvelopeMembersV1(ctx, doc.ID, lockedMembers, "draft", false); err != nil {
+				return err
+			}
+			lockedChildren := ownedEnvelopeDocumentsV1(lockedMembers)
+			if err = verifyOriginalEnvelopeChildren(originalChildren, lockedChildren); err != nil {
+				return err
+			}
+			envelopeChildren = lockedChildren
+		}
+
+		// A reviewed CRM mapping is part of the authoring contract, even if all of
+		// its bindings were subsequently deleted. Check every locked document before
+		// writing observations/frozen values; nil resolver/report wiring refuses a
+		// currently mapped document rather than silently removing its obligation.
+		if err := phase.work.CheckCRMReviewV1(ctx, lockedSource, read.resolution); err != nil {
+			return err
+		}
+		if doc.IsEnvelope {
+			if err = checkOwnedEnvelopeCRMReviewsV1(ctx, lockedMembers, read.members); err != nil {
+				return err
+			}
+		}
+
+		if bindingPreparation != nil {
+			if err := phase.work.VerifyAndPersistResolutionV1(ctx, read.resolution); err != nil {
+				if errors.Is(err, pdfadmission.ErrHTMLSendBindingChangedV1) {
+					return fmt.Errorf("%w: %v", ErrDraftChangedDuringSend, err)
+				}
+				return err
+			}
+			var lockedCandidate *pdfadmission.ApplicationHTMLSendSourceV1
+			lockedCandidate, err = phase.work.NewResolvedSourceV1(read.resolution)
+			if err == nil {
+				err = validateOwnedResolvedBlockVariablesV1(lockedCandidate)
+			}
+			if err == nil {
+				err = lockedSource.ValidateReviewedV1()
+			}
+			if err == nil {
+				err = lockedCandidate.ValidateCurrentV1()
+			}
+			if err == nil {
+				err = lockedSource.ValidateCurrentV1()
+			}
+			// Reviewed HTML never writes the existing source/variables tuple. BOTH the
+			// genuine resolved candidate and original locked tuple were just checked.
+			if err == nil && !lockedCandidate.MatchesDocumentV1(preparedDoc) {
+				err = pdfadmission.ErrHTMLSendWorkV1
+			}
+			if err == nil {
+				err = ctx.Err()
+			}
+			// An annex package captures the already reviewed source tuple. A live
+			// resolver cannot rewrite that tuple between measurement and capture.
+			if err == nil && a.PackageSend.PresentV1() {
+				var matches bool
+				matches, err = lockedCandidate.MatchesPackageOriginalV1(ctx, lockedSource)
+				if err == nil && !matches {
+					err = ErrDraftChangedDuringSend
+				}
+			}
+			if err == nil && len(doc.HtmlSourceJson) == 0 && !a.PackageSend.PresentV1() {
+				doc, lockedSource, err = phase.work.PersistResolvedVariablesV1(ctx, read.resolution)
+				if errors.Is(err, pgx.ErrNoRows) {
+					err = ErrDraftChangedDuringSend
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("persist frozen variables: %w", err)
+			}
+			if doc.IsEnvelope {
+				if err = persistOwnedEnvelopeResolutionsV1(ctx, lockedMembers, read.members); err != nil {
+					return err
+				}
+				envelopeChildren = ownedEnvelopeDocumentsV1(lockedMembers)
+			}
+		}
+		if doc.IsEnvelope {
+			envelopeRoles, err = validateOwnedEnvelopeMembersV1(ctx, doc.ID, lockedMembers, "draft", true)
+			if err != nil {
+				return err
+			}
+		}
+		// Recheck the locked, persisted authoring snapshot before creating an
+		// irreversible sealing intent. HTML-origin PDFs must still contain exactly
+		// their reviewed printed values after resolver freezing and lock waits.
+		if err := validateOwnedResolvedBlockVariablesV1(lockedSource); err != nil {
+			return err
+		}
+		if err := lockedSource.ValidateCurrentV1(); err != nil {
+			return err
+		}
+		// Non-CRM live bindings can also change a block's frozen values. The review
+		// must cover this actual post-freeze content, not only the draft checked
+		// above. A refusal rolls the observation/freeze writes back with this tx.
+		if err := phase.work.CheckCRMReviewV1(ctx, lockedSource, read.resolution); err != nil {
+			return err
+		}
+		if doc.IsEnvelope {
+			if err = checkOwnedEnvelopeCRMReviewsV1(ctx, lockedMembers, read.members); err != nil {
+				return err
+			}
+		}
+
+		// Recipient CRUD shares this parent row lock. Re-list only after acquiring
+		// it, then validate and mint exclusively from this stable snapshot; the
+		// earlier list is advisory preflight and cannot authorize a ceremony.
+		lockedRecipients, err := phase.work.ReadRecipientsV1(ctx)
+		if err != nil {
+			return fmt.Errorf("send document: re-list recipients: %w", err)
+		}
+		if err := validateOwnedSendRecipientsV1(lockedSource, doc, envelopeRoles, lockedRecipients); err != nil {
+			return err
+		}
+		if doc.SourceKind == "pdf" {
+			fields, ferr := phase.work.ReadFieldsV1(ctx)
+			if ferr != nil {
+				return fmt.Errorf("send PDF: list fields: %w", ferr)
+			}
+			if doc.RequiresSignature {
+				if ferr := validateOwnedPDFSignatureFieldsV1(lockedSource, doc, lockedRecipients, fields, preparedPDFPageCount); ferr != nil {
+					return ferr
+				}
+			} else if ferr := validateAcknowledgementFields(fields); ferr != nil {
+				return ferr
+			}
+		}
+		packageStep = "confirmation"
+		var confirmation *generated.DocumentLawfulBasisConfirmation
+		if a.PackageSend.PresentV1() {
+			confirmation, err = phase.work.ConfirmPackageLawfulBasisV1(ctx, strings.TrimSpace(a.LawfulBasis), a.Via)
+		} else {
+			confirmation, err = phase.work.ConfirmLawfulBasisV1(ctx, strings.TrimSpace(a.LawfulBasis), a.Via)
+		}
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrDraftChangedDuringSend
+			}
+			return fmt.Errorf("confirm document lawful basis: %w", err)
+		}
+		confirmedDoc := *doc
+		confirmedDoc.LawfulBasis = confirmation.LawfulBasis
+		if err := requireConfirmedLawfulBasis(&confirmedDoc, confirmation); err != nil {
+			return err
+		}
+		doc = &confirmedDoc
+		if err := requireValidSignerDisclosure(doc, confirmation); err != nil {
+			return err
+		}
+		// The unlocked preflight above can perform storage and resolver work. Check
+		// the persisted deadline again while holding the document lock, immediately
+		// before committing the durable/possibly irreversible sealing intent.
+		if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
+			return err
+		}
+		// Resolve and persist the complete effective theme while the document rows
+		// are locked and before any irreversible lifecycle transition. Later org
+		// branding changes cannot alter signer or terminal rendering. Envelope
+		// children get complete snapshots too, even though the current renderer uses
+		// the root theme, so their independent evidence state remains self-contained.
+		packageStep = "branding"
+		brandingDocs := append([]*generated.Document{doc}, envelopeChildren...)
+		for _, brandingDoc := range brandingDocs {
+			brandingWork, brandingSource := phase.work, lockedSource
+			if brandingDoc.ID != doc.ID {
+				found := false
+				for _, member := range lockedMembers {
+					if member.doc.ID == brandingDoc.ID {
+						brandingWork, brandingSource = member.work, member.source
+						found = true
+						break
+					}
+				}
+				if !found {
+					return pdfadmission.ErrHTMLSendWorkV1
+				}
+			}
+			snapshot, ferr := brandingWork.FreezeBrandingV1(ctx)
+			if ferr == nil {
+				ferr = branding.ValidateFrozenSnapshot(brandingDoc.ID, snapshot)
+			}
+			if ferr == nil {
+				ferr = brandingWork.ValidateFrozenBrandingV1(ctx, brandingSource)
+			}
+			logoURL := ""
+			if snapshot != nil {
+				logoURL = snapshot.LogoUrl.String
+			}
+			if ferr != nil {
+				return ferr
+			}
+			if logoURL != "" {
+				return ErrUnsupportedBrandingLogo
+			}
+		}
+		// Durable cross-system boundary: commit a non-editable/non-deletable
+		// `sealing` state and actor intent before applying irreversible Object Lock.
+		// A crash or SQL commit failure after retention therefore leaves a resumable
+		// sealing ceremony, never an ordinary draft containing seven-year WORM PII.
+		intentActor := pdfadmission.HTMLSendIntentActorV1{IP: a.IP, Via: a.Via, Tool: a.Tool}
+		if a.PackageSend.PresentV1() {
+			packageStep = "capture"
+			if _, err := phase.work.AppendDocumentPackageCaptureV1(ctx, read.packageDraft); err != nil {
+				return err
+			}
+			packageStep = "intent"
+			if _, err := phase.work.CreatePackageIntentV1(ctx, intentActor); err != nil {
+				return err
+			}
+		} else if err := phase.work.CreateIntentV1(ctx, intentActor); err != nil {
+			return fmt.Errorf("create send sealing intent: %w", err)
+		}
+		if doc.IsEnvelope {
+			if err = phase.work.BeginEnvelopeMembersSealingV1(ctx); err != nil {
+				return fmt.Errorf("seal envelope children: %w", err)
+			}
+		}
+		packageStep = "begin_sealing"
+		if err := phase.work.BeginSendSealingV1(ctx); err != nil {
+			return fmt.Errorf("begin document send sealing: %w", err)
 		}
 		if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
-			return SendResult{}, err
+			return err
 		}
-		if err := bindingPreparation.checkCRMDeadlines(e.now()); err != nil {
-			return SendResult{}, err
+		// The intent and credential queries may also wait. Keep the admission
+		// deadline valid at commit rather than relying on the earlier snapshot.
+		if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
+			return err
 		}
+		if bindingPreparation != nil && len(bindingPreparation.crmReports) > 0 {
+			err = phase.appendAuditEntriesV1(ctx, bindingPreparation.auditEntries(e, a))
+			if err != nil {
+				return err
+			}
+			if err := reauthorizeLifecycleActor(ctx, tx, a, actorUser); err != nil {
+				return err
+			}
+			if err := bindingPreparation.checkCRMDeadlines(e.now()); err != nil {
+				return err
+			}
+		}
+		if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
+			return err
+		}
+
+		packageStep = "commit"
+		return nil
+	})
+	if err != nil {
+		if a.PackageSend.PresentV1() {
+			packageSendFailureDiagnosticV1(packageStep, err)
+		}
+		// The identity is a reconciliation selector only, even if COMMIT was
+		// dispatched. Never claim durability or mint a second job on this path.
+		id, _ := operation.native.PackageSendAttemptIDV1()
+		return SendResult{PackageAttemptID: id}, fmt.Errorf("commit send sealing intent: %w", err)
 	}
-	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
-		return SendResult{}, err
+	// Every initial model/report/provider/source view has now had its actual
+	// final use. Keep only the actual UUID scope before signalling those real
+	// consumers; recovery owns distinct fresh snapshots and all original checks.
+	packageAttempt, isPackage := operation.native.PackageSendAttemptIDV1()
+	recoveryDocument, recoveryOrg := doc.ID, doc.OrgID
+	prepared = nil
+	read = nil
+	doc = nil
+	originalDoc = nil
+	originalChildren = nil
+	envelopeChildren = nil
+	envelopeRoles = nil
+	preparedDoc = nil
+	bindingPreparation = nil
+	a = Actor{}
+	if err = operation.retireInitialStagesV1(); err != nil {
+		return SendResult{PackageAttemptID: packageAttempt}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return SendResult{}, fmt.Errorf("commit send sealing intent: %w", err)
+	if isPackage {
+		// The wired native worker owns storage, invitation tokens and outbox.
+		// A request never borrows a process-wide recovery queue slot.
+		return SendResult{Status: "sealing", PackageAttemptID: packageAttempt}, nil
 	}
-	for _, pending := range pendingCRMAudits {
-		e.Audit.Publish(pending)
-	}
-	cancelTransaction()
-	return e.ResumeSendSealing(requestCtx, doc.ID, doc.OrgID)
+	return e.resumeOwnedSendSealingV1(ctx, operation, recoveryDocument, recoveryOrg)
 }
 
 type sealedSendSnapshot struct {
@@ -615,15 +751,13 @@ type pendingInvite struct {
 // durable draft -> sealing -> sent transition. It is safe to call repeatedly:
 // retention is idempotent, the retained marker is durable, and the final row
 // lock permits exactly one token/outbox/audit commit.
-func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) (SendResult, error) {
+func (e *Engine) resumeOwnedSendSealingV1(ctx context.Context, operation *ownedSendOperationV1, docID, orgID uuid.UUID) (SendResult, error) {
 	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
 		return SendResult{}, errors.New("resume send sealing: lifecycle store unavailable")
 	}
-	intent, err := e.Queries.GetSendSealingIntent(ctx, generated.GetSendSealingIntentParams{
-		DocumentID: docID, OrgID: orgID,
-	})
+	intent, err := e.readOwnedSendIntentV1(ctx, operation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return e.completedSendSealingResult(ctx, docID, orgID)
+		return e.completedOwnedSendResultV1(ctx, operation)
 	}
 	if err != nil {
 		return SendResult{}, fmt.Errorf("resume send sealing: load intent: %w", err)
@@ -631,37 +765,41 @@ func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) 
 	if intent.PresignExecutionID.Valid {
 		return SendResult{}, ErrDelegatedRecoveryUnavailable
 	}
-	intent, err = e.ensureSendSealingRetainUntil(ctx, intent)
+	intent, err = e.ensureOwnedSendRetainUntilV1(ctx, operation, intent)
 	if err != nil {
-		e.recordSendSealingFailure(ctx, docID, orgID, err)
+		e.recordOwnedSendFailureV1(ctx, operation, err)
 		return SendResult{}, err
 	}
-	snapshot, err := e.loadSealedSendSnapshot(ctx, docID, orgID)
+	snapshot, err := e.loadOwnedSealedSendSnapshotV1(ctx, operation)
 	if err != nil {
-		if sendSealingReversible(intent) {
-			if abortErr := e.abortUnstartedSendSealing(ctx, docID, orgID); abortErr != nil {
+		if ownedSendRetentionReversibleV1(intent) {
+			if abortErr := e.abortOwnedUnstartedSendV1(ctx, operation); abortErr != nil {
 				return SendResult{}, errors.Join(err, fmt.Errorf("abort invalid pre-retention sealing intent: %w", abortErr))
 			}
 		}
-		e.recordSendSealingFailure(ctx, docID, orgID, err)
+		e.recordOwnedSendFailureV1(ctx, operation, err)
 		return SendResult{}, err
 	}
-	if sendSealingReversible(intent) {
+	if snapshot == nil {
+		return SendResult{}, pdfadmission.ErrHTMLSendWorkV1
+	}
+	if snapshot.alreadyCompleted != nil {
+		return *snapshot.alreadyCompleted, nil
+	}
+	if ownedSendRetentionReversibleV1(intent) {
 		// A pre-retention intent is still safe to unwind. Never cross the Object
 		// Lock boundary when the original absolute signing deadline no longer has
 		// the normal admission margin. If another worker starts retention between
 		// this check and the abort, reload and continue as irreversible recovery.
 		if expiryErr := ValidateExpiryForSend(snapshot.doc.ExpiresAt, e.now()); expiryErr != nil {
-			if abortErr := e.abortUnstartedSendSealing(ctx, docID, orgID); abortErr == nil {
+			if abortErr := e.abortOwnedUnstartedSendV1(ctx, operation); abortErr == nil {
 				return SendResult{}, expiryErr
 			} else {
-				reloaded, reloadErr := e.Queries.GetSendSealingIntent(ctx, generated.GetSendSealingIntentParams{
-					DocumentID: docID, OrgID: orgID,
-				})
+				reloaded, reloadErr := e.readOwnedSendIntentV1(ctx, operation)
 				if reloadErr != nil {
 					return SendResult{}, errors.Join(expiryErr, abortErr, reloadErr)
 				}
-				if sendSealingReversible(reloaded) {
+				if ownedSendRetentionReversibleV1(reloaded) {
 					return SendResult{}, errors.Join(expiryErr, abortErr)
 				}
 				intent = reloaded
@@ -669,9 +807,7 @@ func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) 
 		}
 	}
 	if !intent.RetentionCompletedAt.Valid {
-		rows, err := e.Queries.MarkSendSealingRetentionStarted(ctx, generated.MarkSendSealingRetentionStartedParams{
-			DocumentID: docID, OrgID: orgID,
-		})
+		rows, err := e.markOwnedSendRetentionV1(ctx, operation, false)
 		if err != nil {
 			return SendResult{}, fmt.Errorf("resume send sealing: persist retention start: %w", err)
 		}
@@ -680,9 +816,9 @@ func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) 
 			// intent read but before this idempotent marker update. Distinguish
 			// that successful handoff from a genuinely invalid/disappeared
 			// intent instead of failing a concurrent automation replay.
-			reloaded, reloadErr := e.reloadCompletedSendSealingIntent(ctx, docID, orgID)
+			reloaded, reloadErr := e.reloadOwnedCompletedSendIntentV1(ctx, operation)
 			if errors.Is(reloadErr, pgx.ErrNoRows) {
-				return e.completedSendSealingResult(ctx, docID, orgID)
+				return e.completedOwnedSendResultV1(ctx, operation)
 			}
 			if reloadErr != nil {
 				return SendResult{}, fmt.Errorf("resume send sealing: retention-start handoff: %w", reloadErr)
@@ -690,32 +826,35 @@ func (e *Engine) ResumeSendSealing(ctx context.Context, docID, orgID uuid.UUID) 
 			intent = reloaded
 		}
 		if !intent.RetentionCompletedAt.Valid {
-			if err := retainReadySendEvidence(ctx, e.Storage, snapshot.doc, snapshot.recipients, snapshot.fields, snapshot.pageCount, intent.RetainUntil.Time); err != nil {
-				e.recordSendSealingFailure(ctx, docID, orgID, err)
+			if err := snapshot.retainReadyV1(ctx, operation, intent.RetainUntil.Time); err != nil {
+				e.recordOwnedSendFailureV1(ctx, operation, err)
 				return SendResult{}, fmt.Errorf("resume send sealing: retain evidence: %w", err)
 			}
 			for _, child := range snapshot.children {
 				if err := retainSendEvidence(ctx, e.Storage, child, intent.RetainUntil.Time); err != nil {
-					e.recordSendSealingFailure(ctx, docID, orgID, err)
+					e.recordOwnedSendFailureV1(ctx, operation, err)
 					return SendResult{}, fmt.Errorf("resume send envelope: retain child evidence: %w", err)
 				}
 			}
-			rows, err = e.Queries.MarkSendSealingRetentionComplete(ctx, generated.MarkSendSealingRetentionCompleteParams{
-				DocumentID: docID, OrgID: orgID,
-			})
+			rows, err = e.markOwnedSendRetentionV1(ctx, operation, true)
 			if err != nil {
 				return SendResult{}, fmt.Errorf("resume send sealing: persist retained marker: %w", err)
 			}
 			if rows != 1 {
-				if _, reloadErr := e.reloadCompletedSendSealingIntent(ctx, docID, orgID); errors.Is(reloadErr, pgx.ErrNoRows) {
-					return e.completedSendSealingResult(ctx, docID, orgID)
+				if _, reloadErr := e.reloadOwnedCompletedSendIntentV1(ctx, operation); errors.Is(reloadErr, pgx.ErrNoRows) {
+					return e.completedOwnedSendResultV1(ctx, operation)
 				} else if reloadErr != nil {
 					return SendResult{}, fmt.Errorf("resume send sealing: retained-marker handoff: %w", reloadErr)
 				}
 			}
 		}
 	}
-	return e.completeSealedSend(ctx, snapshot)
+	completion, err := snapshot.completionSnapshotV1(operation)
+	if err != nil {
+		return SendResult{}, err
+	}
+	snapshot = nil
+	return e.completeOwnedSealedSendV1(ctx, operation, completion)
 }
 
 // reloadCompletedSendSealingIntent closes the marker race between concurrent
@@ -746,6 +885,13 @@ func (e *Engine) reloadCompletedSendSealingIntent(ctx context.Context, docID, or
 // authoritative lifecycle status and the winning transaction remains the sole
 // publisher of invitations and audit events.
 func (e *Engine) completedSendSealingResult(ctx context.Context, docID, orgID uuid.UUID) (SendResult, error) {
+	packageHistory, historyErr := e.Queries.HasDocumentPackageSendHistoryV1(ctx, generated.HasDocumentPackageSendHistoryV1Params{OrgID: orgID, DocumentID: docID})
+	if historyErr != nil {
+		return SendResult{}, historyErr
+	}
+	if packageHistory {
+		return SendResult{}, pdfadmission.ErrHTMLSendPackagePathRequiredV1
+	}
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: orgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SendResult{}, ErrDocumentNotFound
@@ -809,22 +955,28 @@ func (e *Engine) ensureSendSealingRetainUntil(ctx context.Context, intent *gener
 }
 
 func canonicalSendSealingRetainUntil(intent *generated.SendSealingIntent) (time.Time, error) {
-	if intent == nil || !intent.Article13NoticeEpochAt.Valid || intent.Article13NoticeEpochAt.Time.IsZero() {
+	if intent == nil {
 		return time.Time{}, errors.New("persisted Article 13 ceremony epoch is unavailable")
 	}
-	if !intent.RetainUntil.Valid || intent.RetainUntil.Time.IsZero() {
+	if intent.PackageSendAttemptID.Valid {
+		return time.Time{}, pdfadmission.ErrHTMLSendPackagePathRequiredV1
+	}
+	return canonicalSendSealingRetentionTimesV1(intent.Article13NoticeEpochAt, intent.RetainUntil)
+}
+func canonicalSendSealingRetentionTimesV1(epoch, retainUntil pgtype.Timestamptz) (time.Time, error) {
+	if !epoch.Valid || epoch.Time.IsZero() {
+		return time.Time{}, errors.New("persisted Article 13 ceremony epoch is unavailable")
+	}
+	if !retainUntil.Valid || retainUntil.Time.IsZero() {
 		return time.Time{}, errors.New("persisted retention deadline is unavailable")
 	}
-	canonical := intent.RetainUntil.Time.UTC()
+	canonical := retainUntil.Time.UTC()
 	if canonical.Nanosecond() != 0 {
 		return time.Time{}, errors.New("persisted retention deadline must use whole-second precision")
 	}
-	want := storage.EvidenceRetentionDeadline(intent.Article13NoticeEpochAt.Time, article13.RetentionYearsV1)
+	want := storage.EvidenceRetentionDeadline(epoch.Time, article13.RetentionYearsV1)
 	if !canonical.Equal(want) {
-		return time.Time{}, fmt.Errorf(
-			"persisted retention deadline %s does not match Article 13 ceremony epoch commitment %s",
-			canonical.Format(time.RFC3339), want.Format(time.RFC3339),
-		)
+		return time.Time{}, fmt.Errorf("persisted retention deadline %s does not match Article 13 ceremony epoch commitment %s", canonical.Format(time.RFC3339), want.Format(time.RFC3339))
 	}
 	return canonical, nil
 }
@@ -876,7 +1028,7 @@ func (e *Engine) abortUnstartedSendSealing(ctx context.Context, docID, orgID uui
 }
 
 func sendSealingReversible(intent *generated.SendSealingIntent) bool {
-	return intent != nil && !intent.PresignExecutionID.Valid && !intent.RetentionStartedAt.Valid && !intent.RetentionCompletedAt.Valid
+	return intent != nil && !intent.PackageSendAttemptID.Valid && !intent.PresignExecutionID.Valid && !intent.RetentionStartedAt.Valid && !intent.RetentionCompletedAt.Valid
 }
 
 func (e *Engine) recordSendSealingFailure(ctx context.Context, docID, orgID uuid.UUID, cause error) {
@@ -1738,6 +1890,21 @@ func persistAuthorizedFrozenDocument(ctx context.Context, q *generated.Queries, 
 	if err := validateResolvedBlockVariables(&candidate); err != nil {
 		return nil, err
 	}
+	if len(doc.HtmlSourceJson) > 0 {
+		// This is the same locked, reviewed HTML/PDF source. Full source
+		// validation binds BOTH snapshots to its exact current printed values,
+		// independent of JSONB spacing. Keep the actual stored snapshot instead
+		// of an unnecessary UPDATE that would invalidate its wire measurement.
+		// Resolver observations, fresh CRM review and final actor/source checks
+		// still run in Send; a changed candidate was refused above.
+		if err := validateResolvedBlockVariables(doc); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return doc, nil
+	}
 	updated, err := q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
 		ID: doc.ID, OrgID: doc.OrgID, VariablesJson: frozen, ExpectedUpdatedAt: doc.UpdatedAt,
 	})
@@ -2235,35 +2402,7 @@ func verifyPreparedSendDocument(prepared, locked *generated.Document) error {
 	if prepared == nil || locked == nil || prepared.ID != locked.ID || prepared.OrgID != locked.OrgID {
 		return ErrDraftChangedDuringSend
 	}
-	if prepared.Name != locked.Name || prepared.Status != locked.Status || prepared.SenderID != locked.SenderID ||
-		prepared.SourceKind != locked.SourceKind || prepared.RoutingMode != locked.RoutingMode ||
-		prepared.RoutingTier != locked.RoutingTier || prepared.RequiresSignature != locked.RequiresSignature ||
-		prepared.IsEnvelope != locked.IsEnvelope || prepared.DefaultLocale != locked.DefaultLocale ||
-		prepared.BilingualTargetLang != locked.BilingualTargetLang || prepared.LawfulBasis != locked.LawfulBasis ||
-		prepared.NegotiationEnabled != locked.NegotiationEnabled ||
-		prepared.RenderedPdfKey != locked.RenderedPdfKey || prepared.PdfStorageKey != locked.PdfStorageKey ||
-		prepared.RenderedPdfVersionID != locked.RenderedPdfVersionID || prepared.PdfStorageVersionID != locked.PdfStorageVersionID ||
-		prepared.EvidenceVersionPinsRequired != locked.EvidenceVersionPinsRequired ||
-		prepared.ParentEnvelopeID != locked.ParentEnvelopeID || prepared.EnvelopePosition != locked.EnvelopePosition ||
-		!bytes.Equal(prepared.BlocksJson, locked.BlocksJson) ||
-		!bytes.Equal(prepared.VariablesJson, locked.VariablesJson) ||
-		!bytes.Equal(prepared.Metadata, locked.Metadata) ||
-		!bytes.Equal(prepared.HtmlSourceJson, locked.HtmlSourceJson) ||
-		!bytes.Equal(prepared.HtmlCurrentSourceJson, locked.HtmlCurrentSourceJson) ||
-		prepared.HtmlCurrentMaterializationID != locked.HtmlCurrentMaterializationID ||
-		prepared.HtmlCurrentMaterializationSequence != locked.HtmlCurrentMaterializationSequence ||
-		prepared.HtmlCurrentPageCount != locked.HtmlCurrentPageCount ||
-		prepared.HtmlEffectiveSourceCommitment != locked.HtmlEffectiveSourceCommitment ||
-		prepared.HtmlReviewedMaterializationID != locked.HtmlReviewedMaterializationID ||
-		!bytes.Equal(prepared.HtmlReviewedPdfSha256, locked.HtmlReviewedPdfSha256) ||
-		prepared.HtmlReviewedBy != locked.HtmlReviewedBy ||
-		prepared.HtmlReviewedAt.Valid != locked.HtmlReviewedAt.Valid ||
-		prepared.HtmlReviewedAt.InfinityModifier != locked.HtmlReviewedAt.InfinityModifier ||
-		(prepared.HtmlReviewedAt.Valid && !prepared.HtmlReviewedAt.Time.Equal(locked.HtmlReviewedAt.Time)) ||
-		!bytes.Equal(prepared.RenderedPdfSha, locked.RenderedPdfSha) ||
-		!bytes.Equal(prepared.PdfSha256, locked.PdfSha256) ||
-		prepared.ExpiresAt.Valid != locked.ExpiresAt.Valid ||
-		(prepared.ExpiresAt.Valid && !prepared.ExpiresAt.Time.Equal(locked.ExpiresAt.Time)) {
+	if !pdfadmission.HTMLSendPreparedDocumentEqualV1(prepared, locked) {
 		return fmt.Errorf("%w: %s", ErrDraftChangedDuringSend, prepared.ID)
 	}
 	return nil
@@ -2655,164 +2794,7 @@ func expireLockedEnvelopeChildren(ctx context.Context, q documentStatusSetter, c
 // remind. The engine advances a locked, due automatic schedule atomically
 // with the reminder; a manual remind pushes the next scheduled fire out.
 func (e *Engine) Remind(ctx context.Context, a Actor, docID uuid.UUID, automatic bool) (int, error) {
-	if e == nil || e.Pool == nil || e.Queries == nil || e.Audit == nil {
-		return 0, errors.New("remind document: lifecycle store unavailable")
-	}
-	if !automatic {
-		if err := requireActorAuthorization(a); err != nil {
-			return 0, err
-		}
-	}
-	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: a.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrDocumentNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	if doc.Status != "sent" && doc.Status != "in_progress" {
-		return 0, ErrNotRemindable
-	}
-	// Mint the reminder tokens (and the manual-remind reset) in one tx under a row
-	// lock + remindable re-check, so a concurrent remind/void cannot interleave token
-	// rotations. Reminder emails fire only after commit.
-	txCtx := ctx
-	if !automatic {
-		var cancelTransaction context.CancelFunc
-		txCtx, cancelTransaction = context.WithTimeout(ctx, 10*time.Second)
-		defer cancelTransaction()
-	}
-	tx, err := e.Pool.BeginTx(txCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return 0, err
-	}
-	defer rollbackLifecycleTransaction(txCtx, tx)
-	q := e.Queries.WithTx(tx)
-	lockedDoc, err := q.GetDocumentForUpdate(txCtx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrDocumentNotFound
-	}
-	if err != nil {
-		return 0, fmt.Errorf("lock document: %w", err)
-	}
-	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
-		return 0, ErrNotRemindable
-	}
-	// Status can lag behind the expiration worker. Recheck the actual deadline
-	// after waiting for the authoritative lock, before rotating tokens or mail.
-	if lockedDoc.ExpiresAt.Valid && !lockedDoc.ExpiresAt.Time.After(e.now()) {
-		return 0, fmt.Errorf("%w: document deadline has passed", ErrNotRemindable)
-	}
-	doc = lockedDoc
-	var actorUser *generated.User
-	if !automatic {
-		actorUser, err = authorizeLifecycleActor(txCtx, tx, q, &a)
-		if err != nil {
-			return 0, err
-		}
-	}
-	if automatic {
-		schedule, err := q.GetReminderForUpdate(txCtx, doc.ID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, nil
-		}
-		if err != nil {
-			return 0, fmt.Errorf("lock automatic reminder: %w", err)
-		}
-		if schedule.FiresRemaining <= 0 || !schedule.NextFireAt.Valid || schedule.NextFireAt.Time.After(e.now()) {
-			return 0, nil
-		}
-		if !doc.SentAt.Valid {
-			return 0, errors.New("automatic reminder requires send timestamp")
-		}
-		next, err := nextAutomaticReminder(schedule.ScheduleJson, int(schedule.FiresRemaining), doc.SentAt.Time)
-		if err != nil {
-			return 0, err
-		}
-		if err := q.AdvanceReminder(txCtx, generated.AdvanceReminderParams{DocumentID: doc.ID, NextFireAt: pgtype.Timestamptz{Time: next, Valid: true}}); err != nil {
-			return 0, fmt.Errorf("advance automatic reminder: %w", err)
-		}
-	}
-
-	recs, err := q.ListRecipientsByDocument(txCtx, doc.ID)
-	if err != nil {
-		return 0, fmt.Errorf("re-list reminder recipients: %w", err)
-	}
-	exp := magictoken.Expiry(doc.ExpiresAt, e.now())
-	type pendingReminder struct {
-		recID               uuid.UUID
-		email, name, locale string
-		signURL, beaconURL  string
-	}
-	reminders := make([]pendingReminder, 0, len(recs))
-	for _, rec := range recs {
-		if rec.Status != "pending" && rec.Status != "sent" && rec.Status != "viewed" {
-			continue
-		}
-		tok, err := e.rotateToken(txCtx, q, rec.ID, doc.ID, exp)
-		if err != nil {
-			return 0, err
-		}
-		reminders = append(reminders, pendingReminder{rec.ID, rec.Email, rec.Name, rec.Locale,
-			e.PublicURL + "/sign/" + tok, e.PublicURL + "/e/o/" + tok})
-	}
-	if !automatic {
-		if err := q.ResetReminderAfterManualRemind(txCtx, doc.ID); err != nil {
-			return 0, fmt.Errorf("reset manual reminder schedule: %w", err)
-		}
-	}
-	queueBacked := usesDurableEmailQueue(e.Mailer)
-	if queueBacked {
-		messages := make([]dispatch.Message, 0, len(reminders))
-		for _, rm := range reminders {
-			msg, rerr := e.renderEmail(dispatch.KindReminder, rm.email, rm.name, doc.Name, a.Email, rm.signURL, rm.beaconURL, rm.locale, doc.RequiresSignature)
-			if rerr != nil {
-				return 0, fmt.Errorf("render reminder email: %w", rerr)
-			}
-			messages = append(messages, msg)
-		}
-		if err := enqueueLifecycleEmails(txCtx, q, messages); err != nil {
-			return 0, fmt.Errorf("persist reminder outbox: %w", err)
-		}
-	}
-	auditEntries := make([]audit.Entry, 0, len(reminders))
-	for i := range reminders {
-		rm := &reminders[i]
-		payload := map[string]any{}
-		if automatic {
-			payload["automatic"] = true
-		} else {
-			payload["manual"] = true
-		}
-		auditEntries = append(auditEntries, e.auditEntry(a, &doc.ID, &rm.recID, audit.KindReminderSent, payload))
-	}
-	pendingAudits, err := appendAuditEntriesTx(txCtx, e.Audit, tx, auditEntries)
-	if err != nil {
-		return 0, fmt.Errorf("audit reminder: %w", err)
-	}
-	if !automatic {
-		if err := reauthorizeLifecycleActor(txCtx, tx, a, actorUser); err != nil {
-			return 0, err
-		}
-	}
-	// A schedule or audit wait must not commit links that expired while this
-	// reminder was being prepared, for either manual or automatic dispatch.
-	if doc.ExpiresAt.Valid && !doc.ExpiresAt.Time.After(e.now()) {
-		return 0, fmt.Errorf("%w: document deadline has passed", ErrNotRemindable)
-	}
-	if err := tx.Commit(txCtx); err != nil {
-		return 0, fmt.Errorf("commit remind: %w", err)
-	}
-	for _, pending := range pendingAudits {
-		e.Audit.Publish(pending)
-	}
-
-	if !queueBacked {
-		for _, rm := range reminders {
-			e.sendEmail(dispatch.KindReminder, rm.email, rm.name, doc.Name, a.Email, rm.signURL, rm.beaconURL, rm.locale, doc.RequiresSignature)
-		}
-	}
-	return len(reminders), nil
+	return e.remindOwnedV1(ctx, a, docID, automatic)
 }
 
 // rotateToken is THE chokepoint for the magic-token TTL invariant: it mints a
@@ -3166,4 +3148,16 @@ func stringifyVarForEIDAS(v any) (string, bool) {
 		}
 		return string(raw), true
 	}
+}
+
+// Same original reversible decision on the genuine purpose-specific native
+// scalar projection. This is not a fabricated SendSealingIntent model.
+func ownedSendRetentionReversibleV1(intent pdfadmission.HTMLSendRetentionProjectionV1) bool {
+	return !intent.PackageSendAttemptID.Valid && !intent.PresignExecutionID.Valid && !intent.RetentionStartedAt.Valid && !intent.RetentionCompletedAt.Valid
+}
+func canonicalOwnedSendSealingRetainUntilV1(intent pdfadmission.HTMLSendRetentionProjectionV1) (time.Time, error) {
+	if intent.PackageSendAttemptID.Valid {
+		return time.Time{}, pdfadmission.ErrHTMLSendPackagePathRequiredV1
+	}
+	return canonicalSendSealingRetentionTimesV1(intent.Article13NoticeEpochAt, intent.RetainUntil)
 }

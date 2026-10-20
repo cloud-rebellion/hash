@@ -104,6 +104,9 @@ UPDATE documents
    AND status = 'draft'
    AND parent_envelope_id IS NULL
    AND source_kind = 'blocks'
+   -- The envelope renderer uses only its children. Never hide an agreement
+   -- by promoting a populated document into a non-rendered wrapper.
+   AND blocks_json = '{"version":1,"blocks":[]}'::jsonb
    AND deleted_at IS NULL
 RETURNING *;
 
@@ -121,6 +124,7 @@ WHERE parent_envelope_id = $1;
 -- family high-water snapshot or observes finalizing and fails closed.
 UPDATE documents AS child
 SET status = 'finalizing',
+    participant_report_schema = parent.participant_report_schema,
     completion_effective_at_bound = parent.completion_effective_at_bound,
     completion_effective_at = parent.completion_effective_at,
     finalization_retain_until = parent.finalization_retain_until,

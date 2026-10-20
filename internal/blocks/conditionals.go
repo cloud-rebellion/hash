@@ -39,7 +39,11 @@ func EvalCondition(expr string, vars map[string]string) bool {
 // mistyped comparisons. Send, recovery, and finalization use this form so a
 // localized/non-numeric amount cannot silently choose a contractual branch.
 func EvalConditionStrict(expr string, vars map[string]string) (bool, error) {
-	value, _, err := parseCondition(expr, vars)
+	return evalConditionStrictForSendV1(expr, vars, nil)
+}
+
+func evalConditionStrictForSendV1(expr string, vars map[string]string, work *conditionalSendWorkV1) (bool, error) {
+	value, _, err := parseConditionForSendV1(expr, vars, work)
 	return value, err
 }
 
@@ -48,7 +52,11 @@ func EvalConditionStrict(expr string, vars map[string]string) (bool, error) {
 // document so a missing condition input cannot silently remove a clause from
 // the immutable artifact.
 func ConditionVariableNames(expr string) ([]string, error) {
-	_, names, err := parseCondition(expr, nil)
+	return conditionVariableNamesForSendV1(expr, nil)
+}
+
+func conditionVariableNamesForSendV1(expr string, work *conditionalSendWorkV1) ([]string, error) {
+	_, names, err := parseConditionForSendV1(expr, nil, work)
 	return names, err
 }
 
@@ -57,6 +65,10 @@ func ConditionVariableNames(expr string) ([]string, error) {
 // intentionally separate from EvalCondition's boolean-only compatibility API
 // so immutable lifecycle gates can distinguish false from invalid.
 func ValidateConditionalEvaluation(t *Tree, vars map[string]string) error {
+	return validateConditionalEvaluationForSendV1(t, vars, nil)
+}
+
+func validateConditionalEvaluationForSendV1(t *Tree, vars map[string]string, work *conditionalSendWorkV1) error {
 	if t == nil {
 		return nil
 	}
@@ -65,7 +77,7 @@ func ValidateConditionalEvaluation(t *Tree, vars map[string]string) error {
 		if validationErr != nil || b.Type != TypeConditional {
 			return
 		}
-		if _, err := EvalConditionStrict(b.AttrString("expression", ""), vars); err != nil {
+		if _, err := evalConditionStrictForSendV1(b.AttrString("expression", ""), vars, work); err != nil {
 			validationErr = fmt.Errorf("block %q condition: %w", b.ID, err)
 		}
 	})
@@ -79,6 +91,7 @@ type conditionParser struct {
 	pos   int
 	vars  map[string]string
 	names map[string]struct{}
+	work  *conditionalSendWorkV1
 }
 
 type conditionAtomKind uint8
@@ -98,10 +111,15 @@ type conditionAtom struct {
 var strictDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
 
 func parseCondition(expr string, vars map[string]string) (bool, []string, error) {
+	return parseConditionForSendV1(expr, vars, nil)
+}
+
+func parseConditionForSendV1(expr string, vars map[string]string, work *conditionalSendWorkV1) (bool, []string, error) {
 	p := &conditionParser{
 		input: strings.TrimSpace(expr),
 		vars:  vars,
 		names: make(map[string]struct{}),
+		work:  work,
 	}
 	if p.input == "" {
 		return false, nil, fmt.Errorf("condition expression is empty")
@@ -194,7 +212,7 @@ func (p *conditionParser) parseComparison() (bool, error) {
 	if p.vars == nil {
 		return false, nil
 	}
-	comparison, err := numericCompare(left.value, right.value)
+	comparison, err := numericCompareForSendV1(left.value, right.value, p.work)
 	if err != nil {
 		return false, p.errorf("relational comparisons require numeric operands")
 	}
@@ -272,7 +290,7 @@ func (p *conditionParser) parseAtom() (conditionAtom, error) {
 		return conditionAtom{}, p.errorf("expected condition value")
 	}
 	literal := p.input[start:p.pos]
-	if _, err := parseStrictDecimal(literal); err != nil {
+	if _, err := parseStrictDecimalForSendV1(literal, p.work); err != nil {
 		return conditionAtom{}, p.errorf("expected a number, boolean, quoted string, or var(name)")
 	}
 	return conditionAtom{value: literal, kind: conditionAtomNumber}, nil
@@ -317,11 +335,15 @@ func truthy(s string) bool {
 }
 
 func numericCompare(a, b string) (int, error) {
-	an, err := parseStrictDecimal(strings.TrimSpace(a))
+	return numericCompareForSendV1(a, b, nil)
+}
+
+func numericCompareForSendV1(a, b string, work *conditionalSendWorkV1) (int, error) {
+	an, err := parseStrictDecimalForSendV1(strings.TrimSpace(a), work)
 	if err != nil {
 		return 0, err
 	}
-	bn, err := parseStrictDecimal(strings.TrimSpace(b))
+	bn, err := parseStrictDecimalForSendV1(strings.TrimSpace(b), work)
 	if err != nil {
 		return 0, err
 	}
@@ -329,8 +351,17 @@ func numericCompare(a, b string) (int, error) {
 }
 
 func parseStrictDecimal(value string) (*big.Rat, error) {
+	return parseStrictDecimalForSendV1(value, nil)
+}
+
+func parseStrictDecimalForSendV1(value string, work *conditionalSendWorkV1) (*big.Rat, error) {
 	if !strictDecimalPattern.MatchString(value) {
 		return nil, fmt.Errorf("not a decimal number")
+	}
+	// The original lexical gate runs first. Native callers must install their
+	// source-derived logical allowance before this decimal can expand.
+	if err := work.beforeDecimalV1(value); err != nil {
+		return nil, err
 	}
 	number, ok := new(big.Rat).SetString(value)
 	if !ok {

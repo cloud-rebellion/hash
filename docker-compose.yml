@@ -109,6 +109,13 @@ services:
       HASH_PORT: "8080"
       HASH_ENVIRONMENT: ${HASH_ENVIRONMENT:-development}
       HASH_RELEASE: ${HASH_RELEASE:-development}
+      FLARE_DSN: ${FLARE_DSN:-}
+      FLARE_LOG_LEVEL: ${FLARE_LOG_LEVEL:-warn}
+      FLARE_TRACES_SAMPLE_RATE: ${FLARE_TRACES_SAMPLE_RATE:-0.1}
+      HASH_FLARE_MONITOR_PREFIX: ${HASH_FLARE_MONITOR_PREFIX:-}
+      # Explicit sampled-row age policy; 0 reports ages without inventing an SLA.
+      HASH_FLARE_EMAIL_SAMPLE_MAX_AGE_SECONDS: ${HASH_FLARE_EMAIL_SAMPLE_MAX_AGE_SECONDS:-0}
+      HASH_FLARE_FINALIZE_SAMPLE_MAX_AGE_SECONDS: ${HASH_FLARE_FINALIZE_SAMPLE_MAX_AGE_SECONDS:-0}
       HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:-http://localhost:8080}
       # Explicitly local Article 13 identity. Any non-development deployment
       # must provide its actual operator/contact/authority instead of these.
@@ -214,6 +221,9 @@ services:
       HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-}
       # Flare error reporting; empty default keeps dev/self-host a no-op.
       FLARE_DSN: ${FLARE_DSN:-}
+      FLARE_LOG_LEVEL: ${FLARE_LOG_LEVEL:-warn}
+      FLARE_TRACES_SAMPLE_RATE: ${FLARE_TRACES_SAMPLE_RATE:-0.1}
+      HASH_FLARE_MONITOR_PREFIX: ${HASH_FLARE_MONITOR_PREFIX:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "127.0.0.1:${HASH_APP_PORT:-8090}:8080"

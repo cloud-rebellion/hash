@@ -36,32 +36,19 @@ func registerWorkflowTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "send_document",
 		Write:       true,
-		Description: "Transition a draft document to sent. Mints a fresh magic link per signer and queues invite emails + a document.sent webhook. Returns one signing URL per recipient.",
-		InputSchema: schemaObject(map[string]any{
-			"document_id": stringSchema("document uuid (must be in draft state)"),
-			"lawful_basis": map[string]any{
-				"type":        "string",
-				"enum":        []string{"contract"},
-				"description": "Controller confirmation that GDPR Article 6(1)(b), contract or requested pre-contractual steps, applies to this document",
-			},
-		}, []string{"document_id", "lawful_basis"}),
+		Description: "Send the exact reviewed document. Ordinary Send returns signing links. With saved annexes supply package_send from get_document_attachments; returns status=sealing, empty links and a persisted attempt while native recovery secures all files and queues invitations. Inspect unknown outcomes; never invent links or treat sealing as sent.",
+		InputSchema: packageSendInputSchemaV1(),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
-			var p struct {
-				DocumentID  string `json:"document_id"`
-				LawfulBasis string `json:"lawful_basis"`
-			}
-			if err := MustParseArgs(args, &p); err != nil {
+			p, err := parsePackageSendArgumentsV1(args)
+			if err != nil {
 				return nil, err
 			}
-			id, err := uuid.Parse(p.DocumentID)
-			if err != nil {
-				return nil, errors.New("document_id must be a uuid")
-			}
+			id := p.document
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			if err := send.ValidateLawfulBasis(p.LawfulBasis); err != nil {
+			if err := send.ValidateLawfulBasis(p.lawfulBasis); err != nil {
 				return nil, err
 			}
 			// Route through the lifecycle engine so the agent send path
@@ -72,22 +59,30 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
+			responseOwner := workflowSendResponseFromV1(r)
+			if responseOwner == nil {
+				return nil, errors.New("send response ownership unavailable")
+			}
 			res, err := d.Send.Send(r.Context(), send.Actor{
 				UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email,
 				IP: clientIP(r), Via: "mcp", Tool: "send_document",
-				LawfulBasis: p.LawfulBasis, Authorize: authorize,
+				LawfulBasis: p.lawfulBasis, Authorize: authorize, PackageSend: p.selection,
 			}, id)
+			if !responseOwner.retainV1(&res) {
+				res.CloseConsumerV1()
+				return nil, errors.New("send response ownership unavailable")
+			}
 			if err != nil {
+				if p.selection.PresentV1() && res.PackageAttemptID != uuid.Nil {
+					return nil, &packageSendToolErrorV1{document: id, attempt: res.PackageAttemptID}
+				}
 				return nil, err
 			}
-			return map[string]any{
-				"document_id": id,
-				"status":      res.Status,
-				"links":       res.Links,
-			}, nil
+			return packageSendToolOutcomeFromV1(id, res, p.selection.PresentV1())
 		},
 	})
 
+	registerPackageSendInspectionV1(s, d)
 	s.RegisterTool(ToolDef{
 		Name:        "void_document",
 		Write:       true,
@@ -200,7 +195,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 				}
 				expiresArg = pgtype.Timestamptz{Time: t, Valid: true}
 			}
-			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteWorkflow,
+			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteWorkflow, documentDetailsOnlyV1,
 				map[string]any{"via": "mcp", "tool": "set_expiry", "expires_at": p.ExpiresAt},
 				func(locked *generated.Document) (generated.UpdateDocumentMetadataParams, error) {
 					// A timestamp that was valid at admission can expire during a
@@ -208,7 +203,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 					if expiresArg.Valid && !expiresArg.Time.After(time.Now()) {
 						return generated.UpdateDocumentMetadataParams{}, errors.New("expires_at must be in the future")
 					}
-					return generated.UpdateDocumentMetadataParams{ID: id, OrgID: u.OrgID, Name: locked.Name, ExpiresAt: expiresArg, Metadata: locked.Metadata}, nil
+					return generated.UpdateDocumentMetadataParams{ID: id, OrgID: u.OrgID, Name: locked.Name, ExpiresAt: expiresArg}, nil
 				})
 		},
 	})
@@ -242,7 +237,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if p.Key == "" {
 				return nil, errors.New("key required")
 			}
-			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteAuthoring,
+			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteAuthoring, documentMetadataReplaceV1,
 				map[string]any{"via": "mcp", "tool": "attach_metadata", "key": p.Key, "value": p.Value},
 				func(locked *generated.Document) (generated.UpdateDocumentMetadataParams, error) {
 					meta := map[string]any{}
@@ -265,10 +260,19 @@ func registerWorkflowTools(s *Server, d Deps) {
 	})
 }
 
-// Both metadata tools retain the original admitted key, the live sender/owner,
-// and draft/evidence/privacy locks through mutation and audit. No second token
-// use is claimed. Publication follows the final receipt check and commit.
-func mutateDraftDocumentMetadata(r *http.Request, d Deps, u auth.SessionUser, id uuid.UUID, scope string, payload map[string]any,
+// Intent is chosen by the registered tool, never inferred from JSONB equality.
+// Only attach_metadata replaces metadata; set_expiry leaves that column absent.
+type documentMetadataIntentV1 uint8
+
+const (
+	documentDetailsOnlyV1 documentMetadataIntentV1 = iota + 1
+	documentMetadataReplaceV1
+)
+
+// Both tools retain the original admitted key, the live sender/owner, and
+// draft/evidence/privacy locks through mutation and audit. No second token use
+// is claimed. Publication follows the final receipt check and commit.
+func mutateDraftDocumentMetadata(r *http.Request, d Deps, u auth.SessionUser, id uuid.UUID, scope string, intent documentMetadataIntentV1, payload map[string]any,
 	input func(*generated.Document) (generated.UpdateDocumentMetadataParams, error),
 ) (*generated.Document, error) {
 	if d.Pool == nil || d.Queries == nil || d.Audit == nil {
@@ -293,7 +297,19 @@ func mutateDraftDocumentMetadata(r *http.Request, d Deps, u auth.SessionUser, id
 	if err != nil {
 		return nil, err
 	}
-	doc, err := d.Queries.WithTx(tx).UpdateDocumentMetadata(ctx, params)
+	q := d.Queries.WithTx(tx)
+	var doc *generated.Document
+	switch intent {
+	case documentDetailsOnlyV1:
+		if params.Metadata != nil {
+			return nil, errors.New("details-only edit cannot replace metadata")
+		}
+		doc, err = q.UpdateDraftDocumentDetailsV1(ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: params.ID, OrgID: params.OrgID, Name: params.Name, ExpiresAt: params.ExpiresAt})
+	case documentMetadataReplaceV1:
+		doc, err = q.UpdateDocumentMetadata(ctx, params)
+	default:
+		return nil, errors.New("document metadata edit intent unavailable")
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"unicode/utf8"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -99,27 +98,8 @@ func Current(ctx context.Context, q Queries, doc *generated.Document) (*generate
 	if err != nil {
 		return nil, fmt.Errorf("current HTML materialization: %w", err)
 	}
-	origin, err := htmlsource.OriginCommitment(doc)
-	if err != nil || row == nil || row.ID != uuid.UUID(doc.HtmlCurrentMaterializationID.Bytes) || row.DocumentID != doc.ID || row.OrgID != doc.OrgID ||
-		row.Sequence != doc.HtmlCurrentMaterializationSequence.Int32 || row.PageCount != doc.HtmlCurrentPageCount.Int32 ||
-		row.PdfKey != doc.PdfStorageKey.String || row.PdfVersionID != doc.PdfStorageVersionID.String || !bytes.Equal(row.PdfSha256, doc.PdfSha256) ||
-		hex.EncodeToString(row.SourceCommitment) != commitment || hex.EncodeToString(row.OriginCommitment) != origin {
-		return nil, ErrInvalid
-	}
-	// Rows predating persisted report provenance may be NULL. Preserve their
-	// current legacy behavior, but a report retained on a row must be projected
-	// with that exact PDF rather than independently replaced.
-	if len(row.MetadataRedactionReport) > 0 && !bytes.Equal(row.MetadataRedactionReport, doc.MetadataRedactionReport) {
-		return nil, ErrInvalid
-	}
-	if err := validateMaterializationReport(row.MetadataRedactionReport, row.PdfSha256, row.PageCount); err != nil {
+	if err := validateCurrentReadProjectionV1(doc, currentReadProjectionV1(row), commitment); err != nil {
 		return nil, err
-	}
-	check := *doc
-	check.HtmlCurrentSourceJson = bytes.Clone(row.SourceJson)
-	rowCommitment, err := htmlsource.Commitment(&check)
-	if err != nil || rowCommitment != commitment {
-		return nil, ErrInvalid
 	}
 	return row, nil
 }
@@ -162,25 +142,14 @@ func RegisterOrigin(ctx context.Context, q Queries, doc *generated.Document, pag
 // Append archives the old review/layout first, then clears only unsigned
 // geometry and selects a fresh immutable PDF. It never commits or performs I/O.
 func Append(ctx context.Context, q Queries, previous, candidate *generated.Document, in AppendInput) (*generated.Document, *generated.HtmlDocumentMaterialization, error) {
-	if q == nil || previous == nil || candidate == nil || in.ActorID == uuid.Nil || in.PageCount < 1 || in.PageCount > 500 ||
-		!utf8.ValidString(in.Summary) || utf8.RuneCountInString(in.Summary) > 500 || bytes.IndexByte([]byte(in.Summary), 0) >= 0 ||
-		previous.Status != "draft" || candidate.ID != previous.ID || candidate.OrgID != previous.OrgID || candidate.TemplateID != previous.TemplateID {
+	if q == nil {
 		return nil, nil, ErrInvalid
 	}
-	if err := validateMaterializationReport(in.MetadataRedactionReport, candidate.PdfSha256, in.PageCount); err != nil {
+	check, err := PrepareAppendValidationV1(previous, candidate, in)
+	if err != nil {
 		return nil, nil, err
 	}
-	// Validate every proposed identity/input before writing history.
-	check := *candidate
-	check.HtmlSourceJson = bytes.Clone(previous.HtmlSourceJson)
-	check.HtmlCurrentSourceJson = bytes.Clone(in.SourceJSON)
-	check.HtmlCurrentMaterializationID = pgtype.UUID{Bytes: uuid.New(), Valid: true}
-	check.HtmlCurrentPageCount = pgtype.Int4{Int32: in.PageCount, Valid: true}
-	check.HtmlCurrentMaterializationSequence = pgtype.Int4{Int32: 2, Valid: true}
-	if previous.HtmlCurrentMaterializationSequence.Valid {
-		check.HtmlCurrentMaterializationSequence.Int32 = previous.HtmlCurrentMaterializationSequence.Int32 + 1
-	}
-	commitment, err := htmlsource.Commitment(&check)
+	commitment, err := htmlsource.Commitment(check)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -188,7 +157,7 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 	if err != nil {
 		return nil, nil, err
 	}
-	afterDigest, err := htmlsource.MaterializationDigest(&check)
+	afterDigest, err := htmlsource.MaterializationDigest(check)
 	if err != nil {
 		return nil, nil, ErrInvalid
 	}
@@ -198,7 +167,7 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 		if candidate.PdfStorageKey.String == previous.PdfStorageKey.String && candidate.PdfStorageVersionID.String == previous.PdfStorageVersionID.String {
 			return nil, nil, ErrInvalid
 		}
-		input, err := htmlsource.InputForCurrent(&check)
+		input, err := htmlsource.InputForCurrent(check)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -210,7 +179,7 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 			return nil, nil, ErrInvalid
 		}
 	}
-	changed, err := htmlsource.ChangedSections(&check)
+	changed, err := htmlsource.ChangedSections(check)
 	if err != nil {
 		return nil, nil, err
 	}

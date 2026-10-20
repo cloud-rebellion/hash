@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-
-	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/htmlsource"
 )
 
 type purgeObjectDeleter interface {
@@ -87,6 +87,11 @@ func (w *worker) loopSoftDeletePurge(ctx context.Context) {
 }
 
 func (w *worker) runSoftDeletePurgeOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runSoftDeletePurgeOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobSoftDeletePurge, started, state)
+}
+func (w *worker) runSoftDeletePurgeOnceObserved(ctx context.Context) flarereport.JobInvocationState {
 	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-softDeleteGraceWindow), Valid: true}
 	claimCtx, cancelClaim := context.WithTimeout(ctx, softDeleteClaimTimeout)
 	claimed, err := w.queries.ClaimSoftDeletedDocumentsForPurge(claimCtx, generated.ClaimSoftDeletedDocumentsForPurgeParams{
@@ -95,15 +100,18 @@ func (w *worker) runSoftDeletePurgeOnce(ctx context.Context) {
 	cancelClaim()
 	if err != nil {
 		slog.Warn("soft_delete_purge: claim failed", "err", err, "cutoff", cutoff.Time)
-		return
+		return flarereport.InvocationUnavailable
 	}
+	state := flarereport.InvocationReturned
 	deleted := 0
 	for _, doc := range claimed {
 		if doc == nil {
+			state = flarereport.InvocationUnobservable
 			continue
 		}
 		rows, err := purgeClaimedSoftDeletedDocument(ctx, doc, cutoff, w.storage, w.beginSoftDeletePurge)
 		if err != nil {
+			state = mergeWorkerInvocation385(state, flarereport.InvocationPartial)
 			slog.Warn("soft_delete_purge: protected cleanup failed", "document_id", doc.ID, "err", err)
 			continue
 		}
@@ -112,8 +120,8 @@ func (w *worker) runSoftDeletePurgeOnce(ctx context.Context) {
 		}
 	}
 	slog.Debug("soft_delete_purge: tick complete", "cutoff", cutoff.Time, "claimed", len(claimed), "deleted", deleted)
+	return state
 }
-
 func (w *worker) beginSoftDeletePurge(ctx context.Context) (softDeletePurgeTransaction, error) {
 	if w.pool == nil || w.queries == nil {
 		return softDeletePurgeTransaction{}, errors.New("soft delete purge: database unavailable")

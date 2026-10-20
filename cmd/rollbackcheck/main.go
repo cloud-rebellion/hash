@@ -25,12 +25,19 @@ import (
 )
 
 type rollbackResult struct {
-	Safe                bool  `json:"safe"`
-	Complete            bool  `json:"complete"`
-	SealingDocuments    int64 `json:"sealing_documents"`
-	SendIntents         int64 `json:"send_sealing_intents"`
-	FinalizingDocuments int64 `json:"finalizing_documents"`
-	FinalizationIntents int64 `json:"document_finalization_intents"`
+	Safe                        bool  `json:"safe"`
+	Complete                    bool  `json:"complete"`
+	SealingDocuments            int64 `json:"sealing_documents"`
+	SendIntents                 int64 `json:"send_sealing_intents"`
+	PackageSendAttempts         int64 `json:"document_package_send_attempts_v1"`
+	PackageResponses            int64 `json:"document_package_responses_v1"`
+	ParticipantReports          int64 `json:"document_participant_reports_v1"`
+	OrdinaryPreparations        int64 `json:"document_ordinary_finalization_preparations_v1"`
+	OrdinaryOutputs             int64 `json:"document_ordinary_finalization_outputs_v1"`
+	OrdinaryLegacyIntents       int64 `json:"document_ordinary_finalization_legacy_intents_v1"`
+	ParticipantReportDeliveries int64 `json:"document_participant_report_deliveries_v1"`
+	FinalizingDocuments         int64 `json:"finalizing_documents"`
+	FinalizationIntents         int64 `json:"document_finalization_intents"`
 }
 
 type lawfulBasisCutoverResult struct {
@@ -455,12 +462,26 @@ func verifyRollbackBoundary(ctx context.Context, db rollbackQuerier) (rollbackRe
 SELECT (SELECT count(*)::bigint FROM documents WHERE status = 'sealing'),
        (SELECT count(*)::bigint FROM send_sealing_intents),
        (SELECT count(*)::bigint FROM documents WHERE status = 'finalizing'),
-       (SELECT count(*)::bigint FROM document_finalization_intents)`
+       (SELECT count(*)::bigint FROM document_finalization_intents),
+       (SELECT count(*)::bigint FROM document_package_send_attempts_v1),
+       (SELECT count(*)::bigint FROM document_package_responses_v1),
+       (SELECT count(*)::bigint FROM document_participant_reports_v1),
+       (SELECT count(*)::bigint FROM document_participant_report_deliveries_v1),
+       (SELECT count(*)::bigint FROM document_ordinary_finalization_preparations_v1),
+       (SELECT count(*)::bigint FROM document_ordinary_finalization_outputs_v1),
+       (SELECT count(*)::bigint FROM document_ordinary_finalization_legacy_intents_v1)`
 	if err := tx.QueryRow(ctx, query).Scan(
 		&result.SealingDocuments,
 		&result.SendIntents,
 		&result.FinalizingDocuments,
 		&result.FinalizationIntents,
+		&result.PackageSendAttempts,
+		&result.PackageResponses,
+		&result.ParticipantReports,
+		&result.ParticipantReportDeliveries,
+		&result.OrdinaryPreparations,
+		&result.OrdinaryOutputs,
+		&result.OrdinaryLegacyIntents,
 	); err != nil { //nolint:rawsql -- release-only read from one snapshot
 		return result, err
 	}
@@ -469,7 +490,7 @@ SELECT (SELECT count(*)::bigint FROM documents WHERE status = 'sealing'),
 	}
 	result.Complete = true
 	result.Safe = result.SealingDocuments == 0 && result.SendIntents == 0 &&
-		result.FinalizingDocuments == 0 && result.FinalizationIntents == 0
+		result.FinalizingDocuments == 0 && result.FinalizationIntents == 0 && result.PackageSendAttempts == 0 && result.PackageResponses == 0 && result.ParticipantReports == 0 && result.ParticipantReportDeliveries == 0 && result.OrdinaryPreparations == 0 && result.OrdinaryOutputs == 0 && result.OrdinaryLegacyIntents == 0
 	return result, nil
 }
 

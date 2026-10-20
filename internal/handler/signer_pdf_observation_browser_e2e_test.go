@@ -137,7 +137,7 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 	}
 	version, readErr := io.ReadAll(io.LimitReader(probe.Body, 256))
 	_ = probe.Body.Close()
-	if readErr != nil || probe.StatusCode != http.StatusOK || strings.TrimSpace(string(version)) != "8.36.0-hash.1" {
+	if readErr != nil || probe.StatusCode != http.StatusOK || strings.TrimSpace(string(version)) != "8.36.0-hash.5" {
 		t.Fatal("required source-built renderer version differs")
 	}
 
@@ -430,7 +430,9 @@ func TestRealRenderedSignerPDFObservationWithExternalBrowserE2E(t *testing.T) {
 		artifactHashes[output.name] = hex.EncodeToString(sum[:])
 	}
 	_, signingArtifact, err := htmlsource.SigningPage(current)
-    if err!=nil || signingArtifact==nil {t.Fatal("completed signing artifact missing",err)}
+	if err != nil || signingArtifact == nil {
+		t.Fatal("completed signing artifact missing", err)
+	}
 	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "scope": "Actual Go HTTPS/PostgreSQL/source worker, exact Chromium renderer and built browser signing. Participants, S3/retention, certificate key and delivery outbox are synthetic; no SMTP/provider/production/legal acceptance.", "document_id": doc.ID, "source_commitment": commitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256), "page_count": pages, "signature_count": len(signatures), "autosave_confirmed": true, "manual_signature_fields": false, "automatic_branded_page_support": true, "signing_artifact": signingArtifact, "renderer_version": strings.TrimSpace(string(version)), "artifact_sha256": artifactHashes, "sanitization_report": current.MetadataRedactionReport}, "", "  ")
 	if err := os.WriteFile(filepath.Join(artifacts, "backend-receipt.json"), append(receipt, '\n'), 0600); err != nil {
 		t.Fatal("write safe signer browser backend receipt")

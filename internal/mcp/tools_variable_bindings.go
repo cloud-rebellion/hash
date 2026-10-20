@@ -13,9 +13,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/bindingauthoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/resolver"
 )
@@ -94,12 +94,14 @@ func registerVariableBindingTools(s *Server, d Deps) {
 				"fallback":    stringSchema("optional unverified preview fallback; CRM send requires fresh reviewed values and successful empty values remain empty"),
 			}, []string{"document_id", "variable", refField, pathField}),
 			Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-				u, _ := auth.FromContext(r.Context())
-				raw := map[string]any{}
-				if err := json.Unmarshal(args, &raw); err != nil {
-					return nil, err
-				}
-				return runBind(r, d, u.OrgID, u.UserID, raw, kind, refField, pathField, name)
+				return withVariableBindingArgumentsV1(r, d, args, func(r *http.Request, args json.RawMessage) (any, error) {
+					u, _ := auth.FromContext(r.Context())
+					raw := map[string]any{}
+					if err := json.Unmarshal(args, &raw); err != nil {
+						return nil, err
+					}
+					return runBind(r, d, u.OrgID, u.UserID, raw, kind, refField, pathField, name)
+				})
 			},
 		}
 	}
@@ -120,15 +122,17 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			"fallback":    stringSchema("optional literal if the setting is empty"),
 		}, []string{"document_id", "variable", "path"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-			u, _ := auth.FromContext(r.Context())
-			raw := map[string]any{}
-			if err := json.Unmarshal(args, &raw); err != nil {
-				return nil, err
-			}
-			// org.setting bindings have no source_ref; reuse runBind by
-			// injecting an empty deal_id-shaped key.
-			raw["deal_id"] = ""
-			return runBind(r, d, u.OrgID, u.UserID, raw, resolver.SourceOrgSetting, "deal_id", "path", "bind_variable_to_org_setting")
+			return withVariableBindingArgumentsV1(r, d, args, func(r *http.Request, args json.RawMessage) (any, error) {
+				u, _ := auth.FromContext(r.Context())
+				raw := map[string]any{}
+				if err := json.Unmarshal(args, &raw); err != nil {
+					return nil, err
+				}
+				// org.setting bindings have no source_ref; reuse runBind by
+				// injecting an empty deal_id-shaped key.
+				raw["deal_id"] = ""
+				return runBind(r, d, u.OrgID, u.UserID, raw, resolver.SourceOrgSetting, "deal_id", "path", "bind_variable_to_org_setting")
+			})
 		},
 	})
 
@@ -141,33 +145,31 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			"variable":    stringSchema("the variable name to unbind"),
 		}, []string{"document_id", "variable"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-			u, _ := auth.FromContext(r.Context())
-			if d.Pool == nil || d.Audit == nil {
-				return nil, errors.New("atomic audit dependencies unavailable")
-			}
-			var p struct {
-				DocumentID string `json:"document_id"`
-				Variable   string `json:"variable"`
-			}
-			if err := MustParseArgs(args, &p); err != nil {
-				return nil, err
-			}
-			id, err := uuid.Parse(p.DocumentID)
-			if err != nil {
-				return nil, errors.New("document_id must be a uuid")
-			}
-			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
-				return nil, err
-			}
-			if err := resolver.ValidateBindingName(p.Variable); err != nil {
-				return nil, err
-			}
-			if _, err := runVariableBindingMutation(r, d, u.OrgID, u.UserID, id, p.Variable, "unbind_variable", "", func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
-				return nil, q.DeleteVariableBinding(ctx, generated.DeleteVariableBindingParams{DocumentID: id, VariableName: p.Variable})
-			}); err != nil {
-				return nil, err
-			}
-			return map[string]any{"unbound": p.Variable}, nil
+			return withVariableBindingArgumentsV1(r, d, args, func(r *http.Request, args json.RawMessage) (any, error) {
+				u, _ := auth.FromContext(r.Context())
+				if d.Pool == nil || d.Audit == nil {
+					return nil, errors.New("atomic audit dependencies unavailable")
+				}
+				var p struct {
+					DocumentID string `json:"document_id"`
+					Variable   string `json:"variable"`
+				}
+				if err := MustParseArgs(args, &p); err != nil {
+					return nil, err
+				}
+				id, err := uuid.Parse(p.DocumentID)
+				if err != nil {
+					return nil, errors.New("document_id must be a uuid")
+				}
+				if err := auth.EnforceDocScope(r.Context(), id); err != nil {
+					return nil, err
+				}
+				if err := resolver.ValidateBindingName(p.Variable); err != nil {
+					return nil, err
+				}
+				result, err := runVariableBindingMutation(r, d, u.OrgID, u.UserID, id, "unbind_variable", bindingauthoring.InputV1{Variable: p.Variable, Delete: true})
+				return &ownedVariableBindingResultV1{value: map[string]any{"unbound": p.Variable}, owner: result}, err
+			})
 		},
 	})
 
@@ -264,66 +266,42 @@ func runBind(r *http.Request, d Deps, orgID, userID uuid.UUID, args map[string]a
 	if err := resolver.ValidateBinding(variable, kind, ref, path, fallback); err != nil {
 		return nil, err
 	}
-	row, err := runVariableBindingMutation(r, d, orgID, userID, id, variable, tool, string(kind), func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
-		return q.UpsertVariableBinding(ctx, generated.UpsertVariableBindingParams{
-			DocumentID: id, VariableName: variable, SourceKind: string(kind), SourceRef: ref, SourcePath: path, Fallback: fallback,
-		})
-	})
+	result, err := runVariableBindingMutation(r, d, orgID, userID, id, tool, bindingauthoring.InputV1{Variable: variable, SourceKind: string(kind), SourceRef: ref, SourcePath: path, Fallback: fallback})
+	owned := &ownedVariableBindingResultV1{owner: result}
 	if err != nil {
-		return nil, err
+		return owned, err
 	}
-	return bindingRow(row), nil
+	owned.value = bindingRow(result.Binding)
+	return owned, nil
 }
 
-func runVariableBindingMutation(r *http.Request, d Deps, orgID, userID, docID uuid.UUID, variable, tool, sourceKind string,
-	mutation func(context.Context, *generated.Queries) (*generated.DocumentVariableBinding, error),
-) (*generated.DocumentVariableBinding, error) {
-	if d.Pool == nil || d.Audit == nil {
-		return nil, errors.New("atomic audit dependencies unavailable")
-	}
+func runVariableBindingMutation(r *http.Request, d Deps, orgID, userID, docID uuid.UUID, tool string, in bindingauthoring.InputV1) (*bindingauthoring.ResultV1, error) {
 	authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), docID, mcpScopeWriteAuthoring)
 	if err != nil {
 		return nil, err
 	}
+	return bindingauthoring.MutateV1(r.Context(), bindingauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit}, bindingauthoring.ActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "mcp", Tool: tool, UserAgent: r.UserAgent()}, docID, in)
+}
+
+// Keep the actual parsed args/result alive until MCP has serialized its result.
+func withVariableBindingArgumentsV1(r *http.Request, d Deps, args json.RawMessage, run func(*http.Request, json.RawMessage) (any, error)) (result any, failure error) {
+	// Preserve original syntax/scope/credential refusals with an unconfigured
+	// runtime. The shared producer still refuses nil Sessions before any SQL;
+	// this validation-only path cannot open a Pool or create a native receipt.
+	if d.PDFCreationSessions == nil {
+		return run(r, args)
+	}
+	u, _ := auth.FromContext(r.Context())
 	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 	defer cancel()
-	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, fmt.Errorf("begin variable binding mutation: %w", err)
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize}, docID)
+	r = r.WithContext(ctx)
+	input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(ctx, u.OrgID, args)
 	if err != nil {
 		return nil, err
 	}
-	row, err := mutation(ctx, generated.New(tx))
-	if err != nil {
-		return nil, fmt.Errorf("mutate variable binding: %w", err)
-	}
-	actorID := guard.UserID()
-	payload := map[string]any{"via": "mcp", "tool": tool, "variable": variable}
-	if sourceKind != "" {
-		payload["source_kind"] = sourceKind
-	}
-	pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID:       orgID,
-		ActorUserID: &actorID,
-		DocumentID:  &docID,
-		Kind:        audit.KindDocumentUpdated,
-		UserAgent:   r.UserAgent(),
-		Payload:     payload,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("audit variable binding mutation: %w", err)
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit variable binding mutation: %w", err)
-	}
-	d.Audit.Publish(pending)
-	return row, nil
+	defer func() { result = newOwnedBlockToolResultV1(result, input) }()
+	failure = input.WithArgumentsV1(ctx, func(raw []byte) error { result, failure = run(r, json.RawMessage(raw)); return failure })
+	return result, failure
 }
 
 func bindingRow(b *generated.DocumentVariableBinding) map[string]any {

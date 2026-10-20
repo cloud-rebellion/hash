@@ -14,30 +14,36 @@ import (
 // canonical blocks. Unrecognised tags become raw_html blocks (which are
 // passed through bluemonday-equivalent sanitation rules in the caller; the
 // parser itself is structural, not security-bearing).
-func ParseHTML(src string) *Tree {
+func ParseHTML(src string) *Tree { tree, _ := parseHTMLWithConstructionV1(src, nil); return tree }
+func parseHTMLWithConstructionV1(src string, admission HTMLImportConstructionV1) (*Tree, error) {
 	t := MustEmptyTree()
 	if strings.TrimSpace(src) == "" {
-		return t
+		return t, nil
 	}
 
 	// Wrap in a body so html.Parse always has a root.
 	wrapped := "<html><body>" + src + "</body></html>"
 	doc, err := html.Parse(strings.NewReader(wrapped))
 	if err != nil {
-		return t
+		return t, nil
 	}
 
 	body := findFirst(doc, "body")
 	if body == nil {
-		return t
+		return t, nil
 	}
 
+	if admission != nil {
+		if err := admission.BeforeHTMLBlocksV1(body); err != nil {
+			return nil, err
+		}
+	}
 	for c := body.FirstChild; c != nil; c = c.NextSibling {
 		if blk := nodeToBlock(c); blk != nil {
 			t.Blocks = append(t.Blocks, *blk)
 		}
 	}
-	return t
+	return t, nil
 }
 
 func nodeToBlock(n *html.Node) *Block {

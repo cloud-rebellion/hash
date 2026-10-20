@@ -7,6 +7,13 @@ command. Hash copies the selected template and variables into the document;
 the resulting signing ceremony does not depend on the source system remaining
 available.
 
+This command remains limited to pinned blocks templates. It has no attachment
+selection or `package_send` input; those fields are rejected, rather than ignored.
+A nonempty saved package cannot use ordinary legacy Send without its explicit
+reviewed package observation. Agents can author/select/review a package and use
+[MCP package Send](DOCUMENT-ATTACHMENTS-API.md#mcp-package-send-and-inspection)
+instead. This API does not execute delegated/pre-sign package signatures.
+
 ## Create a signature request
 
 `POST /api/automation/v1/signature-requests`

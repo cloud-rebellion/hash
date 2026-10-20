@@ -41,6 +41,9 @@ type fakeVersionedS3 struct {
 	mu                        sync.Mutex
 	encryptionMode            encrypt.Type
 	payload                   []byte
+	contentType               string
+	responseContentType       *string             // Explicit fault override; empty means no HEAD header.
+	afterRequest              func(*http.Request) // Cancellation/fault witness after provider effects.
 	requests                  []recordedDataPlaneRequest
 	storedCustomerKey         string
 	storedCustomerMD5         string
@@ -87,6 +90,11 @@ func (l *cancellationErrorVersionLister) ListObjects(ctx context.Context, _ stri
 func (f *fakeVersionedS3) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	defer func() {
+		if f.afterRequest != nil {
+			f.afterRequest(r)
+		}
+	}()
 	if r.Method == http.MethodGet && r.URL.Query().Has("versions") {
 		f.serveVersionList(w, r)
 		return
@@ -121,6 +129,7 @@ func (f *fakeVersionedS3) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.payload = append([]byte(nil), body...)
+		f.contentType = r.Header.Get("Content-Type")
 		if f.encryptionMode == encrypt.SSEC {
 			f.storedCustomerKey = r.Header.Get(encrypt.SseCustomerKey)
 			f.storedCustomerMD5 = r.Header.Get(encrypt.SseCustomerKeyMD5)
@@ -145,7 +154,16 @@ func (f *fakeVersionedS3) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(f.payload)))
-		w.Header().Set("Content-Type", "application/octet-stream")
+		contentType := f.contentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		if f.responseContentType != nil {
+			contentType = *f.responseContentType
+		}
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
 		w.Header().Set("ETag", `"probe-etag"`)
 		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
 		w.Header().Set("X-Amz-Version-Id", responseVersion)

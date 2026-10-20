@@ -4,6 +4,7 @@
 package versions
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -71,27 +72,75 @@ type DiffCounts struct {
 // diff degrades to a positional compare; we annotate added/removed but cannot
 // detect moves.
 func Diff(from, to []byte) ([]BlockChange, error) {
-	a, err := parseTreeOrEmpty(from)
+	return DiffContext(context.Background(), from, to)
+}
+
+// DiffContext preserves the historical block matching/classification/order.
+// Cancellation is checked at each bounded phase and returned without private
+// cause text. Standard JSON conversion and bounded sort internals are not
+// preempted by a goroutine; their input size/cardinality is admitted first.
+func DiffContext(ctx context.Context, from, to []byte) ([]BlockChange, error) {
+	if err := blocks.TreeContextError(ctx); err != nil {
+		return nil, err
+	}
+	limit, err := diffAttributeWireBudget(from, to)
+	if err != nil {
+		return nil, err
+	}
+	return DiffContextWithAttributeLimit(ctx, from, to, limit)
+}
+
+// DiffContextWithAttributeLimit lets evidence apply its existing output cap
+// before allocating any canonical attribute summary. No change is truncated.
+func DiffContextWithAttributeLimit(ctx context.Context, from, to []byte, attributeLimit int64) (changes []BlockChange, retErr error) {
+	defer func() {
+		if err := blocks.TreeContextError(ctx); err != nil {
+			changes = nil
+			retErr = err
+		}
+	}()
+	if err := blocks.TreeContextError(ctx); err != nil {
+		return nil, err
+	}
+	if attributeLimit < 0 {
+		return nil, ErrDiffTooLarge
+	}
+	attributeRemaining := attributeLimit
+	a, err := blocks.ParseTreeContext(ctx, from)
 	if err != nil {
 		return nil, fmt.Errorf("diff: parse from: %w", err)
 	}
-	b, err := parseTreeOrEmpty(to)
+	b, err := blocks.ParseTreeContext(ctx, to)
 	if err != nil {
 		return nil, fmt.Errorf("diff: parse to: %w", err)
 	}
 
 	// flatten both trees so nested content blocks (lists, tables) compare too
-	flatA := flattenWithPosition(a.Blocks, 0)
-	flatB := flattenWithPosition(b.Blocks, 0)
+	flatA, err := flattenWithPositionContext(ctx, a.Blocks, 0)
+	if err != nil {
+		return nil, err
+	}
+	flatB, err := flattenWithPositionContext(ctx, b.Blocks, 0)
+	if err != nil {
+		return nil, err
+	}
+	idxA, err := indexByIDContext(ctx, flatA)
+	if err != nil {
+		return nil, err
+	}
+	idxB, err := indexByIDContext(ctx, flatB)
+	if err != nil {
+		return nil, err
+	}
 
-	idxA := indexByID(flatA)
-	idxB := indexByID(flatB)
-
-	changes := make([]BlockChange, 0)
+	changes = make([]BlockChange, 0)
 
 	// pass 1: removed (in A but not B) and modified/moved (in both)
 	idsA := sortedIDs(idxA)
 	for _, id := range idsA {
+		if err := blocks.TreeContextError(ctx); err != nil {
+			return nil, err
+		}
 		entryA := idxA[id]
 		entryB, ok := idxB[id]
 		if !ok {
@@ -104,7 +153,19 @@ func Diff(from, to []byte) ([]BlockChange, error) {
 			})
 			continue
 		}
-		if !blockEquivalent(entryA.Block, entryB.Block) {
+		equivalent, err := blockEquivalentContext(ctx, entryA.Block, entryB.Block)
+		if err != nil {
+			return nil, err
+		}
+		if !equivalent {
+			fromAttr, err := boundedAttrSummaryContext(ctx, entryA.Block, &attributeRemaining)
+			if err != nil {
+				return nil, err
+			}
+			toAttr, err := boundedAttrSummaryContext(ctx, entryB.Block, &attributeRemaining)
+			if err != nil {
+				return nil, err
+			}
 			changes = append(changes, BlockChange{
 				Kind:     ChangeModified,
 				BlockID:  id,
@@ -112,8 +173,8 @@ func Diff(from, to []byte) ([]BlockChange, error) {
 				Position: entryB.Position,
 				FromText: entryA.Block.Text,
 				ToText:   entryB.Block.Text,
-				FromAttr: attrSummary(entryA.Block),
-				ToAttr:   attrSummary(entryB.Block),
+				FromAttr: fromAttr,
+				ToAttr:   toAttr,
 			})
 		} else if entryA.Position != entryB.Position {
 			changes = append(changes, BlockChange{
@@ -128,6 +189,9 @@ func Diff(from, to []byte) ([]BlockChange, error) {
 	// pass 2: added (in B but not A)
 	idsB := sortedIDs(idxB)
 	for _, id := range idsB {
+		if err := blocks.TreeContextError(ctx); err != nil {
+			return nil, err
+		}
 		if _, exists := idxA[id]; exists {
 			continue
 		}
@@ -149,6 +213,9 @@ func Diff(from, to []byte) ([]BlockChange, error) {
 		return changes[i].BlockID < changes[j].BlockID
 	})
 
+	if err := blocks.TreeContextError(ctx); err != nil {
+		return nil, err
+	}
 	return changes, nil
 }
 
@@ -179,17 +246,7 @@ type flatEntry struct {
 }
 
 func flattenWithPosition(in []blocks.Block, startPos int) []flatEntry {
-	out := make([]flatEntry, 0, len(in))
-	pos := startPos
-	for _, b := range in {
-		out = append(out, flatEntry{Block: b, Position: pos})
-		pos++
-		if len(b.Content) > 0 {
-			nested := flattenWithPosition(b.Content, pos)
-			out = append(out, nested...)
-			pos += len(nested)
-		}
-	}
+	out, _ := flattenWithPositionContext(context.Background(), in, startPos)
 	return out
 }
 

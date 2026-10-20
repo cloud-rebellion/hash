@@ -13,7 +13,9 @@ import (
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/crmreview"
 	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 )
@@ -24,8 +26,9 @@ import (
 // share one implementation and the invariants can't drift between them.
 
 type sendDocumentResponse struct {
-	Status string        `json:"status"`
-	Links  []signingLink `json:"links"`
+	Status      string                 `json:"status"`
+	Links       []signingLink          `json:"links"`
+	PackageSend *packageSendResponseV1 `json:"package_send,omitempty"`
 }
 
 type signingLink struct {
@@ -36,8 +39,20 @@ type signingLink struct {
 	URL         string    `json:"url"`
 }
 
+type packageSendResponseV1 struct {
+	AttemptID              string `json:"attempt_id"`
+	Outcome                string `json:"outcome"`
+	ReconciliationRequired bool   `json:"reconciliation_required"`
+}
+type packageSendInputV1 send.PackageSendObservationV1
+
+func (v *packageSendInputV1) observationV1() (pdfadmission.HTMLSendPackageSelectionV1, error) {
+	return (*send.PackageSendObservationV1)(v).SelectionV1()
+}
+
 type sendDocumentInput struct {
-	LawfulBasis string `json:"lawful_basis"`
+	LawfulBasis string              `json:"lawful_basis"`
+	PackageSend *packageSendInputV1 `json:"package_send,omitempty"`
 }
 
 func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
@@ -58,15 +73,29 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	selection, err := in.PackageSend.observationV1()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "package_send must identify the exact reviewed document and attachment selection")
+		return
+	}
 	authorize, ok := s.sessionMutationAuthorization(w, r, u)
 	if !ok {
 		return
 	}
 	res, err := s.Send.Send(r.Context(), send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
-		LawfulBasis: in.LawfulBasis, Authorize: authorize,
+		LawfulBasis: in.LawfulBasis, Authorize: authorize, PackageSend: selection,
 	}, docID)
+	defer res.CloseConsumerV1()
 	if err != nil {
+		if res.PackageAttemptID != uuid.Nil {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusServiceUnavailable, struct {
+				Error       string                `json:"error"`
+				PackageSend packageSendResponseV1 `json:"package_send"`
+			}{"Send outcome requires inspection before continuing", packageSendResponseV1{res.PackageAttemptID.String(), "unknown", true}})
+			return
+		}
 		s.writeSendError(w, err)
 		return
 	}
@@ -74,16 +103,30 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 	for _, l := range res.Links {
 		out.Links = append(out.Links, signingLink{RecipientID: l.RecipientID, Email: l.Email, Name: l.Name, Role: l.Role, URL: l.URL})
 	}
-	writeJSON(w, http.StatusOK, out)
+	code := http.StatusOK
+	if res.PackageAttemptID != uuid.Nil {
+		outcome := "completed"
+		if res.Status == "sealing" {
+			outcome = "active"
+			code = http.StatusAccepted
+		}
+		out.PackageSend = &packageSendResponseV1{res.PackageAttemptID.String(), outcome, res.Status == "sealing"}
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	writeJSON(w, code, out)
 }
 
 // writeSendError maps the engine's typed errors to the REST responses the UI
 // expects: 402 + upgrade_url for quota, 409 + tier detail for an eIDAS block.
 func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, pdfadmission.ErrPackageSendSelectionRequiredV1), errors.Is(err, pdfadmission.ErrPackageSendSelectionChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackageSourceChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackagePendingPrivacyV1):
+		writeError(w, http.StatusConflict, "Review and reconcile the exact document and saved attachment selection before sending")
+	case errors.Is(err, pdfadmission.ErrHTMLSendPackageCaptureV1), errors.Is(err, pdfadmission.ErrHTMLSendPackageIntentV1), errors.Is(err, pdfadmission.ErrHTMLSendPackageInspectionV1), errors.Is(err, pdfadmission.ErrHTMLSendPackagePathRequiredV1):
+		writeError(w, http.StatusServiceUnavailable, "Package Send is temporarily unavailable; inspect the saved document before continuing")
 	case errors.Is(err, crmreview.ErrReviewRequired):
 		writeError(w, http.StatusConflict, "CRM mappings or contract content changed. Refresh CRM information, apply the reviewed mappings and review the PDF before sending.")
-	case errors.Is(err, htmlsource.ErrInvalid), errors.Is(err, htmlsource.ErrReviewRequired):
+	case errors.Is(err, htmlsource.ErrInvalid), errors.Is(err, htmlsource.ErrReviewRequired), errors.Is(err, htmlmaterialization.ErrInvalid):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, auth.ErrMutationCredentialExpired):
 		writeError(w, http.StatusUnauthorized, "credential expired before transaction committed")
@@ -127,6 +170,8 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 			"error":       err.Error(),
 			"upgrade_url": "/settings/billing",
 		})
+	case errors.Is(err, pdfadmission.ErrHTMLSendWorkV1), errors.Is(err, pdfadmission.ErrHTMLSendEvidenceV1), errors.Is(err, pdfadmission.ErrHTMLRevisionSourceV1), errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1), errors.Is(err, pdfadmission.ErrWorkRuntimeV1), errors.Is(err, pdfadmission.ErrApplicationSessionV1), errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1), errors.Is(err, pdfadmission.ErrApplicationSessionCommitUnknownV1):
+		writeError(w, http.StatusServiceUnavailable, "Send resources are temporarily unavailable")
 	case errors.Is(err, billing.ErrEntitlementUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
 	case errors.Is(err, resolver.ErrSourceFreshness):

@@ -29,9 +29,10 @@ function fixture() {
   const calls: any[] = [], revised: any[] = [];
   const env: any = { document: document(), retained: source(), sourceID: ID, sourceOrg: ORG, me: { user_id: USER, org_id: ORG, role: 'sender' }, disposed: false, operation: 0,
     values: { company: 'Negotiated <AB> & Co' }, sections: { scope: 'Human-proposed wording' }, summary: 'Negotiated scope', baseline: '', dirty: true, canSave: true,
-    loading: false, busy: false, externalBusy: false, onEditorStateChange: undefined, error: null, needsRefresh: false, uncertain: false, acknowledgedDocument: null, latestDocument: null, latestSource: null,
+    loading: false, busy: false, externalBusy: false, mutationBlocked:false, reconciliationBusy:false, onEditorStateChange: undefined, error: null, needsRefresh: false, uncertain: false, acknowledgedDocument: null, latestDocument: null, latestSource: null,
     APIError, htmlUUID, advanceCleanHTMLObservation, currentHTMLSource, htmlRevisionInput, revisionDraft, verifiedHTMLRevision,
     onRevised: (d: any) => revised.push(d), onSourceChange: undefined, window: { confirm: () => false } };
+  Object.defineProperty(env,'writeBusy',{get:()=>env.externalBusy || env.mutationBlocked || env.reconciliationBusy});
   env.current = () => !env.disposed && env.document.id === ID && env.document.org_id === ORG;
   env.fingerprint = () => JSON.stringify({ values: env.values, sections: env.sections, summary: env.summary });
   for (const [name, kind] of [['reviseHTMLDocument', 'write'], ['getHTMLDocumentSource', 'source'], ['getDocument', 'document'], ['getMe', 'identity']]) {
@@ -310,3 +311,6 @@ test('unseen appended page or mismatched retained page count blocks the actual P
     await bind('./HtmlPDFReview.svelte', ['approve'], env).approve(); expect(env.busy).toBe(false);
   }
 });
+
+test('attachment reconciliation permits read-only inspection and explicit discard while blocking new HTML writes',async()=>{const f=fixture();f.env.mutationBlocked=true;f.env.needsRefresh=true;await f.actions.save(event);expect(f.calls).toHaveLength(0);const p=f.actions.inspectLatest();expect(f.calls[0].kind).toBe('identity');f.calls[0].resolve({user_id:USER,org_id:ORG,role:'sender'});await tick();f.calls[1].resolve(document(2));await tick();f.calls[2].resolve(source(2));await p;f.env.window.confirm=()=>true;f.actions.adoptLatest();expect(f.revised).toEqual([document(2)]);expect(f.env.needsRefresh).toBe(false);expect(f.env.summary).toBe('');});
+test('actual attachment mutation blocks HTML readback adoption and retains local text',()=>{const f=fixture();f.env.reconciliationBusy=true;f.env.latestDocument=document(2);f.env.latestSource=source(2);f.env.window.confirm=()=>true;const before=f.env.fingerprint();f.actions.adoptLatest();expect(f.revised).toEqual([]);expect(f.env.fingerprint()).toBe(before);});

@@ -91,9 +91,18 @@ WHERE e.org_id=$1 AND e.id=$2 RETURNING signatures.*;
 
 -- name: MarkPresignProviderSigned :one
 -- Empty hash can never match a SHA256 token lookup; exact epoch is expired.
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  JOIN presign_executions e ON e.document_id = d.id AND e.org_id = d.org_id
+  WHERE e.org_id = sqlc.arg(org_id) AND e.id = sqlc.arg(id)
+  FOR UPDATE OF d
+)
 UPDATE recipients r SET status='signed',signed_at=e.executed_at,
  magic_token_hash=decode('','hex'),magic_token_expires_at=TIMESTAMPTZ '1970-01-01 00:00:00+00'
-FROM presign_executions e WHERE e.org_id=$1 AND e.id=$2
+FROM presign_executions e
+JOIN locked_document d ON d.id=e.document_id
+WHERE e.org_id=sqlc.arg(org_id) AND e.id=sqlc.arg(id)
  AND r.id=e.provider_recipient_id AND r.document_id=e.document_id
  AND r.status='pending' AND r.sent_at IS NULL AND r.first_viewed_at IS NULL AND r.signed_at IS NULL
 RETURNING r.*;
@@ -103,7 +112,7 @@ RETURNING r.*;
 -- Exact epoch equality forbids adopting a new ceremony after preparation.
 UPDATE send_sealing_intents i SET presign_execution_id=e.id
 FROM presign_executions e WHERE e.org_id=$1 AND e.id=$2
- AND i.document_id=e.document_id AND i.org_id=e.org_id AND i.presign_execution_id IS NULL
+ AND i.document_id=e.document_id AND i.org_id=e.org_id AND i.presign_execution_id IS NULL AND i.package_send_attempt_id IS NULL
  AND i.actor_user_id=e.executor_user_id AND i.article13_notice_epoch_at=e.ceremony_epoch
  AND i.retain_until=hash_evidence_retain_until(e.ceremony_epoch,7)
  AND i.retention_started_at IS NULL AND i.retention_completed_at IS NULL

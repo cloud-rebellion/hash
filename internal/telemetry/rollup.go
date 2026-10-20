@@ -12,10 +12,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
-
-	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // RollupQueries is the slice of *generated.Queries the tick needs.
@@ -40,19 +39,29 @@ type RollupQueries interface {
 // decay while the summary remains inside its bounded window. Once the newest
 // contributing event reaches the retention edge, the whole summary is pruned.
 func RunRollupOnce(ctx context.Context, q RollupQueries, retention time.Duration) {
+	RunRollupOnceObserved(ctx, q, retention)
+}
+
+// RollupObservation describes only failures of the original invocation. Counts,
+// document identities and engagement data are never operational telemetry.
+type RollupObservation struct{ Unavailable, Partial bool }
+
+func RunRollupOnceObserved(ctx context.Context, q RollupQueries, retention time.Duration) RollupObservation {
+	observation := RollupObservation{}
 	docIDs, err := q.ListDocumentsWithPendingRollup(ctx)
 	if err != nil {
 		// Fail closed: the listing failing means the database is not
 		// answering, so pruning now would delete rows we cannot prove were
 		// counted. The next tick retries in an hour.
 		slog.Warn("telemetry: list pending rollup", "err", err)
-		return
+		return RollupObservation{Unavailable: true, Partial: observation.Partial}
 	}
 	for _, docID := range docIDs {
 		if _, err := q.RollupBlockViews(ctx, docID); err != nil {
 			// The claim and the summary write share one statement, so a
 			// failure here rolls back the claim too: nothing is lost, the
 			// rows stay pending and the next tick retries them.
+			observation.Partial = true
 			slog.Warn("telemetry: rollup block views", "doc", docID, "err", err)
 			continue
 		}
@@ -66,21 +75,23 @@ func RunRollupOnce(ctx context.Context, q RollupQueries, retention time.Duration
 	pruned, err := q.PruneTelemetryOlderThan(ctx, pruneCutoff)
 	if err != nil {
 		slog.Warn("telemetry: prune", "err", err)
-		return
+		return RollupObservation{Unavailable: true, Partial: observation.Partial}
 	}
 	if pruned != nil && pruned.DeletedRows > 0 {
 		slog.Info("telemetry: pruned raw events", "rows", pruned.DeletedRows)
 	}
 	if pruned != nil && pruned.UnrolledViews > 0 {
+		observation.Partial = true
 		slog.Error("telemetry: block.viewed events hit the retention edge before they were rolled up, engagement totals under-count by this many views",
 			"views", pruned.UnrolledViews)
 	}
 	prunedSummaries, err := q.PruneEngagementOlderThan(ctx, pruneCutoff)
 	if err != nil {
 		slog.Warn("telemetry: prune engagement summaries", "err", err)
-		return
+		return RollupObservation{Unavailable: true, Partial: observation.Partial}
 	}
 	if prunedSummaries > 0 {
 		slog.Info("telemetry: pruned engagement summaries", "rows", prunedSummaries)
 	}
+	return observation
 }

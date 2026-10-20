@@ -182,7 +182,7 @@ func (s *Server) commitCRMDocumentValues(ctx context.Context, actor authoring.Ac
 		}
 	}
 	// Always advance the parent edit witness, including mapping-only/unlink.
-	updated, err := q.UpdateDocumentMetadata(ctx, generated.UpdateDocumentMetadataParams{ID: id, OrgID: actor.OrgID, Name: doc.Name, ExpiresAt: doc.ExpiresAt, Metadata: doc.Metadata})
+	updated, err := q.UpdateDraftDocumentDetailsV1(ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: id, OrgID: actor.OrgID, Name: doc.Name, ExpiresAt: doc.ExpiresAt})
 	if err != nil {
 		return nil, err
 	}

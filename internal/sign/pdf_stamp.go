@@ -4,27 +4,22 @@
 package sign
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
-	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
-	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	pdftypes "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/sanitize"
 )
 
 // PDF-source finalization. A pdf-source document is the uploaded PDF itself;
@@ -34,87 +29,17 @@ import (
 //
 // Approach: for every page that carries fields, render a same-size HTML overlay
 // (fields absolutely positioned by percentage) to a single-page PDF via the
-// existing Gotenberg renderer, then overlay that page 1:1 onto the original
-// page with pdfcpu. Stamping a full page at scale 1 / centered means the HTML
-// top-left percentage coordinates map directly, with no PDF bottom-left
-// coordinate math to get wrong.
+// existing Gotenberg renderer. The mandatory isolated worker inspects the
+// PDF.js-visible viewport and imports each overlay as an independent Form.
+// Original boxes, rotation, UserUnit and painting remain unchanged.
 
 // stampItem is one positioned overlay element (a field value or a signature),
 // in page-percentage coordinates with pre-rendered inner HTML.
-type stampItem struct {
-	XPct, YPct, WPct, HPct float64
-	HTML                   string
-}
+type stampItem = render.PDFStampItemV1
 
-// buildPageOverlayHTML renders the overlay HTML for one page. The body fills
-// the whole page; each item is absolutely positioned by percentage so it lands
-// where the designer placed it once the page is stamped 1:1.
-func buildPageOverlayHTML(items []stampItem) string {
-	var sb strings.Builder
-	sb.WriteString(`<!doctype html><html><head><meta charset="utf-8"><style>`)
-	sb.WriteString(`@page{margin:0}html,body{margin:0;padding:0;height:100%;width:100%}`)
-	sb.WriteString(`.f{position:absolute;box-sizing:border-box;display:flex;align-items:center;` +
-		`font-family:Inter,system-ui,sans-serif;font-size:11px;color:#111;overflow:hidden;line-height:1.2}`)
-	sb.WriteString(render.SignatureCSS())
-	sb.WriteString(`</style></head><body>`)
-	for _, it := range items {
-		fmt.Fprintf(&sb,
-			`<div class="f" style="left:%.4f%%;top:%.4f%%;width:%.4f%%;height:%.4f%%">%s</div>`,
-			it.XPct, it.YPct, it.WPct, it.HPct, it.HTML)
-	}
-	sb.WriteString(`</body></html>`)
-	return sb.String()
-}
-
-// stampOverlays overlays each single-page overlay PDF onto the matching page of
-// the original. overlays is keyed by 1-based page number. Pages without an
-// overlay are left untouched.
-func stampOverlays(original []byte, overlays map[int][]byte) ([]byte, error) {
-	conf := pdfmodel.NewDefaultConfiguration()
-	conf.ValidationMode = pdfmodel.ValidationRelaxed
-	conf.Unit = pdftypes.POINTS
-
-	pages := make([]int, 0, len(overlays))
-	for p := range overlays {
-		pages = append(pages, p)
-	}
-	sort.Ints(pages)
-
-	current := original
-	for _, p := range pages {
-		ov := overlays[p]
-		if len(ov) == 0 {
-			continue
-		}
-		// scale 1 absolute + centered + opaque = exact 1:1 page overlay.
-		wm, err := pdfapi.PDFWatermarkForReadSeeker(
-			bytes.NewReader(ov), 1, "scale:1 abs, pos:c, rot:0, op:1", true, false, pdftypes.POINTS)
-		if err != nil {
-			return nil, fmt.Errorf("build overlay watermark page %d: %w", p, err)
-		}
-		var buf bytes.Buffer
-		if err := pdfapi.AddWatermarks(bytes.NewReader(current), &buf, []string{strconv.Itoa(p)}, wm, conf); err != nil {
-			return nil, fmt.Errorf("stamp overlay page %d: %w", p, err)
-		}
-		current = buf.Bytes()
-	}
-	return current, nil
-}
-
-// mergePDFs concatenates PDFs in order into one (used to append the audit cert
-// page to the stamped contract).
-func mergePDFs(parts ...[]byte) ([]byte, error) {
-	conf := pdfmodel.NewDefaultConfiguration()
-	conf.ValidationMode = pdfmodel.ValidationRelaxed
-	rss := make([]io.ReadSeeker, 0, len(parts))
-	for _, p := range parts {
-		rss = append(rss, bytes.NewReader(p))
-	}
-	var buf bytes.Buffer
-	if err := pdfapi.MergeRaw(rss, &buf, false, conf); err != nil {
-		return nil, fmt.Errorf("merge pdfs: %w", err)
-	}
-	return buf.Bytes(), nil
+func buildPageOverlayHTML(items []stampItem) string { return render.BuildPageOverlayHTMLV1(items) }
+func buildSizedPageOverlayHTML(items []stampItem, width, height float64) string {
+	return render.BuildSizedPageOverlayHTMLV1(items, width, height)
 }
 
 // loadSourcePDF fetches the uploaded PDF bytes backing a pdf-source document.
@@ -151,14 +76,12 @@ func (e *Engine) loadSourcePDF(ctx context.Context, doc *generated.Document) ([]
 
 // stampFieldsAndSignatures renders the field/signature overlays for every page
 // of a pdf-source document and returns the stamped PDF (without the audit
-// cert, which the caller appends). Pure of storage/DB beyond the queries it
-// runs to read fields + signatures.
+// cert, which the caller appends). It reads exact archived signature versions
+// before rendering any page; no signature is regenerated from row metadata.
 func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Document, original []byte) ([]byte, error) {
-	dimConf := pdfmodel.NewDefaultConfiguration()
-	dimConf.ValidationMode = pdfmodel.ValidationRelaxed
-	dims, err := pdfapi.PageDims(bytes.NewReader(original), dimConf)
+	geometry, err := sanitize.InspectManualPDFWithContext(ctx, original)
 	if err != nil {
-		return nil, fmt.Errorf("read page dims: %w", err)
+		return nil, fmt.Errorf("inspect manual PDF in isolated worker: %w", err)
 	}
 
 	fields, err := e.Queries.ListFieldsByDocument(ctx, doc.ID)
@@ -173,15 +96,23 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 	if err != nil {
 		return nil, err
 	}
-	if err := pdflayout.ValidateSignatureRows(doc, recipients, fields, sigs, len(dims)); err != nil {
+	// Fitted signatures are complete retained page packages. Sending their span
+	// through this legacy HTML renderer would discard the measured frozen output.
+	for _, signature := range sigs {
+		if signature != nil && signature.SignatureKind == "manual_pdf_fit_v1" {
+			return nil, ErrFittedCompositionRequiredV1
+		}
+	}
+	if err := pdflayout.ValidateSignatureRows(doc, recipients, fields, sigs, len(geometry.Pages)); err != nil {
 		return nil, fmt.Errorf("stamp PDF parties: %w", err)
 	}
-	sigByRec := map[string]*generated.Signature{}
+	sigByRec := map[string]render.ArchivedSignatureSpan{}
 	for _, s := range sigs {
-		if err := render.ValidateSignatureName(s.TypedName); err != nil {
-			return nil, fmt.Errorf("stamp stored signature %s: %w", s.ID, err)
+		span, err := e.archivedSignatureSpan(ctx, doc.ID, s)
+		if err != nil {
+			return nil, fmt.Errorf("stamp stored signature: %w", err)
 		}
-		sigByRec[s.RecipientID.String()] = s
+		sigByRec[s.RecipientID.String()] = span
 	}
 
 	// Group overlay items by 1-based page number.
@@ -195,7 +126,7 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 			continue
 		}
 		page := int(f.Page)
-		if err := validateStampTargetPage(f, len(dims)); err != nil {
+		if err := validateStampTargetPage(f, len(geometry.Pages)); err != nil {
 			return nil, err
 		}
 		byPage[page] = append(byPage[page], stampItem{
@@ -212,14 +143,46 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 		return original, nil
 	}
 
+	overlays, err := e.renderManualPDFOverlays(ctx, geometry, byPage, len(original))
+	if err != nil {
+		return nil, err
+	}
+	composed, err := sanitize.ApplyManualPDFOverlaysWithContext(ctx, original, geometry, overlays)
+	if err != nil {
+		return nil, fmt.Errorf("compose manual PDF in isolated worker: %w", err)
+	}
+	return composed.Bytes, nil
+}
+
+// Each renderer read consumes the remaining framed input budget. This helper
+// holds at most the accepted batch plus one bounded response, and stops before
+// another page is requested when admission fails.
+func (e *Engine) renderManualPDFOverlays(ctx context.Context, geometry sanitize.PDFManualGeometry, byPage map[int][]stampItem, sourceBytes int) (map[int][]byte, error) {
+	if sourceBytes < 1 || sourceBytes > sanitize.MaxPDFBytes || geometry.SourceBytes != int64(sourceBytes) {
+		return nil, sanitize.ErrPDFTooLarge
+	}
 	overlays := map[int][]byte{}
-	for page, items := range byPage {
-		dim := dims[page-1]
-		html := buildPageOverlayHTML(items)
+	pages := make([]int, 0, len(byPage))
+	for page := range byPage {
+		pages = append(pages, page)
+	}
+	sort.Ints(pages)
+	total := sourceBytes
+	for _, page := range pages {
+		items := byPage[page]
+		remaining := sanitize.MaxPDFBytes - total
+		if remaining < 1 {
+			return nil, sanitize.ErrPDFTooLarge
+		}
+		width, height, err := geometry.Pages[page-1].ViewportPoints()
+		if err != nil {
+			return nil, err
+		}
+		html := buildSizedPageOverlayHTML(items, width, height)
 		overlayPDF, err := e.PDF.HTMLToPDF(ctx, html, render.PDFOptions{
-			PaperWidth:  float32(dim.Width) / 72.0,
-			PaperHeight: float32(dim.Height) / 72.0,
-			Margins:     [4]float32{0, 0, 0, 0},
+			MaxResponseBytes: remaining,
+			ExactPaperPoints: [2]float64{width, height},
+			Margins:          [4]float32{0, 0, 0, 0},
 			// Zero margins are intentional here. Suppress the ordinary
 			// one-inch document defaults so percentages remain page-relative.
 			PreferCSSPageSize: true,
@@ -228,9 +191,13 @@ func (e *Engine) stampFieldsAndSignatures(ctx context.Context, doc *generated.Do
 		if err != nil {
 			return nil, fmt.Errorf("render overlay page %d: %w", page, err)
 		}
+		if len(overlayPDF) < 1 || len(overlayPDF) > remaining {
+			return nil, sanitize.ErrPDFTooLarge
+		}
+		total += len(overlayPDF)
 		overlays[page] = overlayPDF
 	}
-	return stampOverlays(original, overlays)
+	return overlays, nil
 }
 
 // validateStampTargetPage is the terminal fail-closed counterpart to Send's
@@ -250,7 +217,7 @@ func validateStampTargetPage(field *generated.DocumentField, pageCount int) erro
 // signature span for signature fields, otherwise the (escaped) filled value.
 // Returns "" when there is nothing to stamp (unsigned signature slot, empty
 // value) so the page overlay stays minimal.
-func stampInnerHTML(f *generated.DocumentField, sigByRec map[string]*generated.Signature) (string, error) {
+func stampInnerHTML(f *generated.DocumentField, sigByRec map[string]render.ArchivedSignatureSpan) (string, error) {
 	if f.Type == "signature" {
 		if !f.RecipientID.Valid {
 			return "", nil
@@ -259,11 +226,10 @@ func stampInnerHTML(f *generated.DocumentField, sigByRec map[string]*generated.S
 		if !ok {
 			return "", nil
 		}
-		span, err := render.RenderSignatureSpan(sig.TypedName, sig.Font)
-		if err != nil {
-			return "", fmt.Errorf("stamp stored signature %s: %w", sig.ID, err)
+		if sig.HTML() == "" {
+			return "", errors.New("stamp stored signature: validated archive is empty")
 		}
-		return span, nil
+		return sig.HTML(), nil
 	}
 	if !f.Value.Valid || strings.TrimSpace(f.Value.String) == "" {
 		return "", nil

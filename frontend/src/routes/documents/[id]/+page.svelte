@@ -1,4 +1,5 @@
 <script lang="ts">
+ import type { PackageSendObservation } from '$lib/packageSend';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { beforeNavigate } from '$app/navigation';
@@ -34,7 +35,9 @@
   import HtmlDocumentRevision from '$lib/components/HtmlDocumentRevision.svelte';
   import HtmlDocumentHistory from '$lib/components/HtmlDocumentHistory.svelte';
   import CRMDocumentPanel from '$lib/components/CRMDocumentPanel.svelte';
+  import DocumentAttachmentsPanel from '$lib/components/DocumentAttachmentsPanel.svelte';
   import { currentHTMLSource, htmlUUID } from '$lib/htmlRevision';
+  import { createCommentHistory, latestComments, type CommentSelection } from '$lib/commentHistory';
   import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
 
   let doc = $state<DocumentResponse | null>(null);
@@ -53,6 +56,10 @@
   let htmlRevisionBlocked = $state(true);
   let htmlEditorClean = $state(false), blocksEditorClean = $state(false);
   let crmBlocked = $state(true), crmBusy = $state(false), crmReviewRequired = $state(false), senderMutationBusy = $state(false);
+  let attachmentPackageSend=$state<PackageSendObservation | undefined>(undefined);
+  let attachmentReviewRequest=$state({ revision: 0, inspect: false }), attachmentReviewRevision=$state(0);
+  let attachmentBusy=$state(false), attachmentDirty=$state(false), attachmentSendBlocked=$state(true), attachmentMessage=$state('Load saved attachments before sending.');
+  let crmLocalIntent=$state(false), senderDraftDirty=$state(false), pdfLayoutBusy=$state(false), pdfLayoutDirty=$state(false);
   let crmRefreshRevision = $state(0), crmReviewRevision = $state(0), crmEditorRevision = $state(0);
   let htmlSource = $state.raw<HTMLDocumentSource | null>(null);
   let changeRequests = $state<ChangeRequest[]>([]);
@@ -62,7 +69,19 @@
   let comments = $state<DocComment[]>([]);
   let commentBody = $state('');
   let postingComment = $state(false);
-  let commentLoadRevision = 0;
+  let commentSendRevision = 0;
+  let commentDocumentKey = '';
+  let commentLoading = $state(false);
+  let olderCommentCursor = $state<string | null>(null);
+  let newerCommentCursor = $state<string | null>(null);
+  const commentHistory = createCommentHistory<CommentScope>({
+    readPage: (scope, selection, signal) => listComments(scope.id, selection, signal),
+    isCurrent: isCurrentCommentScope,
+    changed: view => {
+      comments = view.comments; olderCommentCursor = view.olderCursor; newerCommentCursor = view.newerCursor;
+      commentLoading = view.loading; commentRefreshError = view.error;
+    },
+  });
   let commentRefreshError = $state<string | null>(null);
   let savingMode = $state(false);
   let changeRequestRefreshError = $state<string | null>(null);
@@ -76,7 +95,13 @@
   const routeDocumentID = $derived($page.params.id);
   const crmEditable = $derived(!!doc && doc.status === 'draft' && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)));
   const crmEditorClean = $derived(doc?.has_html_source ? htmlEditorClean : doc?.source_kind === 'blocks' ? blocksEditorClean : false);
-  const crmOtherBusy = $derived(senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode);
+  const htmlSiblingMutationBusy=$derived(crmBusy || attachmentBusy || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy);
+  const attachmentBarrier=$derived(attachmentBusy || attachmentDirty);
+  const attachmentEligible=$derived(crmEditable && doc?.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id);
+  const attachmentReconciliationBusy=$derived(crmBusy || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
+  const crmReconciliationBusy=$derived(senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBusy || pdfLayoutBusy || pdfLayoutDirty);
+  const attachmentOtherBusy=$derived(crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
+  const crmOtherBusy = $derived(senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBarrier);
 
   type DocumentScope = { id: string; routeRevision: number; documentRevision: number };
   function isCurrentRoute(id: string, revision: number): boolean {
@@ -104,13 +129,26 @@
     doc = updated;
     documentRevision++;
   }
-  function receiveCRMDocument(updated: DocumentResponse, scope: DocumentScope): boolean {
-    if (!doc || !isCurrentDocument(scope, true) || !crmEditorClean || crmOtherBusy) return false;
+  function receiveCRMDocument(updated: DocumentResponse, scope: DocumentScope, reconciliation=false): boolean {
+    if (!doc || !isCurrentDocument(scope, true) || !crmEditorClean || (reconciliation ? crmReconciliationBusy : crmOtherBusy)) return false;
     const changedSource = doc.has_html_source && (updated.html_source_commitment !== doc.html_source_commitment || updated.pdf_sha256 !== doc.pdf_sha256);
     if (!receiveDocument(updated, scope)) return false;
     crmReviewRequired = false; crmReviewRevision++;
     if (changedSource) { crmEditorRevision++; htmlEditorClean = false; }
     return true;
+  }
+  function receiveAttachmentDocument(updated: DocumentResponse, expectedUpdatedAt: string, scope: DocumentScope, reconciliation=false): boolean {
+    if (!doc || !isCurrentDocument(scope,true) || doc.updated_at!==expectedUpdatedAt || (reconciliation ? attachmentReconciliationBusy : attachmentOtherBusy) || (doc.has_html_source && !htmlEditorClean)) return false;
+    // Controller validates ordinary attachment-only readback against the entire
+    // prior source. Explicit inspected adoption may load a newer saved source.
+    const adopted = receiveDocument(updated,scope);
+    if (adopted && reconciliation) attachmentReviewRevision++;
+    return adopted;
+  }
+  function requestPackageReview(inspect: boolean, scope: DocumentScope) {
+    if (!isCurrentDocument(scope) || doc?.status !== 'draft' || (inspect && (attachmentReconciliationBusy || attachmentBusy))) return;
+    attachmentPackageSend=undefined; attachmentSendBlocked=true;
+    attachmentReviewRequest={ revision: attachmentReviewRequest.revision + 1, inspect };
   }
   function requestCRMReview(scope: DocumentScope) {
     if (!isCurrentDocument(scope)) return;
@@ -120,6 +158,7 @@
     if (!doc || doc.id !== updated.id || doc.pdf_sha256 !== updated.pdf_sha256
         || doc.html_source_commitment !== updated.html_source_commitment || doc.html_materialization_revision !== updated.html_materialization_revision) {
       pdfSignatureFields = [];
+      pdfLayoutBusy=false; pdfLayoutDirty=false;
       generatedPlacementReady = false;
       htmlRevisionBlocked = true;
       htmlSource = null;
@@ -138,10 +177,14 @@
     }
     catch { htmlSource = null; htmlRevisionBlocked = true; generatedPlacementReady = false; }
   }
+  function receiveHTMLDocument(updated: DocumentResponse, scope: DocumentScope): boolean {
+    if (htmlSiblingMutationBusy) return false;
+    return receiveDocument(updated,scope);
+  }
   async function refreshHTMLDocument() {
     const scope = captureDocument();
-    if (!scope) return;
-    try { receiveDocument(await getDocument(scope.id), scope); }
+    if (!scope || htmlSiblingMutationBusy) return;
+    try { receiveHTMLDocument(await getDocument(scope.id), scope); }
     catch (e) { if (isCurrentDocument(scope)) error = (e as Error).message; }
   }
   function receivePlacementProof(proof: { documentID: string; pdfSHA256: string; htmlSourceCommitment: string; ready: boolean }, scope: DocumentScope) {
@@ -155,7 +198,7 @@
     documentRevision++;
   }
   async function changeDefaultLocale(locale: string, scope: DocumentScope) {
-    if (!doc || crmBusy || !isCurrentDocument(scope)) return;
+    if (!doc || crmBusy || attachmentBarrier || crmLocalIntent || !isCurrentDocument(scope)) return;
     const actionScope = captureDocument();
     if (!actionScope) return;
     try {
@@ -166,9 +209,18 @@
     }
   }
 
+  type CommentScope = DocumentScope & { orgID: string };
+  function captureCommentScope(): CommentScope | null {
+    const scope = captureDocument();
+    return scope && doc ? { ...scope, orgID: doc.org_id } : null;
+  }
+  function isCurrentCommentScope(scope: CommentScope): boolean {
+    return isCurrentDocument(scope) && doc?.org_id === scope.orgID;
+  }
+
   async function toggleSignatureMode() {
     const scope = captureDocument();
-    if (!scope || !doc || crmBusy || doc.status !== 'draft' || savingMode || revising || resolvingId
+    if (!scope || !doc || crmBusy || attachmentBarrier || crmLocalIntent || doc.status !== 'draft' || savingMode || revising || resolvingId
         || (doc.has_html_source && (htmlRevisionBlocked || !htmlSource || htmlSource.contract_profile))) return;
     savingMode = true;
     error = null;
@@ -182,39 +234,30 @@
     }
   }
 
-  async function loadComments(id: string) {
-    const scope = captureDocument();
-    if (!scope || scope.id !== id) return;
-    const revision = ++commentLoadRevision;
-    try {
-      const res = await listComments(id);
-      if (revision === commentLoadRevision && isCurrentDocument(scope)) {
-        comments = res.comments;
-        commentRefreshError = null;
-      }
-    } catch (e) {
-      if (revision === commentLoadRevision && isCurrentDocument(scope)) {
-        commentRefreshError = `Messages could not be refreshed. ${(e as Error).message}`;
-      }
-    }
+  async function loadComments(id: string, selection: CommentSelection = latestComments) {
+    const scope = captureCommentScope();
+    if (scope && scope.id === id) await commentHistory.load(scope, selection);
   }
 
   async function sendComment() {
-    const scope = captureDocument();
+    const scope = captureCommentScope();
     if (!scope || postingComment || !commentBody.trim()) return;
-    const documentID = scope.id;
+    const ticket = ++commentSendRevision;
+    const current = () => ticket === commentSendRevision && isCurrentCommentScope(scope);
     const submittedBody = commentBody;
+    commentHistory.invalidate();
     postingComment = true;
     error = null;
     try {
-      await postComment(documentID, submittedBody.trim());
-      if (!isCurrentDocument(scope)) return;
+      await postComment(scope.id, submittedBody.trim());
+      if (!current()) return;
       if (commentBody === submittedBody) commentBody = '';
-      await loadComments(documentID);
+      postingComment = false;
+      await loadComments(scope.id);
     } catch (e) {
-      if (isCurrentDocument(scope)) error = (e as Error).message;
+      if (current()) error = (e as Error).message;
     } finally {
-      if (isCurrentDocument(scope)) postingComment = false;
+      if (current()) postingComment = false;
     }
   }
 
@@ -368,6 +411,8 @@
     htmlRevisionBlocked = true;
     htmlEditorClean = false; blocksEditorClean = false;
     crmBlocked = true; crmBusy = false; crmReviewRequired = false; senderMutationBusy = false;
+    attachmentPackageSend=undefined;attachmentReviewRequest={revision:attachmentReviewRequest.revision+1,inspect:false};attachmentReviewRevision++;attachmentBusy=false;attachmentDirty=false;attachmentSendBlocked=true;attachmentMessage='Load saved attachments before sending.';
+    crmLocalIntent=false;senderDraftDirty=false;pdfLayoutBusy=false;pdfLayoutDirty=false;
     crmRefreshRevision++; crmReviewRevision++; crmEditorRevision++;
     htmlSource = null;
     changeRequests = [];
@@ -382,7 +427,9 @@
     changeRequestRefreshError = null;
     refreshingChanges = false;
     savingApprovalMode = false;
-    commentLoadRevision++;
+    commentSendRevision++;
+    commentDocumentKey = '';
+    commentHistory.reset();
     changeRequestLoadRevision++;
     documentRevision++;
     if (templateFlashTimer) clearTimeout(templateFlashTimer);
@@ -401,7 +448,17 @@
       }
       void loadDocument(id, revision);
     });
-    return () => { untrack(() => routeRevision++); };
+    return () => { untrack(() => { routeRevision++; commentSendRevision++; commentHistory.invalidate(); }); };
+  });
+
+  $effect.pre(() => {
+    const key = doc ? JSON.stringify([doc.id, doc.org_id]) : '';
+    untrack(() => {
+      if (commentDocumentKey && commentDocumentKey !== key && !disposed) {
+        commentSendRevision++; commentHistory.reset(); postingComment = false;
+      }
+      commentDocumentKey = key;
+    });
   });
 
   beforeNavigate(({ cancel, willUnload, from, to }) => {
@@ -420,6 +477,8 @@
   onDestroy(() => {
     disposed = true;
     routeRevision++;
+    commentSendRevision++;
+    commentHistory.dispose();
     if (templateFlashTimer) clearTimeout(templateFlashTimer);
   });
 </script>
@@ -469,29 +528,29 @@
 
     {#if crmEditable}
       <CRMDocumentPanel document={doc} actor={{ org_id: doc.org_id, user_id: viewerUserID, role: viewerRole === 'owner' ? 'owner' : 'sender' }}
-        editorClean={crmEditorClean} otherBusy={crmOtherBusy} refreshRevision={crmRefreshRevision}
-        onApplied={(updated) => receiveCRMDocument(updated, documentScope)}
-        onStateChange={(blocked, busy) => { if (isCurrentDocument(documentScope)) { crmBlocked = blocked; crmBusy = busy; } }} />
+        editorClean={crmEditorClean} otherBusy={crmOtherBusy} reconciliationBusy={crmReconciliationBusy} refreshRevision={crmRefreshRevision}
+        onApplied={(updated,reconciliation) => receiveCRMDocument(updated, documentScope,reconciliation)}
+        onStateChange={(blocked, busy, localIntent) => { if (isCurrentDocument(documentScope)) { crmBlocked = blocked; crmBusy = busy; crmLocalIntent=localIntent===true; } }} />
     {/if}
     {#if doc.has_html_source}
       {#if doc.status !== 'draft'}<details class="mb-6"><summary class="cursor-pointer text-sm text-text-secondary">Saved document information and intended parties</summary>
-        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
+        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveHTMLDocument(updated, documentScope)}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       </details>{:else}
       {#key `${doc.id}:${crmEditorRevision}`}
-        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveDocument(updated, documentScope)}
-          externalBusy={crmBusy} onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) htmlEditorClean = clean; }}
+        <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveHTMLDocument(updated, documentScope)}
+          externalBusy={crmBusy} mutationBlocked={attachmentBarrier} reconciliationBusy={htmlSiblingMutationBusy} onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) htmlEditorClean = clean; }}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       {/key}
       {/if}
       {#if doc.status === 'draft'}
       {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}:${doc.html_source_commitment}`}
-        <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked}
+        <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked || attachmentBarrier}
           expectedPages={htmlSource?.page_count} hasSigningPage={htmlSource?.source_schema_version === 3}
           canReview={viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)}
-          onReviewed={(updated) => receiveDocument(updated, documentScope)} onRefresh={refreshHTMLDocument} />
+          onReviewed={(updated) => { if(!receiveHTMLDocument(updated, documentScope)) throw new Error('The displayed agreement changed. Refresh and reconcile the saved review.'); }} onRefresh={refreshHTMLDocument} />
       {/key}
       {/if}
     {/if}
@@ -507,7 +566,7 @@
               : 'Bara läsa och acceptera: mottagarna öppnar och klickar Acceptera. Ingen signatur.'}
           </p>
         </div>
-        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode || crmBusy || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
+        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode || crmBusy || attachmentBarrier || crmLocalIntent || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
           {savingMode ? 'Sparar…' : doc.requires_signature ? 'Byt till acceptera' : 'Kräv signatur'}
         </button>
       </div>
@@ -591,6 +650,7 @@
         {:else}
         {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
           hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource}
+          readonly={attachmentBarrier} onStateChange={(state)=>{if(isCurrentDocument(documentScope,true)){pdfLayoutBusy=state.busy;pdfLayoutDirty=state.dirty;}}}
           onPlacementProof={(proof) => receivePlacementProof(proof, documentScope)} onSignatureFieldsChange={(fields) => {
           if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
         }} />{/key}
@@ -619,12 +679,20 @@
     {/if}
 
     <div class="mt-8">
+      {#if attachmentEligible}
+       <DocumentAttachmentsPanel document={doc} actor={{org_id:doc.org_id,user_id:viewerUserID,role:viewerRole==='owner'?'owner':'sender'}}
+        mainEditorClean={!doc.has_html_source || htmlEditorClean} externalBusy={attachmentOtherBusy} reconciliationBusy={attachmentReconciliationBusy} packageReviewRequest={attachmentReviewRequest}
+        onSaved={(updated,expected,reconciliation)=>receiveAttachmentDocument(updated,expected,documentScope,reconciliation)}
+        onStateChange={(state)=>{if(isCurrentDocument(documentScope)){attachmentBusy=state.busy;attachmentDirty=state.dirty;attachmentSendBlocked=state.blocked;attachmentMessage=state.message;attachmentPackageSend=state.packageSend;}}} />
+      {/if}
       <SenderPanel
         documentID={doc.id}
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
         revisionBlocked={(doc.has_html_source === true && htmlRevisionBlocked) || (crmEditable && doc.source_kind === 'blocks' && !blocksEditorClean)}
+        attachmentsBlocked={doc.status==='draft' && doc.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id && (!attachmentEligible || attachmentSendBlocked)} attachmentsMessage={attachmentMessage} packageSend={attachmentPackageSend} packageReviewRevision={attachmentReviewRevision} packageReconciliationBusy={attachmentReconciliationBusy || attachmentBusy} onPackageReviewRequired={(inspect)=>requestPackageReview(inspect,documentScope)}
+        externalMutationBusy={attachmentBarrier} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
         crmBlocked={crmEditable && (crmBlocked || crmReviewRequired)} {crmBusy} {crmReviewRevision}
         onCRMReviewRequired={() => requestCRMReview(documentScope)}
         onMutationStateChange={(busy) => { if (isCurrentDocument(documentScope)) senderMutationBusy = busy; }}
@@ -645,10 +713,18 @@
           <p class="text-sm text-text-secondary mb-4 leading-relaxed">
             Ställ och besvara frågor med motparten. Varje inlägg mejlas till den andra parten.
           </p>
+          <nav aria-label="Message history" class="flex gap-2 mb-3">
+            <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !olderCommentCursor}
+              onclick={() => doc && olderCommentCursor && loadComments(doc.id, { kind: 'before', cursor: olderCommentCursor })}>Older</button>
+            <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !newerCommentCursor}
+              onclick={() => doc && newerCommentCursor && loadComments(doc.id, { kind: 'after', cursor: newerCommentCursor })}>Newer</button>
+            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => doc && loadComments(doc.id)}>Latest</button>
+          </nav>
+          <p role="status" aria-live="polite">{commentLoading ? 'Loading messages…' : ''}</p>
           {#if commentRefreshError}
             <div role="alert" class="text-danger mb-4">
               <p>{commentRefreshError}</p>
-              <button type="button" class="btn btn-secondary" onclick={() => doc && loadComments(doc.id)}>Retry message refresh</button>
+              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>Retry message refresh</button>
             </div>
           {/if}
           {#if comments.length}

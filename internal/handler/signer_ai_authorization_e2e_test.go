@@ -12,21 +12,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/aiapps"
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/evidence"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type signerAIFixture struct {
@@ -36,28 +34,52 @@ type signerAIFixture struct {
 
 func setupSignerAIAuthE2E(t *testing.T, blocking bool) signerAIFixture {
 	t.Helper()
-	f := setupGuardedAIAppsRESTE2E(t, true, blocking)
-	f.s.Sign = &sign.Engine{Pool: f.pool, Queries: f.q, Audit: f.s.Audit}
+	return setupSignerAIAuthWithOwned324E2E(t, blocking, newOwnedAutomationAuthorizationFixtureV1(t))
+}
+func setupSignerAIAuthWithOwned324E2E(t *testing.T, blocking bool, owned *ownedPublicReadFixtureV1) signerAIFixture {
+	t.Helper()
+	f := setupGuardedAIAppsMCPWithOwned324E2E(t, false, blocking, owned)
+	f.nativeProvider = newStaffAIHTTPProvider300E2E(t, f.provider)
+	return finishSignerAIAuth324E2E(t, f)
+}
+func finishSignerAIAuth324E2E(t *testing.T, f guardedAIAppsFixture) signerAIFixture {
+	t.Helper()
+	if f.owned == nil || f.s.Sign == nil || f.s.Sign.WorkRuntime == nil || !f.s.Sign.WorkRuntime.MatchesPoolV1(f.pool) || f.nativeProvider == nil {
+		t.Fatal("genuine signer native runtime and actual HTTP provider required")
+	}
 	f.s.OperatorName = "Fixture processor"
 	f.s.PrivacyContact = "privacy@example.test"
 	f.s.SupervisoryAuthority = "IMY"
 	f.s.PrivacyPolicyURL = "https://hash.example.test/privacy"
-	// Expose a synthetic token for this real sent ceremony; no external email
-	// consumer runs against the disposable DB and no production token is used.
-	token, hash, err := auth.MintMagicToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = f.q.RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: f.recipient.ID, DocumentID: f.doc.ID, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}}); err != nil {
-		t.Fatal(err)
-	}
 	shield, err := ai.NewLocalShield(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := ai.New(f.q, shield, nil, f.provider)
-	f.s.Clarifier = &aiapps.Clarifier{Runtime: rt}
-	rc, err := f.s.Sign.LookupByToken(f.ctx, hash)
+	runtime := ai.New(f.q, shield, nil, f.nativeProvider)
+	f.s.Clarifier = &aiapps.Clarifier{Runtime: runtime}
+	f.s.Negotiator = &aiapps.Negotiator{Runtime: runtime}
+	// Retain the actual normal Send credential; no plaintext token/hash or sent
+	// status is seeded or repaired after native birth.
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	w := nativeLifecycleSubmit256(f.ctx, f.lifecycleAuthorizationFixture, "send", cookie)
+	var sent sendDocumentResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &sent) != nil || len(sent.Links) != 1 || sent.Links[0].RecipientID != f.recipient.ID {
+		t.Fatal("actual signer authorization Send", w.Code, w.Body.String())
+	}
+	link, err := url.Parse(sent.Links[0].URL)
+	if err != nil || !strings.HasPrefix(link.Path, "/sign/") {
+		t.Fatal("actual signer authorization credential", err)
+	}
+	token := strings.TrimPrefix(link.Path, "/sign/")
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.recipient, err = f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: f.recipient.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := f.s.Sign.LookupByToken(f.ctx, auth.HashMagicToken(token))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +87,13 @@ func setupSignerAIAuthE2E(t *testing.T, blocking bool) signerAIFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = rc.CloseReadV1(); err != nil {
+		t.Fatal("original notice reader join", err)
+	}
+	t.Cleanup(func() { f.owned.assertObserversOnlyV1(t) })
 	return signerAIFixture{f, token, notice.NoticeDigest}
 }
+
 func (f signerAIFixture) submitSigner(ctx context.Context, digest string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", f.s.PublicURL+"/sign/"+f.token+"/clarify", strings.NewReader(`{"block_id":"agreement","selection_text":"Lifecycle signer alice@example.com payment date","question":"Please explain"}`)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
@@ -95,15 +122,19 @@ func waitSignerAITokenExpiryE2E(t *testing.T, f signerAIFixture) {
 }
 func assertSignerAIReceiptE2E(t *testing.T, f signerAIFixture, answered bool) uuid.UUID {
 	t.Helper()
+	return assertSignerAINumericReceipt324E2E(t, f, answered, 23, 11, true)
+}
+func assertSignerAINumericReceipt324E2E(t *testing.T, f signerAIFixture, answered bool, wantInput, wantOutput int, wantSuccess bool) uuid.UUID {
+	t.Helper()
 	var request uuid.UUID
 	var users, requests, usage, costs, answers int
 	if err := f.pool.QueryRow(f.ctx, `SELECT
  (SELECT id FROM events WHERE org_id=$1 AND kind='ai.requested'),
  (SELECT count(*) FROM events WHERE org_id=$1 AND kind IN ('ai.requested','ai.completed','clarifier.requested','clarifier.answered') AND actor_user_id IS NOT NULL),
  (SELECT count(*) FROM events WHERE org_id=$1 AND kind='clarifier.requested' AND recipient_id=$2),
- (SELECT count(*) FROM ai_completion_audit a JOIN events e ON e.id=a.id AND e.org_id=a.org_id AND e.document_id=a.document_id AND e.actor_user_id IS NULL AND e.recipient_id=$2 AND e.kind='ai.requested' WHERE a.org_id=$1 AND a.actor_user_id IS NULL AND a.input_tokens=23 AND a.output_tokens=11 AND a.shield_active),
+ (SELECT count(*) FROM ai_completion_audit a JOIN events e ON e.id=a.id AND e.org_id=a.org_id AND e.document_id=a.document_id AND e.actor_user_id IS NULL AND e.recipient_id=$2 AND e.kind='ai.requested' WHERE a.org_id=$1 AND a.actor_user_id IS NULL AND a.input_tokens=$3 AND a.output_tokens=$4 AND a.success=$5 AND a.shield_active),
  (SELECT count(*) FROM events WHERE org_id=$1 AND kind='ai.completed' AND recipient_id=$2),
- (SELECT count(*) FROM events WHERE org_id=$1 AND kind='clarifier.answered' AND recipient_id=$2)`, f.org, f.recipient.ID).Scan(&request, &users, &requests, &usage, &costs, &answers); err != nil || users != 0 || requests != 1 || usage != 1 || costs != 1 {
+ (SELECT count(*) FROM events WHERE org_id=$1 AND kind='clarifier.answered' AND recipient_id=$2)`, f.org, f.recipient.ID, wantInput, wantOutput, wantSuccess).Scan(&request, &users, &requests, &usage, &costs, &answers); err != nil || users != 0 || requests != 1 || usage != 1 || costs != 1 {
 		t.Fatalf("signer truthful receipt invalid req%s users%d reqs%d usage%d cost%d err%v", request, users, requests, usage, costs, err)
 	} //nolint:rawsql -- exact fixture recipient attribution
 	want := 0
@@ -121,6 +152,7 @@ func assertSignerAIReceiptE2E(t *testing.T, f signerAIFixture, answered bool) uu
 		t.Fatalf("signer AI broke independent notice/evidence verification: %v", err)
 	}
 	assertStaffAIChainE2E(t, f.guardedAIAppsFixture)
+	nativeBindingMeasurement259(t, f.lifecycleAuthorizationFixture, f.doc.ID)
 	return request
 }
 
@@ -128,40 +160,50 @@ func TestSignerAIOriginalTokenAfterDocumentAndRecipientWaitE2E(t *testing.T) {
 	for _, wait := range []string{"document", "recipient"} {
 		for _, change := range []string{"rotation", "expiry"} {
 			t.Run(wait+"/"+change, func(t *testing.T) {
-				f := setupSignerAIAuthE2E(t, false)
+				if wait == "recipient" && change == "rotation" {
+					// Canonical rotation locks the parent first. After native
+					// parent SHARE admission it must serialize, not mutate the
+					// token behind that owner while it waits for the recipient.
+					signerAIRotationAfterAnswer331E2E(t)
+					return
+				}
+				gate := newSignerAILookupGate324(t)
+				f := setupSignerAIAuthWithOwned324E2E(t, false, newOwnedPublicReadFixtureProfileV1(t, false, false, gate))
 				if change == "expiry" {
 					if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`, f.recipient.ID); err != nil {
 						t.Fatal(err)
 					}
 				} //nolint:rawsql
-				blocked, err := f.pool.Begin(f.ctx)
+				gate.armed.Store(true)
+				done, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitSigner(ctx, f.digest) })
+				var blocked pgx.Tx
+				defer func() { gate.unblock(); signerAIWorkerCleanup324(t, blocked, cancel, joined) }()
+				pid := gate.await(t)
+				var err error
+				blocked, err = f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer blocked.Rollback(context.Background())
-				query := "-- name: GetDocumentForShare"
+				query := "-- name: LockDocumentAIRootV1"
 				if wait == "document" {
 					_, err = f.q.WithTx(blocked).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.org})
 				} else {
 					_, err = blocked.Exec(f.ctx, `SELECT id FROM recipients WHERE id=$1 FOR UPDATE`, f.recipient.ID)
-					query = "-- name: GetRecipientForShare" //nolint:rawsql -- intentional fixture-controlled recipient wait
+					query = "-- name: GetSignerRecipientReadHeaderV1" //nolint:rawsql -- intentional fixture-controlled recipient wait
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				done := make(chan *httptest.ResponseRecorder, 1)
-				go func() { done <- f.submitSigner(f.ctx, f.digest) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, query, "transactionid")
+				gate.unblock()
+				awaitSignerNativeLock324(t, f, pid, query)
 				if change == "rotation" {
 					_, hash, err := auth.MintMagicToken()
 					if err != nil {
 						t.Fatal(err)
 					}
-					target := f.q
-					if wait == "recipient" {
-						target = target.WithTx(blocked)
-					}
-					if err = target.RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: f.recipient.ID, DocumentID: f.doc.ID, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}}); err != nil {
+					// This blocker already owns the canonical parent lock;
+					// rotation must use its actual transaction, not self-wait.
+					if err = f.q.WithTx(blocked).RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: f.recipient.ID, DocumentID: f.doc.ID, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}}); err != nil {
 						t.Fatal(err)
 					}
 				} else {
@@ -181,6 +223,7 @@ func TestSignerAIOriginalTokenAfterDocumentAndRecipientWaitE2E(t *testing.T) {
 			})
 		}
 	}
+	t.Run("request-dispatch gap/rotation", signerAIRotationBetweenPhases331E2E)
 }
 
 func TestSignerAIProviderExpiryAndCancellationPreserveRecipientCostE2E(t *testing.T) {
@@ -192,10 +235,8 @@ func TestSignerAIProviderExpiryAndCancellationPreserveRecipientCostE2E(t *testin
 					t.Fatal(err)
 				}
 			} //nolint:rawsql
-			ctx, cancel := context.WithCancel(f.ctx)
-			defer cancel()
-			done := make(chan *httptest.ResponseRecorder, 1)
-			go func() { done <- f.submitSigner(ctx, f.digest) }()
+			done, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitSigner(ctx, f.digest) })
+			defer signerAIWorkerCleanup324(t, nil, cancel, joined)
 			req := awaitAIProviderE2E(t, f.provider)
 			if strings.Contains(req.User, "Lifecycle signer") || strings.Contains(req.User, "alice@example.com") {
 				t.Fatal("public signer runtime lost Shield/party context")
@@ -212,7 +253,11 @@ func TestSignerAIProviderExpiryAndCancellationPreserveRecipientCostE2E(t *testin
 			if w.Code != want || strings.Contains(w.Body.String(), "Reviewed AI suggestion") {
 				t.Fatalf("refused signer result=%d %s", w.Code, w.Body.String())
 			}
-			assertSignerAIReceiptE2E(t, f, false)
+			if failure == "cancel" {
+				assertSignerAINumericReceipt324E2E(t, f, false, 0, 0, false)
+			} else {
+				assertSignerAIReceiptE2E(t, f, false)
+			}
 		})
 	}
 }
@@ -245,6 +290,10 @@ func TestSignerAIRequiredNoticeRequestResultAuditsAndReceiptScopeE2E(t *testing.
 	receipt := assertSignerAIReceiptE2E(t, f, false)
 	other := setupSignerAIAuthE2E(t, false)
 	params := generated.InsertRequestedSignerAICompletionAuditParams{RequestEventID: receipt, OrgID: f.org, DocumentID: f.doc.ID, RecipientID: f.recipient.ID, Provider: f.provider.Name(), Model: f.provider.Model(), PromptName: "duplicate", Success: true, TransferJurisdiction: "local"}
+	// Exercise the actual native :execrows producer directly as well as the
+	// retained generic query below; every mismatched/duplicate receipt is a
+	// zero-row refusal and must leave both organizations' durable state intact.
+	assertSignerAINativeReceiptNegatives331E2E(t, f, other, receipt)
 	for _, change := range []string{"duplicate", "org", "document", "recipient", "missing"} {
 		bad := params
 		switch change {
@@ -308,11 +357,16 @@ func TestSignerAIPrivacyAndAuditDiagnosticsFailClosedE2E(t *testing.T) {
 }
 
 func TestSignerAIRevalidatesOriginalNoticeAfterDocumentWaitE2E(t *testing.T) {
-	f := setupSignerAIAuthE2E(t, false)
-	blocked := holdAuthoringDocumentMCPE2E(t, f.lifecycleAuthorizationFixture, f.doc.ID)
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- f.submitSigner(f.ctx, f.digest) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForShare", "transactionid")
+	gate := newSignerAILookupGate324(t)
+	f := setupSignerAIAuthWithOwned324E2E(t, false, newOwnedPublicReadFixtureProfileV1(t, false, false, gate))
+	gate.armed.Store(true)
+	done, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitSigner(ctx, f.digest) })
+	var blocked pgx.Tx
+	defer func() { gate.unblock(); signerAIWorkerCleanup324(t, blocked, cancel, joined) }()
+	pid := gate.await(t)
+	blocked = holdAuthoringDocumentMCPE2E(t, f.lifecycleAuthorizationFixture, f.doc.ID)
+	gate.unblock()
+	awaitSignerNativeLock324(t, f, pid, "-- name: LockDocumentAIRootV1")
 	// Complete a legal evidence-safe revision while this older acknowledged
 	// request waits. Revision and resend are separate commits; attempting to
 	// bundle their active epochs into one fixture transaction is itself rejected
@@ -339,45 +393,23 @@ func TestSignerAIRevalidatesOriginalNoticeAfterDocumentWaitE2E(t *testing.T) {
 	} //nolint:rawsql
 }
 
-func TestSignerAIAndStaffShareSmallPoolAccountingAdmissionE2E(t *testing.T) {
-	f := setupSignerAIAuthE2E(t, true)
-	cfg := f.pool.Config()
-	cfg.MaxConns = 3
-	cfg.MinConns = 0
-	pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
+func TestSignerAIAndStaffNativeSmallPoolPreserveAccountingE2E(t *testing.T) {
+	t.Helper()
+	f := finishSignerAIAuth324E2E(t, setupNativeStaffPool315E2E(t, true, nativeOrgProviderOverlapLimits315()))
+	if f.pool.Config().MaxConns != 1 || !f.owned.runtime.MatchesPoolV1(f.pool) {
+		t.Fatal("native cross-protocol pool/runtime was not born together")
 	}
-	t.Cleanup(pool.Close)
-	f.pool = pool
-	f.q = generated.New(pool)
-	f.s.Pool = pool
-	f.s.Queries = f.q
-	f.s.Audit = audit.New(f.q, pool)
-	f.s.Sign = &sign.Engine{Pool: pool, Queries: f.q, Audit: f.s.Audit}
-	shield, err := ai.NewLocalShield(make([]byte, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Separate runtime objects share the actual pool's admission gate. This
-	// exercises the stronger boundary than relying on one process runtime clone.
-	f.s.Clarifier = &aiapps.Clarifier{Runtime: ai.New(f.q, shield, nil, f.provider)}
-	f.s.Negotiator = &aiapps.Negotiator{Runtime: ai.New(f.q, shield, nil, f.provider)}
-	lease, err := pool.Acquire(f.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Release()
-	first := make(chan *httptest.ResponseRecorder, 1)
-	second := make(chan *httptest.ResponseRecorder, 1)
-	go func() { first <- f.submitSigner(f.ctx, f.digest) }()
+	first, cancelFirst, joinFirst := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitSigner(ctx, f.digest) })
+	defer signerAIWorkerCleanup324(t, nil, cancelFirst, joinFirst)
 	awaitAIProviderE2E(t, f.provider)
-	if pool.Stat().AcquiredConns() != 3 {
-		t.Fatal("fixture does not occupy constrained pool")
-	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 	op := staffAIActionForE2E(t, f.guardedAIAppsFixture, "suggest")
-	go func() { second <- staffAISubmitE2E(f.guardedAIAppsFixture, f.ctx, op, cookie) }()
+	second, cancelSecond, joinSecond := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+		return staffAISubmitE2E(f.guardedAIAppsFixture, ctx, op, cookie)
+	})
+	defer signerAIWorkerCleanup324(t, nil, cancelSecond, joinSecond)
+	awaitAIProviderE2E(t, f.provider)
+	assertSignerStaffNativeOverlap324(t, f)
 	close(f.provider.release)
 	if w := receiveSessionOperationE2E(t, first); w.Code != http.StatusOK {
 		t.Fatalf("constrained signer result=%d %s", w.Code, w.Body.String())
@@ -386,9 +418,10 @@ func TestSignerAIAndStaffShareSmallPoolAccountingAdmissionE2E(t *testing.T) {
 		t.Fatalf("constrained staff result=%d %s", w.Code, w.Body.String())
 	}
 	var recipients, staff int
-	if err = pool.QueryRow(f.ctx, `SELECT count(*) FILTER (WHERE a.actor_user_id IS NULL AND e.recipient_id=$2),count(*) FILTER (WHERE a.actor_user_id=$3 AND e.recipient_id IS NULL) FROM ai_completion_audit a JOIN events e ON e.id=a.id AND e.kind='ai.requested' AND e.org_id=a.org_id AND e.document_id=a.document_id WHERE a.org_id=$1 AND a.input_tokens=23 AND a.output_tokens=11`, f.org, f.recipient.ID, f.user.ID).Scan(&recipients, &staff); err != nil || recipients != 1 || staff != 1 || f.provider.calls.Load() != 2 {
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FILTER (WHERE a.actor_user_id IS NULL AND e.recipient_id=$2),count(*) FILTER (WHERE a.actor_user_id=$3 AND e.recipient_id IS NULL) FROM ai_completion_audit a JOIN events e ON e.id=a.id AND e.kind='ai.requested' AND e.org_id=a.org_id AND e.document_id=a.document_id WHERE a.org_id=$1 AND a.input_tokens=23 AND a.output_tokens=11 AND a.success AND a.shield_active`, f.org, f.recipient.ID, f.user.ID).Scan(&recipients, &staff); err != nil || recipients != 1 || staff != 1 || f.provider.calls.Load() != 2 {
 		t.Fatal("constrained cross-protocol cost attribution missing", recipients, staff, err)
-	} //nolint:rawsql -- exact fixture-owned incurred usage
+	}
+	assertSignerStaffNativeEvents324(t, f)
 	rows, err := f.q.ListEventsByDocumentChronological(f.ctx, generated.ListEventsByDocumentChronologicalParams{DocumentID: pgtype.UUID{Bytes: f.doc.ID, Valid: true}, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -397,4 +430,6 @@ func TestSignerAIAndStaffShareSmallPoolAccountingAdmissionE2E(t *testing.T) {
 		t.Fatal("mixed staff/recipient notice evidence invalid", err)
 	}
 	assertStaffAIChainE2E(t, f.guardedAIAppsFixture)
+	nativeBindingMeasurement259(t, f.lifecycleAuthorizationFixture, f.doc.ID)
+	f.owned.assertObserversOnlyV1(t)
 }

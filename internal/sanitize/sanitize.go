@@ -151,6 +151,15 @@ func (b *boundedPDFBuffer) Reset()        { b.buffer.Reset() }
 // removes metadata, then verifies the rewritten bytes. Optimize alone does
 // not remove source Info fields or XMP in the pinned pdfcpu version.
 func cleanPDF(asset, ct string, raw []byte) (Result, error) {
+	return cleanPDFWithResourcePreservation(asset, ct, raw, false)
+}
+
+// The ordered layer importer wraps original painting in a Form while the
+// original page Group can still name a page-level ColorSpace. Resource
+// consolidation uses only content tokens and can prune that required binding.
+// Preserve resources only for that operation; all other cleaner callers retain
+// their existing default configuration and stripping/verification policy.
+func cleanPDFWithResourcePreservation(asset, ct string, raw []byte, preserveResources bool) (Result, error) {
 	if len(raw) > MaxPDFBytes {
 		return Result{}, ErrPDFTooLarge
 	}
@@ -162,6 +171,9 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 	if err := removePDFMetadata(ctx); err != nil {
 		return Result{}, err
 	}
+	if preserveResources {
+		ctx.Conf.OptimizeResourceDicts = false
+	}
 	if err := pdfapi.OptimizeContext(ctx); err != nil {
 		return Result{}, errors.New("sanitize: PDF optimization failed")
 	}
@@ -172,7 +184,7 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 		}
 		return Result{}, errors.New("sanitize: PDF rewrite failed")
 	}
-	_, err = secondPassStrip(out.Bytes(), &out)
+	_, err = secondPassStripWithResourcePreservation(out.Bytes(), &out, preserveResources)
 	if err != nil {
 		return Result{}, err
 	}
@@ -330,6 +342,10 @@ func collectActivePDFDict(d pdftypes.Dict, found map[string]struct{}) {
 // Note: pdfcpu's APIs in v0.12 require io.ReadSeeker for input. We feed
 // it the already-optimized output from the first pass and overwrite.
 func secondPassStrip(in []byte, out *boundedPDFBuffer) ([]string, error) {
+	return secondPassStripWithResourcePreservation(in, out, false)
+}
+
+func secondPassStripWithResourcePreservation(in []byte, out *boundedPDFBuffer, preserveResources bool) ([]string, error) {
 	stripped := []string{}
 	current := in
 
@@ -338,6 +354,9 @@ func secondPassStrip(in []byte, out *boundedPDFBuffer) ([]string, error) {
 		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
+		if preserveResources {
+			conf.OptimizeResourceDicts = false
+		}
 		if err := pdfapi.RemoveAttachments(bytes.NewReader(current), &buf, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "embedded_files")
@@ -352,6 +371,9 @@ func secondPassStrip(in []byte, out *boundedPDFBuffer) ([]string, error) {
 		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
+		if preserveResources {
+			conf.OptimizeResourceDicts = false
+		}
 		if err := pdfapi.RemoveFormFields(bytes.NewReader(current), &buf, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "acroform")
@@ -368,6 +390,9 @@ func secondPassStrip(in []byte, out *boundedPDFBuffer) ([]string, error) {
 		var buf boundedPDFBuffer
 		conf := model.NewDefaultConfiguration()
 		conf.ValidationMode = model.ValidationRelaxed
+		if preserveResources {
+			conf.OptimizeResourceDicts = false
+		}
 		if err := pdfapi.RemoveAnnotations(bytes.NewReader(current), &buf, nil, nil, nil, conf); err == nil && buf.Len() > 0 {
 			current = buf.Bytes()
 			stripped = append(stripped, "annotations")

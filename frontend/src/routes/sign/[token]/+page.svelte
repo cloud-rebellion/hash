@@ -1,13 +1,18 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { createCommentHistory, commentQuery, latestComments, type CommentSelection } from '$lib/commentHistory';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { CheckCircle2, FileSignature, ShieldCheck, X } from 'lucide-svelte';
   import SignerFields from '$lib/components/SignerFields.svelte';
   import PdfSignerView from '$lib/components/PdfSignerView.svelte';
   import A13Notice from '$lib/components/A13Notice.svelte';
+  import SignerPackageReview from '$lib/components/SignerPackageReview.svelte';
+  import type { SignerPackageResponse } from '$lib/signerPackage';
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
   import { signerCeremonyKey, validateSignerPDFObservation, type SignerPDFObservation, type SignerPDFScope } from '$lib/signerPDF';
+  import { createSignerViewRecorder, type SignerViewScope, type SignerViewState } from '$lib/signerView';
   import { t, setLocale } from '$lib/i18n';
+  import { completionArtifactLinks, type CompletionArtifactLinks } from '$lib/completionArtifacts';
 
   type Privacy = {
     controller: string;
@@ -96,10 +101,11 @@
   let showAdoptModal = $state(false);
   let signing = $state(false);
   let signError = $state<string | null>(null);
-  let completed = $state<{ url: string | null } | null>(null);
+  let completed = $state<{ terminal: boolean; links: CompletionArtifactLinks | null } | null>(null);
   let accepted = $state(false);
   let accepting = $state(false);
   let noticeAcknowledged = $state(false);
+  let packageReview = $state<{ key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse }>({ key: '', ready: false, settled: false });
 
   let showDeclineModal = $state(false);
   let declineReason = $state('');
@@ -128,54 +134,82 @@
   let comments = $state<DocComment[]>([]);
   let commentBody = $state('');
   let postingComment = $state(false);
-  let commentLoadRevision = 0;
+  let commentRouteEpoch = 0;
+  let commentSendRevision = 0;
+  let commentScopeKey = '';
+  let initialCommentKey = '';
+  let commentLoading = $state(false);
+  let olderCommentCursor = $state<string | null>(null);
+  let newerCommentCursor = $state<string | null>(null);
+  const commentHistory = createCommentHistory<CommentScope>({
+    readPage: async (scope, selection, signal) => {
+      const res = await fetch(`/sign/${encodeURIComponent(scope.token)}/comments${commentQuery(selection)}`, { signal, cache: 'no-store' });
+      if (!res.ok) throw new Error(`Message history request failed (HTTP ${res.status}).`);
+      return res.json();
+    },
+    isCurrent: isCurrentCommentScope,
+    changed: view => {
+      comments = view.comments; olderCommentCursor = view.olderCursor; newerCommentCursor = view.newerCursor;
+      commentLoading = view.loading; commentRefreshError = view.error;
+    },
+  });
   let commentRefreshError = $state<string | null>(null);
 
-  async function loadComments(token = $page.params.token, signal?: AbortSignal) {
-    if (!token) return;
-    const revision = ++commentLoadRevision;
-    const recipientID = ctx?.recipient.id;
-    try {
-      const res = await fetch(`/sign/${token}/comments`, { signal });
-      if (!res.ok) throw new Error(`Messages could not be refreshed (HTTP ${res.status}).`);
-      const body = await res.json();
-      if (!signal?.aborted && revision === commentLoadRevision && token === $page.params.token && recipientID === ctx?.recipient.id) {
-        comments = body?.comments ?? [];
-        commentRefreshError = null;
-      }
-    } catch (e) {
-      if (!signal?.aborted && revision === commentLoadRevision && token === $page.params.token && recipientID === ctx?.recipient.id) {
-        commentRefreshError = (e as Error).message;
-      }
-    }
+  type CommentScope = { epoch: number; token: string; documentID: string; recipientID: string;
+    noticeDigest: string; sourceKind: string; ceremonyKey: string };
+  function invalidateCommentScope() {
+    commentRouteEpoch++; commentSendRevision++; commentScopeKey = ''; initialCommentKey = '';
+    commentHistory.reset(); postingComment = false;
+    noticeAcknowledged = false; viewerScopeKey = ''; documentReady = false; showAdoptModal = false;
+  }
+  function synchronizeCommentScope(key: string, kind: string) {
+    const next = key ? JSON.stringify([key, kind]) : '';
+    if (commentScopeKey && commentScopeKey !== next) invalidateCommentScope();
+    commentScopeKey = next;
+  }
+  function captureCommentScope(): CommentScope | null {
+    const ceremonyKey = currentCeremonyKey();
+    synchronizeCommentScope(ceremonyKey, ctx?.source_kind ?? '');
+    if (!ctx || !ceremonyKey || !loadedToken) return null;
+    return { epoch: commentRouteEpoch, token: loadedToken, documentID: ctx.document_id, recipientID: ctx.recipient.id,
+      noticeDigest: ctx.privacy.notice_digest, sourceKind: ctx.source_kind, ceremonyKey };
+  }
+  function isCurrentCommentScope(scope: CommentScope): boolean {
+    return !routeDisposed && scope.epoch === commentRouteEpoch && scope.token === loadedToken && scope.token === $page.params.token
+      && scope.documentID === ctx?.document_id && scope.recipientID === ctx?.recipient.id
+      && scope.noticeDigest === ctx?.privacy.notice_digest && scope.sourceKind === ctx?.source_kind
+      && scope.ceremonyKey === currentCeremonyKey();
+  }
+
+  async function loadComments(token = $page.params.token, signal?: AbortSignal, selection: CommentSelection = latestComments) {
+    const scope = captureCommentScope();
+    if (scope && scope.token === token) await commentHistory.load(scope, selection, signal);
   }
 
   async function sendComment() {
-    if (!ctx || postingComment || !commentBody.trim()) return;
+    const scope = captureCommentScope();
+    if (!scope || postingComment || !commentBody.trim()) return;
+    const ticket = ++commentSendRevision;
+    const current = () => ticket === commentSendRevision && isCurrentCommentScope(scope);
     const submittedBody = commentBody;
-    const token = $page.params.token;
-    const recipientID = ctx.recipient.id;
-    const noticeDigest = ctx.privacy.notice_digest;
-    if (!token) return;
+    commentHistory.invalidate();
     postingComment = true;
+    signError = null;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/comments`, {
-        method: 'POST',
-        headers: signerNoticeHeaders(noticeDigest, true),
+      if (!noticeAcknowledged || acknowledgedScopeKey !== scope.ceremonyKey) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${encodeURIComponent(scope.token)}/comments`, {
+        method: 'POST', headers: signerNoticeHeaders(scope.noticeDigest, true),
         body: JSON.stringify({ body: submittedBody.trim() })
       });
+      if (!current()) return;
       if (!res.ok) throw new Error(`Message could not be sent (HTTP ${res.status}). Your draft has been kept.`);
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
-        if (commentBody === submittedBody) commentBody = '';
-        await loadComments(token);
-      }
+      if (commentBody === submittedBody) commentBody = '';
+      postingComment = false;
+      await loadComments(scope.token);
     } catch (e) {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
-        signError = (e as Error).message;
-      }
+      if (current()) signError = (e as Error).message;
     } finally {
-      if (token === $page.params.token && recipientID === ctx?.recipient.id) postingComment = false;
+      if (current()) postingComment = false;
     }
   }
 
@@ -262,36 +296,92 @@
   let viewerScopeKey = $state('');
   let routeDisposed = false;
   let acknowledgedScopeKey = '';
+  let acknowledgedSourceKind = '';
+  let ceremonyEpoch = $state(0);
+  let viewState = $state<SignerViewState>({ pending: false, confirmed: false, error: null });
+  const viewRecorder = createSignerViewRecorder({
+    fetch: (input, init) => fetch(input, init),
+    current: scope => viewScopeCurrent(scope),
+    changed: state => { viewState = state; }
+  });
 
   function currentCeremonyKey(): string {
     if (!ctx || loadedToken !== $page.params.token || routeDisposed) return '';
     return signerCeremonyKey(loadedToken, ctx.privacy.notice_digest, ctx.document_id, ctx.recipient.id, ctx.pdf_observation);
   }
 
-  function viewerReady(): boolean {
-    if (!ctx || loadedToken !== $page.params.token || routeDisposed) return false;
+  function documentDisplayed(): boolean {
+    if (!ctx || loadedToken !== $page.params.token || routeDisposed || loadError || completed || accepted || declined) return false;
     return ctx.source_kind === 'pdf'
-      ? !!ctx.pdf_observation && fieldsFilled && viewerScopeKey === currentCeremonyKey()
+      ? !!ctx.pdf_observation && viewerScopeKey === currentCeremonyKey()
       : documentReady;
   }
 
-  function updatePDFGate(filled: boolean, scope: SignerPDFScope) {
-    const key = signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation);
-    if (!key || key !== currentCeremonyKey()) return;
-    fieldsFilled = filled;
-    viewerScopeKey = filled ? key : '';
+  function viewerReady(): boolean {
+    return documentDisplayed() && !commentLoading && (ctx?.source_kind !== 'pdf' || fieldsFilled);
   }
 
-  function adoptPDF(scope: SignerPDFScope) {
-    if (signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation) === currentCeremonyKey()) void adopt();
+  function packageReady(): boolean {
+    return !!currentCeremonyKey() && packageReview.key === currentCeremonyKey() && packageReview.ready;
+  }
+
+  function packageCanLoad(): boolean {
+    return documentDisplayed() && viewState.confirmed;
+  }
+
+  function updatePackageReview(next: { key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse }, epoch: number) {
+    if (epoch !== ceremonyEpoch || next.key !== currentCeremonyKey()) return;
+    if (packageReview.key === next.key && packageReview.ready === next.ready && packageReview.settled === next.settled
+      && JSON.stringify(packageReview.response) === JSON.stringify(next.response)) return;
+    packageReview = { ...next, ...(next.response ? { response: { ...next.response } } : {}) };
+    if (next.settled && packageCanLoad() && initialCommentKey !== next.key) {
+      initialCommentKey = next.key;
+      void loadComments(loadedToken);
+    }
+  }
+
+  function updatePDFGate(filled: boolean, scope: SignerPDFScope, epoch = ceremonyEpoch) {
+    const key = signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation);
+    if (epoch !== ceremonyEpoch || ctx?.source_kind !== 'pdf' || !key || key !== currentCeremonyKey()) return;
+    fieldsFilled = filled;
+  }
+
+  function updatePDFReady(ready: boolean, scope: SignerPDFScope, epoch = ceremonyEpoch) {
+    const key = signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation);
+    if (epoch !== ceremonyEpoch || ctx?.source_kind !== 'pdf' || !key || key !== currentCeremonyKey()) return;
+    viewerScopeKey = ready ? key : '';
+  }
+
+  function adoptPDF(scope: SignerPDFScope, epoch = ceremonyEpoch) {
+    if (epoch === ceremonyEpoch && signerCeremonyKey(scope.token, scope.noticeDigest, scope.observation.document_id, scope.observation.recipient_id, scope.observation) === currentCeremonyKey()) void adopt();
+  }
+
+  function currentViewScope(): SignerViewScope | null {
+    const key = currentCeremonyKey();
+    if (!key || !ctx) return null;
+    return { epoch: ceremonyEpoch, key, kind: ctx.source_kind, token: loadedToken, noticeDigest: ctx.privacy.notice_digest };
+  }
+
+  function viewScopeCurrent(scope: SignerViewScope): boolean {
+    return scope.epoch === ceremonyEpoch && scope.key === currentCeremonyKey()
+      && scope.kind === ctx?.source_kind && scope.token === loadedToken
+      && scope.noticeDigest === ctx?.privacy.notice_digest;
   }
 
   $effect.pre(() => {
     const key = currentCeremonyKey();
+    const kind = ctx?.source_kind ?? '';
     untrack(() => {
-      if (key !== acknowledgedScopeKey) {
+      synchronizeCommentScope(key, kind);
+      if (key !== acknowledgedScopeKey || kind !== acknowledgedSourceKind) {
+        ceremonyEpoch += 1;
+        viewRecorder.invalidate();
         acknowledgedScopeKey = key;
+        acknowledgedSourceKind = kind;
         noticeAcknowledged = false;
+        packageReview = { key: '', ready: false, settled: false };
+        initialCommentKey = '';
+        fieldsFilled = false;
         viewerScopeKey = '';
         documentReady = false;
         showAdoptModal = false;
@@ -300,10 +390,20 @@
   });
 
   $effect(() => {
+    const scope = currentViewScope();
+    const ready = documentDisplayed();
+    const acknowledged = noticeAcknowledged;
+    // Confirmation state must not become a dependency or trigger HTTP retries.
+    untrack(() => viewRecorder.update(scope, ready, acknowledged));
+  });
+
+  $effect(() => {
     if (ctx?.recipient.name) typedName = ctx.recipient.name;
   });
 
   function resetRouteState() {
+    ceremonyEpoch += 1;
+    viewRecorder.invalidate();
     ctx = null;
     loadError = null;
     documentHTML = '';
@@ -316,6 +416,8 @@
     accepted = false;
     accepting = false;
     noticeAcknowledged = false;
+    packageReview = { key: '', ready: false, settled: false };
+    initialCommentKey = '';
     showDeclineModal = false;
     declineReason = '';
     declined = false;
@@ -334,7 +436,9 @@
     annoError = null;
     comments = [];
     commentRefreshError = null;
-    commentLoadRevision++;
+    invalidateCommentScope();
+    acknowledgedScopeKey = '';
+    acknowledgedSourceKind = '';
     commentBody = '';
     postingComment = false;
     fieldsFilled = false;
@@ -344,6 +448,7 @@
   }
 
   async function load(token: string, signal: AbortSignal) {
+    let currentLoad = () => !signal.aborted && !routeDisposed && token === $page.params.token;
     try {
       const res = await fetch(`/sign/${token}`, { signal, cache: 'no-store' });
       if (signal.aborted) return;
@@ -365,6 +470,7 @@
       }
       loadedToken = token;
       ctx = loaded;
+      const installedContext = ctx;
 
 	  // Legal translations have not all received counsel review. Keep the
 	  // complete signer ceremony in English until an approved catalog ships;
@@ -383,29 +489,44 @@
 	  } else if (rs === 'accepted' && !docDone) {
 		accepted = true;
       } else if (rs === 'signed' || docDone) {
-        completed = { url: null };
+        completed = { terminal: docDone, links: null };
       } else if (loaded.status === 'changes_requested') {
         // A change request paused signing; show the pending state on return.
         changesRequested = true;
       }
+
+      // Terminal recipients must not briefly mount a live document viewer.
+      // Capture the installed Svelte proxy, not the raw response object.
+      const loadKey = currentCeremonyKey();
+      const loadKind = ctx.source_kind;
+      currentLoad = () => !signal.aborted && !routeDisposed && token === $page.params.token
+        && ctx === installedContext && loadKey === currentCeremonyKey() && loadKind === ctx.source_kind;
+      await tick();
+      if (!currentLoad()) return;
+      const loadEpoch = ceremonyEpoch;
+      const sameContext = currentLoad;
+      currentLoad = () => sameContext() && loadEpoch === ceremonyEpoch;
+      if (completed || accepted || declined) return;
 
       // Block-source documents render server-side HTML; pdf-source documents
       // render via pdf.js in PdfSignerView, so skip the HTML endpoint (it
       // refuses pdf-source).
       if (loaded.source_kind === 'blocks') {
         const docRes = await fetch(`/sign/${token}/document`, { signal, cache: 'no-store' });
-        if (signal.aborted || token !== $page.params.token) return;
+        if (!currentLoad()) return;
         if (!docRes.ok) throw new Error('The document could not be loaded. Please reopen your signing link.');
         const html = await docRes.text();
-        if (signal.aborted || token !== $page.params.token) return;
+        if (!currentLoad()) return;
         if (!html.trim()) throw new Error('The document is empty. Please contact the sender.');
         documentHTML = html;
+        await tick();
+        if (!currentLoad()) return;
         documentReady = true;
       }
-      if (signal.aborted || token !== $page.params.token) return;
-      void loadComments(token, signal);
+      if (!currentLoad()) return;
+      // The current package descriptor starts comments after view confirmation.
     } catch (e) {
-      if (!signal.aborted && token === $page.params.token) {
+      if (currentLoad()) {
         fieldsFilled = false;
         documentReady = false;
         viewerScopeKey = '';
@@ -417,7 +538,7 @@
   onMount(() => {
 	setLocale('en');
   });
-  onDestroy(() => { routeDisposed = true; });
+  onDestroy(() => { routeDisposed = true; viewRecorder.dispose(); invalidateCommentScope(); commentHistory.dispose(); });
 
   // SvelteKit keeps this page component alive when only [token] changes.
   // Scope every load to that token and tear down all recipient-specific UI
@@ -435,12 +556,12 @@
       clearLegacyA13Acknowledgement(token);
       void load(token, controller.signal);
     });
-    return () => controller.abort();
+    return () => { controller.abort(); untrack(() => { viewRecorder.invalidate(); invalidateCommentScope(); }); };
   });
 
   async function adopt() {
     if (!ctx || changesRequested || requestingChanges) return;
-    if (signing || accepting || declining || !viewerReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined) return;
+    if (signing || accepting || declining || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined) return;
     if (!typedName.trim()) {
       signError = 'Please type your name first.';
       return;
@@ -449,30 +570,19 @@
   }
 
   function acknowledgeCurrentNotice() {
-    if (!ctx) return;
-    const token = $page.params.token;
-    const recipientID = ctx.recipient.id;
-    const noticeDigest = ctx.privacy.notice_digest;
-    if (!token) return;
+    if (!currentCeremonyKey()) return;
     noticeAcknowledged = true;
-    // The first evidence-producing interaction now happens only after the
-    // current notice was acknowledged. Repeats are idempotent server-side.
-    void fetch(`/sign/${token}/view`, {
-      method: 'POST',
-      headers: signerNoticeHeaders(noticeDigest),
-    }).then(() => {
-      // Do not let a late response touch state for a different magic link.
-      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
-    }).catch(() => {});
   }
 
   async function confirmSign() {
     if (!ctx || changesRequested || requestingChanges) return;
-    if (signing || accepting || declining || !viewerReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined || !typedName.trim()) return;
+    if (signing || accepting || declining || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined || !typedName.trim()) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
     const ceremonyKey = currentCeremonyKey();
+    const packageResponse = packageReview.response ? { ...packageReview.response } : undefined;
+    const requiresPackagePortal = packageResponse !== undefined;
     if (!token) return;
     signing = true;
     signError = null;
@@ -481,7 +591,7 @@
       const res = await fetch(`/sign/${token}/sign`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
-        body: JSON.stringify({ typed_name: typedName, font: chosenFont })
+        body: JSON.stringify({ typed_name: typedName, font: chosenFont, ...(packageResponse ? { package_response: packageResponse } : {}) })
       });
       if (ceremonyKey !== currentCeremonyKey()) return;
       if (!res.ok) {
@@ -493,15 +603,11 @@
       }
       const body = await res.json();
       if (ceremonyKey !== currentCeremonyKey()) return;
-      if (body.completed) {
-        completed = {
-          url: typeof body.final_pdf_url === 'string' && body.final_pdf_url
-            ? body.final_pdf_url
-            : null
-        };
+      if (body.completed === true) {
+        completed = { terminal: true, links: completionArtifactLinks(body, token, requiresPackagePortal) };
       } else {
         // Other signers still pending.
-        completed = { url: null };
+        completed = { terminal: false, links: null };
       }
       showAdoptModal = false;
     } catch (e) {
@@ -521,11 +627,13 @@
 
   async function accept() {
     if (!ctx || changesRequested || requestingChanges) return;
-    if (signing || accepting || declining || !viewerReady() || !noticeAcknowledged || completed || accepted || declined) return;
+    if (signing || accepting || declining || !viewerReady() || !packageReady() || !noticeAcknowledged || completed || accepted || declined) return;
     const token = $page.params.token;
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
     const ceremonyKey = currentCeremonyKey();
+    const packageResponse = packageReview.response ? { ...packageReview.response } : undefined;
+    const requiresPackagePortal = packageResponse !== undefined;
     if (!token) return;
     accepting = true;
     signError = null;
@@ -534,7 +642,7 @@
       const res = await fetch(`/sign/${token}/accept`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
-        body: JSON.stringify({})
+        body: JSON.stringify(packageResponse ? { package_response: packageResponse } : {})
       });
       if (ceremonyKey !== currentCeremonyKey()) return;
       if (!res.ok) {
@@ -544,12 +652,8 @@
       }
       const data = await res.json();
       if (ceremonyKey !== currentCeremonyKey()) return;
-      if (data.completed) {
-        completed = {
-          url: typeof data.final_pdf_url === 'string' && data.final_pdf_url
-            ? data.final_pdf_url
-            : null
-        };
+      if (data.completed === true) {
+        completed = { terminal: true, links: completionArtifactLinks(data, token, requiresPackagePortal) };
       } else {
         accepted = true;
       }
@@ -648,11 +752,12 @@
 
 {#if ctx?.privacy}
   {@const noticeCeremonyKey = currentCeremonyKey()}
-  {#key noticeCeremonyKey}
+  {#key JSON.stringify([ceremonyEpoch, noticeCeremonyKey, ctx.source_kind])}
+    {@const noticeEpoch = untrack(() => ceremonyEpoch)}
     <A13Notice
       privacy={ctx.privacy}
       storageKey={a13AcknowledgementKey(ctx)}
-	  onAcknowledged={() => { if (noticeCeremonyKey === currentCeremonyKey()) acknowledgeCurrentNotice(); }}
+	  onAcknowledged={() => { if (noticeEpoch === ceremonyEpoch && noticeCeremonyKey === currentCeremonyKey()) acknowledgeCurrentNotice(); }}
     />
   {/key}
 {/if}
@@ -689,11 +794,17 @@
     <div class="state-card">
       <CheckCircle2 class="size-10 text-success mb-3 mx-auto" />
 	  <h2>{ctx.requires_signature ? $t('sign.signed.title') : $t('sign.accepted.completedTitle')}</h2>
-      {#if completed.url}
+      {#if completed.links}
 		<p>{ctx.requires_signature ? $t('sign.signed.allParties') : $t('sign.accepted.completedAllParties')}</p>
-        <a class="btn btn-primary" href={completed.url} download>
+        <a class="btn btn-primary" href={completed.links.finalPDFURL} download>
 		  {ctx.requires_signature ? $t('sign.signed.download') : $t('sign.accepted.download')}
         </a>
+        <a class="btn btn-secondary" href={completed.links.auditCertURL} download>
+          {$t('sign.completed.downloadAudit')}
+        </a>
+        {#if completed.links.packagePortalURL}<a class="btn btn-secondary" href={completed.links.packagePortalURL}>Download original contract files</a>{/if}
+      {:else if completed.terminal}
+        <p>{$t('sign.completed.downloadsUnavailable')}</p>
       {:else}
 		<p>{ctx.requires_signature ? $t('sign.signed.recorded') : $t('sign.accepted.completedRecorded')}</p>
       {/if}
@@ -709,15 +820,17 @@
       <article class="document-frame" aria-label="Current document">
         {#if ctx.source_kind === 'pdf'}
           {#if ctx.pdf_observation}
-          {#key currentCeremonyKey()}
+          {#key JSON.stringify([ceremonyEpoch, currentCeremonyKey(), ctx.source_kind])}
+          {@const pdfEpoch = untrack(() => ceremonyEpoch)}
           <PdfSignerView
             token={$page.params.token ?? ''}
             noticeDigest={ctx.privacy.notice_digest}
             observation={ctx.pdf_observation}
             signed={!!completed}
             readOnly={changesRequested || requestingChanges || signing || accepting || declining}
-            onFilledChange={updatePDFGate}
-            onSignatureClick={adoptPDF}
+            onReadyChange={(ready, scope) => updatePDFReady(ready, scope, pdfEpoch)}
+            onFilledChange={(filled, scope) => updatePDFGate(filled, scope, pdfEpoch)}
+            onSignatureClick={(scope) => adoptPDF(scope, pdfEpoch)}
           />
           {/key}
           {/if}
@@ -727,9 +840,25 @@
             {@html documentHTML}
           </div>
         {/if}
+        {#if packageCanLoad()}
+        {#key JSON.stringify([ceremonyEpoch, currentCeremonyKey()])}
+          {@const packageEpoch = untrack(() => ceremonyEpoch)}
+          {@const packageScope = untrack(() => ({ token: loadedToken, key: currentCeremonyKey(), documentID: ctx!.document_id,
+            recipientID: ctx!.recipient.id, noticeDigest: ctx!.privacy.notice_digest, observation: ctx!.pdf_observation }))}
+          <SignerPackageReview scope={packageScope} mainReady={documentDisplayed()}
+            disabled={requestingChanges || signing || accepting || declining || commentLoading}
+            onChange={next => updatePackageReview(next, packageEpoch)} />
+        {/key}
+        {/if}
       </article>
 
       <aside class="signer-actions">
+        {#if viewState.error}
+          <div class="banner banner-danger" role="alert">
+            <p>{viewState.error}</p>
+            <button class="btn btn-secondary" disabled={viewState.pending || !documentDisplayed() || !noticeAcknowledged} onclick={() => viewRecorder.retry()}>Retry view confirmation</button>
+          </div>
+        {/if}
         {#if changesRequested}
           <section class="negotiation-status" role="status" aria-label="Changes requested">
             <h2>{$t('changes.requested.title')}</h2>
@@ -749,18 +878,19 @@
         {:else if !ctx.requires_signature}
           <h3 class="section-eyebrow">{$t('sign.accept.title')}</h3>
           <p class="text-xs text-text-muted mb-3">{$t('sign.accept.body')}</p>
-          <button class="btn btn-primary w-full" disabled={accepting || signing || declining || requestingChanges || !viewerReady() || !noticeAcknowledged} onclick={accept}>
+          <button class="btn btn-primary w-full" disabled={accepting || signing || declining || requestingChanges || !viewerReady() || !packageReady() || !noticeAcknowledged} onclick={accept}>
             <CheckCircle2 class="size-4" /> {accepting ? $t('common.loading') : $t('sign.accept.button')}
           </button>
           <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
         {:else}
         {#if ctx.source_kind !== 'pdf'}
           {@const blockCeremonyKey = currentCeremonyKey()}
-          {#key blockCeremonyKey}
+          {#key JSON.stringify([ceremonyEpoch, blockCeremonyKey, ctx.source_kind])}
+          {@const blockEpoch = untrack(() => ceremonyEpoch)}
           <SignerFields
             token={$page.params.token ?? ''}
             noticeDigest={ctx.privacy.notice_digest}
-            onChange={(v) => { if (blockCeremonyKey === currentCeremonyKey()) fieldsFilled = v; }}
+            onChange={(v) => { if (blockEpoch === ceremonyEpoch && blockCeremonyKey === currentCeremonyKey()) fieldsFilled = v; }}
           />
           {/key}
         {:else}
@@ -782,7 +912,7 @@
 
         <button
           class="btn btn-primary w-full"
-          disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !noticeAcknowledged || !typedName.trim() || !fieldsFilled}
+          disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !packageReady() || !noticeAcknowledged || !typedName.trim() || !fieldsFilled}
           onclick={adopt}
           title={!fieldsFilled ? $t('sign.fillRequiredTitle') : ''}
         >
@@ -808,10 +938,18 @@
 
         <div class="comments">
           <h3 class="section-eyebrow">{$t('comments.title')}</h3>
+          <nav aria-label="Message history" class="flex gap-2">
+            <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !olderCommentCursor}
+              onclick={() => olderCommentCursor && loadComments(undefined, undefined, { kind: 'before', cursor: olderCommentCursor })}>Older</button>
+            <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !newerCommentCursor}
+              onclick={() => newerCommentCursor && loadComments(undefined, undefined, { kind: 'after', cursor: newerCommentCursor })}>Newer</button>
+            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => loadComments()}>Latest</button>
+          </nav>
+          <p role="status" aria-live="polite">{commentLoading ? 'Loading messages…' : ''}</p>
           {#if commentRefreshError}
             <div role="alert">
               <p class="error">{commentRefreshError}</p>
-              <button type="button" class="btn btn-secondary" onclick={() => loadComments()}>Retry message refresh</button>
+              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>Retry message refresh</button>
             </div>
           {/if}
           {#if comments.length}
@@ -863,7 +1001,7 @@
 
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick={() => (showAdoptModal = false)}>{$t('common.cancel')}</button>
-        <button class="btn btn-primary" disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !fieldsFilled || !noticeAcknowledged || !typedName.trim()} onclick={confirmSign}>
+        <button class="btn btn-primary" disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || !typedName.trim()} onclick={confirmSign}>
           {signing ? $t('adopt.signing') : $t('adopt.confirm')}
         </button>
       </div>

@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -12,9 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/envelopes"
 )
 
 // Phase 8.6 envelope REST surface. Envelopes ARE documents (with
@@ -27,7 +25,7 @@ func (s *Server) handlePromoteToEnvelope(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	docID, ok := parseUUIDParam(w, r, "id")
+	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
 	}
@@ -35,40 +33,24 @@ func (s *Server) handlePromoteToEnvelope(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "envelopes engine not configured")
 		return
 	}
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Document, error) {
-			return envelopes.New(q).PromoteToEnvelope(r.Context(), docID, sess.OrgID)
-		},
-		func(*generated.Document) audit.Entry {
-			return audit.Entry{
-				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID,
-				Kind:      audit.KindDocumentUpdated,
-				IP:        firstIPFromHeader(r),
-				UserAgent: r.UserAgent(),
-				Payload:   map[string]any{"via": "rest", "tool": "promote_to_envelope"},
-			}
-		},
-	)
+	result, err := s.mutateEnvelopeOwnedV1(r, sess.OrgID, sess.UserID, "promote_to_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopePromoteV1, Root: id})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "document not found or not eligible (must be draft + blocks-source + not a child)")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeEnvelopeOwnedErrorV1(w, "promote_to_envelope", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(row))
+	writeJSON(w, http.StatusOK, toDocumentResponse(result.Document))
 }
 
-// POST /api/v1/envelopes/{id}/attach
-//
-// Body: { "child_id": "<uuid>", "position": <int, optional> }
+// Original small single Decode caps/unknown-field/trailing behavior are kept.
 func (s *Server) handleAttachToEnvelope(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
 		return
 	}
-	envelopeID, ok := parseUUIDParam(w, r, "id")
+	root, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
 	}
@@ -77,45 +59,36 @@ func (s *Server) handleAttachToEnvelope(w http.ResponseWriter, r *http.Request) 
 		Position int32  `json:"position"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeEnvelopeStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	childID, err := uuid.Parse(in.ChildID)
+	child, err := uuid.Parse(in.ChildID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "child_id must be a uuid")
 		return
 	}
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Document, error) {
-			return envelopes.New(q).Attach(r.Context(), envelopeID, childID, sess.OrgID, in.Position)
-		},
-		func(*generated.Document) audit.Entry {
-			return audit.Entry{
-				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
-				Kind:      audit.KindDocumentUpdated,
-				IP:        firstIPFromHeader(r),
-				UserAgent: r.UserAgent(),
-				Payload:   map[string]any{"via": "rest", "tool": "attach_to_envelope", "child_id": childID.String()},
-			}
-		},
-	)
+	result, err := s.mutateEnvelopeOwnedV1(r, sess.OrgID, sess.UserID, "attach_to_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeAttachV1, Root: root, Children: []uuid.UUID{child}, Position: in.Position})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeEnvelopeOwnedErrorV1(w, "attach_to_envelope", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(row))
+	writeJSON(w, http.StatusOK, toDocumentResponse(result.Document))
 }
-
-// POST /api/v1/envelopes/{id}/detach
-//
-// Body: { "child_id": "<uuid>" }
 func (s *Server) handleDetachFromEnvelope(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
 		return
 	}
-	envelopeID, ok := parseUUIDParam(w, r, "id")
+	root, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
 	}
@@ -123,45 +96,36 @@ func (s *Server) handleDetachFromEnvelope(w http.ResponseWriter, r *http.Request
 		ChildID string `json:"child_id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeEnvelopeStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	childID, err := uuid.Parse(in.ChildID)
+	child, err := uuid.Parse(in.ChildID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "child_id must be a uuid")
 		return
 	}
-	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
-		func(q *generated.Queries) (*generated.Document, error) {
-			return envelopes.New(q).Detach(r.Context(), childID, sess.OrgID)
-		},
-		func(*generated.Document) audit.Entry {
-			return audit.Entry{
-				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
-				Kind:      audit.KindDocumentUpdated,
-				IP:        firstIPFromHeader(r),
-				UserAgent: r.UserAgent(),
-				Payload:   map[string]any{"via": "rest", "tool": "detach_from_envelope", "child_id": childID.String()},
-			}
-		},
-	)
+	result, err := s.mutateEnvelopeOwnedV1(r, sess.OrgID, sess.UserID, "detach_from_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeDetachV1, Root: root, Children: []uuid.UUID{child}})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeEnvelopeOwnedErrorV1(w, "detach_from_envelope", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(row))
+	writeJSON(w, http.StatusOK, toDocumentResponse(result.Document))
 }
-
-// POST /api/v1/envelopes/{id}/reorder
-//
-// Body: { "child_ids": ["<uuid>", "<uuid>", ...] }
 func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
 		return
 	}
-	envelopeID, ok := parseUUIDParam(w, r, "id")
+	root, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
 	}
@@ -169,7 +133,12 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 		ChildIDs []string `json:"child_ids"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeEnvelopeStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -182,50 +151,17 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 		}
 		ids = append(ids, id)
 	}
-	if _, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: envelopeID, OrgID: sess.OrgID}); err != nil {
-		writeError(w, http.StatusNotFound, "envelope not found")
-		return
+	result, err := s.mutateEnvelopeOwnedV1(r, sess.OrgID, sess.UserID, "reorder_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeReorderV1, Root: root, Children: ids})
+	if result != nil {
+		defer result.CloseConsumerV1()
 	}
-	if s.Audit == nil {
-		writeInternalErrorMsg(w, "reorder envelope", errors.New("audit unavailable"))
-		return
-	}
-	tx, err := s.Pool.Begin(r.Context())
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeEnvelopeOwnedErrorV1(w, "reorder_envelope", err)
 		return
 	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	if err := envelopes.New(s.Queries.WithTx(tx)).Reorder(r.Context(), envelopeID, sess.OrgID, ids); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": "reorder_envelope", "count": len(ids)},
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	s.Audit.Publish(pending)
-	children, err := s.Queries.ListEnvelopeChildMetadataForRead(r.Context(), generated.ListEnvelopeChildMetadataForReadParams{
-		ParentEnvelopeID: pgtype.UUID{Bytes: envelopeID, Valid: true}, OrgID: sess.OrgID,
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	out := make([]any, 0, len(children))
-	for _, c := range children {
-		out = append(out, toEnvelopeChildMetadataResponse(c))
+	out := make([]any, 0, len(result.Children))
+	for _, child := range result.Children {
+		out = append(out, toEnvelopeChildMetadataResponse(child))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"children": out, "count": len(out)})
 }

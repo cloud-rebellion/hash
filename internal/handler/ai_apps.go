@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,11 +20,14 @@ import (
 
 	"github.com/bright-interaction/hash/internal/ai"
 	"github.com/bright-interaction/hash/internal/aiapps"
+	"github.com/bright-interaction/hash/internal/aiauthoring"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/negotiationauthoring"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 )
 
 const signerClarifierTimeout = 35 * time.Second
@@ -54,13 +58,27 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), signerClarifierTimeout)
+	defer cancel()
+	owned, err := s.Sign.NewSignerAIRequestV1(ctx, rc, noticeEvidence, clientIP(r), r.UserAgent())
+	if err != nil {
+		s.writeSignerClarifierError(w, signerClarifierFailureV1(err))
+		return
+	}
+	defer owned.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
 	var in signerClarifierInput
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err := owned.WithBodyV1(ctx, r.Body, func(body io.Reader) error {
+		original := r.Body
+		r.Body = io.NopCloser(body)
+		defer func() { r.Body = original }()
+		return decodeSignerJSON(r, &in)
+	}); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -69,12 +87,23 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.completeSignerClarifier(r, rc, noticeEvidence, in)
+	if err := owned.CaptureInputV1(ctx, in.BlockID, in.Locale, in.SelectionText, in.Question); err != nil {
+		s.writeSignerClarifierError(w, signerClarifierFailureV1(err))
+		return
+	}
+	res, err := s.completeSignerClarifier(r, ctx, owned, in)
+	if res != nil {
+		defer res.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeSignerClarifierError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	started := false
+	err = res.WithValueV1(r.Context(), func(value aiapps.ClarifyResult) error { started = true; writeJSON(w, http.StatusOK, value); return nil })
+	if err != nil && !started {
+		s.writeSignerClarifierError(w, signerClarifierFailureV1(err))
+	}
 }
 
 // lookupBlockWithNeighbours walks the top-level block list + finds the
@@ -119,6 +148,14 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, ok := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var in struct {
 		BlockID      string `json:"block_id"`
@@ -128,7 +165,7 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 		AIAssisted   bool   `json:"ai_assisted"`
 		ParentID     string `json:"parent_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithStreamingBodyV1(r.Context(), r.Body, func(raw []byte) error { return json.NewDecoder(bytes.NewReader(raw)).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -156,59 +193,15 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	row, err := authoring.CommitNegotiationMutation(r.Context(), s.aiAppDependencies(), actor, docID,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
-			if _, err := authoring.AIAppBlock(doc, in.BlockID); err != nil {
-				return nil, err
-			}
-			if parent.Valid {
-				row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: uuid.UUID(parent.Bytes), OrgID: sess.OrgID, DocumentID: doc.ID})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, authoring.ErrAIProposalNotFound
-				}
-				if err != nil {
-					return nil, err
-				}
-				if row.BlockID != in.BlockID {
-					return nil, authoring.ErrAIProposalBlockMismatch
-				}
-			}
-			return q.InsertProposal(ctx, generated.InsertProposalParams{
-				DocumentID:   doc.ID,
-				OrgID:        sess.OrgID,
-				ProposedBy:   pgtype.UUID{Bytes: sess.UserID, Valid: true},
-				BlockID:      in.BlockID,
-				ProposalKind: in.ProposalKind,
-				ProposedText: in.ProposedText,
-				Rationale:    in.Rationale,
-				DiffJson:     []byte("{}"),
-				AiAssisted:   in.AIAssisted,
-				ParentID:     parent,
-			})
-		},
-		func(row *generated.DocumentProposal) audit.Entry {
-			return audit.Entry{
-				OrgID:       sess.OrgID,
-				ActorUserID: &sess.UserID,
-				DocumentID:  &docID,
-				Kind:        "negotiation.proposed",
-				IP:          firstIPFromHeader(r),
-				UserAgent:   r.UserAgent(),
-				Payload: map[string]any{
-					"via":         "rest",
-					"proposal_id": row.ID.String(),
-					"block_id":    in.BlockID,
-					"kind":        in.ProposalKind,
-					"ai_assisted": in.AIAssisted,
-				},
-			}
-		},
-	)
+	result, err := s.mutateManualNegotiationV1(r, actor, docID, negotiationauthoring.InputV1{Operation: pdfadmission.ManualProposalCreateV1, BlockID: in.BlockID, ProposalKind: in.ProposalKind, ProposedText: in.ProposedText, Rationale: in.Rationale, AIAssisted: in.AIAssisted, ParentID: parent})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, proposalToDTO(row))
+	writeJSON(w, http.StatusCreated, proposalToDTO(result.Proposal))
 }
 
 // GET /api/v1/documents/{id}/proposals
@@ -257,11 +250,19 @@ func (s *Server) handleSetProposalStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, ok := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
 	var in struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithStreamingBodyV1(r.Context(), r.Body, func(raw []byte) error { return json.NewDecoder(bytes.NewReader(raw)).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -285,41 +286,15 @@ func (s *Server) handleSetProposalStatus(w http.ResponseWriter, r *http.Request)
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	row, err := authoring.CommitNegotiationMutation(r.Context(), s.aiAppDependencies(), actor, ownerDoc,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (*generated.DocumentProposal, error) {
-			row, err := q.GetProposalForUpdate(ctx, generated.GetProposalForUpdateParams{ID: id, OrgID: sess.OrgID, DocumentID: doc.ID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, authoring.ErrAIProposalNotFound
-			}
-			if err != nil {
-				return nil, err
-			}
-			if _, err := authoring.AIAppBlock(doc, row.BlockID); err != nil {
-				return nil, err
-			}
-			return q.SetProposalStatus(ctx, generated.SetProposalStatusParams{
-				ID:     id,
-				OrgID:  sess.OrgID,
-				Status: in.Status,
-			})
-		},
-		func(row *generated.DocumentProposal) audit.Entry {
-			return audit.Entry{
-				OrgID:       sess.OrgID,
-				ActorUserID: &sess.UserID,
-				DocumentID:  &row.DocumentID,
-				Kind:        "negotiation.status_changed",
-				IP:          firstIPFromHeader(r),
-				UserAgent:   r.UserAgent(),
-				Payload:     map[string]any{"via": "rest", "proposal_id": id.String(), "status": in.Status},
-			}
-		},
-	)
+	result, err := s.mutateManualNegotiationV1(r, actor, ownerDoc, negotiationauthoring.InputV1{Operation: pdfadmission.ManualProposalStatusV1, ProposalID: id, Status: in.Status})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, proposalToDTO(row))
+	writeJSON(w, http.StatusOK, proposalToDTO(result.Proposal))
 }
 
 // POST /api/v1/documents/{id}/proposals/suggest
@@ -340,19 +315,25 @@ func (s *Server) handleSuggestCounter(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input, err := s.HTMLCreationSessions.NewAIHTTPInputV1(r.Context(), sess.OrgID, "suggest_counter_clause")
+	if err != nil {
+		s.writeAIAppMutationError(w, err)
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
 	var in struct {
 		BlockID  string   `json:"block_id"`
 		Concern  string   `json:"concern"`
 		RedLines []string `json:"red_lines"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithBodyV1(r.Context(), r.Body, func(reader io.Reader) error { return json.NewDecoder(reader).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	res, err := runStaffAICompletion(r, s, sess, docID, "suggest_counter_clause", s.Negotiator.Runtime,
 		func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.CounterResult, error) {
-			block, err := authoring.AIAppBlock(doc, in.BlockID)
+			block, err := authoring.AIAppBlockContextV1(ctx, doc, in.BlockID)
 			if err != nil {
 				return aiapps.CounterResult{}, err
 			}
@@ -361,11 +342,23 @@ func (s *Server) handleSuggestCounter(w http.ResponseWriter, r *http.Request) {
 				OriginalClause: block.Text, Concern: in.Concern, RedLines: in.RedLines,
 			})
 		}, nil)
+	if res != nil {
+		defer res.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	outputStarted := false
+	if err = res.WithValueV1(r.Context(), func(value aiapps.CounterResult) error {
+		outputStarted = true
+		writeJSON(w, http.StatusOK, value)
+		return nil
+	}); err != nil && !outputStarted {
+		s.writeAIAppMutationError(w, err)
+	}
+	// Cancellation after an actual write may report incomplete delivery; it
+	// cannot append a second error document to an already-started200 response.
 }
 
 // POST /api/v1/documents/{id}/bilingual/equivalence
@@ -384,6 +377,12 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	input, err := s.HTMLCreationSessions.NewAIHTTPInputV1(r.Context(), sess.OrgID, "check_bilingual_equivalence")
+	if err != nil {
+		s.writeAIAppMutationError(w, err)
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var in struct {
 		LangA   string `json:"lang_a"`
@@ -392,7 +391,7 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 		ClauseB string `json:"clause_b"`
 		BlockID string `json:"block_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithBodyV1(r.Context(), r.Body, func(reader io.Reader) error { return json.NewDecoder(reader).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -400,7 +399,7 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 		func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.EquivalenceResult, error) {
 			clauseA := in.ClauseA
 			if in.BlockID != "" {
-				block, err := authoring.AIAppBlock(doc, in.BlockID)
+				block, err := authoring.AIAppBlockContextV1(ctx, doc, in.BlockID)
 				if err != nil {
 					return aiapps.EquivalenceResult{}, err
 				}
@@ -422,11 +421,23 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 				},
 			}
 		})
+	if res != nil {
+		defer res.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	outputStarted := false
+	if err = res.WithValueV1(r.Context(), func(value aiapps.EquivalenceResult) error {
+		outputStarted = true
+		writeJSON(w, http.StatusOK, value)
+		return nil
+	}); err != nil && !outputStarted {
+		s.writeAIAppMutationError(w, err)
+	}
+	// Cancellation after an actual write may report incomplete delivery; it
+	// cannot append a second error document to an already-started200 response.
 }
 
 // PATCH /api/v1/documents/{id}/negotiation-enabled
@@ -441,11 +452,19 @@ func (s *Server) handleSetNegotiationEnabled(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, ok := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	var in struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithStreamingBodyV1(r.Context(), r.Body, func(raw []byte) error { return json.NewDecoder(bytes.NewReader(raw)).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -454,14 +473,10 @@ func (s *Server) handleSetNegotiationEnabled(w http.ResponseWriter, r *http.Requ
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	_, err = authoring.CommitNegotiationMutation(r.Context(), s.aiAppDependencies(), actor, docID,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (bool, error) {
-			return true, q.SetDocumentNegotiationEnabled(ctx, generated.SetDocumentNegotiationEnabledParams{ID: doc.ID, OrgID: sess.OrgID, NegotiationEnabled: in.Enabled})
-		}, func(bool) audit.Entry {
-			return audit.Entry{OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID, Kind: "negotiation.setting_changed",
-				IP: firstIPFromHeader(r), UserAgent: r.UserAgent(), Payload: map[string]any{"via": "rest", "enabled": in.Enabled},
-			}
-		})
+	result, err := s.mutateManualNegotiationV1(r, actor, docID, negotiationauthoring.InputV1{Operation: pdfadmission.ManualNegotiationSettingV1, Enabled: in.Enabled})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
@@ -481,11 +496,19 @@ func (s *Server) handleSetBilingualTarget(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, ok := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	var in struct {
 		Lang string `json:"lang"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := input.WithStreamingBodyV1(r.Context(), r.Body, func(raw []byte) error { return json.NewDecoder(bytes.NewReader(raw)).Decode(&in) }); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -494,14 +517,10 @@ func (s *Server) handleSetBilingualTarget(w http.ResponseWriter, r *http.Request
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	_, err = authoring.CommitNegotiationMutation(r.Context(), s.aiAppDependencies(), actor, docID,
-		func(ctx context.Context, q *generated.Queries, doc *generated.Document) (bool, error) {
-			return true, q.SetDocumentBilingualTarget(ctx, generated.SetDocumentBilingualTargetParams{ID: doc.ID, OrgID: sess.OrgID, BilingualTargetLang: in.Lang})
-		}, func(bool) audit.Entry {
-			return audit.Entry{OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID, Kind: "bilingual.target_changed",
-				IP: firstIPFromHeader(r), UserAgent: r.UserAgent(), Payload: map[string]any{"via": "rest", "lang": in.Lang},
-			}
-		})
+	result, err := s.mutateManualNegotiationV1(r, actor, docID, negotiationauthoring.InputV1{Operation: pdfadmission.ManualBilingualTargetV1, Lang: in.Lang})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
@@ -530,18 +549,24 @@ func (s *Server) handleRunRiskAnalysis(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input, err := s.HTMLCreationSessions.NewAIHTTPInputV1(r.Context(), sess.OrgID, "run_risk_analysis")
+	if err != nil {
+		s.writeAIAppMutationError(w, err)
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	var in struct {
 		Locale        string `json:"locale"`
 		SenderContext string `json:"sender_context"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+	if err := input.WithBodyV1(r.Context(), r.Body, func(reader io.Reader) error { return json.NewDecoder(reader).Decode(&in) }); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	res, err := runStaffAICompletion(r, s, sess, docID, "run_risk_analysis", s.RiskAnalyzer.Runtime,
 		func(ctx context.Context, runtime *ai.Runtime, doc *generated.Document) (aiapps.AnalyzeResult, error) {
-			tree, err := blocks.ParseTree(doc.BlocksJson)
+			tree, err := ai.ParseTreeV1(ctx, doc.BlocksJson)
 			if err != nil {
 				return aiapps.AnalyzeResult{}, err
 			}
@@ -556,11 +581,23 @@ func (s *Server) handleRunRiskAnalysis(w http.ResponseWriter, r *http.Request) {
 					"shield_active": res.ShieldActive, "latency_ms": res.LatencyMs},
 			}
 		})
+	if res != nil {
+		defer res.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeAIAppMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	outputStarted := false
+	if err = res.WithValueV1(r.Context(), func(value aiapps.AnalyzeResult) error {
+		outputStarted = true
+		writeJSON(w, http.StatusOK, value)
+		return nil
+	}); err != nil && !outputStarted {
+		s.writeAIAppMutationError(w, err)
+	}
+	// Cancellation after an actual write may report incomplete delivery; it
+	// cannot append a second error document to an already-started200 response.
 }
 
 func countSeverity(fs []aiapps.Finding, sev string) int {
@@ -619,13 +656,12 @@ func (s *Server) sessionAIAppActor(r *http.Request, user auth.SessionUser) (auth
 
 func runStaffAICompletion[T any](r *http.Request, s *Server, user auth.SessionUser, id uuid.UUID, action string, runtime *ai.Runtime,
 	complete func(context.Context, *ai.Runtime, *generated.Document) (T, error), event func(T) audit.Entry,
-) (T, error) {
-	var zero T
+) (*aiauthoring.ResultV1[T], error) {
 	actor, err := s.sessionAIAppActor(r, user)
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
-	return authoring.CompleteDocumentAI(r.Context(), s.aiAppDependencies(), authoring.AIAppRequest{
+	return aiauthoring.CompleteDocumentAIV1(r.Context(), aiauthoring.DependenciesV1{Pool: s.Pool, Sessions: s.HTMLCreationSessions, Audit: s.Audit}, authoring.AIAppRequest{
 		Actor: actor, DocumentID: id, Via: "rest", Action: action, IP: firstIPFromHeader(r), UserAgent: r.UserAgent(),
 	}, runtime, complete, event)
 }
@@ -641,4 +677,9 @@ func (s *Server) writeAIAppMutationError(w http.ResponseWriter, err error) {
 	default:
 		s.writeDraftAuthoringError(w, "AI or negotiation operation failed", err)
 	}
+}
+
+// The actual input and result owners remain alive through ordinary JSON output.
+func (s *Server) mutateManualNegotiationV1(r *http.Request, actor authoring.Actor, document uuid.UUID, in negotiationauthoring.InputV1) (*negotiationauthoring.ResultV1, error) {
+	return negotiationauthoring.MutateV1(r.Context(), negotiationauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Audit: s.Audit}, negotiationauthoring.ActorV1{OrgID: actor.OrgID, UserID: actor.UserID, Authorize: actor.Authorize, Via: "rest", IP: firstIPFromHeader(r), UserAgent: r.UserAgent()}, document, in)
 }

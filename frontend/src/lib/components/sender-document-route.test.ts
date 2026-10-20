@@ -1,3 +1,5 @@
+import { attachCommentHistory } from './commentHistory-fixture.test-support';
+import { createCommentHistory, latestComments } from '../commentHistory';
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { currentHTMLSource, htmlUUID } from '../htmlRevision';
@@ -8,11 +10,11 @@ const start = source.indexOf('  type DocumentScope');
 const end = source.indexOf('  $effect(() =>', start);
 const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end));
 const bind = new Function('env', `with(env) { ${code}; return {
-  loadDocument, loadComments, sendComment, loadChangeRequests, resolveCr, revise,
-  toggleSignatureMode, receiveHTMLSource, receivePlacementProof, receiveEditorDocument, receiveCRMDocument, requestCRMReview, receiveStatus, changeDefaultLocale, resetRouteState
+  isCurrentCommentScope, loadDocument, loadComments, sendComment, loadChangeRequests, resolveCr, revise,
+  toggleSignatureMode, receiveHTMLSource, receivePlacementProof, receiveEditorDocument, receiveCRMDocument, requestCRMReview, requestPackageReview, receiveStatus, changeDefaultLocale, resetRouteState
 }; }`);
 function document(id: string, status = 'changes_requested') {
-  return { id, name: id, status, updated_at: `${id}-timestamp`, source_kind: 'blocks', requires_signature: true, blocks_json: { blocks: [{ text: `${id} content` }] } };
+  return { id, org_id: 'org-A', name: id, status, updated_at: `${id}-timestamp`, source_kind: 'blocks', requires_signature: true, blocks_json: { blocks: [{ text: `${id} content` }] } };
 }
 function fixture() {
   const calls: any[] = [];
@@ -20,11 +22,12 @@ function fixture() {
   const env: any = {
     doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
-    crmBusy: false, crmBlocked: true, crmReviewRequired: false, crmEditorClean: true, crmOtherBusy: false, htmlEditorClean: false, blocksEditorClean: false, senderMutationBusy: false, crmRefreshRevision: 0, crmReviewRevision: 0, crmEditorRevision: 0,
+    crmBusy: false, crmBlocked: true, crmReviewRequired: false, crmEditorClean: true, crmOtherBusy: false, attachmentBusy:false,attachmentDirty:false,attachmentSendBlocked:true,attachmentMessage:"",crmLocalIntent:false,senderDraftDirty:false,pdfLayoutBusy:false,pdfLayoutDirty:false, htmlEditorClean: false, blocksEditorClean: false, senderMutationBusy: false, crmRefreshRevision: 0, crmReviewRevision: 0, crmEditorRevision: 0,
+    attachmentPackageSend: undefined, attachmentReviewRequest: { revision: 0, inspect: false }, attachmentReviewRevision: 0,
     showPDFSave: false, pdfSignatureFields: [], generatedPlacementReady: false, recipientRevision: 0, htmlRevisionBlocked: true, htmlSource: null,
     changeRequests: [{ id: 'request-A', status: 'open', message: 'Prior proposal' }], revising: false,
     approvalMode: 'accept', resolvingId: null, comments: [{ body: 'Prior conversation' }], commentBody: 'Unsent A draft',
-    postingComment: false, commentLoadRevision: 0, commentRefreshError: null, savingMode: false,
+    createCommentHistory, latestComments, commentLoading: false, olderCommentCursor: null, newerCommentCursor: null, commentDocumentKey: '', commentSendRevision: 0, postingComment: false, commentRefreshError: null, savingMode: false,
     changeRequestRefreshError: null, refreshingChanges: false, savingApprovalMode: false, changeRequestLoadRevision: 0,
     templateFlashTimer: null, htmlUUID, currentHTMLSource, getMe: async () => ({ email: 'owner@example.test', change_approval_mode: 'accept' }),
     getDocument: pending('getDocument'), listComments: pending('listComments'), postComment: pending('postComment'),
@@ -32,8 +35,33 @@ function fixture() {
     reviseDocument: pending('revise'), updateDocument: pending('update'), createBlocksTemplate: pending('template'),
     setChangeApprovalMode: pending('approvalMode'), setTimeout, clearTimeout
   };
-  return { env, calls, actions: bind(env) };
+  Object.defineProperty(env,'htmlSiblingMutationBusy',{get:()=>env.crmBusy || env.attachmentBusy || env.senderMutationBusy || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.pdfLayoutBusy});
+  Object.defineProperty(env,'attachmentBarrier',{get:()=>env.attachmentBusy || env.attachmentDirty});
+  Object.defineProperty(env,'attachmentOtherBusy',{get:()=>env.crmBusy || env.crmLocalIntent || env.senderMutationBusy || env.senderDraftDirty || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.pdfLayoutBusy || env.pdfLayoutDirty});
+  Object.defineProperty(env,'attachmentReconciliationBusy',{get:()=>env.crmBusy || env.senderMutationBusy || env.senderDraftDirty || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.pdfLayoutBusy || env.pdfLayoutDirty});
+  Object.defineProperty(env,'crmReconciliationBusy',{get:()=>env.senderMutationBusy || env.senderDraftDirty || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.attachmentBusy || env.pdfLayoutBusy || env.pdfLayoutDirty});
+  const actions = bind(env);
+  env.isCurrentCommentScope = actions.isCurrentCommentScope;
+  env.commentHistory = attachCommentHistory(source, env);
+  return { env, calls, actions };
 }
+
+test('route reset retires the prior package inspection request and reviewed selection', () => {
+  const f=fixture(), previous={revision:7,inspect:true};
+  f.env.attachmentReviewRequest=previous;f.env.attachmentReviewRevision=4;
+  f.env.attachmentPackageSend={expected_updated_at:'2026-10-19T12:03:04Z',package_id:'4e972fb2-ae22-4c84-a52d-93d66507b080',generation:'7'};
+  f.actions.resetRouteState();
+  expect(f.env.attachmentPackageSend).toBeUndefined();expect(f.env.attachmentReviewRequest).toEqual({revision:8,inspect:false});
+  expect(f.env.attachmentReviewRequest).not.toBe(previous);expect(previous).toEqual({revision:7,inspect:true});expect(f.env.attachmentReviewRevision).toBe(5);
+});
+test('parent-owned package inspection excludes its own readback barrier and retains independent mutation guards', () => {
+  const f=fixture();f.env.doc.status='draft';f.env.doc.source_kind='pdf';f.env.attachmentDirty=true;
+  const scope={id:'A',routeRevision:f.env.routeRevision,documentRevision:f.env.documentRevision};
+  f.actions.requestPackageReview(true,scope);expect(f.env.attachmentReviewRequest).toEqual({revision:1,inspect:true});
+  for(const busy of ['attachmentBusy','crmBusy','senderMutationBusy','senderDraftDirty','pdfLayoutBusy','pdfLayoutDirty']){
+    f.env[busy]=true;f.actions.requestPackageReview(true,scope);expect(f.env.attachmentReviewRequest.revision).toBe(1);f.env[busy]=false;
+  }
+});
 
 test('unverified HTML source and declared contract signing intent block acknowledgement downgrade before dispatch', async () => {
   for (const mode of ['unverified', 'dirty', 'contract']) {

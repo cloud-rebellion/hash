@@ -11,16 +11,17 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && cp -R /go/pkg/mod/github.com/gotenberg/gotenberg/v8@v8.36.0/build/chromium-hyphen-data /out/ \
     && cp /go/pkg/mod/github.com/gotenberg/gotenberg/v8@v8.36.0/LICENSE /out/GOTENBERG-MIT.txt
 COPY gotenberg/*.go ./
+COPY gotenberg/internal/ ./internal/
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -trimpath \
-      -ldflags='-s -w -X github.com/gotenberg/gotenberg/v8/cmd.Version=8.36.0-hash.1' \
+      -ldflags='-s -w -X github.com/gotenberg/gotenberg/v8/cmd.Version=8.36.0-hash.5' \
       -o /out/gotenberg .
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 LABEL org.opencontainers.image.title="Hash Chromium renderer" \
       org.opencontainers.image.description="Minimal Gotenberg-compatible HTML-to-PDF renderer for Hash" \
-      org.opencontainers.image.version="8.36.0-hash.1" \
+      org.opencontainers.image.version="8.36.0-hash.5" \
       org.opencontainers.image.authors="Bright Interaction" \
       org.opencontainers.image.vendor="Bright Interaction" \
       org.opencontainers.image.licenses="LicenseRef-Hash-Sustainable-Use-License" \
@@ -46,9 +47,18 @@ RUN apk add --no-cache \
     && adduser -u 1001 -S -D -H -G gotenberg gotenberg \
     && install -d -o gotenberg -g gotenberg /home/gotenberg /opt/gotenberg/chromium-hyphen-data
 
+# Reuse the installed binary's exact version as read-only build metadata. The
+# first conversion must not start another Chromium process just for tracing.
+RUN install -d -m 0755 /opt/gotenberg/versions \
+    && /usr/bin/chromium --version > /opt/gotenberg/versions/chromium \
+    && test -s /opt/gotenberg/versions/chromium \
+    && chmod 0444 /opt/gotenberg/versions/chromium \
+    && chmod 0555 /opt/gotenberg/versions
+
 COPY --from=builder /out/gotenberg /usr/local/bin/gotenberg
 COPY --from=builder --chown=1001:1001 /out/chromium-hyphen-data/ /opt/gotenberg/chromium-hyphen-data/
 COPY LICENSE /licenses/HASH.txt
+COPY gotenberg/internal/chromium/LICENSE.chromedp /licenses/CHROMEDP-MIT.txt
 COPY --from=builder /out/GOTENBERG-MIT.txt /licenses/GOTENBERG-MIT.txt
 
 # Alpine Chromium 152 starts Crashpad even in headless mode. Keep its config
@@ -57,7 +67,9 @@ COPY --from=builder /out/GOTENBERG-MIT.txt /licenses/GOTENBERG-MIT.txt
 # required" while the API health endpoint remains green. Auto-start makes
 # container readiness exercise this browser bootstrap before Hash sends work.
 ENV XDG_CONFIG_HOME=/tmp/.config \
+    GOTENBERG_VERSIONS_DIR_PATH=/opt/gotenberg/versions \
     CHROMIUM_AUTO_START=true \
+    CHROMIUM_DISABLE_JAVASCRIPT=true \
     CHROMIUM_BIN_PATH=/usr/bin/chromium \
     CHROMIUM_HYPHEN_DATA_DIR_PATH=/opt/gotenberg/chromium-hyphen-data \
     CHROMIUM_DENY_PRIVATE_IPS=true \

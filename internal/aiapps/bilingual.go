@@ -63,7 +63,7 @@ func (b *Bilingual) Check(ctx context.Context, in EquivalenceInput) (Equivalence
 	if err != nil {
 		return EquivalenceResult{}, fmt.Errorf("bilingual: prompt: %w", err)
 	}
-	req, err := prompt.Render(map[string]string{
+	req, err := ai.RenderPromptV1(ctx, prompt, map[string]string{
 		"LangA":   strOrDefault(in.LangA, "sv-SE"),
 		"LangB":   strOrDefault(in.LangB, "en-GB"),
 		"ClauseA": in.ClauseA,
@@ -79,6 +79,9 @@ func (b *Bilingual) Check(ctx context.Context, in EquivalenceInput) (Equivalence
 		CacheKey:   ai.CacheKey(req),
 	})
 	if err != nil {
+		return EquivalenceResult{}, err
+	}
+	if err := ai.PrepareFeatureResultV1(ctx, resp.Text); err != nil {
 		return EquivalenceResult{}, err
 	}
 	out := EquivalenceResult{

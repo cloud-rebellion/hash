@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { APIError, type DocumentResponse, type HTMLDocumentInput, type HTMLDocumentSource, type TemplateResponse } from './api/client';
-import { signingPageTemplateFixture } from './htmlTemplate.test';
+import { signingPageTemplateFixture } from './htmlTemplateFixtures';
 import { signingPageSourceFixture } from './htmlRevision.test';
 import { CRMTemplatePopulationController, checkedCreationMarker, checkedCreationOutcome, checkedCreationReadback, checkedCreationResult, checkedTemplateObservation,
   initialCRMTemplateState, readCreationMarker, storeCreationMarker, templateExpected, templateWitnessKey, type CRMTemplateCandidate, type CRMTemplateContext,

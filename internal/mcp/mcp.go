@@ -23,6 +23,8 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 )
 
 // sanitizeToolError keeps a tool's operator-authored validation message
@@ -161,10 +163,11 @@ type PromptMessage struct {
 // Server is the MCP entry point. Build via NewServer + Register*; mount via
 // Handler() onto chi behind RequireAPIKey middleware.
 type Server struct {
-	tools     map[string]ToolDef
-	resources map[string]Resource
-	prompts   map[string]Prompt
-	billing   *billing.Engine // for central MinFeature enforcement; nil = billing off (dev/e2e)
+	nativeInput *pdfadmission.ApplicationSessionFactoryV1
+	tools       map[string]ToolDef
+	resources   map[string]Resource
+	prompts     map[string]Prompt
+	billing     *billing.Engine // for central MinFeature enforcement; nil = billing off (dev/e2e)
 }
 
 func NewServer() *Server {
@@ -197,7 +200,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, nil, codeInvalidRequest, "POST required", nil)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	var body []byte
+	var err error
+	var input *pdfadmission.ApplicationDocumentAIInputV1
+	if user, ok := auth.FromContext(r.Context()); ok && s.nativeInput != nil {
+		input, err = s.nativeInput.NewMCPEnvelopeInputV1(r.Context(), user.OrgID)
+		if err != nil {
+			flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureUnavailable)
+			writeRPCError(w, nil, codeInternalError, "input capacity unavailable", nil)
+			return
+		}
+		defer input.CloseConsumerV1()
+	}
+	readBody := func(reader io.Reader) error { body, err = io.ReadAll(reader); return err }
+	original := http.MaxBytesReader(w, r.Body, 1<<20)
+	if input != nil {
+		err = input.WithBodyV1(r.Context(), original, readBody)
+	} else {
+		err = readBody(original)
+	}
 	if err != nil {
 		writeRPCError(w, nil, codeParseError, "read body: "+err.Error(), nil)
 		return
@@ -234,7 +255,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case "prompts/list":
 		s.handlePromptsList(w, req)
 	case "prompts/get":
-		s.handlePromptsGet(w, req)
+		s.handlePromptsGet(w, r, req)
 	default:
 		writeRPCError(w, req.ID, codeMethodNotFound, "unknown method: "+req.Method, nil)
 	}
@@ -350,6 +371,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 			msg := "your plan does not include the '" + tool.MinFeature + "' feature"
 			if ferr != nil {
 				msg = "entitlement check unavailable"
+				flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureDependency)
 			}
 			writeRPCResult(w, req.ID, ToolResult{
 				Content: []ToolContent{{Type: "text", Text: msg}},
@@ -358,15 +380,46 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 			return
 		}
 	}
+	// Send may return a typed error retaining actual policy/model strings. Keep
+	// its genuine result consumer through BOTH error and success serialization.
+	if p.Name == "send_document" {
+		var owner *workflowSendResponseV1
+		r, owner = newWorkflowSendResponseV1(r)
+		defer owner.closeV1()
+	}
 	result, err := tool.Handler(r, p.Arguments)
+	if owned, ok := result.(interface{ CloseConsumerV1() }); ok {
+		defer owned.CloseConsumerV1()
+	}
 	if err != nil {
+		// Only the fixed Send error type carries safe package selectors. The
+		// workflow response owner remains retained until this write returns.
+		if outcome, ok := packageSendErrorResultV1(p.Name, err); ok {
+			flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureUnavailable)
+			writeRPCResult(w, req.ID, outcome)
+			return
+		}
+		message := sanitizeToolError(err)
+		if message == "internal error" {
+			flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureInternal)
+		} else if errors.Is(err, billing.ErrEntitlementUnavailable) {
+			flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureDependency)
+		}
 		writeRPCResult(w, req.ID, ToolResult{
-			Content: []ToolContent{{Type: "text", Text: sanitizeToolError(err)}},
+			Content: []ToolContent{{Type: "text", Text: message}},
 			IsError: true,
 		})
 		return
 	}
-	body, _ := json.Marshal(result)
+	body, err := json.Marshal(result)
+	if err != nil {
+		// The existing actual result owner stays retained through this failure
+		// serialization. Marshaler diagnostics may contain private text/credentials.
+		slog.Error("mcp tool result serialization failed", "tool", p.Name, "error_type", fmt.Sprintf("%T", err))
+		flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureInternal)
+		writeRPCResult(w, req.ID, ToolResult{Content: []ToolContent{{Type: "text", Text: "tool result unavailable"}}, IsError: true})
+		return
+	}
 	writeRPCResult(w, req.ID, ToolResult{
 		Content: []ToolContent{{Type: "text", Text: string(body)}},
 	})
@@ -419,10 +472,14 @@ func (s *Server) handleResourcesRead(w http.ResponseWriter, r *http.Request, req
 	}
 	body, err := res.Loader(r)
 	if err != nil {
-		writeRPCError(w, req.ID, codeInternalError, err.Error(), nil)
+		writeMCPInternalError(w, r, req.ID)
 		return
 	}
-	raw, _ := json.Marshal(body)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		writeMCPInternalError(w, r, req.ID)
+		return
+	}
 	writeRPCResult(w, req.ID, map[string]any{
 		"contents": []map[string]any{{
 			"uri":      p.URI,
@@ -440,7 +497,7 @@ func (s *Server) handlePromptsList(w http.ResponseWriter, req request) {
 	writeRPCResult(w, req.ID, map[string]any{"prompts": out})
 }
 
-func (s *Server) handlePromptsGet(w http.ResponseWriter, req request) {
+func (s *Server) handlePromptsGet(w http.ResponseWriter, r *http.Request, req request) {
 	var p struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
@@ -456,13 +513,21 @@ func (s *Server) handlePromptsGet(w http.ResponseWriter, req request) {
 	}
 	msgs, err := prompt.Renderer(p.Arguments)
 	if err != nil {
-		writeRPCError(w, req.ID, codeInternalError, err.Error(), nil)
+		writeMCPInternalError(w, r, req.ID)
 		return
 	}
 	writeRPCResult(w, req.ID, map[string]any{
 		"description": prompt.Description,
 		"messages":    msgs,
 	})
+}
+
+// JSON-RPC internal errors travel over HTTP200, so HTTP error monitoring
+// cannot observe them. Keep diagnostic contents out of both wire response and
+// telemetry while retaining the original request's safe trace correlation.
+func writeMCPInternalError(w http.ResponseWriter, r *http.Request, id json.RawMessage) {
+	flarereport.CaptureOperationFailure(r.Context(), flarereport.OperationMCP, flarereport.FailureInternal)
+	writeRPCError(w, id, codeInternalError, "internal error", nil)
 }
 
 func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {

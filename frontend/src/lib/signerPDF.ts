@@ -179,7 +179,14 @@ export async function readSignerFieldResponse(response: Response, observation: S
     await response.body?.cancel();
     throw new Error('The document fields could not be verified.');
   }
-  const data: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await readBoundedSignerResponse(response, MAX_FIELDS_JSON_BYTES, signal)));
+  const bytes = await readBoundedSignerResponse(response, MAX_FIELDS_JSON_BYTES, signal);
+  assertActive(signal);
+  let data: unknown;
+  try { data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch {
+    assertActive(signal);
+    throw new Error('The document fields could not be verified. Please reopen your signing link.');
+  }
   assertActive(signal);
   if (!object(data)) throw new Error('The document fields could not be verified.');
   return data;
@@ -219,7 +226,7 @@ export function confirmSignerPDFField(previous: SignerPDFField, updated: SignerP
   }
 }
 
-type DestroyablePDF = { loadingTask: { destroy(): Promise<void> } };
+type DestroyablePDF = { destroy(): Promise<void> };
 
 // The live key is read again after every await, including callbacks that arrive
 // before Svelte has had a chance to run the previous effect's cleanup.
@@ -227,19 +234,27 @@ export class SignerPDFSession {
   readonly controller = new AbortController();
   readonly key: string;
   private document?: DestroyablePDF;
+  private retirement?: Promise<void>;
+  private readonly idleRetirement = Promise.resolve();
   constructor(readonly scope: SignerPDFScope, private liveKey: () => string) {
     this.key = signerPDFScopeKey(scope.token, scope.noticeDigest, scope.observation);
   }
   current(): boolean { return !this.controller.signal.aborted && this.key === this.liveKey(); }
   assertCurrent(): void { if (!this.current()) throw new DOMException('The document view was closed.', 'AbortError'); }
   attach(document: DestroyablePDF): void {
-    if (!this.current()) { void document.loadingTask.destroy().catch(() => {}); this.assertCurrent(); }
+    if (this.document) throw new Error('The document view already owns a PDF.');
     this.document = document;
+    if (!this.current()) { void this.destroy(); this.assertCurrent(); }
   }
-  destroy(): void {
+  destroy(): Promise<void> {
     this.controller.abort();
-    void this.document?.loadingTask.destroy().catch(() => {});
-    this.document = undefined;
+    if (!this.document) return this.idleRetirement;
+    if (!this.retirement) {
+      try { this.retirement = this.document.destroy(); }
+      catch (error) { this.retirement = Promise.reject(error); }
+      void this.retirement.catch(() => {});
+    }
+    return this.retirement;
   }
 }
 

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/nethard"
 	"github.com/bright-interaction/hash/internal/sourcejson"
 )
@@ -45,6 +47,20 @@ func NewClient(serverOrigin string, allowPrivateDevelopment bool) (*Client, erro
 	return &Client{origin: origin, doer: nethard.Client(RequestTimeout, func() bool { return allowPrivateDevelopment }), now: time.Now}, nil
 }
 
+// NewTrustedPrivateClientV1 accepts only operator boot configuration. It has no
+// development-bypass parameter; ordinary/default NewClient remains unchanged.
+func NewTrustedPrivateClientV1(serverOrigin, hostPrefixes string) (*Client, error) {
+	origin, err := CanonicalOrigin(serverOrigin, false)
+	if err != nil {
+		return nil, err
+	}
+	doer, err := nethard.CRMPrivateClientV1(RequestTimeout, origin, hostPrefixes)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{origin: origin, doer: doer, now: time.Now}, nil
+}
+
 type HTTPError struct {
 	Status     int
 	RetryAfter time.Duration
@@ -67,7 +83,28 @@ func (c *Client) validIdentity(id Identity, allowUnmapped bool) error {
 	return nil
 }
 
+// Observe the final typed outcome after the actual transport/body lifecycle.
+// No origin, path, token, remote diagnostic, CRM record or caller identity is
+// included. Expected policy/not-found/rate outcomes are counted without paging.
 func (c *Client) get(ctx context.Context, path, token string, budget *int) ([]byte, time.Time, error) {
+	started := time.Now()
+	raw, observedAt, err := c.getObservedResponse(ctx, path, token, budget)
+	outcome := flarereport.OutcomeDependency
+	switch {
+	case err == nil:
+		outcome = flarereport.OutcomeSuccess
+	case errors.Is(err, context.Canceled):
+		outcome = flarereport.OutcomeCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		outcome = flarereport.OutcomeTimeout
+	case errors.Is(err, ErrCredential), errors.Is(err, ErrRecordUnavailable), errors.Is(err, ErrRateLimited), errors.Is(err, ErrIdentity):
+		outcome = flarereport.OutcomeRejected
+	}
+	flarereport.ObserveOperation(ctx, flarereport.OperationCRM, outcome, time.Since(started))
+	return raw, observedAt, err
+}
+
+func (c *Client) getObservedResponse(ctx context.Context, path, token string, budget *int) ([]byte, time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, time.Time{}, err
 	}

@@ -64,62 +64,7 @@ func registerEIDASTools(s *Server, d Deps) {
 			"reason":         stringSchema("human-readable explanation surfaced in send-blocked errors"),
 			"active":         map[string]any{"type": "boolean", "description": "default true"},
 		}, []string{"name", "predicate_json", "required_tier"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-			u, _ := auth.FromContext(r.Context())
-			var p struct {
-				Name         string          `json:"name"`
-				Priority     int32           `json:"priority"`
-				Predicate    json.RawMessage `json:"predicate_json"`
-				RequiredTier string          `json:"required_tier"`
-				Reason       string          `json:"reason"`
-				Active       *bool           `json:"active"`
-			}
-			if err := MustParseArgs(args, &p); err != nil {
-				return nil, err
-			}
-			if !eidas.Tier(p.RequiredTier).Valid() {
-				return nil, errors.New("required_tier must be SES, AES, or QES")
-			}
-			if err := eidas.ValidateRule(p.Predicate, eidas.Tier(p.RequiredTier)); err != nil {
-				return nil, fmt.Errorf("invalid eIDAS rule: %w", err)
-			}
-			active := true
-			if p.Active != nil {
-				active = *p.Active
-			}
-			if err := eidas.ValidateRuleActivation(eidas.Tier(p.RequiredTier), active); err != nil {
-				return nil, err
-			}
-			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
-			if err != nil {
-				return nil, err
-			}
-			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
-				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
-				func(ctx context.Context, q *generated.Queries) (*generated.EidasRoutingRule, error) {
-					return q.InsertEIDASRule(ctx, generated.InsertEIDASRuleParams{
-						OrgID:         u.OrgID,
-						Name:          p.Name,
-						Priority:      p.Priority,
-						PredicateJson: p.Predicate,
-						RequiredTier:  p.RequiredTier,
-						Reason:        p.Reason,
-						Active:        active,
-					})
-				},
-				func(row *generated.EidasRoutingRule) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID,
-						Kind:    audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "create_eidas_rule", "rule_id": row.ID.String()},
-					}
-				},
-			)
-			if err != nil {
-				return nil, err
-			}
-			return ruleRow(row), nil
-		},
+		Handler: func(r *http.Request, args json.RawMessage) (any, error) { return createCatalogRuleOwnedV1(r, args, d) },
 	})
 
 	s.RegisterTool(ToolDef{
@@ -130,46 +75,7 @@ func registerEIDASTools(s *Server, d Deps) {
 		InputSchema: schemaObject(map[string]any{
 			"rule_id": stringSchema("rule uuid"),
 		}, []string{"rule_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-			u, _ := auth.FromContext(r.Context())
-			var p struct {
-				RuleID string `json:"rule_id"`
-			}
-			if err := MustParseArgs(args, &p); err != nil {
-				return nil, err
-			}
-			id, err := uuid.Parse(p.RuleID)
-			if err != nil {
-				return nil, errors.New("rule_id must be a uuid")
-			}
-			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), uuid.Nil, mcpScopeWriteAuthoring)
-			if err != nil {
-				return nil, err
-			}
-			_, err = authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
-				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
-				func(ctx context.Context, q *generated.Queries) (uuid.UUID, error) {
-					if _, err := q.GetEIDASRule(ctx, generated.GetEIDASRuleParams{ID: id, OrgID: u.OrgID}); err != nil {
-						if errors.Is(err, pgx.ErrNoRows) {
-							return uuid.Nil, errEIDASRuleNotFound
-						}
-						return uuid.Nil, err
-					}
-					return id, q.DeleteEIDASRule(ctx, generated.DeleteEIDASRuleParams{ID: id, OrgID: u.OrgID})
-				},
-				func(uuid.UUID) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID,
-						Kind:    audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "delete_eidas_rule", "rule_id": id.String()},
-					}
-				},
-			)
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"deleted": id.String()}, nil
-		},
+		Handler: func(r *http.Request, args json.RawMessage) (any, error) { return deleteCatalogRuleOwnedV1(r, args, d) },
 	})
 
 	s.RegisterTool(ToolDef{

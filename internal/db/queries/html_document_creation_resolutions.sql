@@ -17,3 +17,10 @@ INSERT INTO html_document_creation_resolutions (
 )
 ON CONFLICT (org_id, actor_user_id, request_id) DO NOTHING
 RETURNING *;
+
+-- name: GetHTMLDocumentCreationResolution :one
+-- M80 terminal descriptors are immutable; no descriptor row lock precedes a
+-- current document/cache read. Absent MVCC metadata never grants retry/closure
+-- authority; final quota/unique-registry SQL remains the mutation boundary.
+SELECT * FROM html_document_creation_resolutions
+WHERE org_id=$1 AND actor_user_id=$2 AND request_id=$3;

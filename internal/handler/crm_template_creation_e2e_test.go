@@ -429,9 +429,16 @@ func TestCRMTemplatePopulationCreationRechecksRendererAndAuditWaitsE2E(t *testin
 			finish := func() { once.Do(func() { close(release) }) }
 			t.Cleanup(finish)
 			f.renderer.entered, f.renderer.release = make(chan struct{}, 1), release
+			requestCtx, cancelRequest := context.WithCancel(f.ctx)
 			done := make(chan *httptest.ResponseRecorder, 1)
+			finished := make(chan struct{})
+			defer func() {
+				finish()
+				joinHTMLAuthoringRequestE2E(t, cancelRequest, finished)
+			}()
 			go func() {
-				done <- submitHTMLDocumentCreationE2E(t, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
+				defer close(finished)
+				done <- submitHTMLDocumentCreationContextE2E(t, requestCtx, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
 			}()
 			select {
 			case <-f.renderer.entered:
@@ -496,6 +503,12 @@ func TestCRMTemplatePopulationCreationRechecksRendererAndAuditWaitsE2E(t *testin
 		f := setupCRMTemplateCreationE2E(t)
 		in, _ := f.command(t)
 		actor, admission := f.admission(t, in)
+		admissionInUse := false
+		defer func() {
+			if !admissionInUse {
+				admission.closeOwnedV1()
+			}
+		}()
 		var elapsed atomic.Bool
 		admission.now = func() time.Time {
 			now := time.Now()
@@ -511,12 +524,24 @@ func TestCRMTemplatePopulationCreationRechecksRendererAndAuditWaitsE2E(t *testin
 		if err != nil {
 			t.Fatal("commit canonical original command")
 		}
+		requestCtx, cancelRequest := context.WithCancel(f.ctx)
 		done := make(chan error, 1)
+		finished := make(chan struct{})
+		admissionInUse = true
+		defer func() {
+			if joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, blocked) {
+				admissionInUse = false
+			}
+		}()
 		go func() {
-			_, err := f.s.instantiateHTMLDocument(f.ctx, actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, admission, inputDigest)
+			defer close(finished)
+			outcome, err := f.s.instantiateHTMLDocument(requestCtx, actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, admission, inputDigest)
+			if outcome != nil {
+				defer outcome.closeOwnedWriterV1()
+			}
 			done <- err
 		}()
-		awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+		awaitHTMLAuthoringOperationLockE2E(t, f.lifecycleAuthorizationFixture, "-- name: AcquireOrgChainLock", "advisory")
 		elapsed.Store(true)
 		if err := blocked.Commit(f.ctx); err != nil {
 			t.Fatal("release actual audit lock")
@@ -642,7 +667,18 @@ func TestCRMTemplateCreationConcurrentRequestAndDatabaseGuardsE2E(t *testing.T) 
 	// jobs in separate process-local gates. The real final quota transaction,
 	// original signed-session checks and compensator remain unchanged.
 	actor, firstAdmission := f.admission(t, in)
+	firstInUse, secondInUse := false, false
+	defer func() {
+		if !firstInUse {
+			firstAdmission.closeOwnedV1()
+		}
+	}()
 	secondActor, secondAdmission := f.admission(t, in)
+	defer func() {
+		if !secondInUse {
+			secondAdmission.closeOwnedV1()
+		}
+	}()
 	digest, _ := hex.DecodeString(in.ExpectedTemplateContentSHA256)
 	inputDigest, err := crmTemplateCreateInputDigest(actor, f.template.ID, in)
 	if err != nil {
@@ -657,13 +693,38 @@ func TestCRMTemplateCreationConcurrentRequestAndDatabaseGuardsE2E(t *testing.T) 
 		result *htmlCreationOutcome
 		err    error
 	}
+	requestCtx, cancelRequest := context.WithCancel(f.ctx)
+	defer cancelRequest()
 	done := make(chan completed, 2)
+	defer func() {
+		// Each real request is joined by the later defers before draining outcomes.
+		for {
+			select {
+			case out := <-done:
+				if out.result != nil {
+					out.result.closeOwnedWriterV1()
+				}
+			default:
+				return
+			}
+		}
+	}()
 	for _, job := range []struct {
 		actor     authoring.Actor
 		admission *crmTemplatePopulationAdmission
-	}{{actor, firstAdmission}, {secondActor, secondAdmission}} {
+		inUse     *bool
+	}{{actor, firstAdmission, &firstInUse}, {secondActor, secondAdmission, &secondInUse}} {
+		*job.inUse = true
+		finished := make(chan struct{})
+		defer func() {
+			finish()
+			if joinHTMLAuthoringRequestE2E(t, cancelRequest, finished) {
+				*job.inUse = false
+			}
+		}()
 		go func() {
-			result, err := f.s.instantiateHTMLDocument(f.ctx, job.actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, job.admission, inputDigest)
+			defer close(finished)
+			result, err := f.s.instantiateHTMLDocument(requestCtx, job.actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, job.admission, inputDigest)
 			done <- completed{result, err}
 		}()
 	}
@@ -678,8 +739,11 @@ func TestCRMTemplateCreationConcurrentRequestAndDatabaseGuardsE2E(t *testing.T) 
 	receive := func() *htmlCreationOutcome {
 		select {
 		case out := <-done:
+			if out.result != nil {
+				t.Cleanup(out.result.closeOwnedWriterV1)
+			}
 			if out.err != nil || out.result == nil {
-				t.Fatal("concurrent prepared creation did not finish")
+				t.Fatalf("concurrent prepared creation did not finish: error_type=%T error=%v result_present=%t pending=%+v resources=%+v", out.err, out.err, out.result != nil, f.s.HTMLCreationSessions.PendingV1(), htmlAuthoringNativeSnapshotE2E(t, f.s))
 			}
 			return out.result
 		case <-time.After(4 * time.Second):

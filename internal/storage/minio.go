@@ -36,6 +36,7 @@ type Client struct {
 	writeServerSideEncryption encrypt.ServerSide
 	readServerSideEncryption  encrypt.ServerSide
 	sseMode                   string
+	localProfile              *evidenceLocalClientProfileV1
 }
 
 type Config struct {
@@ -133,8 +134,14 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid object storage policy: %w", err)
 	}
+	transport, err := newBoundedStorageTransportV1(cfg.UseSSL)
+	if err != nil {
+		return nil, fmt.Errorf("init bounded object storage transport: %w", err)
+	}
+	staticCredentials := credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
 	mc, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Transport:    transport,
+		Creds:        staticCredentials,
 		Secure:       cfg.UseSSL,
 		Region:       cfg.Region,
 		BucketLookup: policy.BucketLookupType,
@@ -180,14 +187,16 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		}
 	}
 
-	return &Client{
+	client := &Client{
 		mc:                        mc,
 		bucket:                    cfg.Bucket,
 		requireEvidenceLock:       cfg.RequireObjectLock,
 		writeServerSideEncryption: policy.WriteEncryption,
 		readServerSideEncryption:  policy.ReadEncryption,
 		sseMode:                   policy.SSEMode,
-	}, nil
+	}
+	client.localProfile = newEvidenceLocalClientProfileV1(client, mc, cfg, staticCredentials, policy.BucketLookupType, transport)
+	return client, nil
 }
 
 func verifyExistingBucket(ctx context.Context, client bucketInitializer, bucket string) error {
@@ -400,7 +409,7 @@ func (c *Client) verifyDataPlaneEncryption(ctx context.Context, key, versionID s
 			return errors.New("storage data-plane encryption proof: exact-version HEAD was not rejected for a different SSE-C key")
 		}
 
-		obj, getErr := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{
+		obj, getErr := c.mc.GetObject(withObjectResponseLimitV1(ctx, dataPlaneCheckPayloadBytes), c.bucket, key, minio.GetObjectOptions{
 			VersionID: versionID, ServerSideEncryption: wrongEncryption,
 		})
 		if getErr == nil {
@@ -846,7 +855,7 @@ func (c *Client) PutStream(ctx context.Context, key, contentType string, r io.Re
 // Get returns the full object bytes. Caller must keep payloads small (<50MB
 // hard cap on uploads).
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
-	obj, err := c.mc.GetObject(ctx, c.bucket, key, c.getOpts(""))
+	obj, err := c.mc.GetObject(withObjectResponseLimitV1(ctx, maxStoredObjectBytes), c.bucket, key, c.getOpts(""))
 	if err != nil {
 		return nil, fmt.Errorf("get %q: %w", key, err)
 	}
@@ -1071,7 +1080,7 @@ func (c *Client) getObjectVersion(ctx context.Context, key, versionID string) ([
 		versionID = ""
 	}
 	opts := c.getOpts(versionID)
-	obj, err := c.mc.GetObject(ctx, c.bucket, key, opts)
+	obj, err := c.mc.GetObject(withObjectResponseLimitV1(ctx, maxStoredObjectBytes), c.bucket, key, opts)
 	if err != nil {
 		return nil, fmt.Errorf("get %q version %q: %w", key, versionID, err)
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
 )
@@ -62,62 +63,80 @@ func materializeHTMLTemplatePreview(content htmlmaster.TemplateCommitment, sampl
 // Check saved and retained content under a short read transaction, then release
 // all locks before scanner, renderer or parser work. Repeat after that work so a
 // changed/archived design or revoked session never releases PDF bytes or proof.
-func (s *Server) loadHTMLTemplatePreview(ctx context.Context, actor authoring.Actor, id uuid.UUID, version int32, digest string) (htmlmaster.TemplateCommitment, error) {
-	var empty htmlmaster.TemplateCommitment
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+func (s *Server) loadHTMLTemplatePreview(ctx context.Context, actor authoring.Actor, id uuid.UUID, version int32, digest string, values, sections map[string]string) (result htmlmaster.TemplateCommitment, closeConsumer func(), failure error) {
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, id)
 	if err != nil {
-		return empty, err
+		return result, nil, err
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	template, err := q.GetHTMLTemplateForShare(ctx, generated.GetHTMLTemplateForShareParams{ID: id, OrgID: actor.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return empty, errTemplateNotFound
-	}
+	defer func() {
+		_ = o.closeSQLV1(ctx)
+		if closeConsumer == nil {
+			o.closeConsumerV1(ctx)
+		}
+	}()
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		if err := o.reader.AcquireStringMapsV1(ctx, values, sections); err != nil {
+			return err
+		}
+		template, revision, err := o.reader.ReadTemplateRevisionExpectedV1(ctx, id, version, digest)
+		if errors.Is(err, pdfadmission.ErrHTMLAuthoringChangedV1) {
+			return errHTMLTemplateConflict
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errTemplateNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if template.Version != version || hex.EncodeToString(template.HtmlContentSha256) != digest {
+			return errHTMLTemplateConflict
+		}
+		response, err := toHTMLTemplateDetailResponseOwnedV1(ctx, o.reader, template, revision)
+		if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+			return err
+		}
+		if err != nil || response.ContentSHA256 != digest {
+			return errHTMLTemplateConflict
+		}
+		guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
+		if err != nil {
+			return err
+		}
+		if err = guard.Recheck(ctx); err != nil {
+			return err
+		}
+		result = htmlmaster.TemplateCommitment{MasterJSON: response.HTMLMasterJSON, DefaultsJSON: response.VariablesJSON, SHA256: digest}
+		return nil
+	})
 	if err != nil {
-		return empty, err
+		return htmlmaster.TemplateCommitment{}, nil, err
 	}
-	if template.Version != version || hex.EncodeToString(template.HtmlContentSha256) != digest {
-		return empty, errHTMLTemplateConflict
+	if err = o.session.CommitV1(ctx); err != nil {
+		return htmlmaster.TemplateCommitment{}, nil, err
 	}
-	revision, err := q.GetHTMLTemplateRevisionForShare(ctx, generated.GetHTMLTemplateRevisionForShareParams{TemplateID: id, OrgID: actor.OrgID, Version: version})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return empty, errHTMLTemplateConflict
-	}
-	if err != nil {
-		return empty, err
-	}
-	response, err := toHTMLTemplateDetailResponse(template, revision)
-	if err != nil || response.ContentSHA256 != digest {
-		return empty, errHTMLTemplateConflict
-	}
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
-	if err != nil {
-		return empty, err
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		return empty, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return empty, err
-	}
-	return htmlmaster.TemplateCommitment{MasterJSON: response.HTMLMasterJSON, DefaultsJSON: response.VariablesJSON, SHA256: digest}, nil
+	return result, func() { o.closeConsumerV1(ctx) }, nil
 }
 
 func (s *Server) checkHTMLTemplatePreviewAuthor(ctx context.Context, actor authoring.Actor) error {
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, actor.UserID)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
+	defer o.closeConsumerV1(ctx)
+	defer func() { _ = o.closeSQLV1(ctx) }()
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
+		if err != nil {
+			return err
+		}
+		return guard.Recheck(ctx)
+	})
 	if err != nil {
 		return err
 	}
-	if err := guard.Recheck(ctx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return o.session.CommitV1(ctx)
 }
 
 func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +144,9 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 	defer cancel()
 	u, ok := requireSessionUser(w, ctx)
 	if !ok {
+		return
+	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
 		return
 	}
 	id, ok := parseUUIDParam(w, r, "id")
@@ -152,17 +174,27 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer release()
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLTemplatePreviewInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	var in htmlTemplatePreviewInput
-	if err := decodeSignerJSON(r, &in); err != nil || in.ExpectedVersion <= 0 || !htmlPreviewSHA256(in.ExpectedContentSHA256) {
+	decodeErr := decodeSignerJSON(r, &in)
+	if writeHTMLAuthoringInputFailureV1(w, decodeErr) {
+		return
+	}
+	if decodeErr != nil || in.ExpectedVersion <= 0 || !htmlPreviewSHA256(in.ExpectedContentSHA256) {
 		writeError(w, http.StatusBadRequest, "saved template version, lowercase content SHA-256 and declared string values are required")
 		return
 	}
 	actor := authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}
-	content, err := s.loadHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256)
+	content, closeConsumer, err := s.loadHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256, in.Values, in.Sections)
 	if err != nil {
 		s.writeHTMLTemplateError(w, "load HTML template preview", err)
 		return
 	}
+	defer closeConsumer()
 	if err := scanHTMLMaster(ctx, content.MasterJSON); err != nil {
 		writeScanError(w, err)
 		return
@@ -250,10 +282,12 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusServiceUnavailable, "HTML template preview proof unavailable")
 		return
 	}
-	if _, err := s.loadHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256); err != nil {
+	_, closeRecheck, err := s.loadHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256, nil, nil)
+	if err != nil {
 		s.writeHTMLTemplateError(w, "recheck HTML template preview", err)
 		return
 	}
+	closeRecheck()
 	if err := receipt.validate(time.Now()); err != nil || ctx.Err() != nil {
 		writeError(w, http.StatusServiceUnavailable, "HTML template preview expired before completion")
 		return

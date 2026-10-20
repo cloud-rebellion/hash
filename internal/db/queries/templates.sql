@@ -104,3 +104,17 @@ RETURNING *;
 UPDATE templates
 SET archived_at = now(), updated_at = now()
 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL;
+
+-- name: CreateFreshHTMLTemplateV1 :one
+-- Fixed native authoring owner supplies this exact previously unused ID.
+-- Primary-key INSERT establishes new-row scope; no caller row is adopted.
+INSERT INTO templates (id,org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256)
+VALUES (sqlc.arg(id)::uuid,sqlc.arg(org_id)::uuid,sqlc.arg(name)::text,'html',sqlc.arg(html_master_json)::jsonb,sqlc.arg(variables_json)::jsonb,sqlc.arg(created_by)::uuid,sqlc.arg(html_content_sha256)::bytea)
+RETURNING *;
+
+-- name: GetHTMLAuthoringTargetKindForUpdateV1 :one
+-- Cheap classification preserves existing 404 (missing/foreign/archived) versus
+-- 409 (active non-HTML target), without selecting any unadmitted JSON body.
+SELECT (source_kind='html')::boolean AS is_html FROM templates
+WHERE id=sqlc.arg(template_id)::uuid AND org_id=sqlc.arg(org_id)::uuid AND archived_at IS NULL
+FOR UPDATE;

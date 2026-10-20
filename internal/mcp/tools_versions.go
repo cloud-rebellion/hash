@@ -16,6 +16,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -89,7 +90,16 @@ func registerVersionTools(s *Server, d Deps) {
 			"from":        intSchema("source version_no (defaults to to-1)", 1, 100000, 0),
 			"to":          intSchema("target version_no (defaults to latest)", 1, 100000, 0),
 		}, []string{"document_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, retErr error) {
+			defer func() {
+				if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+					result = nil
+					retErr = cancelErr
+				}
+			}()
+			if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+				return nil, cancelErr
+			}
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
 				DocumentID string `json:"document_id"`
@@ -147,9 +157,14 @@ func registerVersionTools(s *Server, d Deps) {
 				if v.OrgID != u.OrgID {
 					return nil, errors.New("version not found")
 				}
+				fromSide := versionSideContext(r.Context(), v)
+				toSide := versionSideContext(r.Context(), v)
+				if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+					return nil, cancelErr
+				}
 				return map[string]any{
-					"from":    versionSide(v),
-					"to":      versionSide(v),
+					"from":    fromSide,
+					"to":      toSide,
 					"changes": []any{},
 					"counts":  versions.DiffCounts{},
 				}, nil
@@ -165,13 +180,18 @@ func registerVersionTools(s *Server, d Deps) {
 			if fromV.OrgID != u.OrgID || toV.OrgID != u.OrgID {
 				return nil, errors.New("version not found")
 			}
-			changes, err := versions.Diff(fromV.BlockTreeJson, toV.BlockTreeJson)
+			changes, err := versions.DiffContext(r.Context(), fromV.BlockTreeJson, toV.BlockTreeJson)
 			if err != nil {
 				return nil, err
 			}
+			fromSide := versionSideContext(r.Context(), fromV)
+			toSide := versionSideContext(r.Context(), toV)
+			if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+				return nil, cancelErr
+			}
 			return map[string]any{
-				"from":    versionSide(fromV),
-				"to":      versionSide(toV),
+				"from":    fromSide,
+				"to":      toSide,
 				"changes": changes,
 				"counts":  versions.SummarizeCounts(changes),
 			}, nil
@@ -332,7 +352,11 @@ func versionToMap(v *generated.DocumentVersion) map[string]any {
 }
 
 func versionSide(v *generated.DocumentVersion) versions.DiffSide {
-	count, _ := mcpBlockCount(v.BlockTreeJson)
+	return versionSideContext(context.Background(), v)
+}
+
+func versionSideContext(ctx context.Context, v *generated.DocumentVersion) versions.DiffSide {
+	count, _ := mcpBlockCountContext(ctx, v.BlockTreeJson)
 	return versions.DiffSide{
 		VersionID:  v.ID.String(),
 		VersionNo:  v.VersionNo,
@@ -343,14 +367,9 @@ func versionSide(v *generated.DocumentVersion) versions.DiffSide {
 }
 
 func mcpBlockCount(raw json.RawMessage) (int, error) {
-	if len(raw) == 0 {
-		return 0, nil
-	}
-	var t struct {
-		Blocks []json.RawMessage `json:"blocks"`
-	}
-	if err := json.Unmarshal(raw, &t); err != nil {
-		return 0, err
-	}
-	return len(t.Blocks), nil
+	return mcpBlockCountContext(context.Background(), raw)
+}
+
+func mcpBlockCountContext(ctx context.Context, raw json.RawMessage) (int, error) {
+	return blocks.CountTopLevelTreeBlocksContext(ctx, raw)
 }

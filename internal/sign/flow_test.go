@@ -159,9 +159,9 @@ func TestAllCommentEntrypointsRejectOverlongBodyBeforeDependencies(t *testing.T)
 	}
 }
 
-func TestRenderFieldValuesSection_NilQueriesReturnsEmpty(t *testing.T) {
-	if got := renderFieldValuesSection(testCtx(), nil, testUUID()); got != "" {
-		t.Errorf("nil queries should yield empty; got %q", got)
+func TestRenderFieldValuesSection_NilQueriesFailsClosed(t *testing.T) {
+	if got, err := renderFieldValuesSection(testCtx(), nil, testUUID()); got != "" || err == nil {
+		t.Errorf("missing field queries must refuse certificate generation; got %q, %v", got, err)
 	}
 }
 

@@ -81,6 +81,7 @@ func (f *signerPDFFieldFixture) request(t *testing.T) *http.Request {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rc.CloseReadV1() })
 	notice, err := f.s.signerPrivacyNotice(request, rc)
 	if err != nil {
 		t.Fatal(err)

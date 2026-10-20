@@ -2,6 +2,7 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { fetchVerifiedDocumentPDF, reviewHTMLDocument, type DocumentResponse } from '$lib/api/client';
   import type { PdfDoc } from '$lib/pdf';
+  import type { PdfLoad } from '$lib/pdfLoad';
 
   let { document, canReview, revisionBlocked = false, expectedPages, hasSigningPage = false, onReviewed, onRefresh }: {
     document: DocumentResponse;
@@ -27,6 +28,8 @@
   let canvas: HTMLCanvasElement;
   let activePDF = $state.raw<PdfDoc | null>(null);
   let disposed = false;
+  let pdfLoad: PdfLoad<PdfDoc> | null = null;
+  let loadInFlight = false;
   let revision = 0;
   const abort = new AbortController();
   const current = () => !disposed && document.id === sourceID && document.updated_at === sourceStamp && document.pdf_sha256 === sourceSHA
@@ -55,26 +58,35 @@
     }
   }
   async function loadPreview() {
-    if (!current() || busy || activePDF) return;
+    if (!current() || busy || activePDF || loadInFlight) return;
+    loadInFlight = true;
     loading = true;
     error = null;
     try {
+      if (pdfLoad) {
+        await pdfLoad.destroy();
+        if (!current()) return;
+        pdfLoad = null;
+      }
       const bytes = await fetchVerifiedDocumentPDF(sourceID, sourceSHA, abort.signal);
       if (!current()) return;
       const pdf = await import('$lib/pdf');
       if (!current()) return;
-      const loaded = await pdf.loadPdfData(bytes);
-      if (!current()) { void loaded.loadingTask.destroy().catch(() => {}); return; }
+      pdfLoad = pdf.startPdfData(bytes);
+      const loaded = await pdfLoad.promise;
+      if (!current()) { await pdfLoad.destroy(); return; }
       if (loaded.numPages < 1 || loaded.numPages > 500) {
-        void loaded.loadingTask.destroy().catch(() => {});
         throw new Error('This PDF cannot be reviewed here. Ask its owner to inspect it.');
       }
       activePDF = loaded;
       pageCount = loaded.numPages;
       await renderPage(1);
     } catch (e) {
-      if (current()) error = (e as Error).message;
+      let retirementFailed = false;
+      if (!activePDF) { try { await pdfLoad?.destroy(); } catch { retirementFailed = true; } }
+      if (current()) error = retirementFailed ? 'The PDF preview could not be closed. Refresh this page before trying again.' : (e as Error).message;
     } finally {
+      loadInFlight = false;
       if (current()) loading = false;
     }
   }
@@ -102,7 +114,7 @@
   onMount(() => { void loadPreview(); });
   onDestroy(() => {
     disposed = true; revision++; abort.abort();
-    if (activePDF) void activePDF.loadingTask.destroy().catch(() => {});
+    void pdfLoad?.destroy();
   });
 </script>
 

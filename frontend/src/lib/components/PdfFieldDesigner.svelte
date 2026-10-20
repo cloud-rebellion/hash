@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import type { PdfDoc } from '$lib/pdf';
+  import type { PdfLoad } from '$lib/pdfLoad';
   import {
     listFields,
     addField,
@@ -18,8 +19,8 @@
   type Props = { documentID: string; recipientRevision?: number; hasHTMLSource?: boolean; pdfSHA256?: string; htmlSourceCommitment?: string;
     htmlSource?: HTMLDocumentSource | null; readonly?: boolean;
     onPlacementProof?: (proof: { documentID: string; pdfSHA256: string; htmlSourceCommitment: string; ready: boolean }) => void;
-    onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void };
-  let { documentID, recipientRevision = 0, hasHTMLSource = false, pdfSHA256, htmlSourceCommitment, htmlSource = null, readonly = false, onPlacementProof, onSignatureFieldsChange }: Props = $props();
+    onSignatureFieldsChange?: (fields: { role: string; label: string }[]) => void; onStateChange?: (state: {busy: boolean; dirty: boolean}) => void };
+  let { documentID, recipientRevision = 0, hasHTMLSource = false, pdfSHA256, htmlSourceCommitment, htmlSource = null, readonly = false, onPlacementProof, onSignatureFieldsChange, onStateChange }: Props = $props();
   const sourceHTML = untrack(() => hasHTMLSource), sourceSHA = untrack(() => pdfSHA256), sourceCommitment = untrack(() => htmlSourceCommitment);
   const retainedSource = untrack(() => htmlSource), generated = untrack(() => htmlSource?.source_schema_version === 3);
 
@@ -37,7 +38,7 @@
   let rendered = $state(false);
   const placementUnavailable = $derived(readonly || generated || saving || loading || !rendered || refreshingRecipients || recipientRefreshError !== null || error !== null || pages.length === 0);
   let disposed = false;
-  let activePdf: PdfDoc | null = null;
+  let pdfLoad: PdfLoad<PdfDoc> | null = null;
   const current = (target: string) => !disposed && documentID === target && hasHTMLSource === sourceHTML
     && (!sourceHTML || (pdfSHA256 === sourceSHA && htmlSourceCommitment === sourceCommitment
       && (!retainedSource || (htmlSource?.html_source_commitment === retainedSource.html_source_commitment
@@ -76,6 +77,7 @@
   let draft = $state<{ page: number; x: number; y: number; w: number; h: number } | null>(null);
   let dragStart: { page: number; x: number; y: number; pointerID: number } | null = null;
 
+  $effect(() => { const state={busy:saving,dirty:draft!==null}; untrack(()=>onStateChange?.(state)); });
   const canvasEls: Record<number, HTMLCanvasElement> = {};
   const MAX_W = 760;
 
@@ -129,15 +131,18 @@
       } else if (sourceHTML && !readonly) throw new Error('Load and verify this document’s retained source before placing signature fields.');
       const pdf = await import('$lib/pdf');
       if (!current(target)) return;
+      const loadPDF = async () => {
+        const bytes = sourceHTML ? await fetchVerifiedDocumentPDF(target, sourceSHA!, abort.signal) : null;
+        if (!current(target) || initializationFailed) throw new DOMException('The document view was closed.', 'AbortError');
+        pdfLoad = bytes ? pdf.startPdfData(bytes) : pdf.startPdf(documentPdfURL(target));
+        const loaded = await pdfLoad.promise;
+        if (!current(target) || initializationFailed) { await pdfLoad.destroy(); throw new DOMException('The document view was closed.', 'AbortError'); }
+        return loaded;
+      };
       const [recs, fs, doc] = await Promise.all([
         listRecipients(target),
         listFields(target),
-        (sourceHTML ? fetchVerifiedDocumentPDF(target, sourceSHA!, abort.signal).then((bytes) => pdf.loadPdfData(bytes))
-          : pdf.loadPdf(documentPdfURL(target))).then((loaded) => {
-          if (!current(target) || initializationFailed) void loaded.loadingTask.destroy().catch(() => {});
-          else activePdf = loaded;
-          return loaded;
-        }),
+        loadPDF(),
       ]);
       if (!current(target)) return;
       if (doc.numPages < 1 || doc.numPages > 500) throw new Error('This PDF exceeds the field-placement page limit.');
@@ -176,8 +181,13 @@
       emitProof(true);
     } catch (e) {
       initializationFailed = true;
-      if (activePdf) { void activePdf.loadingTask.destroy().catch(() => {}); activePdf = null; }
-      if (current(target)) { error = (e as Error).message; rendered = false; emitProof(false); }
+      abort.abort();
+      let retirementFailed = false;
+      try { await pdfLoad?.destroy(); } catch { retirementFailed = true; }
+      if (current(target)) {
+        error = retirementFailed ? 'The PDF preview could not be closed. Refresh this page before trying again.' : (e as Error).message;
+        rendered = false; emitProof(false);
+      }
     } finally {
       if (current(target)) loading = false;
     }
@@ -189,7 +199,7 @@
     abort.abort();
     dragStart = null;
     draft = null;
-    if (activePdf) void activePdf.loadingTask.destroy().catch(() => {});
+    void pdfLoad?.destroy();
   });
 
   function recipientName(id?: string): string {

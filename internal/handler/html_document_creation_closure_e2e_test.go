@@ -42,7 +42,11 @@ func htmlClosureBodyE2E(org, user uuid.UUID) string {
 }
 
 func htmlClosureSubmitE2E(f crmTemplateCreationFixtureE2E, template, request uuid.UUID, cookie string) *httptest.ResponseRecorder {
-	return submitSessionOperationE2E(f.s, http.MethodPost, htmlClosurePathE2E(template, request)+"/close", htmlClosureBodyE2E(f.org, f.user.ID), cookie)
+	return htmlClosureSubmitContextE2E(f.ctx, f, template, request, cookie)
+}
+
+func htmlClosureSubmitContextE2E(ctx context.Context, f crmTemplateCreationFixtureE2E, template, request uuid.UUID, cookie string) *httptest.ResponseRecorder {
+	return submitSessionOperationContextE2E(ctx, f.s, http.MethodPost, htmlClosurePathE2E(template, request)+"/close", htmlClosureBodyE2E(f.org, f.user.ID), cookie)
 }
 
 func htmlClosureInventoryE2E(t *testing.T, f crmTemplateCreationFixtureE2E) string {
@@ -208,22 +212,44 @@ func TestHTMLCreationClosureWinsBeforeOriginalFinalCommitE2E(t *testing.T) {
 					t.Fatal("configure versioned source wait peer")
 				}
 			}
+			requestCtx, cancelRequest := context.WithCancel(f.ctx)
+			defer cancelRequest()
 			done := make(chan error, 1)
+			var finished chan struct{}
+			var originalAdmission *crmTemplatePopulationAdmission
+			defer func() {
+				finish()
+				joined := finished == nil
+				if finished != nil {
+					joined = joinHTMLAuthoringRequestE2E(t, cancelRequest, finished)
+				}
+				if originalAdmission != nil && joined {
+					originalAdmission.closeOwnedV1()
+				}
+			}()
 			if stage == "renderer_nil_billing" {
 				actor, admission := f.admission(t, in)
+				originalAdmission = admission
 				inputDigest, err := crmTemplateCreateInputDigest(actor, f.template.ID, in)
 				if err != nil {
 					t.Fatal("digest original admitted command")
 				}
 				digest, _ := hex.DecodeString(in.ExpectedTemplateContentSHA256)
 				f.s.Billing = nil
+				finished = make(chan struct{})
 				go func() {
-					_, err := f.s.instantiateHTMLDocument(f.ctx, actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, admission, inputDigest)
+					defer close(finished)
+					outcome, err := f.s.instantiateHTMLDocument(requestCtx, actor, f.template.ID, in, digest, generated.Document{}.ExpiresAt, admission, inputDigest)
+					if outcome != nil {
+						defer outcome.closeOwnedWriterV1()
+					}
 					done <- err
 				}()
 			} else {
+				finished = make(chan struct{})
 				go func() {
-					w := submitHTMLDocumentCreationE2E(t, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
+					defer close(finished)
+					w := submitHTMLDocumentCreationContextE2E(t, requestCtx, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
 					if w.Code != http.StatusConflict {
 						done <- errors.New("held original creation was not refused with409")
 						return
@@ -259,14 +285,23 @@ func TestHTMLCreationCommitWinsAndCloserReturnsOriginalPinsE2E(t *testing.T) {
 	f := setupCRMTemplateCreationE2E(t)
 	in, _ := f.command(t)
 	blocked := ownerOrgLockE2E(t, ownerOrgMutationFixture{lifecycleAuthorizationFixture: f.lifecycleAuthorizationFixture}, true)
+	requestCtx, cancelRequest := context.WithCancel(f.ctx)
 	created := make(chan *httptest.ResponseRecorder, 1)
+	creationFinished := make(chan struct{})
+	defer joinHTMLAuthoringRequestE2E(t, cancelRequest, creationFinished, blocked)
 	go func() {
-		created <- submitHTMLDocumentCreationE2E(t, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
+		defer close(creationFinished)
+		created <- submitHTMLDocumentCreationContextE2E(t, requestCtx, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie)
 	}()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+	awaitHTMLAuthoringOperationLockE2E(t, f.lifecycleAuthorizationFixture, "-- name: AcquireOrgChainLock", "advisory")
 	closed := make(chan *httptest.ResponseRecorder, 1)
-	go func() { closed <- htmlClosureSubmitE2E(f, f.template.ID, in.RequestID, f.cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockBillingUsageForOrg", "advisory")
+	closureFinished := make(chan struct{})
+	defer joinHTMLAuthoringRequestE2E(t, cancelRequest, closureFinished, blocked)
+	go func() {
+		defer close(closureFinished)
+		closed <- htmlClosureSubmitContextE2E(requestCtx, f, f.template.ID, in.RequestID, f.cookie)
+	}()
+	awaitHTMLAuthoringOperationLockE2E(t, f.lifecycleAuthorizationFixture, "-- name: LockBillingUsageForOrg", "advisory")
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal("release creation audit lock")
 	}
@@ -326,9 +361,15 @@ func TestHTMLCreationClosureRechecksOriginalCredentialAfterWaitE2E(t *testing.T)
 			if err != nil {
 				t.Fatal("hold actual transaction lock")
 			}
+			requestCtx, cancelRequest := context.WithCancel(f.ctx)
 			done := make(chan *httptest.ResponseRecorder, 1)
-			go func() { done <- htmlClosureSubmitE2E(f, f.template.ID, request, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, query, "advisory")
+			finished := make(chan struct{})
+			defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, blocked)
+			go func() {
+				defer close(finished)
+				done <- htmlClosureSubmitContextE2E(requestCtx, f, f.template.ID, request, cookie)
+			}()
+			awaitHTMLAuthoringOperationLockE2E(t, f.lifecycleAuthorizationFixture, query, "advisory")
 			switch change {
 			case "quota_demotion":
 				_, err = f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "viewer"})

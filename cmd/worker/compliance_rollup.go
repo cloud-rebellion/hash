@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bright-interaction/hash/internal/compliance"
+	"github.com/bright-interaction/hash/internal/flarereport"
 )
 
 // Phase 12.2 compliance flag rollup. Nightly tick: fetch new EDPB feed
@@ -43,13 +44,19 @@ func (w *worker) loopComplianceRollup(ctx context.Context) {
 }
 
 func (w *worker) runComplianceRollupOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runComplianceRollupOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobComplianceRollup, started, state)
+}
+func (w *worker) runComplianceRollupOnceObserved(ctx context.Context) flarereport.JobInvocationState {
 	since := time.Now().Add(-complianceLookback)
 	raised, err := compliance.FlagOnce(ctx, w.complianceFeed, w.complianceFlagger, since)
 	if err != nil {
 		slog.Warn("compliance rollup", "err", err)
-		return
+		return flarereport.InvocationUnavailable
 	}
 	if raised > 0 {
 		slog.Info("compliance rollup", "flags_raised", raised)
 	}
+	return flarereport.InvocationReturned
 }

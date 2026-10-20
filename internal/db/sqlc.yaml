@@ -69,3 +69,8 @@ sql:
             go_type:
               type: "RawMessage"
               import: "encoding/json"
+          # Native report selection is private, never a raw Document REST/MCP field.
+          - column: "documents.participant_report_schema"
+            go_struct_tag: 'json:"-"'
+          - column: "document_ordinary_finalization_preparations_v1.report_schema"
+            go_struct_tag: 'json:"-"'

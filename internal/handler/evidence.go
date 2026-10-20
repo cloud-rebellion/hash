@@ -85,7 +85,7 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Type", res.ContentType())
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, res.Filename))
 	_, _ = w.Write(res.Bytes)
 }

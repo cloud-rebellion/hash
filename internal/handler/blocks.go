@@ -5,7 +5,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,12 +16,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -45,19 +44,27 @@ func (s *Server) handleAppendBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in appendBlockInput
-	if err := decodeJSON(r, &in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:append_block", func(t *blocks.Tree) error {
+	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:append_block", func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 		t.Blocks = append(t.Blocks, in.Block)
-		return blocks.Validate(t)
+		return blocks.ValidateForSendV1(t, admission)
 	}, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 type updateBlockInput struct {
@@ -80,25 +87,33 @@ func (s *Server) handleUpdateBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in updateBlockInput
-	if err := decodeJSON(r, &in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:update_block", func(t *blocks.Tree) error {
+	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:update_block", func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 		for i := range t.Blocks {
 			if t.Blocks[i].ID == bid {
 				in.Block.ID = bid
 				t.Blocks[i] = in.Block
-				return blocks.Validate(t)
+				return blocks.ValidateForSendV1(t, admission)
 			}
 		}
 		return errors.New("block not found")
 	}, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 func (s *Server) handleDeleteBlock(w http.ResponseWriter, r *http.Request) {
@@ -118,11 +133,16 @@ func (s *Server) handleDeleteBlock(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ExpectedUpdatedAt string `json:"expected_updated_at"`
 	}
-	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:delete_block", func(t *blocks.Tree) error {
+	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:delete_block", func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 		filtered := make([]blocks.Block, 0, len(t.Blocks))
 		removed := false
 		for _, b := range t.Blocks {
@@ -138,11 +158,14 @@ func (s *Server) handleDeleteBlock(w http.ResponseWriter, r *http.Request) {
 		t.Blocks = filtered
 		return nil
 	}, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 type reorderBlocksInput struct {
@@ -160,11 +183,16 @@ func (s *Server) handleReorderBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in reorderBlocksInput
-	if err := decodeJSON(r, &in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:reorder_blocks", func(t *blocks.Tree) error {
+	doc, err := s.mutateTree(r, u.OrgID, u.UserID, docID, "rest:reorder_blocks", func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 		if len(in.BlockIDs) != len(t.Blocks) {
 			return errors.New("block_ids length must equal top-level block count")
 		}
@@ -185,11 +213,14 @@ func (s *Server) handleReorderBlocks(w http.ResponseWriter, r *http.Request) {
 		t.Blocks = out
 		return nil
 	}, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 type importHTMLInput struct {
@@ -214,7 +245,12 @@ func (s *Server) handleImportHTML(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	var in importHTMLInput
-	if err := decodeJSON(r, &in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -228,11 +264,14 @@ func (s *Server) handleImportHTML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc, err := s.replaceTree(r, u.OrgID, u.UserID, docID, "rest:import_html", tree, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 type importMarkdownInput struct {
@@ -257,7 +296,12 @@ func (s *Server) handleImportMarkdown(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	var in importMarkdownInput
-	if err := decodeJSON(r, &in); err != nil {
+	input, inputOK := s.newBlocksHTTPInputV1(w, r, u.OrgID)
+	if !inputOK {
+		return
+	}
+	defer input.CloseConsumerV1()
+	if err := decodeBlocksStreamingInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -271,11 +315,14 @@ func (s *Server) handleImportMarkdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc, err := s.replaceTree(r, u.OrgID, u.UserID, docID, "rest:import_markdown", tree, in.ExpectedUpdatedAt)
+	if doc != nil {
+		defer doc.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeBlockMutationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	writeJSON(w, http.StatusOK, toDocumentResponse(doc.Document))
 }
 
 func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
@@ -344,99 +391,37 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 // mutateTree loads the doc, applies fn to its block tree, persists, and
 // audits. Every REST caller supplies the reviewed document timestamp; MCP
 // enforces the same invariant in its own transactional helper.
-func (s *Server) mutateTree(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, toolName string, fn func(*blocks.Tree) error, expected string) (*generated.Document, error) {
+func (s *Server) mutateTree(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, toolName string, fn pdfadmission.BlocksEditV1, expected string) (*blockauthoring.ResultV1, error) {
 	return s.mutateTreeVia(r, orgID, userID, docID, versions.ViaHuman, toolName, fn, expected)
 }
-
-func (s *Server) mutateTreeVia(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn func(*blocks.Tree) error, expected string) (*generated.Document, error) {
+func (s *Server) mutateTreeVia(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn pdfadmission.BlocksEditV1, expected string) (*blockauthoring.ResultV1, error) {
 	authorize, err := s.sessionDraftAuthorization(r, orgID, userID)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize}, docID)
-	if err != nil {
-		return nil, err
-	}
-	q := s.Queries.WithTx(tx)
-	existing := guard.Document
-	if existing.SourceKind != "blocks" {
-		return nil, authoring.ErrDocumentNotDraft
-	}
-	actorID := guard.UserID()
+	return blockauthoring.MutateTreeV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Audit: s.Audit, SnapshotMutation: s.Versions != nil}, blockauthoring.ActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest", Tool: toolName, IP: firstIPFromHeader(r), UserAgent: r.UserAgent()}, docID, via, expected, checkRESTBlockObservationV1, fn)
+}
+func checkRESTBlockObservationV1(existing *generated.Document, expected string) error {
 	if expected == "" {
-		return nil, errBlockObservationMissing
+		return errBlockObservationMissing
 	}
 	stamp, err := time.Parse(time.RFC3339Nano, expected)
 	if err != nil {
-		return nil, errBlockObservationMalformed
+		return errBlockObservationMalformed
 	}
-	if !existing.UpdatedAt.Valid || !existing.UpdatedAt.Time.Equal(stamp) {
-		return nil, errBlockObservationStale
+	if existing == nil || !existing.UpdatedAt.Valid || !existing.UpdatedAt.Time.Equal(stamp) {
+		return errBlockObservationStale
 	}
-
-	tree, err := blocks.ParseTree(existing.BlocksJson)
-	if err != nil {
-		return nil, fmt.Errorf("existing blocks_json invalid: %w", err)
-	}
-	if err := fn(tree); err != nil {
-		return nil, err
-	}
-	if err := blocks.Validate(tree); err != nil {
-		return nil, fmt.Errorf("post-edit validation: %w", err)
-	}
-	raw, err := json.Marshal(tree)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
-		ID: docID, OrgID: orgID, BlocksJson: raw, VariablesJson: existing.VariablesJson,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if s.Versions != nil {
-		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
-			DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-			BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &actorID,
-			Via: via, Summary: toolName,
-		}); err != nil {
-			return nil, err
-		}
-	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: orgID, ActorUserID: &actorID, DocumentID: &docID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": toolName, "blocks": len(tree.Blocks)},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	s.Audit.Publish(pending)
-	return doc, nil
+	return nil
 }
 
 // replaceTree replaces the entire block tree in one shot. Used by import
 // endpoints.
-func (s *Server) replaceTree(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, toolName string, tree *blocks.Tree, expected string) (*generated.Document, error) {
+func (s *Server) replaceTree(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, toolName string, tree *blocks.Tree, expected string) (*blockauthoring.ResultV1, error) {
 	if err := blocks.Validate(tree); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}
-	return s.mutateTreeVia(r, orgID, userID, docID, versions.ViaImport, toolName, func(current *blocks.Tree) error {
+	return s.mutateTreeVia(r, orgID, userID, docID, versions.ViaImport, toolName, func(current *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 		*current = *tree
 		return nil
 	}, expected)
@@ -448,6 +433,9 @@ var errBlockObservationMalformed = errors.New("expected_updated_at must be RFC33
 var errBlockObservationStale = errors.New("Document changed since observation. Fetch and review before replacing the block.")
 
 func mapMutationStatus(err error) int {
+	if errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, pdfadmission.ErrBlocksWriterV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) {
+		return http.StatusServiceUnavailable
+	}
 	var postgresError *pgconn.PgError
 	var connectionError *pgconn.ConnectError
 	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &postgresError) || errors.As(err, &connectionError) {
@@ -487,6 +475,10 @@ func mapMutationStatus(err error) int {
 
 func (s *Server) writeBlockMutationError(w http.ResponseWriter, err error) {
 	status := mapMutationStatus(err)
+	if status == http.StatusServiceUnavailable {
+		writeError(w, status, "block editing capacity unavailable; retry later")
+		return
+	}
 	if status == http.StatusInternalServerError {
 		s.writeDraftAuthoringError(w, "mutate blocks", err)
 		return

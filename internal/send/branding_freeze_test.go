@@ -147,7 +147,7 @@ func TestSendFreezesRootAndEnvelopeChildrenBeforeSealingIntent(t *testing.T) {
 	}
 	source := string(raw)
 	freeze := strings.Index(source, "brandingDocs := append([]*generated.Document{doc}, envelopeChildren...)")
-	seal := strings.Index(source, "q.CreateSendSealingIntent")
+	seal := strings.Index(source, "phase.work.CreateIntentV1")
 	if freeze < 0 || seal < 0 || freeze >= seal {
 		t.Fatalf("branding freeze must cover the root and envelope children before sealing: freeze=%d seal=%d", freeze, seal)
 	}

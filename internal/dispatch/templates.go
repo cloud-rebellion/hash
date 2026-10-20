@@ -40,8 +40,10 @@ type TemplateContext struct {
 	// BeaconURL is retained only for source compatibility with older callers.
 	// Recipient-identifiable pre-notice email tracking is disabled: invite and
 	// reminder renderers deliberately ignore this value and never emit an image.
-	BeaconURL   string
-	DownloadURL string // for completed_signer/sender
+	BeaconURL        string
+	DownloadURL      string // for completed_signer/sender
+	AuditCertURL     string // separate mandatory completion companion
+	PackagePortalURL string // same fresh recipient credential; archived original files
 	// DownloadExpiresAt is the exact UTC deadline shown to external recipients.
 	// Completion rendering fails closed without it so credential TTL and copy
 	// cannot silently drift.
@@ -74,7 +76,7 @@ type TemplateContext struct {
 // Render returns (subject, html, text) for the given kind + ctx. Errors only
 // when the kind is unknown or templates fail to compile.
 func Render(kind string, ctx TemplateContext) (subject, html, text string, err error) {
-	for _, link := range []string{ctx.SignURL, ctx.DownloadURL, ctx.OpenURL, ctx.ApproveURL, ctx.DenyURL, ctx.UpgradeURL} {
+	for _, link := range []string{ctx.SignURL, ctx.DownloadURL, ctx.AuditCertURL, ctx.PackagePortalURL, ctx.OpenURL, ctx.ApproveURL, ctx.DenyURL, ctx.UpgradeURL} {
 		if err := validateEmailLink(link); err != nil {
 			return "", "", "", err
 		}
@@ -292,6 +294,13 @@ func localizedHTML(kind string, ctx TemplateContext) string {
 		orOpen := esc(i18n.T(loc, "email.common.orOpenUrl", p))
 		extra = fmt.Sprintf(`<p style="font-size: 13px; color: #666;">%s <a href="%s">%s</a></p>`, orOpen, urlEsc, urlEsc)
 	}
+	if kind == KindCompletedSigner && ctx.AuditCertURL != "" {
+		auditCTA := esc(i18n.T(loc, prefix+".auditCta", p))
+		extra = fmt.Sprintf("<p><a href=\"%s\">%s</a></p>", esc(ctx.AuditCertURL), auditCTA)
+	}
+	if kind == KindCompletedSigner && ctx.PackagePortalURL != "" {
+		extra += fmt.Sprintf("<p><a href=\"%s\">Download original contract files</a></p>", esc(ctx.PackagePortalURL))
+	}
 	return fmt.Sprintf(`<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">%s</p>
@@ -315,7 +324,14 @@ func localizedText(kind string, ctx TemplateContext) string {
 	if url == "" {
 		return fmt.Sprintf("%s\n\n%s\n\n%s\n", heading, body, footer)
 	}
-	return fmt.Sprintf("%s\n\n%s\n\n%s: %s\n\n%s\n", heading, body, cta, url, footer)
+	extra := ""
+	if kind == KindCompletedSigner && ctx.AuditCertURL != "" {
+		extra = fmt.Sprintf("%s: %s\\n\\n", i18n.T(loc, prefix+".auditCta", p), ctx.AuditCertURL)
+	}
+	if kind == KindCompletedSigner && ctx.PackagePortalURL != "" {
+		extra += fmt.Sprintf("Download original contract files: %s\n\n", ctx.PackagePortalURL)
+	}
+	return fmt.Sprintf("%s\\n\\n%s\\n\\n%s: %s\\n\\n%s%s\\n", heading, body, cta, url, extra, footer)
 }
 
 func htmlFor(kind string) string {
@@ -427,31 +443,37 @@ const completedSignerHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Signed</p>
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">Your signed copy of {{.DocumentName}}</h1>
-<p>The signing ceremony is complete. Use the link below to download and save the completed signed PDF before {{.DownloadExpiresAt}}. The link does not include the separately stored audit certificate.</p>
+<p>The signing ceremony is complete. Download and save the completed PDF and its separate audit certificate before {{.DownloadExpiresAt}}.</p>
 {{if .DownloadURL}}<p style="margin: 24px 0;"><a href="{{.DownloadURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Download signed PDF</a></p>{{end}}
+{{if .AuditCertURL}}<p><a href="{{.AuditCertURL}}">Download audit certificate</a></p>{{end}}
+{{if .PackagePortalURL}}<p><a href="{{.PackagePortalURL}}">Download original contract files</a></p>{{end}}
 <p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash for {{.OrgName}}.</p>
 </body></html>`
 
-const completedSignerText = `The completed signed PDF for {{.DocumentName}} is ready. The download link expires at {{.DownloadExpiresAt}} and does not include the separately stored audit certificate.
+const completedSignerText = `The completed PDF and its separate audit certificate for {{.DocumentName}} are ready. Download and save both before {{.DownloadExpiresAt}}.
 
 Download: {{.DownloadURL}}
-`
+Audit certificate: {{.AuditCertURL}}
+{{if .PackagePortalURL}}Original contract files: {{.PackagePortalURL}}
+{{end}}`
 
 const completedSenderHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Completed</p>
 {{if .Acknowledgement}}
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} acknowledgements are complete</h1>
-<p>All required recipients acknowledged the document. The completed PDF contains no signature image or representation that a party signed. The separately stored audit certificate records acknowledgement evidence and is not included in this download.</p>
+<p>All required recipients acknowledged the document. The completed PDF contains no signature image or representation that a party signed. Download the separate audit certificate below for acknowledgement evidence.</p>
 {{else}}
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} signing ceremony is complete</h1>
-<p>All required signing roles completed. The final signed PDF is ready; the audit certificate is stored separately and is not included in this download.</p>
+<p>All required signing roles completed. The completed PDF and its separate audit certificate are ready to download.</p>
 {{end}}
 {{if .DownloadURL}}<p style="margin: 24px 0;"><a href="{{.DownloadURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Download completed PDF</a></p>{{end}}
+{{if .AuditCertURL}}<p><a href="{{.AuditCertURL}}">Download audit certificate</a></p>{{end}}
 </body></html>`
 
-const completedSenderText = `{{if .Acknowledgement}}All required acknowledgements for {{.DocumentName}} are complete. The PDF contains no signature image or representation that a party signed; the acknowledgement audit certificate is stored separately and is not included in this download.{{else}}All required signing roles for {{.DocumentName}} completed. The audit certificate is stored separately and is not included in this download.{{end}}
+const completedSenderText = `{{if .Acknowledgement}}All required acknowledgements for {{.DocumentName}} are complete. The PDF contains no signature image or representation that a party signed; the separate audit certificate records the acknowledgement evidence.{{else}}All required signing roles for {{.DocumentName}} completed. The audit certificate is provided separately.{{end}}
 Download completed PDF: {{.DownloadURL}}
+Audit certificate: {{.AuditCertURL}}
 `
 
 const declinedHTML = `<!doctype html>

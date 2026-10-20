@@ -100,6 +100,7 @@ func TestChangeRequestFlow(t *testing.T) {
 	// Signer requests changes instead of signing.
 	rc, err := signEng.LookupByToken(ctx, oldTokenHash)
 	dmust(t, err, "lookup")
+	t.Cleanup(func() { _ = rc.CloseReadV1() })
 	notice := testArticle13NoticeEvidence(t, rc)
 	dmust(t, signEng.RequestChanges(ctx, rc, sign.ChangeRequestInput{
 		Message: "Sänk priset och lägg till en garanti.", BlockID: "p", Quote: "Pris {{price}} kr.", Proposed: "Pris 12 000 kr.",
@@ -127,8 +128,9 @@ func TestChangeRequestFlow(t *testing.T) {
 	// the marked text for the proposed text in the block.
 	_, err = q.SetOrgChangeApprovalMode(ctx, generated.SetOrgChangeApprovalModeParams{ID: org.ID, ChangeApprovalMode: "auto_apply"})
 	dmust(t, err, "set auto_apply")
-	_, err = signEng.ResolveChange(ctx, org.ID, doc.ID, crs[0].ID, true)
+	resolved, err := signEng.ResolveChange(ctx, org.ID, doc.ID, crs[0].ID, true)
 	dmust(t, err, "approve change")
+	defer resolved.CloseConsumerV1()
 	applied, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
 	dmust(t, err, "reload applied")
 	if !strings.Contains(string(applied.BlocksJson), "Pris 12 000 kr.") {
@@ -138,6 +140,7 @@ func TestChangeRequestFlow(t *testing.T) {
 	// Sender revises -> back to draft, requests resolved, recipient reset.
 	revised, err := signEng.Revise(ctx, org.ID, doc.ID)
 	dmust(t, err, "revise")
+	defer revised.CloseConsumerV1()
 	if revised.Status != "draft" {
 		t.Fatalf("expected draft after revise, got %s", revised.Status)
 	}
@@ -154,7 +157,8 @@ func TestChangeRequestFlow(t *testing.T) {
 	if !freshRec.MagicTokenExpiresAt.Valid || freshRec.MagicTokenExpiresAt.Time.After(time.Now()) {
 		t.Fatalf("expected revise to expire the old ceremony token, got %+v", freshRec.MagicTokenExpiresAt)
 	}
-	if _, staleErr := signEng.LookupByToken(ctx, oldTokenHash); staleErr == nil {
+	if stale, staleErr := signEng.LookupByToken(ctx, oldTokenHash); staleErr == nil {
+		_ = stale.CloseReadV1()
 		t.Fatal("old signer token still reads the reopened draft")
 	}
 
@@ -168,6 +172,7 @@ func TestChangeRequestFlow(t *testing.T) {
 	}
 	rc2, err := signEng.LookupByToken(ctx, resentRec.MagicTokenHash)
 	dmust(t, err, "lookup2")
+	t.Cleanup(func() { _ = rc2.CloseReadV1() })
 	res, err := signEng.Sign(ctx, rc2, sign.SignInput{
 		TypedName: "Client", Font: "Caveat", IP: "203.0.113.5", UserAgent: "test",
 		Notice: testArticle13NoticeEvidence(t, rc2),

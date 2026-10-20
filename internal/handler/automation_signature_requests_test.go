@@ -289,7 +289,7 @@ func TestAutomationSignatureRequestHandlerRejectsMalformedTemplatePins(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			processor := &fakeAutomationSignatureRequestProcessor{}
-			server := &Server{automationSignatureRequestProcessorOverride: processor}
+			server := &Server{HTMLCreationSessions: automationUnitInputFactoryV1(t), automationSignatureRequestProcessorOverride: processor}
 			req := httptest.NewRequest(http.MethodPost, "/api/automation/v1/signature-requests", strings.NewReader(test.body))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(automationIdempotencyHeader, "crm-delivery-malformed-pin")
@@ -298,7 +298,7 @@ func TestAutomationSignatureRequestHandlerRejectsMalformedTemplatePins(t *testin
 			ctx = context.WithValue(ctx, auth.RoleKey, "sender")
 			ctx = context.WithValue(ctx, auth.EmailKey, "sender@example.test")
 			res := httptest.NewRecorder()
-			server.handleAutomationSignatureRequest(res, req.WithContext(ctx))
+			server.handleAutomationSignatureRequest(res, automationUnitRequestV1(t, req.WithContext(ctx)))
 			if res.Code != http.StatusBadRequest || len(processor.inputs) != 0 {
 				t.Fatalf("status=%d processor calls=%d body=%s", res.Code, len(processor.inputs), res.Body.String())
 			}
@@ -360,7 +360,7 @@ func TestAutomationSignatureRequestRouteRequiresMachineAuthorization(t *testing.
 			processor := &fakeAutomationSignatureRequestProcessor{response: automationSignatureRequestResponse{
 				AutomationRequestID: requestID, DocumentID: documentID, Status: "sent",
 			}}
-			server := &Server{
+			server := &Server{HTMLCreationSessions: automationUnitInputFactoryV1(t),
 				APIKeys: automationAPIKeyVerifier{
 					id: uuid.New(), userID: uuid.New(), orgID: uuid.New(), role: test.role,
 					email: "sender@example.test", hash: key.Hash, docScope: test.docScope, scopes: test.scopes,
@@ -374,7 +374,7 @@ func TestAutomationSignatureRequestRouteRequiresMachineAuthorization(t *testing.
 				req.Header.Set("Authorization", "Bearer "+key.Plaintext)
 			}
 			res := httptest.NewRecorder()
-			server.Routes().ServeHTTP(res, req)
+			server.Routes().ServeHTTP(res, automationUnitRequestV1(t, req))
 			if res.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", res.Code, test.wantStatus, res.Body.String())
 			}
@@ -443,7 +443,7 @@ func TestAutomationSignatureRequestHandlerMapsReplayAndCollision(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := &Server{automationSignatureRequestProcessorOverride: test.processor}
+			server := &Server{HTMLCreationSessions: automationUnitInputFactoryV1(t), automationSignatureRequestProcessorOverride: test.processor}
 			req := httptest.NewRequest(http.MethodPost, "/api/automation/v1/signature-requests", strings.NewReader(validAutomationRequestBody(templateID)))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(automationIdempotencyHeader, "crm-delivery-42")
@@ -452,7 +452,7 @@ func TestAutomationSignatureRequestHandlerMapsReplayAndCollision(t *testing.T) {
 			ctx = context.WithValue(ctx, auth.RoleKey, "sender")
 			ctx = context.WithValue(ctx, auth.EmailKey, "sender@example.test")
 			res := httptest.NewRecorder()
-			server.handleAutomationSignatureRequest(res, req.WithContext(ctx))
+			server.handleAutomationSignatureRequest(res, automationUnitRequestV1(t, req.WithContext(ctx)))
 			if res.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", res.Code, test.wantStatus, res.Body.String())
 			}
@@ -462,7 +462,7 @@ func TestAutomationSignatureRequestHandlerMapsReplayAndCollision(t *testing.T) {
 
 func TestAutomationSignatureRequestHandlerRejectsMissingContentType(t *testing.T) {
 	processor := &fakeAutomationSignatureRequestProcessor{}
-	server := &Server{automationSignatureRequestProcessorOverride: processor}
+	server := &Server{HTMLCreationSessions: automationUnitInputFactoryV1(t), automationSignatureRequestProcessorOverride: processor}
 	req := httptest.NewRequest(http.MethodPost, "/api/automation/v1/signature-requests", strings.NewReader(validAutomationRequestBody(uuid.New())))
 	req.Header.Set(automationIdempotencyHeader, "crm-delivery-42")
 	ctx := context.WithValue(req.Context(), auth.UserIDKey, uuid.New())
@@ -470,7 +470,7 @@ func TestAutomationSignatureRequestHandlerRejectsMissingContentType(t *testing.T
 	ctx = context.WithValue(ctx, auth.RoleKey, "sender")
 	ctx = context.WithValue(ctx, auth.EmailKey, "sender@example.test")
 	res := httptest.NewRecorder()
-	server.handleAutomationSignatureRequest(res, req.WithContext(ctx))
+	server.handleAutomationSignatureRequest(res, automationUnitRequestV1(t, req.WithContext(ctx)))
 	if res.Code != http.StatusUnsupportedMediaType || len(processor.inputs) != 0 {
 		t.Fatalf("missing content type status=%d processor calls=%d body=%s", res.Code, len(processor.inputs), res.Body.String())
 	}
@@ -561,7 +561,7 @@ func TestDecodeAutomationSignatureRequestRejectsCaseVariantAliases(t *testing.T)
 }
 
 func TestAutomationSignatureRequestProcessorErrorsDoNotEchoInternalDetails(t *testing.T) {
-	server := &Server{automationSignatureRequestProcessorOverride: &fakeAutomationSignatureRequestProcessor{err: errors.New("dial tcp database.internal:5432")}}
+	server := &Server{HTMLCreationSessions: automationUnitInputFactoryV1(t), automationSignatureRequestProcessorOverride: &fakeAutomationSignatureRequestProcessor{err: errors.New("dial tcp database.internal:5432")}}
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(validAutomationRequestBody(uuid.New())))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(automationIdempotencyHeader, "crm-delivery-42")
@@ -570,7 +570,7 @@ func TestAutomationSignatureRequestProcessorErrorsDoNotEchoInternalDetails(t *te
 	ctx = context.WithValue(ctx, auth.RoleKey, "sender")
 	ctx = context.WithValue(ctx, auth.EmailKey, "sender@example.test")
 	res := httptest.NewRecorder()
-	server.handleAutomationSignatureRequest(res, req.WithContext(ctx))
+	server.handleAutomationSignatureRequest(res, automationUnitRequestV1(t, req.WithContext(ctx)))
 	if res.Code != http.StatusInternalServerError || strings.Contains(res.Body.String(), "database.internal") {
 		t.Fatalf("internal error leaked: status=%d body=%s", res.Code, res.Body.String())
 	}

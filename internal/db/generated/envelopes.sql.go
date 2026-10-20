@@ -38,7 +38,7 @@ UPDATE documents AS child
    AND child.is_envelope = FALSE
    AND child.parent_envelope_id IS NULL
    AND child.deleted_at IS NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment, child.signature_fit_reserved_bytes, child.fits_index_required, child.fits_index_preparation_id, child.fits_index_storage_key, child.fits_index_version_id, child.fits_index_sha256, child.fits_index_bytes, child.signature_fit_original_payload_bytes, child.signature_fit_original_authority_bytes, child.signature_fit_original_authority_count, child.signing_admission_policy, child.signing_admission_active_id, child.signing_admission_sealed_id, child.signing_admission_count, child.signing_admission_static_bytes, child.signing_admission_ordinary_bytes, child.signing_admission_plan_bytes, child.signature_fit_request_binding_bytes, child.signature_fit_request_binding_count, child.participant_report_schema
 `
 
 type AttachToEnvelopeParams struct {
@@ -124,6 +124,26 @@ func (q *Queries) AttachToEnvelope(ctx context.Context, arg AttachToEnvelopePara
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }
@@ -131,6 +151,7 @@ func (q *Queries) AttachToEnvelope(ctx context.Context, arg AttachToEnvelopePara
 const beginEnvelopeChildrenFinalization = `-- name: BeginEnvelopeChildrenFinalization :many
 UPDATE documents AS child
 SET status = 'finalizing',
+    participant_report_schema = parent.participant_report_schema,
     completion_effective_at_bound = parent.completion_effective_at_bound,
     completion_effective_at = parent.completion_effective_at,
     finalization_retain_until = parent.finalization_retain_until,
@@ -149,7 +170,7 @@ WHERE child.parent_envelope_id = $1
   AND parent.completion_effective_at_bound = TRUE
   AND parent.completion_effective_at IS NOT NULL
   AND parent.finalization_retain_until IS NOT NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment, child.signature_fit_reserved_bytes, child.fits_index_required, child.fits_index_preparation_id, child.fits_index_storage_key, child.fits_index_version_id, child.fits_index_sha256, child.fits_index_bytes, child.signature_fit_original_payload_bytes, child.signature_fit_original_authority_bytes, child.signature_fit_original_authority_count, child.signing_admission_policy, child.signing_admission_active_id, child.signing_admission_sealed_id, child.signing_admission_count, child.signing_admission_static_bytes, child.signing_admission_ordinary_bytes, child.signing_admission_plan_bytes, child.signature_fit_request_binding_bytes, child.signature_fit_request_binding_count, child.participant_report_schema
 `
 
 type BeginEnvelopeChildrenFinalizationParams struct {
@@ -235,6 +256,26 @@ func (q *Queries) BeginEnvelopeChildrenFinalization(ctx context.Context, arg Beg
 			&i.HtmlCurrentMaterializationSequence,
 			&i.HtmlReviewedMaterializationID,
 			&i.HtmlEffectiveSourceCommitment,
+			&i.SignatureFitReservedBytes,
+			&i.FitsIndexRequired,
+			&i.FitsIndexPreparationID,
+			&i.FitsIndexStorageKey,
+			&i.FitsIndexVersionID,
+			&i.FitsIndexSha256,
+			&i.FitsIndexBytes,
+			&i.SignatureFitOriginalPayloadBytes,
+			&i.SignatureFitOriginalAuthorityBytes,
+			&i.SignatureFitOriginalAuthorityCount,
+			&i.SigningAdmissionPolicy,
+			&i.SigningAdmissionActiveID,
+			&i.SigningAdmissionSealedID,
+			&i.SigningAdmissionCount,
+			&i.SigningAdmissionStaticBytes,
+			&i.SigningAdmissionOrdinaryBytes,
+			&i.SigningAdmissionPlanBytes,
+			&i.SignatureFitRequestBindingBytes,
+			&i.SignatureFitRequestBindingCount,
+			&i.ParticipantReportSchema,
 		); err != nil {
 			return nil, err
 		}
@@ -280,7 +321,7 @@ WHERE child.parent_envelope_id = $1
   AND parent.finalization_retain_until IS NOT NULL
   AND child.completion_effective_at = parent.completion_effective_at
   AND child.finalization_retain_until = parent.finalization_retain_until
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment, child.signature_fit_reserved_bytes, child.fits_index_required, child.fits_index_preparation_id, child.fits_index_storage_key, child.fits_index_version_id, child.fits_index_sha256, child.fits_index_bytes, child.signature_fit_original_payload_bytes, child.signature_fit_original_authority_bytes, child.signature_fit_original_authority_count, child.signing_admission_policy, child.signing_admission_active_id, child.signing_admission_sealed_id, child.signing_admission_count, child.signing_admission_static_bytes, child.signing_admission_ordinary_bytes, child.signing_admission_plan_bytes, child.signature_fit_request_binding_bytes, child.signature_fit_request_binding_count, child.participant_report_schema
 `
 
 type CompleteEnvelopeChildrenParams struct {
@@ -390,6 +431,26 @@ func (q *Queries) CompleteEnvelopeChildren(ctx context.Context, arg CompleteEnve
 			&i.HtmlCurrentMaterializationSequence,
 			&i.HtmlReviewedMaterializationID,
 			&i.HtmlEffectiveSourceCommitment,
+			&i.SignatureFitReservedBytes,
+			&i.FitsIndexRequired,
+			&i.FitsIndexPreparationID,
+			&i.FitsIndexStorageKey,
+			&i.FitsIndexVersionID,
+			&i.FitsIndexSha256,
+			&i.FitsIndexBytes,
+			&i.SignatureFitOriginalPayloadBytes,
+			&i.SignatureFitOriginalAuthorityBytes,
+			&i.SignatureFitOriginalAuthorityCount,
+			&i.SigningAdmissionPolicy,
+			&i.SigningAdmissionActiveID,
+			&i.SigningAdmissionSealedID,
+			&i.SigningAdmissionCount,
+			&i.SigningAdmissionStaticBytes,
+			&i.SigningAdmissionOrdinaryBytes,
+			&i.SigningAdmissionPlanBytes,
+			&i.SignatureFitRequestBindingBytes,
+			&i.SignatureFitRequestBindingCount,
+			&i.ParticipantReportSchema,
 		); err != nil {
 			return nil, err
 		}
@@ -430,7 +491,7 @@ UPDATE documents AS child
    AND child.status = 'draft'
    AND child.is_envelope = FALSE
    AND child.deleted_at IS NULL
-RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment
+RETURNING child.id, child.org_id, child.template_id, child.name, child.status, child.routing_mode, child.source_kind, child.blocks_json, child.variables_json, child.rendered_pdf_key, child.rendered_pdf_sha, child.pdf_storage_key, child.pdf_sha256, child.final_pdf_key, child.final_pdf_sha, child.audit_cert_key, child.expires_at, child.sent_at, child.completed_at, child.sender_id, child.metadata, child.created_at, child.updated_at, child.parent_envelope_id, child.envelope_position, child.is_envelope, child.metadata_redaction_report, child.routing_tier, child.negotiation_enabled, child.bilingual_target_lang, child.lawful_basis, child.deleted_at, child.default_locale, child.requires_signature, child.audit_payload_key, child.audit_payload_sha256, child.audit_signature_key, child.audit_signature_sha256, child.pdf_storage_version_id, child.rendered_pdf_version_id, child.final_pdf_version_id, child.audit_cert_sha256, child.audit_cert_version_id, child.audit_payload_version_id, child.audit_signature_version_id, child.evidence_version_pins_required, child.completion_effective_at, child.completion_effective_at_bound, child.finalization_retain_until, child.article13_notice_epoch_at, child.article13_notice_schema, child.article13_notice_epoch_v61_committed, child.html_source_json, child.html_reviewed_pdf_sha256, child.html_reviewed_by, child.html_reviewed_at, child.html_current_materialization_id, child.html_current_source_json, child.html_current_page_count, child.html_current_materialization_sequence, child.html_reviewed_materialization_id, child.html_effective_source_commitment, child.signature_fit_reserved_bytes, child.fits_index_required, child.fits_index_preparation_id, child.fits_index_storage_key, child.fits_index_version_id, child.fits_index_sha256, child.fits_index_bytes, child.signature_fit_original_payload_bytes, child.signature_fit_original_authority_bytes, child.signature_fit_original_authority_count, child.signing_admission_policy, child.signing_admission_active_id, child.signing_admission_sealed_id, child.signing_admission_count, child.signing_admission_static_bytes, child.signing_admission_ordinary_bytes, child.signing_admission_plan_bytes, child.signature_fit_request_binding_bytes, child.signature_fit_request_binding_count, child.participant_report_schema
 `
 
 type DetachFromEnvelopeParams struct {
@@ -506,12 +567,32 @@ func (q *Queries) DetachFromEnvelope(ctx context.Context, arg DetachFromEnvelope
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }
 
 const listEnvelopeChildren = `-- name: ListEnvelopeChildren :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment, signature_fit_reserved_bytes, fits_index_required, fits_index_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes, signature_fit_original_payload_bytes, signature_fit_original_authority_bytes, signature_fit_original_authority_count, signing_admission_policy, signing_admission_active_id, signing_admission_sealed_id, signing_admission_count, signing_admission_static_bytes, signing_admission_ordinary_bytes, signing_admission_plan_bytes, signature_fit_request_binding_bytes, signature_fit_request_binding_count, participant_report_schema FROM documents
 WHERE parent_envelope_id = $1 AND org_id = $2
 ORDER BY envelope_position ASC NULLS LAST, created_at ASC
 `
@@ -593,6 +674,26 @@ func (q *Queries) ListEnvelopeChildren(ctx context.Context, arg ListEnvelopeChil
 			&i.HtmlCurrentMaterializationSequence,
 			&i.HtmlReviewedMaterializationID,
 			&i.HtmlEffectiveSourceCommitment,
+			&i.SignatureFitReservedBytes,
+			&i.FitsIndexRequired,
+			&i.FitsIndexPreparationID,
+			&i.FitsIndexStorageKey,
+			&i.FitsIndexVersionID,
+			&i.FitsIndexSha256,
+			&i.FitsIndexBytes,
+			&i.SignatureFitOriginalPayloadBytes,
+			&i.SignatureFitOriginalAuthorityBytes,
+			&i.SignatureFitOriginalAuthorityCount,
+			&i.SigningAdmissionPolicy,
+			&i.SigningAdmissionActiveID,
+			&i.SigningAdmissionSealedID,
+			&i.SigningAdmissionCount,
+			&i.SigningAdmissionStaticBytes,
+			&i.SigningAdmissionOrdinaryBytes,
+			&i.SigningAdmissionPlanBytes,
+			&i.SignatureFitRequestBindingBytes,
+			&i.SignatureFitRequestBindingCount,
+			&i.ParticipantReportSchema,
 		); err != nil {
 			return nil, err
 		}
@@ -612,8 +713,11 @@ UPDATE documents
    AND status = 'draft'
    AND parent_envelope_id IS NULL
    AND source_kind = 'blocks'
+   -- The envelope renderer uses only its children. Never hide an agreement
+   -- by promoting a populated document into a non-rendered wrapper.
+   AND blocks_json = '{"version":1,"blocks":[]}'::jsonb
    AND deleted_at IS NULL
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment, signature_fit_reserved_bytes, fits_index_required, fits_index_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes, signature_fit_original_payload_bytes, signature_fit_original_authority_bytes, signature_fit_original_authority_count, signing_admission_policy, signing_admission_active_id, signing_admission_sealed_id, signing_admission_count, signing_admission_static_bytes, signing_admission_ordinary_bytes, signing_admission_plan_bytes, signature_fit_request_binding_bytes, signature_fit_request_binding_count, participant_report_schema
 `
 
 type MarkAsEnvelopeParams struct {
@@ -687,6 +791,26 @@ func (q *Queries) MarkAsEnvelope(ctx context.Context, arg MarkAsEnvelopeParams) 
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }

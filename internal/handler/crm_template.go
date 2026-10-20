@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/crmconnection"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -30,17 +30,18 @@ var errCRMTemplateChanged = errors.New("template, approval, CRM account or revie
 // These commands have no nullable input members: omission supplies defaults,
 // while an explicit null must never silently become an empty string or false.
 func decodeCRMTemplateJSON(r *http.Request, dst any) error {
-	raw, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxSignerJSONBody))
+	raw, err := readHTMLAuthoringInputJSONV1(r, maxSignerJSONBody)
 	if err != nil {
+		if errors.Is(err, pdfadmission.ErrHTMLAuthoringInputV1) {
+			return err
+		}
 		return errCRMTemplateInput
 	}
 	var value any
 	if json.Unmarshal(raw, &value) != nil || crmTemplateHasNull(value) {
 		return errCRMTemplateInput
 	}
-	copy := r.Clone(r.Context())
-	copy.Body = io.NopCloser(bytes.NewReader(raw))
-	return decodeSignerJSON(copy, dst)
+	return decodeSignerJSONBytesV1(raw, dst)
 }
 
 func crmTemplateHasNull(value any) bool {
@@ -105,6 +106,7 @@ type crmTemplateContext struct {
 	defaults   map[string]string
 	variables  []crmTemplateVariable
 	response   crmTemplateResponseWitness
+	closeOwned func()
 }
 
 func (in CRMTemplateWitness) validate(actor authoring.Actor) error {
@@ -160,11 +162,22 @@ func (in CRMTemplateWitness) matches(current *crmTemplateContext) error {
 // account locks. Its caller commits before network, renderer or storage work.
 // Creation's final transaction takes the quota lock before entering this helper.
 func (s *Server) lockCRMTemplate(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, version int32, contentSHA string) (*authoring.MemberGuard, *crmTemplateContext, error) {
+	return s.lockCRMTemplateForV1(ctx, tx, actor, templateID, version, contentSHA, false)
+}
+
+func (s *Server) lockCRMTemplateRecheckV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, version int32, contentSHA string) (*authoring.MemberGuard, *crmTemplateContext, error) {
+	return s.lockCRMTemplateForV1(ctx, tx, actor, templateID, version, contentSHA, true)
+}
+
+func (s *Server) lockCRMTemplateForV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, version int32, contentSHA string, recheck bool) (*authoring.MemberGuard, *crmTemplateContext, error) {
 	if tx == nil || templateID == uuid.Nil || version <= 0 || !htmlPreviewSHA256(contentSHA) {
 		return nil, nil, errCRMTemplateInput
 	}
-	q := generated.New(tx)
-	template, err := q.GetHTMLTemplateForShare(ctx, generated.GetHTMLTemplateForShareParams{ID: templateID, OrgID: actor.OrgID})
+	reader, err := htmlAuthoringReaderV1(tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	template, revision, err := reader.ReadTemplateRevisionV1(ctx, templateID, version)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -172,36 +185,36 @@ func (s *Server) lockCRMTemplate(ctx context.Context, tx pgx.Tx, actor authoring
 	if template.SourceKind != "html" || template.ID != templateID || template.OrgID != actor.OrgID || template.Version != version || !bytes.Equal(template.HtmlContentSha256, digest) {
 		return nil, nil, errCRMTemplateChanged
 	}
-	revision, err := q.GetHTMLTemplateRevisionForShare(ctx, generated.GetHTMLTemplateRevisionForShareParams{TemplateID: templateID, OrgID: actor.OrgID, Version: version})
-	if err != nil {
-		return nil, nil, err
-	}
 	if revision.TemplateID != templateID || revision.OrgID != actor.OrgID || revision.Version != version ||
 		!revision.ApprovedBy.Valid || uuid.UUID(revision.ApprovedBy.Bytes) == uuid.Nil || !revision.ApprovedAt.Valid || revision.ApprovedAt.Time.IsZero() ||
 		revision.ApprovedAt.InfinityModifier != pgtype.Finite || !bytes.Equal(revision.ContentSha256, digest) {
 		return nil, nil, errCRMTemplateChanged
 	}
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
+	guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
 	if err != nil {
 		return nil, nil, err
 	}
-	content, err := htmlmaster.CanonicalTemplate(revision.HtmlMasterJson, revision.VariablesJson)
+	var content htmlmaster.TemplateCommitment
+	if recheck {
+		content, err = reader.CanonicalRetainedTemplateRecheckV1(ctx, templateID, version)
+	} else {
+		content, err = reader.CanonicalRetainedTemplateV1(ctx, templateID, version)
+	}
+	if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+		return nil, nil, err
+	}
 	if err != nil || content.SHA256 != contentSHA {
 		return nil, nil, errCRMTemplateChanged
 	}
-	master, err := htmlmaster.Decode(content.MasterJSON)
-	if err != nil {
-		return nil, nil, err
-	}
-	compiled, err := htmlmaster.Compile(master)
-	if err != nil {
-		return nil, nil, err
-	}
-	defaults := map[string]string{}
-	if json.Unmarshal(content.DefaultsJSON, &defaults) != nil || defaults == nil {
+	prepared, err := reader.PreparedRetainedTemplateV1(ctx, templateID, version)
+	if errors.Is(err, pdfadmission.ErrHTMLAuthoringChangedV1) {
 		return nil, nil, errCRMTemplateChanged
 	}
-	connection, err := q.GetCRMConnectionByOrgForShare(ctx, actor.OrgID)
+	if err != nil {
+		return nil, nil, err
+	}
+	compiled, defaults := prepared.Compiled, prepared.Defaults
+	connection, err := reader.ReadCRMConnectionV1(ctx)
 	if errors.Is(err, pgx.ErrNoRows) {
 		connection, err = nil, nil
 	}
@@ -215,7 +228,7 @@ func (s *Server) lockCRMTemplate(ctx context.Context, tx pgx.Tx, actor authoring
 		defaults: defaults, variables: []crmTemplateVariable{}, response: crmTemplateResponseWitness{OrgID: actor.OrgID, UserID: actor.UserID,
 			TemplateID: templateID, TemplateVersion: version, TemplateContentSHA256: contentSHA,
 			TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time.UTC().Format(time.RFC3339Nano)}}
-	for _, definition := range master.Values {
+	for _, definition := range prepared.Values {
 		value, exists := defaults[definition.Name]
 		result.variables = append(result.variables, crmTemplateVariable{Name: definition.Name, Required: definition.Required, MaxChars: definition.MaxChars, CurrentPresent: exists, CurrentValue: value})
 	}
@@ -225,38 +238,55 @@ func (s *Server) lockCRMTemplate(ctx context.Context, tx pgx.Tx, actor authoring
 	return guard, result, nil
 }
 
-func (s *Server) readCRMTemplate(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, version int32, digest string, expected *CRMTemplateWitness) (*crmTemplateContext, error) {
-	if s.Pool == nil {
-		return nil, crmconnection.ErrNotConfigured
-	}
+func (s *Server) readCRMTemplate(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, version int32, digest string, expected *CRMTemplateWitness) (current *crmTemplateContext, failure error) {
 	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, templateID)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, current, err := s.lockCRMTemplate(ctx, tx, actor, templateID, version, digest)
-	if err != nil {
-		return nil, err
-	}
-	if expected != nil {
-		if err = expected.matches(current); err != nil {
-			return nil, err
+	defer func() {
+		_ = o.closeSQLV1(ctx)
+		if current == nil {
+			o.closeConsumerV1(ctx)
 		}
-	}
-	if err = guard.Recheck(ctx); err != nil {
+	}()
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		guard, value, err := s.lockCRMTemplate(ctx, tx, actor, templateID, version, digest)
+		if err != nil {
+			return err
+		}
+		current = value
+		if expected != nil {
+			if err = expected.matches(current); err != nil {
+				return err
+			}
+		}
+		return guard.Recheck(ctx)
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = o.session.CommitV1(ctx); err != nil {
 		return nil, err
 	}
+	current.closeOwned = func() { o.closeConsumerV1(ctx) }
 	return current, nil
+}
+
+func (current *crmTemplateContext) closeOwnedV1() {
+	if current != nil && current.closeOwned != nil {
+		current.closeOwned()
+	}
 }
 
 func (s *Server) crmTemplateActor(w http.ResponseWriter, r *http.Request) (authoring.Actor, uuid.UUID, bool) {
 	u, ok := requireSessionUser(w, r.Context())
 	if !ok {
+		return authoring.Actor{}, uuid.Nil, false
+	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
 		return authoring.Actor{}, uuid.Nil, false
 	}
 	id, ok := parseUUIDParam(w, r, "id")
@@ -310,6 +340,7 @@ func (s *Server) handleCRMTemplateContext(w http.ResponseWriter, r *http.Request
 		s.writeCRMTemplateError(w, err)
 		return
 	}
+	defer current.closeOwnedV1()
 	_, activeErr := s.crmActiveConnection(&crmDocumentContext{connection: current.connection})
 	writeJSON(w, 200, struct {
 		crmTemplateResponseWitness

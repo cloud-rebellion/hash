@@ -116,7 +116,8 @@ func (s *Server) handleChangeActionConfirm(w http.ResponseWriter, r *http.Reques
 		s.actionPage(w, http.StatusBadRequest, "Link not valid", `<p class="muted">This link is malformed.</p>`)
 		return
 	}
-	if _, err := s.Sign.ResolveChange(r.Context(), orgID, docID, crID, c.Action == "approve"); err != nil {
+	resolved, err := s.Sign.ResolveChange(r.Context(), orgID, docID, crID, c.Action == "approve")
+	if err != nil {
 		switch {
 		case errors.Is(err, sign.ErrChangeAlreadyResolved):
 			s.actionPage(w, http.StatusOK, "Already handled", `<p class="muted">This change request was already approved or denied.</p>`)
@@ -128,12 +129,16 @@ func (s *Server) handleChangeActionConfirm(w http.ResponseWriter, r *http.Reques
 			s.actionPage(w, http.StatusConflict, "Cannot apply change", `<p class="muted">This change cannot be applied because the document already contains captured legal evidence.</p>`)
 		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
 			s.actionPage(w, http.StatusConflict, "Cannot resolve change", `<p class="muted">This change is not supported for envelopes.</p>`)
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			w.Header().Set("Retry-After", "1")
+			s.actionPage(w, http.StatusServiceUnavailable, "Temporarily unavailable", `<p class="muted">Please retry this change request shortly.</p>`)
 		default:
 			slog.Error("change action resolution failed", "document_id", docID, "change_request_id", crID, "err", err)
 			s.actionPage(w, http.StatusInternalServerError, "Change not saved", `<p class="muted">The change request could not be saved. Please retry or open the document to review the request.</p>`)
 		}
 		return
 	}
+	defer resolved.CloseConsumerV1()
 	done := "approved"
 	if c.Action == "deny" {
 		done = "denied"

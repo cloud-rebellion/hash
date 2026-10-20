@@ -16,12 +16,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
+
+func writeDSRPrivacyContentionV1(w http.ResponseWriter, err error) bool {
+	var pgerr *pgconn.PgError
+	if !errors.As(err, &pgerr) || pgerr.Code != "55P03" {
+		return false
+	}
+	writeError(w, http.StatusConflict, "document privacy review is changing; retry the request")
+	return true
+}
 
 // Data Subject Rights (GDPR Articles 15-22).
 //
@@ -88,6 +98,7 @@ func (s *Server) handleSignerDSR(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	var in signerDSRInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -144,6 +155,9 @@ func (s *Server) handleSignerDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
+		if writeDSRPrivacyContentionV1(w, err) {
+			return
+		}
 		writeInternalErrorMsg(w, "persist", err)
 		return
 	}
@@ -314,6 +328,9 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
+		if writeDSRPrivacyContentionV1(w, err) {
+			return
+		}
 		writeInternalErrorMsg(w, "persist", err)
 		return
 	}
@@ -459,11 +476,11 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if in.Status == "fulfilled" && cur.Kind == "erasure" {
 		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 		if err != nil {
-			writeInternalErrorMsg(w, "inspect retained HTML authoring inventory", err)
+			writeInternalErrorMsg(w, "inspect retained authoring and attachment inventory", err)
 			return
 		}
 		if hasHTMLAuthoring {
-			writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy and retention review; keep this request in progress")
+			writeError(w, http.StatusConflict, "Document attachments, HTML designs and source history require a separate privacy and retention review; keep this request in progress")
 			return
 		}
 		if !cur.RecipientID.Valid {
@@ -592,6 +609,9 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if writeDSRPrivacyContentionV1(w, err) {
+			return
+		}
 		writeInternalError(w, err)
 		return
 	}
@@ -623,11 +643,11 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if in.Status == "fulfilled" && cur.Kind == "erasure" {
 		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 		if err != nil {
-			writeInternalErrorMsg(w, "recheck retained HTML authoring inventory", err)
+			writeInternalErrorMsg(w, "recheck retained authoring and attachment inventory", err)
 			return
 		}
 		if hasHTMLAuthoring {
-			writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy and retention review; keep this request in progress")
+			writeError(w, http.StatusConflict, "Document attachments, HTML designs and source history require a separate privacy and retention review; keep this request in progress")
 			return
 		}
 	}
@@ -678,11 +698,11 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	}
 	hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 	if err != nil {
-		writeInternalErrorMsg(w, "inspect HTML privacy export inventory", err)
+		writeInternalErrorMsg(w, "inspect authoring and attachment privacy export inventory", err)
 		return
 	}
 	if hasHTMLAuthoring {
-		writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy export review; this recipient export cannot fulfill the request")
+		writeError(w, http.StatusConflict, "Document attachments, HTML designs and source history require a separate privacy export review; this recipient export cannot fulfill the request")
 		return
 	}
 	rows, err := q.ExportSubjectData(r.Context(), generated.ExportSubjectDataParams{
@@ -710,11 +730,11 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	// HTML design committed during the preceding query/audit wait.
 	hasHTMLAuthoring, err = q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 	if err != nil {
-		writeInternalErrorMsg(w, "recheck HTML privacy export inventory", err)
+		writeInternalErrorMsg(w, "recheck authoring and attachment privacy export inventory", err)
 		return
 	}
 	if hasHTMLAuthoring {
-		writeError(w, http.StatusConflict, "HTML designs and document source history require a separate privacy export review; this recipient export cannot fulfill the request")
+		writeError(w, http.StatusConflict, "Document attachments, HTML designs and source history require a separate privacy export review; this recipient export cannot fulfill the request")
 		return
 	}
 	if !s.transactionSessionFresh(w, cookie) {

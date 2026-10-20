@@ -52,15 +52,23 @@ func htmlPreviewServerE2E(t *testing.T, f lifecycleAuthorizationFixture, rendere
 	t.Cleanup(peer.Close)
 	// Server contains an atomic collaboration gate; borrow explicit immutable
 	// configuration/dependency pointers instead of copying that noCopy state.
-	server := &Server{Pool: f.s.Pool, Queries: f.s.Queries, Audit: f.s.Audit, Cookies: f.s.Cookies,
+	server := &Server{Pool: f.s.Pool, HTMLCreationSessions: f.s.HTMLCreationSessions,
+		Queries: f.s.Queries, Audit: f.s.Audit, Cookies: f.s.Cookies,
 		Billing: f.s.Billing, Storage: f.s.Storage, Versions: f.s.Versions,
 		PublicURL: f.s.PublicURL, Environment: f.s.Environment, ProxyAuth: f.s.ProxyAuth, Release: f.s.Release}
-	engine := sign.Engine{}
-	if f.s.Sign != nil {
-		engine = *f.s.Sign
+	engine := &sign.Engine{}
+	if original := f.s.Sign; original != nil {
+		// Borrow explicit dependencies; the live Engine keeps its mutex and
+		// retained journal lifetime. Preview does not initialize a new journal.
+		engine = &sign.Engine{Pool: original.Pool, WorkRuntime: original.WorkRuntime,
+			Queries: original.Queries, Storage: original.Storage, Audit: original.Audit,
+			Mailer: original.Mailer, Signer: original.Signer, OrgName: original.OrgName,
+			BaseURL: original.BaseURL, ActionSecret: original.ActionSecret,
+			BrandingCSS: original.BrandingCSS, EnvelopeManifestHTML: original.EnvelopeManifestHTML,
+			EnvelopeChildren: original.EnvelopeChildren, Now: original.Now}
 	}
 	engine.PDF = render.NewGotenberg(peer.URL)
-	server.Sign = &engine
+	server.Sign = engine
 	f.s = server
 	return f
 }
@@ -387,6 +395,51 @@ func TestHTMLTemplatePreviewRechecksAfterRendererWaitE2E(t *testing.T) {
 	}
 }
 
+func TestHTMLTemplatePreviewPinsPrecedeMissingCacheE2E(t *testing.T) {
+	database := isolateHTMLTemplateDatabaseE2E(t)
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	template := createHTMLTemplateE2E(t, f)
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	renderer := &htmlCreationRendererE2E{}
+	preview := htmlPreviewServerE2E(t, f, renderer)
+	if tag, err := f.pool.Exec(f.ctx, "DELETE FROM html_authoring_template_sizes_v1 WHERE template_id=$1 AND org_id=$2", template.ID, f.org); err != nil || tag.RowsAffected() != 1 {
+		t.Fatal("remove exact genuine fresh template cache")
+	} //nolint:rawsql -- exact disposable template cache, never an expanded repair
+	before := htmlTemplateSnapshotE2E(t, f)
+	digest := hex.EncodeToString(template.HtmlContentSha256)
+	wrongDigest := strings.Repeat("0", 64)
+	if wrongDigest == digest {
+		wrongDigest = strings.Repeat("1", 64)
+	}
+	for _, tc := range []struct {
+		name    string
+		version int32
+		digest  string
+		status  int
+	}{
+		{"unchanged_pins_stay_unavailable", template.Version, digest, http.StatusServiceUnavailable},
+		{"different_version_is_conflict", template.Version + 1, digest, http.StatusConflict},
+		{"different_digest_is_conflict", template.Version, wrongDigest, http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(htmlTemplatePreviewInput{ExpectedVersion: tc.version, ExpectedContentSHA256: tc.digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := submitSessionOperationE2E(preview.s, http.MethodPost, "/api/v1/templates/"+template.ID.String()+"/html/preview", string(body), cookie)
+			assertNoHTMLPreviewE2E(t, w, tc.status)
+			assertHTMLTemplateUnchangedE2E(t, f, before)
+			if len(renderer.sources()) != 0 {
+				t.Fatal("missing-cache or mismatched-pin refusal reached renderer")
+			}
+			var caches int
+			if err := f.pool.QueryRow(f.ctx, "SELECT count(*) FROM html_authoring_template_sizes_v1 WHERE template_id=$1 AND org_id=$2", template.ID, f.org).Scan(&caches); err != nil || caches != 0 {
+				t.Fatal("refused preview refreshed an untrusted missing cache")
+			} //nolint:rawsql -- exact absence witness, no source expansion
+		})
+	}
+}
+
 func TestHTMLTemplatePreviewReceiptExpiryDuringAuditWaitE2E(t *testing.T) {
 	database := isolateHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
@@ -405,9 +458,15 @@ func TestHTMLTemplatePreviewReceiptExpiryDuringAuditWaitE2E(t *testing.T) {
 	if err := f.q.WithTx(hold).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
+	requestCtx, cancelRequest := context.WithCancel(f.ctx)
 	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- submitHTMLTemplateE2E(t, f, "approve", template.ID, in, cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+	finished := make(chan struct{})
+	defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, hold)
+	go func() {
+		defer close(finished)
+		result <- submitHTMLTemplateContextE2E(t, requestCtx, f, "approve", template.ID, in, cookie)
+	}()
+	awaitHTMLAuthoringOperationLockE2E(t, f, "-- name: AcquireOrgChainLock", "advisory")
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(proof.ExpiresAt) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

@@ -4,6 +4,7 @@
 package flarereport
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 // the process. Query strings are removed wholesale below.
 var credentialPathPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(/sign/)[^/?#]+`),
+	regexp.MustCompile(`(/completed/)[^/?#]+`),
 	regexp.MustCompile(`(/e/o/)[^/?#]+`),
 	regexp.MustCompile(`(/webhooks/billing/)[^/?#]+`),
 	regexp.MustCompile(`(/qes/callback/)[^/?#]+`),
@@ -54,50 +56,84 @@ func scrubSensitive(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 // injected by the deploy pipeline's flare-provision step; without it this is a
 // no-op so dev runs and self-hosts boot unchanged.
 func InitFlare(service, release, environment string) bool {
+	ready := make(chan struct{})
+	close(ready)
+	return InitFlareWithContext(context.Background(), ready, service, release, environment) != nil
+}
+
+// InitFlareWithContext installs capture before dependencies but starts healthy
+// role signals only after actual readiness. The caller owns finite Close.
+func InitFlareWithContext(ctx context.Context, ready <-chan struct{}, service, release, environment string) *Lifecycle {
 	dsn := os.Getenv("FLARE_DSN")
-	if dsn == "" {
-		return false
+	if dsn == "" || ctx == nil || ready == nil {
+		return nil
 	}
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		Release:          release,
-		Environment:      environment,
-		ServerName:       service,
-		EnableTracing:    true,
-		TracesSampleRate: tracesSampleRate(),
-		BeforeSend:       scrubSensitive,
-		// Transaction envelopes route through a SEPARATE hook. Registering only
-		// BeforeSend left every traced request unscrubbed, which is the
-		// higher-volume half of the traffic on an HTTP service.
-		BeforeSendTransaction: scrubSensitive,
-	})
+	if service != "hash" && service != "hash-worker" {
+		return nil
+	}
+	release, environment = identityValue(release), identityValue(environment)
+	if release == "" || environment == "" {
+		return nil
+	}
+	if _, _, valid := publicDSN(dsn, environment); !valid {
+		return nil
+	}
+	err := sentry.Init(sdkClientOptions(dsn, service, release, environment))
 	if err != nil {
-		slog.Warn("flare: error reporting disabled (sentry init failed)", "error", err)
-		return false
+		slog.Warn("flare: error reporting disabled", "category", "invalid_configuration")
+		return nil
 	}
-	slog.Info("flare: error reporting enabled", "service", service, "release", release, "environment", environment)
-	startHeartbeat(service)
-	installLogShipper(service)
-	return true
+	currentIdentity.Store(&processIdentity{service: service, release: release, environment: environment})
+	return newLifecycleWithShipper(ctx, ready, service, sentry.CurrentHub().Client(), func(owned context.Context) *logShipper {
+		return installLogShipperWithContext(owned, service, release, environment)
+	})
+}
+
+// sdkClientOptions keeps capture asynchronous and bounded while enqueuing each
+// error/transaction before capture returns. SDK v0.47's default telemetry
+// scheduler can remove an item before enqueueing it to the transport, allowing
+// a simultaneous Flush to finish before that item reaches the transport.
+// Use the supported HTTP transport's synchronous enqueue/batch-drain barrier;
+// network I/O still runs on its bounded background worker. Hash ships its own
+// fixed-schema logs and has no SDK log/metric producers.
+func sdkClientOptions(dsn, service, release, environment string) sentry.ClientOptions {
+	transport := sentry.NewHTTPTransport()
+	transport.BufferSize = 30
+	transport.Timeout = 3 * time.Second
+	return sentry.ClientOptions{
+		Dsn: dsn, Release: release, Environment: environment, ServerName: service,
+		Transport: transport, DisableLogs: true, DisableMetrics: true,
+		HTTPClient:    &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		EnableTracing: true, TracesSampleRate: tracesSampleRate(),
+		BeforeSend: scrubSensitive, BeforeSendTransaction: scrubSensitive,
+	}
 }
 
 // FlareRecoverer captures panics to Flare and re-panics so the existing
-// recovery middleware (chi Recoverer) still renders the 500. Mount it AFTER
+// sanitized outer recovery middleware still renders the 500. Mount it AFTER
 // Recoverer in the chain so it sees the panic first. Safe to mount when
 // InitFlare was a no-op: capture calls on an uninitialized hub do nothing.
 func FlareRecoverer(next http.Handler) http.Handler {
-	traced := flareTracer(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				hub := sentry.CurrentHub().Clone()
-				hub.Scope().SetRequest(r)
-				hub.RecoverWithContext(r.Context(), rec)
-				hub.Flush(2 * time.Second)
+				observation, _ := r.Context().Value(httpObservationKey{}).(*httpObservation)
+				if asError(rec) == http.ErrAbortHandler {
+					if observation != nil {
+						observation.aborted.Store(true)
+					}
+					panic(rec)
+				}
+				if observation != nil {
+					observation.panicked.Store(true)
+				}
+				CaptureOperationFailure(r.Context(), OperationHTTP, FailurePanic)
+				// Re-panic the original value for existing recovery behavior;
+				// only the fixed signal and safe code stack leave this process.
 				panic(rec)
 			}
 		}()
-		traced.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -107,7 +143,7 @@ func CaptureErr(err error) {
 	if err == nil {
 		return
 	}
-	sentry.CaptureException(err)
+	CaptureOperationFailure(context.Background(), OperationMail, FailureUnavailable)
 }
 
 // CaptureWorkerFatal emits a deliberately data-free fatal signal and waits for
@@ -122,7 +158,13 @@ func CaptureWorkerFatal(loop string, panicked bool) {
 	}
 	hub := sentry.CurrentHub().Clone()
 	hub.WithScope(func(scope *sentry.Scope) {
+		scope.Clear()
 		scope.SetLevel(sentry.LevelFatal)
+		if id := currentIdentity.Load(); id != nil {
+			scope.SetTag("service", id.service)
+			scope.SetTag("release", id.release)
+			scope.SetTag("environment", id.environment)
+		}
 		scope.SetTag("worker_loop", loop)
 		scope.SetTag("worker_failure", failure)
 		scope.SetFingerprint([]string{"hash-worker-fatal", loop, failure})
@@ -132,3 +174,5 @@ func CaptureWorkerFatal(loop string, panicked bool) {
 	// transport gets a bounded chance to deliver before os.Exit skips defers.
 	hub.Flush(2 * time.Second)
 }
+
+func asError(value any) error { err, _ := value.(error); return err }

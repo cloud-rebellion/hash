@@ -17,19 +17,24 @@ import (
 )
 
 const anonymizeRecipient = `-- name: AnonymizeRecipient :execrows
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  JOIN recipients target ON target.document_id = d.id
+  WHERE target.id = $3 AND d.org_id = $4
+  FOR UPDATE OF d
+)
 UPDATE recipients r
-SET email = $2,
-    name = $3
-FROM documents d
-WHERE r.id = $1
-  AND r.document_id = d.id
-  AND d.org_id = $4
+SET email = $1,
+    name = $2
+FROM locked_document d
+WHERE r.id = $3 AND r.document_id = d.id
 `
 
 type AnonymizeRecipientParams struct {
-	ID    uuid.UUID `json:"id"`
 	Email string    `json:"email"`
 	Name  string    `json:"name"`
+	ID    uuid.UUID `json:"id"`
 	OrgID uuid.UUID `json:"org_id"`
 }
 
@@ -46,9 +51,9 @@ type AnonymizeRecipientParams struct {
 // hard failure so a stale/cross-tenant id can never report "fulfilled".
 func (q *Queries) AnonymizeRecipient(ctx context.Context, arg AnonymizeRecipientParams) (int64, error) {
 	result, err := q.db.Exec(ctx, anonymizeRecipient,
-		arg.ID,
 		arg.Email,
 		arg.Name,
+		arg.ID,
 		arg.OrgID,
 	)
 	if err != nil {
@@ -298,7 +303,7 @@ func (q *Queries) GetDataSubjectRequestForUpdate(ctx context.Context, arg GetDat
 }
 
 const getDocumentForPrivacyUpdate = `-- name: GetDocumentForPrivacyUpdate :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment, signature_fit_reserved_bytes, fits_index_required, fits_index_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes, signature_fit_original_payload_bytes, signature_fit_original_authority_bytes, signature_fit_original_authority_count, signing_admission_policy, signing_admission_active_id, signing_admission_sealed_id, signing_admission_count, signing_admission_static_bytes, signing_admission_ordinary_bytes, signing_admission_plan_bytes, signature_fit_request_binding_bytes, signature_fit_request_binding_count, participant_report_schema FROM documents WHERE id = $1 AND org_id = $2 FOR UPDATE
 `
 
 type GetDocumentForPrivacyUpdateParams struct {
@@ -374,6 +379,26 @@ func (q *Queries) GetDocumentForPrivacyUpdate(ctx context.Context, arg GetDocume
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }
@@ -404,6 +429,24 @@ func (q *Queries) HasCollabRecoveryArchivesForDSR(ctx context.Context, arg HasCo
 
 const hasHTMLAuthoringDataForDSR = `-- name: HasHTMLAuthoringDataForDSR :one
 SELECT EXISTS (
+    SELECT 1 FROM document_packages_v1 p WHERE p.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_send_attempts_v1 a WHERE a.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_responses_v1 r WHERE r.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_ordinary_finalization_preparations_v1 p WHERE p.org_id=$1::uuid AND (p.retain_until>=clock_timestamp() OR p.bodies_retired_at IS NULL)
+    UNION ALL
+    SELECT 1 FROM document_participant_reports_v1 r WHERE r.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_participant_report_legacy_intents_v1 r WHERE r.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_captures_v1 c WHERE c.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_capture_members_v1 c WHERE c.org_id = $1::uuid
+    UNION ALL
+    SELECT 1 FROM document_attachment_drafts_v1 a WHERE a.org_id = $1::uuid
+    UNION ALL
     SELECT 1 FROM html_template_revisions r WHERE r.org_id = $1::uuid
     UNION ALL
     SELECT 1 FROM templates t WHERE t.org_id = $1::uuid

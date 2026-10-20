@@ -308,13 +308,13 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 				t.Fatal("signature did not reach its own held lock")
 			}
 			if scenario == "rotated_document_wait" {
-				if err := f.q.RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: rc.Recipient.ID, DocumentID: f.docID, MagicTokenHash: auth.HashMagicToken(uuid.NewString()),
+				if err := f.q.WithTx(held).RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: rc.Recipient.ID, DocumentID: f.docID, MagicTokenHash: auth.HashMagicToken(uuid.NewString()),
 					MagicTokenExpiresAt: pgtype.Timestamptz{Time: base.Add(time.Hour), Valid: true}}); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				if scenario == "admitted_recipient_deadline_extended" {
-					if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, rc.Recipient.ID, base.Add(time.Hour)); err != nil { //nolint:rawsql
+					if _, err := held.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, rc.Recipient.ID, base.Add(time.Hour)); err != nil { //nolint:rawsql
 						t.Fatal(err)
 					}
 				} else if scenario == "admitted_document_deadline_extended" {
@@ -324,17 +324,17 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 				}
 				clock.Store(base.Add(2 * time.Second).UnixNano())
 			}
+			// Capture the holder's own authorized credential/deadline changes
+			// before releasing the document: an incorrectly accepted request
+			// must not be able to race into the baseline snapshot.
+			before := negotiationCredentialSnapshot(t, f.ctx, held, f)
 			if err := held.Commit(f.ctx); err != nil {
 				t.Fatal(err)
 			}
-			// For the same-hash extension case the holder itself commits a new
-			// document deadline; observe that authorized update before checking
-			// the stale signature's rollback.
-			before := f.snapshot(t)
 			if err := <-result; !errors.Is(err, ErrMagicLinkExpired) {
 				t.Fatalf("expired/rotated signature error=%v", err)
 			}
-			if before != f.snapshot(t) {
+			if before != negotiationCredentialSnapshot(t, f.ctx, f.pool, f) {
 				t.Fatal("stale signature committed fields, signatures, status, events or mail")
 			}
 			if strings.HasPrefix(scenario, "admitted_") {
@@ -522,6 +522,7 @@ func (f *multipartyPDFFixture) context(t *testing.T, index int) *RecipientContex
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rc.CloseReadV1() })
 	return rc
 }
 
@@ -601,7 +602,8 @@ func (f *multipartyPDFFixture) assertCompleted(t *testing.T, label string) {
 		t.Fatalf("signed/completed/mail=%d/%d/%d", signed, completed, mail)
 	}
 	for _, token := range f.tokens {
-		if _, err := f.engine.LookupByToken(f.ctx, auth.HashMagicToken(token)); err == nil {
+		if unexpected, err := f.engine.LookupByToken(f.ctx, auth.HashMagicToken(token)); err == nil {
+			_ = unexpected.CloseReadV1()
 			t.Fatal("completed PDF retained an admitted ceremony credential")
 		}
 	}

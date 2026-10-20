@@ -18,6 +18,8 @@ import (
 
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/documentpackage"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -144,6 +146,7 @@ func (s *Server) handleSignerContext(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	out := signerContextResponse{
 		DocumentID:        rc.Document.ID,
 		DocumentName:      rc.Document.Name,
@@ -251,6 +254,7 @@ func (s *Server) handleSignerDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	if rc.Document.SourceKind != "blocks" {
 		writeError(w, http.StatusBadRequest, "pdf-source documents not yet renderable inline")
 		return
@@ -276,10 +280,11 @@ func (s *Server) handleSignerDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSignerView(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticViewV1)
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
@@ -295,6 +300,13 @@ func (s *Server) handleSignerView(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "this document is no longer active")
 			return
 		}
+		if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) || errors.Is(err, sign.ErrMagicLinkExpired) {
+			if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+				s.Sign.LogSignerViewRefusalV1(r.Context(), rc)
+			}
+			writeSignerReadError(w, err)
+			return
+		}
 		writeInternalError(w, err)
 		return
 	}
@@ -302,14 +314,17 @@ func (s *Server) handleSignerView(w http.ResponseWriter, r *http.Request) {
 }
 
 type signerSignInput struct {
-	TypedName string `json:"typed_name"`
-	Font      string `json:"font"`
+	PackageResponse *documentpackage.ResponseV1 `json:"package_response,omitempty"`
+	TypedName       string                      `json:"typed_name"`
+	Font            string                      `json:"font"`
 }
 
 type signerSignResponse struct {
-	Status      string `json:"status"`
-	Completed   bool   `json:"completed"`
-	FinalPDFURL string `json:"final_pdf_url,omitempty"`
+	Status           string `json:"status"`
+	Completed        bool   `json:"completed"`
+	FinalPDFURL      string `json:"final_pdf_url,omitempty"`
+	AuditCertURL     string `json:"audit_cert_url,omitempty"`
+	PackagePortalURL string `json:"package_portal_url,omitempty"`
 }
 
 func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +332,7 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
@@ -327,20 +343,37 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.Sign.Sign(r.Context(), rc, sign.SignInput{
-		TypedName: in.TypedName,
-		Font:      in.Font,
-		IP:        clientIP(r),
-		UserAgent: r.UserAgent(),
-		Notice:    noticeEvidence,
+		PackageResponse: in.PackageResponse,
+		TypedName:       in.TypedName,
+		Font:            in.Font,
+		IP:              clientIP(r),
+		UserAgent:       r.UserAgent(),
+		Notice:          noticeEvidence,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, sign.ErrMagicLinkExpired):
+			writeError(w, http.StatusGone, "magic link expired")
+		case errors.Is(err, sign.ErrPackageResponseRequiredV1):
+			writeError(w, http.StatusPreconditionRequired, "review and explicitly consent to the current complete contract package")
+		case errors.Is(err, sign.ErrPackageResponseChangedV1):
+			writeError(w, http.StatusPreconditionFailed, "the contract package changed; reload and review it before continuing")
+		case errors.Is(err, documentpackage.ErrResponseV1):
+			writeError(w, http.StatusBadRequest, "invalid whole-package consent")
+		case errors.Is(err, sign.ErrPackageResponseUnavailableV1):
+			writeError(w, http.StatusServiceUnavailable, "package response is temporarily unavailable")
 		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
 			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			writeError(w, http.StatusServiceUnavailable, "signing is temporarily unavailable")
+		case errors.Is(err, sign.ErrParticipantReportCapacityV1):
+			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing")
 		case errors.Is(err, sign.ErrSignatureTierUnavailable):
 			writeError(w, http.StatusConflict, "AES and QES signing are temporarily unavailable; this document cannot be completed through the SES endpoint")
 		case errors.Is(err, sign.ErrAlreadySigned):
 			writeError(w, http.StatusConflict, "you have already signed this document")
+		case errors.Is(err, sign.ErrSignaturePreparationChanged):
+			writeError(w, http.StatusConflict, "the document or signature placement changed; reload it before signing")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
 			writeError(w, http.StatusConflict, "this document is no longer accepting signatures")
 		default:
@@ -349,22 +382,27 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := signerSignResponse{
-		Status:      res.Status,
-		Completed:   res.Completed,
-		FinalPDFURL: res.FinalPDFURL,
+		Status:           res.Status,
+		Completed:        res.Completed,
+		FinalPDFURL:      res.FinalPDFURL,
+		AuditCertURL:     res.AuditCertURL,
+		PackagePortalURL: res.PackagePortalURL,
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // handleSignerAccept records a recipient's acknowledgement (accept) of a
 // no-signature document. The audit event is the record; no signature is captured.
-type signerAcceptInput struct{}
+type signerAcceptInput struct {
+	PackageResponse *documentpackage.ResponseV1 `json:"package_response,omitempty"`
+}
 
 func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 	rc, ok := s.lookupTokenOrError(w, r)
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
@@ -375,12 +413,26 @@ func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.Sign.Accept(r.Context(), rc, sign.ParticipantResponseEvidence{
-		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
+		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence, PackageResponse: in.PackageResponse,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, sign.ErrMagicLinkExpired):
+			writeError(w, http.StatusGone, "magic link expired")
+		case errors.Is(err, sign.ErrPackageResponseRequiredV1):
+			writeError(w, http.StatusPreconditionRequired, "review and explicitly consent to the current complete contract package")
+		case errors.Is(err, sign.ErrPackageResponseChangedV1):
+			writeError(w, http.StatusPreconditionFailed, "the contract package changed; reload and review it before continuing")
+		case errors.Is(err, documentpackage.ErrResponseV1):
+			writeError(w, http.StatusBadRequest, "invalid whole-package consent")
+		case errors.Is(err, sign.ErrPackageResponseUnavailableV1):
+			writeError(w, http.StatusServiceUnavailable, "package response is temporarily unavailable")
 		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
 			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			writeError(w, http.StatusServiceUnavailable, "acknowledgement is temporarily unavailable")
+		case errors.Is(err, sign.ErrParticipantReportCapacityV1):
+			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing")
 		case errors.Is(err, sign.ErrSignatureTierUnavailable):
 			writeError(w, http.StatusConflict, "AES and QES response flows are temporarily unavailable")
 		case errors.Is(err, sign.ErrAlreadyAccepted):
@@ -396,7 +448,7 @@ func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	out := signerSignResponse{Status: res.Status, Completed: res.Completed, FinalPDFURL: res.FinalPDFURL}
+	out := signerSignResponse{Status: res.Status, Completed: res.Completed, FinalPDFURL: res.FinalPDFURL, AuditCertURL: res.AuditCertURL, PackagePortalURL: res.PackagePortalURL}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -409,6 +461,7 @@ func (s *Server) handleSignerDecline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
@@ -455,6 +508,7 @@ func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
@@ -483,6 +537,9 @@ func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusConflict, "changes cannot be requested after a legal response has been captured")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
 			writeError(w, http.StatusConflict, "this document is no longer accepting changes")
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "change requests temporarily unavailable")
 		default:
 			writeError(w, http.StatusBadRequest, err.Error())
 		}
@@ -492,16 +549,27 @@ func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleSignerListComments(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticCommentsV1)
 	if !ok {
 		return
 	}
-	rows, err := s.Queries.ListComments(r.Context(), rc.Document.ID)
+	defer closeSignerReadConsumerV1(rc)
+	observed, err := s.captureSignerReadObservation(r, rc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list comments failed")
+		writeSignerReadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"comments": toCommentResponses(rows)})
+	page, err := s.Sign.SignerCommentPageV1(r.Context(), rc, r.URL.RawQuery, func(fresh *sign.RecipientContext) error {
+		return s.validateSignerReadObservation(r, rc, observed, fresh)
+	})
+	if err != nil {
+		s.writeCommentPageErrorV1(w, err)
+		return
+	}
+	defer page.CloseConsumerV1()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(page.JSON)
 }
 
 func (s *Server) handleSignerCreateComment(w http.ResponseWriter, r *http.Request) {
@@ -509,59 +577,122 @@ func (s *Server) handleSignerCreateComment(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
 	}
+	input, err := s.Sign.NewSignerCommentHTTPInputV1(r.Context(), rc)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeSignerReadError(w, errors.Join(sign.ErrSigningAdmissionUnavailableV1, err))
+		return
+	}
+	defer input.CloseConsumerV1()
+	raw, finishDecode, err := input.ReadSignerJSONV1(r.Context(), r.Body)
+	if err != nil {
+		if errors.Is(err, pdfadmission.ErrCommentInputV1) {
+			w.Header().Set("Retry-After", "1")
+			writeSignerReadError(w, errors.Join(sign.ErrSigningAdmissionUnavailableV1, err))
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid json")
+		}
+		return
+	}
+	defer finishDecode()
 	var in createCommentInput
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err = decodeSignerJSONBytesV1(raw, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	c, err := s.Sign.SignerComment(r.Context(), rc, in.Body, sign.ParticipantResponseEvidence{
-		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
-	})
-	if err != nil {
-		if errors.Is(err, sign.ErrInvalidNoticeEvidence) {
-			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
-			return
-		}
-		if errors.Is(err, sign.ErrDocumentNotSignable) || errors.Is(err, sign.ErrDocumentNotCommentable) {
-			writeError(w, http.StatusConflict, "this document is not accepting comments")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err = input.CaptureSignerBodyV1(r.Context(), in.Body); err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeSignerReadError(w, errors.Join(sign.ErrSigningAdmissionUnavailableV1, err))
 		return
 	}
-	writeJSON(w, http.StatusCreated, toCommentResponse(c))
+	c, err := s.Sign.SignerCommentOwnedV1(rc, input, sign.ParticipantResponseEvidence{IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence})
+	if err != nil {
+		switch {
+		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrDocumentNotSignable), errors.Is(err, sign.ErrDocumentNotCommentable):
+			writeError(w, http.StatusConflict, "this document is not accepting comments")
+		case errors.Is(err, sign.ErrInvalidCommentBody):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			w.Header().Set("Retry-After", "1")
+			writeSignerReadError(w, err)
+		case errors.Is(err, sign.ErrMagicLinkExpired):
+			writeSignerReadError(w, err)
+		default:
+			writeInternalErrorMsg(w, "post signer comment", err)
+		}
+		return
+	}
+	defer c.CloseConsumerV1()
+	writeJSON(w, http.StatusCreated, toCommentResponse(c.DocumentComment))
 }
 
-// handleSignerFinalPDF streams the signed PDF to any recipient via their magic
-// link once the document is completed. The presigned URL handleSignerSign
-// returns is ephemeral and only the final signer ever receives it; this stable
-// route gives every signer (and anyone re-opening their link afterwards) a way
-// to retrieve their copy.
+// Completed artifact routes share the rotated read-only credential and the
+// download rate limits. Certificate access additionally binds its own pins.
 func (s *Server) handleSignerFinalPDF(w http.ResponseWriter, r *http.Request) {
+	s.handleCompletedArtifactDownloadV1(w, r, false)
+}
+
+func (s *Server) handleSignerAuditCert(w http.ResponseWriter, r *http.Request) {
+	s.handleCompletedArtifactDownloadV1(w, r, true)
+}
+
+func (s *Server) handleCompletedArtifactDownloadV1(w http.ResponseWriter, r *http.Request, certificate bool) {
+	w.Header().Set("Cache-Control", "no-store")
 	tok := chi.URLParam(r, "token")
 	if tok == "" {
 		writeError(w, http.StatusBadRequest, "missing token")
 		return
 	}
-	// Completion atomically expires every mutation credential. The final PDF
-	// is the sole exception: a recipient who actually signed/accepted keeps
-	// read-only access through the same stable link shown by the ceremony UI.
-	rc, err := s.Sign.LookupCompletedArtifactByToken(r.Context(), auth.HashMagicToken(tok))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "signed pdf not available")
+	tokenHash := auth.HashMagicToken(tok)
+	lookup := s.Sign.LookupCompletedArtifactByToken
+	recheck := s.Sign.RecheckCompletedArtifactByToken
+	unavailable, suffix := "signed pdf not available", ".pdf"
+	if certificate {
+		lookup = s.Sign.LookupCompletedAuditCertificateByTokenV1
+		recheck = s.Sign.RecheckCompletedAuditCertificateByTokenV1
+		unavailable, suffix = "audit certificate not available", "-audit.pdf"
+	}
+	rc, err := lookup(r.Context(), tokenHash)
+	if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+		writeError(w, http.StatusServiceUnavailable, "signer access is temporarily unavailable")
 		return
 	}
-	body, err := readDocumentArtifact(r.Context(), s.Storage, rc.Document, rc.Document.FinalPdfKey.String, rc.Document.FinalPdfSha, rc.Document.FinalPdfVersionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, unavailable)
+		return
+	}
+	defer closeSignerReadConsumerV1(rc)
+	key, digest, version := rc.Document.FinalPdfKey.String, rc.Document.FinalPdfSha, rc.Document.FinalPdfVersionID
+	if certificate {
+		key, digest, version = rc.Document.AuditCertKey.String, rc.Document.AuditCertSha256, rc.Document.AuditCertVersionID
+	}
+	body, err := readDocumentArtifact(r.Context(), s.Storage, rc.Document, key, digest, version)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
+	if certificate && !contentAddressedArtifactMatches(body, key, "audit", ".pdf") {
+		writeInternalError(w, errors.New("stored audit certificate digest does not match its immutable key"))
+		return
+	}
+	// Keep the original expiry and exact selected artifact across storage work.
+	if err := recheck(r.Context(), tokenHash, rc); err != nil {
+		if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+			writeError(w, http.StatusServiceUnavailable, "signer access is temporarily unavailable")
+			return
+		}
+		writeError(w, http.StatusNotFound, unavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFileName(rc.Document.Name)+`.pdf"`)
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+sanitizeFileName(rc.Document.Name)+suffix+"\"")
 	_, _ = w.Write(body)
 }
 
@@ -569,10 +700,11 @@ func (s *Server) handleSignerFinalPDF(w http.ResponseWriter, r *http.Request) {
 // the signer (magic-token authed) so the signer page can render its pages with
 // pdf.js and overlay the fillable fields.
 func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticPDFV1)
 	if !ok {
 		return
 	}
+	defer closeSignerReadConsumerV1(rc)
 	observation, err := s.captureSignerReadObservation(r, rc)
 	if err != nil || observation.pdf == nil {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
@@ -601,13 +733,33 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 // lookupTokenOrError verifies the URL token and writes 404 on miss. Returns
 // (recipientContext, true) on success.
 func (s *Server) lookupTokenOrError(w http.ResponseWriter, r *http.Request) (*sign.RecipientContext, bool) {
+	return s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticOtherV1)
+}
+func (s *Server) lookupTokenOrErrorV1(w http.ResponseWriter, r *http.Request, route pdfadmission.SignerReadDiagnosticRouteV1) (*sign.RecipientContext, bool) {
 	tok := chi.URLParam(r, "token")
 	if tok == "" {
 		writeError(w, http.StatusBadRequest, "missing token")
 		return nil, false
 	}
 	hash := auth.HashMagicToken(tok)
-	rc, err := s.Sign.LookupByToken(r.Context(), hash)
+	var rc *sign.RecipientContext
+	var err error
+	switch route {
+	case pdfadmission.SignerReadDiagnosticFieldsV1:
+		rc, err = s.Sign.LookupSignerFieldsByTokenV1(r.Context(), hash)
+	case pdfadmission.SignerReadDiagnosticPDFV1:
+		rc, err = s.Sign.LookupSignerPDFByTokenV1(r.Context(), hash)
+	case pdfadmission.SignerReadDiagnosticCommentsV1:
+		rc, err = s.Sign.LookupSignerCommentsByTokenV1(r.Context(), hash)
+	case pdfadmission.SignerReadDiagnosticViewV1:
+		rc, err = s.Sign.LookupSignerViewByTokenV1(r.Context(), hash)
+	default:
+		rc, err = s.Sign.LookupByToken(r.Context(), hash)
+	}
+	if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+		writeError(w, http.StatusServiceUnavailable, "signer access is temporarily unavailable")
+		return nil, false
+	}
 	if errors.Is(err, sign.ErrMagicLinkExpired) {
 		// 410 Gone signals "this resource existed and is permanently
 		// gone" so the signer UI can show "this link expired" copy

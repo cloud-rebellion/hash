@@ -62,6 +62,12 @@ func (p *htmlCreationStorageE2E) ServeHTTP(w http.ResponseWriter, r *http.Reques
 }
 
 func (p *htmlCreationRendererE2E) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.servePaperProtocolV1(w, r, nil)
+}
+
+// A fixed synthetic peer may observe the two real dimension fields during
+// this SAME bounded protocol parse; ordinary fixture behavior is unchanged.
+func (p *htmlCreationRendererE2E) servePaperProtocolV1(w http.ResponseWriter, r *http.Request, paper *[2]string) {
 	if r.Method != http.MethodPost || r.URL.Path != "/forms/chromium/convert/html" {
 		http.Error(w, "unexpected renderer fixture operation", http.StatusBadRequest)
 		return
@@ -89,6 +95,21 @@ func (p *htmlCreationRendererE2E) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		if err != nil || len(body) > 16<<20 {
 			http.Error(w, "oversized renderer fixture part", http.StatusBadRequest)
 			return
+		}
+		if paper != nil && (part.FormName() == "paperWidth" || part.FormName() == "paperHeight") {
+			if part.FileName() != "" || len(body) > 64 {
+				http.Error(w, "invalid synthetic paper field", http.StatusBadRequest)
+				return
+			}
+			index := 0
+			if part.FormName() == "paperHeight" {
+				index = 1
+			}
+			if paper[index] != "" {
+				http.Error(w, "duplicate synthetic paper field", http.StatusBadRequest)
+				return
+			}
+			paper[index] = string(body)
 		}
 		if part.FormName() == "files" && part.FileName() == "index.html" {
 			indexes++
@@ -179,6 +200,11 @@ func htmlCreationInputE2E(template *generated.Template) htmlDocumentInput {
 
 func submitHTMLDocumentCreationE2E(t *testing.T, f lifecycleAuthorizationFixture, templateID uuid.UUID, input htmlDocumentInput, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
+	return submitHTMLDocumentCreationContextE2E(t, f.ctx, f, templateID, input, cookie)
+}
+
+func submitHTMLDocumentCreationContextE2E(t *testing.T, ctx context.Context, f lifecycleAuthorizationFixture, templateID uuid.UUID, input htmlDocumentInput, cookie string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +225,7 @@ func submitHTMLDocumentCreationE2E(t *testing.T, f lifecycleAuthorizationFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	return submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/templates/"+templateID.String()+"/html/documents", string(body), cookie)
+	return submitSessionOperationContextE2E(ctx, f.s, http.MethodPost, "/api/v1/templates/"+templateID.String()+"/html/documents", string(body), cookie)
 }
 
 func TestHTMLDocumentInstantiationCommitsExactSourceSnapshotAndAuditE2E(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/recoveryinventory"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -204,11 +205,11 @@ func loadCandidateCutoverReferences(ctx context.Context, dsn, inventoryPath stri
 		return nil, errors.New("initialize canonical inventory database connection")
 	}
 	defer pool.Close()
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := recoveryinventory.Begin(ctx, pool)
 	if err != nil {
 		return nil, errors.New("begin canonical inventory snapshot")
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer func() { _ = recoveryinventory.Rollback(tx) }()
 	if err := validateCandidateCutoverBlockEvidence(ctx, tx); err != nil {
 		return nil, err
 	}

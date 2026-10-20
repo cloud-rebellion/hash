@@ -9,17 +9,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
-	"time"
 
-	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // This public witness identifies the exact PDF shown to one authenticated
@@ -54,7 +52,7 @@ func (s *Server) captureSignerReadObservation(r *http.Request, rc *sign.Recipien
 	if err != nil || notice.NoticeDigest == "" {
 		return signerReadObservation{}, errSignerReadChanged
 	}
-	if err := validateSignerMaterialization(r.Context(), s.Queries, rc.Document); err != nil {
+	if err := rc.ValidateReadMaterializationV1(); err != nil {
 		return signerReadObservation{}, errSignerReadChanged
 	}
 	return signerReadObservation{pdf: pdf, notice: notice, noticeDigest: notice.NoticeDigest}, nil
@@ -119,35 +117,20 @@ func setSignerPDFObservationHeaders(w http.ResponseWriter, observation *signerPD
 // token lookup is never allowed to adopt an extended original deadline or a
 // different ceremony/source/notice. This authorizes only a read response.
 func (s *Server) recheckSignerRead(r *http.Request, original *sign.RecipientContext, observed signerReadObservation) error {
-	if original == nil || original.Recipient == nil || original.Document == nil || s.Sign == nil || s.Pool == nil {
+	if r == nil || original == nil || original.Recipient == nil || original.Document == nil || s.Sign == nil || s.Pool == nil || s.Sign.Pool != s.Pool {
 		return errSignerReadChanged
 	}
-	// Storage, compilation and PDF processing have finished. These short
-	// read locks retain the exact live parent/recipient while normalized
-	// history and disclosure reads wait; they do not authorize any mutation.
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	if _, err := q.GetDocumentForShare(ctx, generated.GetDocumentForShareParams{ID: original.Document.ID, OrgID: original.Document.OrgID}); err != nil {
-		return errSignerReadChanged
-	}
-	if _, err := q.GetRecipientForShare(ctx, generated.GetRecipientForShareParams{ID: original.Recipient.ID, DocumentID: original.Document.ID, OrgID: original.Document.OrgID}); err != nil {
-		return errSignerReadChanged
-	}
-	lookup := *s.Sign
-	lookup.Queries = q
-	fresh, err := lookup.LookupByToken(ctx, original.Recipient.MagicTokenHash)
-	if err != nil {
-		return err
-	}
-	if err := sign.ValidateRecipientReadCredential(original, fresh, time.Now()); err != nil {
-		return err
-	}
+	// The exact same process runtime owns the opaque original scope and fresh
+	// native read session. Document/recipient/controller/current locks and loans
+	// remain retained through this callback and the engine's final read commit.
+	return s.Sign.RecheckRecipientReadV1(r.Context(), original, func(fresh *sign.RecipientContext) error {
+		return s.validateSignerReadObservation(r, original, observed, fresh)
+	})
+}
+
+// The same fixed source/PDF/privacy predicate is used by native comment pages
+// after their owned body is serialized and SQL physically retires.
+func (s *Server) validateSignerReadObservation(r *http.Request, original *sign.RecipientContext, observed signerReadObservation, fresh *sign.RecipientContext) error {
 	if !sameSignerDocumentSource(original.Document, fresh.Document) {
 		return errSignerReadChanged
 	}
@@ -155,28 +138,20 @@ func (s *Server) recheckSignerRead(r *http.Request, original *sign.RecipientCont
 	if err != nil || !sameSignerPDFObservation(observed.pdf, newPDF) {
 		return errSignerReadChanged
 	}
-	if err := validateSignerMaterialization(ctx, q, fresh.Document); err != nil {
-		return errSignerReadChanged
-	}
 	newNotice, err := s.signerPrivacyNotice(r, fresh)
 	if err != nil || observed.noticeDigest == "" || observed.noticeDigest != newNotice.NoticeDigest {
 		return errSignerReadChanged
 	}
-	// The final normalized-history/notice reads may also have waited. Retain
-	// both admission deadlines through those reads before releasing the body.
-	if err := sign.ValidateRecipientReadCredential(original, fresh, time.Now()); err != nil {
-		return err
+	return nil
+}
+
+// Every successful compatibility lookup and public route retains its consumer
+// through the last actual response use. Cleanup failures leave genuine factory
+// ownership pending; this fixed message exposes no token, body or credentials.
+func closeSignerReadConsumerV1(rc *sign.RecipientContext) {
+	if err := rc.CloseReadV1(); err != nil {
+		slog.Warn("owned signer read cleanup remains pending")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	if err := sign.ValidateRecipientReadCredential(original, fresh, time.Now()); err != nil {
-		return err
-	}
-	return r.Context().Err()
 }
 
 func validateSignerMaterialization(ctx context.Context, q htmlmaterialization.Queries, doc *generated.Document) error {
@@ -209,6 +184,10 @@ func sameSignerDocumentSource(a, b *generated.Document) bool {
 }
 
 func writeSignerReadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+		writeError(w, http.StatusServiceUnavailable, "signer access is temporarily unavailable")
+		return
+	}
 	if errors.Is(err, sign.ErrMagicLinkExpired) {
 		writeError(w, http.StatusGone, "signing link is no longer valid")
 		return

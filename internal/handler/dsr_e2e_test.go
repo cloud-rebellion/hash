@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -142,13 +143,45 @@ func TestDSRConcurrentTerminalTransitionsHaveOneWinnerE2E(t *testing.T) {
 	}
 }
 
-func setupDSRE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
+func setupDSRE2E(t *testing.T, queryTracers ...pgx.QueryTracer) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
 	t.Helper()
+	return setupDSRPoolBirth315E2E(t, 0, queryTracers...)
+}
+
+// The optional test allocation is fixed before the original application pool exists.
+// Zero preserves every existing default caller and its original parsed config.
+func setupDSRPoolBirth315E2E(t *testing.T, maximum int32, queryTracers ...pgx.QueryTracer) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	return setupDSRPoolBirthContext368E2E(t, maximum, nil, queryTracers...)
+}
+
+// The browser's existing four-minute root must own migration, pool and all
+// native work from birth. Its migration phase still has the original90s bound.
+// Other callers retain their original migrationFixtureContext242 parent.
+func setupDSRBrowserBirth368E2E(t *testing.T, birth context.Context) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	if birth == nil || birth.Err() != nil {
+		t.Fatal("browser fixture requires its original live birth owner")
+	}
+	if _, ok := birth.Deadline(); !ok {
+		t.Fatal("browser fixture requires its original finite birth owner")
+	}
+	return setupDSRPoolBirthContext368E2E(t, 0, birth)
+}
+
+func setupDSRPoolBirthContext368E2E(t *testing.T, maximum int32, birth context.Context, queryTracers ...pgx.QueryTracer) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	if len(queryTracers) > 1 {
+		t.Fatal("fixture accepts at most one pool-scoped query tracer")
+	}
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL to run")
 	}
-	ctx := context.Background()
+	ctx := birth
+	if ctx == nil {
+		ctx = migrationFixtureContext242(t)
+	}
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -157,10 +190,39 @@ func setupDSRE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queri
 	// package test processes share the same disposable database.
 	config.ConnConfig.RuntimeParams["application_name"] = "hash-auth-e2e-" + uuid.NewString()
 	migrationDB := stdlib.OpenDB(*config.ConnConfig)
-	if err := mdb.RunMigrations(migrationDB); err != nil {
-		t.Fatalf("migrate: %v", err)
+	migrationDB.SetMaxOpenConns(1)
+	migrationDB.SetMaxIdleConns(1)
+	// Registered before migration so a fatal setup error still closes its pool.
+	t.Cleanup(func() {
+		if err := migrationDB.Close(); err != nil {
+			t.Error("close fixture migration database", err)
+		}
+	})
+	migrationErr := func() error {
+		if birth == nil {
+			return mdb.RunMigrationsContext(ctx, migrationDB)
+		}
+		phase, cancel := browserMigrationPhaseContext368(ctx)
+		defer cancel()
+		return mdb.RunMigrationsContext(phase, migrationDB)
+	}()
+	if migrationErr != nil {
+		t.Fatalf("migrate: %v", migrationErr)
 	}
-	_ = migrationDB.Close()
+	if err := migrationDB.Close(); err != nil {
+		t.Fatal("close fixture migration database", err)
+	}
+	// Fixture-local refusal observation is installed before this actual pool,
+	// runtime or document exists. Migration work retains its original config.
+	if len(queryTracers) == 1 {
+		config.ConnConfig.Tracer = queryTracers[0]
+	}
+	if maximum != 0 && maximum != 1 {
+		t.Fatal("explicit native fixture pool birth supports only original default or one connection")
+	}
+	if maximum == 1 {
+		config.MaxConns, config.MinConns = 1, 0
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
@@ -569,4 +631,37 @@ SELECT document_id,generation,'persisted',$2,$3 FROM collab_document_generations
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE org_id=$1 AND kind IN ('data_subject.anonymized','data_subject.fulfilled')`, orgID).Scan(&terminalEvents); err != nil || terminalEvents != 2 {
 		t.Fatalf("targeted erasure audit count=%d err=%v", terminalEvents, err)
 	}
+}
+
+// Keep the existing90-second fixture budget while reserving cleanup before the
+// actual enclosing test-process deadline. Cancellation is registered first, so
+// pool/backend cleanup runs before this fixture parent is explicitly cancelled.
+func migrationFixtureContext242(t *testing.T) context.Context {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-5*time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-5 * time.Second)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// This fixed test-fixture root restores the declared240s browser contract. It
+// never extends an existing context, test-process deadline or cleanup reserve.
+func browserFixtureContext368(t *testing.T) context.Context {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Minute)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-5*time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-5 * time.Second)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	// Register before DB/pool creation, so actual child/SQL cleanup precedes
+	// cancellation of the browser root just as in the original fixture owner.
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func browserMigrationPhaseContext368(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, 90*time.Second)
 }

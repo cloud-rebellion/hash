@@ -62,11 +62,30 @@ func (n *Negotiator) SuggestCounter(ctx context.Context, in CounterInput) (Count
 	if err != nil {
 		return CounterResult{}, fmt.Errorf("negotiator: prompt: %w", err)
 	}
+	var redBytes int64
+	for _, line := range in.RedLines {
+		var err error
+		redBytes, err = ai.NativeCostV1(redBytes, int64(len(line)), 1)
+		if err != nil {
+			return CounterResult{}, err
+		}
+	}
+	redCost, err := ai.NativeCostV1(4096, redBytes, 4)
+	if err != nil {
+		return CounterResult{}, err
+	}
+	redCost, err = ai.NativeCostV1(redCost, int64(len(in.RedLines)), 32)
+	if err != nil {
+		return CounterResult{}, err
+	}
+	if err = ai.RetainNativeV1(ctx, redCost); err != nil {
+		return CounterResult{}, err
+	}
 	red := "(none specified)"
 	if len(in.RedLines) > 0 {
 		red = "- " + strings.Join(in.RedLines, "\n- ")
 	}
-	req, err := prompt.Render(map[string]string{
+	req, err := ai.RenderPromptV1(ctx, prompt, map[string]string{
 		"OriginalClause": in.OriginalClause,
 		"Concern":        in.Concern,
 		"RedLines":       red,
@@ -80,6 +99,9 @@ func (n *Negotiator) SuggestCounter(ctx context.Context, in CounterInput) (Count
 		UserID:     in.UserID,
 	})
 	if err != nil {
+		return CounterResult{}, err
+	}
+	if err := ai.PrepareFeatureResultV1(ctx, resp.Text); err != nil {
 		return CounterResult{}, err
 	}
 	revised, rationale := splitCounter(resp.Text)

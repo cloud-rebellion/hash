@@ -62,7 +62,8 @@ func TestWorkerUsesConfiguredOperatorForQueuedCeremonyMail(t *testing.T) {
 
 func TestWorkerObservabilityUsesDistinctFailSafeIdentityBeforeDependencies(t *testing.T) {
 	t.Setenv("FLARE_DSN", "")
-	if initWorkerObservability("release", "production") {
+	ready := make(chan struct{})
+	if initWorkerObservability(context.Background(), ready, "release", "production") != nil {
 		t.Fatal("worker observability should be a no-op when no DSN is configured")
 	}
 	raw, err := os.ReadFile("main.go")
@@ -70,11 +71,11 @@ func TestWorkerObservabilityUsesDistinctFailSafeIdentityBeforeDependencies(t *te
 		t.Fatal(err)
 	}
 	src := string(raw)
-	if !strings.Contains(src, `flarereport.InitFlare("hash-worker", release, environment)`) {
+	if !strings.Contains(src, `flarereport.InitFlareWithContext(ctx, ready, "hash-worker", release, environment)`) {
 		t.Fatal("worker observability is not isolated under the hash-worker service identity")
 	}
 	logging := strings.Index(src, "slog.SetDefault")
-	observability := strings.Index(src, "initWorkerObservability(cfg.Release, cfg.Environment)")
+	observability := strings.Index(src, "initWorkerObservability(ctx, telemetryReady, cfg.Release, cfg.Environment)")
 	dependency := strings.Index(src, "pgxpool.New(ctx, cfg.DBURL)")
 	if logging < 0 || observability <= logging || dependency <= observability {
 		t.Fatal("worker observability must initialize after structured logging and before runtime dependencies")

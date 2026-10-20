@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -116,10 +118,19 @@ type htmlCreationPins struct {
 }
 
 type htmlCreationOutcome struct {
-	document *generated.Document
-	pages    int
-	request  *generated.HtmlDocumentCreationRequest
-	replayed bool
+	document         *generated.Document
+	documentView     *documentResponse
+	pages            int
+	request          *generated.HtmlDocumentCreationRequest
+	replayed         bool
+	closeOwnedWriter func()
+}
+
+// Close after JSON response writing, not merely after COMMIT or response mapping.
+func (result *htmlCreationOutcome) closeOwnedWriterV1() {
+	if result != nil && result.closeOwnedWriter != nil {
+		result.closeOwnedWriter()
+	}
 }
 
 func htmlCreationRequestPins(row *generated.HtmlDocumentCreationRequest) htmlCreationPins {
@@ -136,6 +147,10 @@ func (result *htmlCreationOutcome) response() map[string]any {
 		document = response
 		reviewRequired = response.HTMLReviewRequired
 	}
+	if result.documentView != nil {
+		document = *result.documentView
+		reviewRequired = result.documentView.HTMLReviewRequired
+	}
 	out := map[string]any{"document": document, "page_count": result.pages, "review_required": reviewRequired, "replayed": result.replayed}
 	if result.request != nil {
 		out["org_id"], out["user_id"] = result.request.OrgID, result.request.ActorUserID
@@ -148,8 +163,12 @@ func (result *htmlCreationOutcome) response() map[string]any {
 // The caller rechecks a fresh member/original-session guard before returning a
 // result. Reads intentionally
 // do not require a still-current template, CRM account or old review receipt.
-func readHTMLCreationRequest(ctx context.Context, q *generated.Queries, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string) (*htmlCreationOutcome, error) {
-	row, err := q.GetHTMLDocumentCreationRequestForShare(ctx, generated.GetHTMLDocumentCreationRequestForShareParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID})
+func readHTMLCreationRequest(ctx context.Context, q *generated.Queries, actor authoring.Actor, templateID, requestID uuid.UUID, inputDigest string, readers ...*pdfadmission.ApplicationHTMLAuthoringReaderV1) (*htmlCreationOutcome, error) {
+	// M79 pins are immutable. Read them without a request-row lock before
+	// the actual document/cache header locks; deletion may only detach current
+	// to NULL. An old pointer plus missing document remains a tombstone, never
+	// permission to reuse a request or infer a safe absent-command retry.
+	row, err := q.GetHTMLDocumentCreationRequest(ctx, generated.GetHTMLDocumentCreationRequestParams{OrgID: actor.OrgID, ActorUserID: actor.UserID, RequestID: requestID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -161,14 +180,22 @@ func readHTMLCreationRequest(ctx context.Context, q *generated.Queries, actor au
 	}
 	result := &htmlCreationOutcome{request: row, pages: int(row.PageCount), replayed: true}
 	if row.CurrentDocumentID.Valid {
-		result.document, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: uuid.UUID(row.CurrentDocumentID.Bytes), OrgID: actor.OrgID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			result.document, err = nil, nil
+		if len(readers) != 1 || readers[0] == nil {
+			return nil, pdfadmission.ErrHTMLAuthoringReadV1
 		}
-		if err != nil {
-			return nil, err
+		view, readErr := readers[0].ReadCreationResponseV1(ctx, uuid.UUID(row.CurrentDocumentID.Bytes))
+		if errors.Is(readErr, pgx.ErrNoRows) {
+			view, readErr = nil, nil
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		if view != nil {
+			response := htmlCreationDocumentProjectionV1(view)
+			result.documentView = &response
 		}
 	}
+
 	return result, nil
 }
 
@@ -205,7 +232,7 @@ func (s *Server) handleGetHTMLCreationRequest(w http.ResponseWriter, r *http.Req
 			writeError(w, 404, "creation request not found")
 			return
 		}
-		if errors.Is(err, errHTMLCreationClosureUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, errHTMLCreationClosureUnavailable) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) || errors.Is(err, context.DeadlineExceeded) {
 			writeError(w, 503, "creation request outcome unavailable; keep this same request")
 			return
 		}
@@ -220,6 +247,7 @@ func (s *Server) handleGetHTMLCreationRequest(w http.ResponseWriter, r *http.Req
 		writeJSON(w, 404, map[string]any{"state": "unconfirmed", "request_id": requestID, "error": "No committed result found. The original request may still be finishing; keep this request ID."})
 		return
 	}
+	defer result.closeOwnedWriterV1()
 	writeJSON(w, 200, htmlCreationCommittedResponse(result))
 }
 
@@ -228,6 +256,9 @@ func htmlCreationCommittedResponse(result *htmlCreationOutcome) map[string]any {
 	if result.document != nil {
 		document = toDocumentResponse(result.document)
 	}
+	if result.documentView != nil {
+		document = *result.documentView
+	}
 	response := map[string]any{"state": "committed", "request_id": result.request.RequestID,
 		"org_id": result.request.OrgID, "user_id": result.request.ActorUserID,
 		"input_digest": hex.EncodeToString(result.request.InputDigest), "template_id": result.request.TemplateID,
@@ -235,4 +266,20 @@ func htmlCreationCommittedResponse(result *htmlCreationOutcome) map[string]any {
 	// Creation pins are immutable; document is the current authorized view and
 	// may already be edited, signed, soft-deleted or hard-purged.
 	return response
+}
+
+func (result *htmlCreationOutcome) addOwnedConsumerV1(closeConsumer func()) {
+	if result == nil || closeConsumer == nil {
+		return
+	}
+	previous := result.closeOwnedWriter
+	var once sync.Once
+	result.closeOwnedWriter = func() {
+		once.Do(func() {
+			if previous != nil {
+				previous()
+			}
+			closeConsumer()
+		})
+	}
 }

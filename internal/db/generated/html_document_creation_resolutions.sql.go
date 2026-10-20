@@ -14,6 +14,34 @@ import (
 	"github.com/google/uuid"
 )
 
+const getHTMLDocumentCreationResolution = `-- name: GetHTMLDocumentCreationResolution :one
+SELECT org_id, actor_user_id, request_id, template_id, state, resolved_at FROM html_document_creation_resolutions
+WHERE org_id=$1 AND actor_user_id=$2 AND request_id=$3
+`
+
+type GetHTMLDocumentCreationResolutionParams struct {
+	OrgID       uuid.UUID `json:"org_id"`
+	ActorUserID uuid.UUID `json:"actor_user_id"`
+	RequestID   uuid.UUID `json:"request_id"`
+}
+
+// M80 terminal descriptors are immutable; no descriptor row lock precedes a
+// current document/cache read. Absent MVCC metadata never grants retry/closure
+// authority; final quota/unique-registry SQL remains the mutation boundary.
+func (q *Queries) GetHTMLDocumentCreationResolution(ctx context.Context, arg GetHTMLDocumentCreationResolutionParams) (*HtmlDocumentCreationResolution, error) {
+	row := q.db.QueryRow(ctx, getHTMLDocumentCreationResolution, arg.OrgID, arg.ActorUserID, arg.RequestID)
+	var i HtmlDocumentCreationResolution
+	err := row.Scan(
+		&i.OrgID,
+		&i.ActorUserID,
+		&i.RequestID,
+		&i.TemplateID,
+		&i.State,
+		&i.ResolvedAt,
+	)
+	return &i, err
+}
+
 const getHTMLDocumentCreationResolutionForShare = `-- name: GetHTMLDocumentCreationResolutionForShare :one
 SELECT org_id, actor_user_id, request_id, template_id, state, resolved_at FROM html_document_creation_resolutions
 WHERE org_id = $1 AND actor_user_id = $2 AND request_id = $3

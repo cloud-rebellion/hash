@@ -17,11 +17,11 @@ import (
 const bindPresignSealingIntent = `-- name: BindPresignSealingIntent :one
 UPDATE send_sealing_intents i SET presign_execution_id=e.id
 FROM presign_executions e WHERE e.org_id=$1 AND e.id=$2
- AND i.document_id=e.document_id AND i.org_id=e.org_id AND i.presign_execution_id IS NULL
+ AND i.document_id=e.document_id AND i.org_id=e.org_id AND i.presign_execution_id IS NULL AND i.package_send_attempt_id IS NULL
  AND i.actor_user_id=e.executor_user_id AND i.article13_notice_epoch_at=e.ceremony_epoch
  AND i.retain_until=hash_evidence_retain_until(e.ceremony_epoch,7)
  AND i.retention_started_at IS NULL AND i.retention_completed_at IS NULL
-RETURNING i.document_id, i.org_id, i.actor_user_id, i.actor_email, i.actor_ip, i.via, i.tool, i.retention_started_at, i.retention_completed_at, i.attempts, i.last_error, i.created_at, i.updated_at, i.retain_until, i.article13_notice_epoch_at, i.presign_execution_id
+RETURNING i.document_id, i.org_id, i.actor_user_id, i.actor_email, i.actor_ip, i.via, i.tool, i.retention_started_at, i.retention_completed_at, i.attempts, i.last_error, i.created_at, i.updated_at, i.retain_until, i.article13_notice_epoch_at, i.presign_execution_id, i.package_send_attempt_id
 `
 
 type BindPresignSealingIntentParams struct {
@@ -51,6 +51,7 @@ func (q *Queries) BindPresignSealingIntent(ctx context.Context, arg BindPresignS
 		&i.RetainUntil,
 		&i.Article13NoticeEpochAt,
 		&i.PresignExecutionID,
+		&i.PackageSendAttemptID,
 	)
 	return &i, err
 }
@@ -442,9 +443,18 @@ func (q *Queries) LockPresignExecutionRequest(ctx context.Context, arg LockPresi
 }
 
 const markPresignProviderSigned = `-- name: MarkPresignProviderSigned :one
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  JOIN presign_executions e ON e.document_id = d.id AND e.org_id = d.org_id
+  WHERE e.org_id = $1 AND e.id = $2
+  FOR UPDATE OF d
+)
 UPDATE recipients r SET status='signed',signed_at=e.executed_at,
  magic_token_hash=decode('','hex'),magic_token_expires_at=TIMESTAMPTZ '1970-01-01 00:00:00+00'
-FROM presign_executions e WHERE e.org_id=$1 AND e.id=$2
+FROM presign_executions e
+JOIN locked_document d ON d.id=e.document_id
+WHERE e.org_id=$1 AND e.id=$2
  AND r.id=e.provider_recipient_id AND r.document_id=e.document_id
  AND r.status='pending' AND r.sent_at IS NULL AND r.first_viewed_at IS NULL AND r.signed_at IS NULL
 RETURNING r.id, r.document_id, r.role, r.email, r.name, r.order_index, r.status, r.magic_token_hash, r.sent_at, r.first_viewed_at, r.signed_at, r.declined_reason, r.created_at, r.magic_token_expires_at, r.locale

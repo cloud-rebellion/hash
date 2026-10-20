@@ -125,6 +125,10 @@ func ExtractVariableNames(t *Tree) []string {
 // variable map while a token in a code block, raw HTML block, or table heading
 // remained literal in the immutable PDF.
 func ValidateVariablePlaceholders(t *Tree) error {
+	return validateVariablePlaceholdersForSendV1(t, nil)
+}
+
+func validateVariablePlaceholdersForSendV1(t *Tree, work *conditionalSendWorkV1) error {
 	if t == nil {
 		return nil
 	}
@@ -134,7 +138,7 @@ func ValidateVariablePlaceholders(t *Tree) error {
 			return
 		}
 		if b.Type == TypeConditional {
-			if _, err := ConditionVariableNames(b.AttrString("expression", "")); err != nil {
+			if _, err := conditionVariableNamesForSendV1(b.AttrString("expression", ""), work); err != nil {
 				validationErr = fmt.Errorf("block %q condition: %w", b.ID, err)
 				return
 			}
@@ -194,10 +198,14 @@ func ValidateVariablePlaceholders(t *Tree) error {
 // sealing recovery, signer views, and finalization so older active rows cannot
 // bypass a gate merely by entering the lifecycle before a newer binary.
 func ValidateResolvedVariableValues(t *Tree, raw json.RawMessage) (map[string]string, error) {
+	return validateResolvedVariableValuesForSendV1(t, raw, nil)
+}
+
+func validateResolvedVariableValuesForSendV1(t *Tree, raw json.RawMessage, work *conditionalSendWorkV1) (map[string]string, error) {
 	if t == nil {
 		return nil, fmt.Errorf("block tree is nil")
 	}
-	if err := ValidateVariablePlaceholders(t); err != nil {
+	if err := validateVariablePlaceholdersForSendV1(t, work); err != nil {
 		return nil, err
 	}
 	values, err := ParseVariableValues(raw)
@@ -208,7 +216,7 @@ func ValidateResolvedVariableValues(t *Tree, raw json.RawMessage) (map[string]st
 	unresolvedSet := make(map[string]struct{})
 	walkTree(t, func(block *Block) {
 		if block.Type == TypeConditional {
-			names, _ := ConditionVariableNames(block.AttrString("expression", ""))
+			names, _ := conditionVariableNamesForSendV1(block.AttrString("expression", ""), work)
 			for _, name := range names {
 				hardReferences[name] = struct{}{}
 			}
@@ -251,7 +259,7 @@ func ValidateResolvedVariableValues(t *Tree, raw json.RawMessage) (map[string]st
 		sort.Strings(unresolved)
 		return nil, fmt.Errorf("unresolved variables: %s", strings.Join(unresolved, ", "))
 	}
-	if err := ValidateConditionalEvaluation(t, values); err != nil {
+	if err := validateConditionalEvaluationForSendV1(t, values, work); err != nil {
 		return nil, err
 	}
 	return values, nil

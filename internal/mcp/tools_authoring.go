@@ -11,23 +11,24 @@ import (
 	"errors"
 	"fmt"
 	"github.com/bright-interaction/hash/internal/malwarescan"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
+	"github.com/bright-interaction/hash/internal/pdftemplateauthoring"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/requestmeta"
@@ -60,8 +61,13 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"variables_json":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "string variable values keyed by name (eg. {\"recipient.name\":\"Tom\"})"},
 			"blocks_json":               map[string]any{"type": "object", "description": "initial block tree {version:1,blocks:[...]} when source_kind=blocks"},
 		}, []string{"name", "source_kind"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				Name                    string              `json:"name"`
 				SourceKind              string              `json:"source_kind"`
@@ -71,7 +77,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				ExpectedTemplateVersion *int32              `json:"expected_template_version"`
 				Parties                 []pdflayout.Binding `json:"parties"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			if p.Name == "" {
@@ -100,130 +106,12 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if d.Pool == nil || d.Audit == nil {
 				return nil, errors.New("document creation dependencies unavailable")
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-			defer cancel()
-			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			if err != nil {
-				return nil, err
+			if p.SourceKind == "blocks" {
+				return blockauthoring.CreateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit, SnapshotCreation: d.Versions != nil},
+					blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, blockauthoring.CreateInputV1{Name: p.Name, TemplateID: tmplID, BlocksJSON: p.BlocksJSON, VariablesJSON: p.VariablesJSON})
 			}
-			defer func() { _ = authoring.Rollback(ctx, tx) }()
-			q := generated.New(tx)
-			var doc *generated.Document
-			var guard *authoring.MemberGuard
-			var layoutEvents []audit.PendingEvent
-			switch p.SourceKind {
-			case "blocks":
-				if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-					return nil, err
-				}
-				seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, tmplID, p.SourceKind, p.BlocksJSON, p.VariablesJSON)
-				if err != nil {
-					return nil, err
-				}
-				guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
-				if err != nil {
-					return nil, err
-				}
-				doc, err = q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-					OrgID: u.OrgID, TemplateID: tmplID, Name: p.Name,
-					BlocksJson: seed.BlocksJSON, VariablesJson: seed.VariablesJSON, SenderID: u.UserID,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if d.Versions != nil {
-					if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
-						DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-						BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &u.UserID,
-						Via: versions.ViaMCP, Summary: "create_document",
-					}); err != nil {
-						return nil, err
-					}
-				}
-				if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-					return nil, err
-				}
-			case "pdf":
-				if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-					return nil, err
-				}
-				seed, err := authoring.ResolveDocumentSeed(ctx, q, u.OrgID, tmplID, p.SourceKind, nil, p.VariablesJSON)
-				if err != nil {
-					return nil, err
-				}
-				guard, err = authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
-				if err != nil {
-					return nil, err
-				}
-				rep, err := authoring.PDFTemplateDocumentReport(seed.Template)
-				if err != nil {
-					return nil, err
-				}
-				tpl := seed.Template
-				layout, parties, err := pdflayout.Prepare(tpl, p.ExpectedTemplateVersion, p.Parties)
-				if err != nil {
-					return nil, err
-				}
-				doc, err = q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
-					OrgID: u.OrgID, TemplateID: tmplID, Name: p.Name,
-					PdfStorageKey: tpl.PdfStorageKey, PdfSha256: tpl.PdfSha256,
-					PdfStorageVersionID: tpl.PdfStorageVersionID, EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
-					SenderID: u.UserID,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{ID: doc.ID, MetadataRedactionReport: rep}); err != nil {
-					return nil, err
-				}
-				// Report storage changes updated_at; keep the guarded values
-				// update tied to the transaction's current newly created row.
-				doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: u.OrgID})
-				if err != nil {
-					return nil, err
-				}
-				// Preserve declared values for PDF designs too. This populates
-				// contract data; it does not rewrite already-rendered PDF bytes.
-				doc, err = q.FreezeDocumentVariables(ctx, generated.FreezeDocumentVariablesParams{
-					ID: doc.ID, OrgID: u.OrgID, VariablesJson: seed.VariablesJSON, ExpectedUpdatedAt: doc.UpdatedAt,
-				})
-				if err != nil {
-					return nil, err
-				}
-				if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-					return nil, err
-				}
-				layoutEvents, err = pdflayout.Materialize(ctx, tx, q, d.Billing, d.Audit, doc, u.UserID, layout, parties, "mcp")
-				if err != nil {
-					return nil, err
-				}
-			}
-			creationPayload := map[string]any{"name": p.Name, "source_kind": doc.SourceKind, "via": "mcp", "tool": "create_document"}
-			if len(layoutEvents) > 0 {
-				creationPayload["template_id"] = p.TemplateID
-				creationPayload["template_version"] = *p.ExpectedTemplateVersion
-				creationPayload["layout_version"] = 1
-				creationPayload["party_count"] = len(p.Parties)
-			}
-			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-				Kind:    audit.KindDocumentCreated,
-				Payload: creationPayload,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := guard.Recheck(ctx); err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return nil, err
-			}
-			for _, event := range layoutEvents {
-				d.Audit.Publish(event)
-			}
-			d.Audit.Publish(pending)
-			return doc, nil
+			return pdftemplateauthoring.CreateV1(r.Context(), pdftemplateauthoring.CreateDependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit},
+				pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, pdftemplateauthoring.CreateInputV1{TemplateID: tmplID, Source: pdfadmission.PDFTemplateDocumentInputV1{Name: p.Name, TemplateText: p.TemplateID, Variables: p.VariablesJSON, ExpectedTemplateVersion: p.ExpectedTemplateVersion, Parties: p.Parties}})
 		},
 	})
 
@@ -279,10 +167,17 @@ func registerAuthoringTools(s *Server, d Deps) {
 				if p.Landscape {
 					opts.PaperWidth, opts.PaperHeight = 11.69, 8.27
 				}
+				if err := render.ValidateDesignedHTMLSize(p.HTML); err != nil {
+					return nil, err
+				}
 				if err := malwarescan.ScanActive(r.Context(), []byte(p.HTML)); err != nil {
 					return nil, err
 				}
-				rendered, rerr := d.PDF.HTMLToPDF(r.Context(), render.SanitizeForRender(p.HTML), opts)
+				safe, serr := render.SanitizeForRenderBoundedV1(p.HTML)
+				if serr != nil {
+					return nil, serr
+				}
+				rendered, rerr := d.PDF.HTMLToPDF(r.Context(), safe, opts)
 				if rerr != nil {
 					return nil, fmt.Errorf("render html to pdf: %w", rerr)
 				}
@@ -298,61 +193,10 @@ func registerAuthoringTools(s *Server, d Deps) {
 			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 			defer cancel()
 			r = r.WithContext(ctx)
-			tx, err := d.Pool.Begin(r.Context())
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = authoring.Rollback(ctx, tx) }()
-			q := d.Queries.WithTx(tx)
-			if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-				return nil, err
-			}
-			guard, err := authoring.LockAuthor(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize})
-			if err != nil {
-				return nil, err
-			}
-			doc, pageCount, err := docintake.CreatePDFSourceDocument(ctx, q, d.Storage, u.OrgID, u.UserID, p.Name, data)
-			if err != nil {
-				return nil, err
-			}
-			if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				if cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc); cleanupErr != nil {
-					slog.Error("mcp document quota rollback object cleanup failed", "quota_err", err, "cleanup_err", cleanupErr)
-					return nil, errors.New("document import rollback cleanup failed")
-				}
-				return nil, err
-			}
-			// Acknowledgement mode: opt this draft out of requiring a signature
-			// so recipients view + accept instead of signing.
-			if p.RequiresSignature != nil && !*p.RequiresSignature {
-				updated, uerr := q.SetDocumentRequiresSignature(r.Context(), generated.SetDocumentRequiresSignatureParams{
-					ID: doc.ID, OrgID: u.OrgID, RequiresSignature: false,
-				})
-				if uerr != nil {
-					cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
-					return nil, errors.Join(uerr, cleanupErr)
-				}
-				doc = updated
-			}
-			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-				Kind:    audit.KindDocumentCreated,
-				Payload: map[string]any{"name": p.Name, "source_kind": "pdf", "via": "mcp", "tool": "create_pdf_document"},
-			})
-			if err != nil {
-				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
-				return nil, errors.Join(err, cleanupErr)
-			}
-			if err := guard.Recheck(ctx); err != nil {
-				cleanupErr := cleanupMCPImportedPDF(ctx, d, doc)
-				return nil, errors.Join(err, cleanupErr)
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
-				return nil, errors.Join(err, cleanupErr)
-			}
-			d.Audit.Publish(pending)
-			return map[string]any{"document": doc, "page_count": pageCount}, nil
+			result, err := docintake.CreateOwnedPDFSourceDocumentV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit, Store: d.Storage}, docintake.OwnedPDFActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_pdf_document"}, p.Name, data, p.RequiresSignature)
+			// The central MCP transport closes this concrete owner after both
+			// success and error serialization; returning from SQL is not last use.
+			return result, err
 		},
 	})
 
@@ -365,14 +209,19 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
 			"blocks_json":         map[string]any{"type": "object", "description": "{version:1, blocks:[...]}"},
 		}, []string{"expected_updated_at", "document_id", "blocks_json"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string          `json:"expected_updated_at"`
 				DocumentID        string          `json:"document_id"`
 				BlocksJSON        json.RawMessage `json:"blocks_json"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -382,11 +231,11 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			tree, err := blocks.ParseTree(p.BlocksJSON)
+			tree, err := input.ParseTreeV1(r.Context(), p.BlocksJSON)
 			if err != nil {
 				return nil, fmt.Errorf("invalid blocks_json: %w", err)
 			}
-			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "set_document_blocks", func(current *blocks.Tree) error {
+			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "set_document_blocks", func(current *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 				*current = *tree
 				return nil
 			}, p.ExpectedUpdatedAt)
@@ -402,8 +251,13 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
 			"html":                stringSchema("HTML fragment to parse into blocks"),
 		}, []string{"expected_updated_at", "document_id", "html"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			release, err := importguard.Shared.Acquire(u.OrgID)
 			if err != nil {
 				return nil, err
@@ -414,7 +268,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				DocumentID        string `json:"document_id"`
 				HTML              string `json:"html"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -427,11 +281,11 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := malwarescan.ScanActive(r.Context(), []byte(p.HTML)); err != nil {
 				return nil, err
 			}
-			tree, err := blocks.ParseHTMLChecked(p.HTML)
+			tree, err := input.ParseMCPHTMLImportV1(r.Context(), p.HTML)
 			if err != nil {
 				return nil, err
 			}
-			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_html", func(current *blocks.Tree) error {
+			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_html", func(current *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 				*current = *tree
 				return nil
 			}, p.ExpectedUpdatedAt)
@@ -447,8 +301,13 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"expected_updated_at": stringSchema("updated_at from the observed document; stale replacements are rejected"),
 			"markdown":            stringSchema("markdown source"),
 		}, []string{"expected_updated_at", "document_id", "markdown"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			release, err := importguard.Shared.Acquire(u.OrgID)
 			if err != nil {
 				return nil, err
@@ -459,7 +318,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				DocumentID        string `json:"document_id"`
 				Markdown          string `json:"markdown"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -472,11 +331,11 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err := malwarescan.ScanActive(r.Context(), []byte(p.Markdown)); err != nil {
 				return nil, err
 			}
-			tree, err := blocks.ParseMarkdownChecked(p.Markdown)
+			tree, err := input.ParseMCPMarkdownImportV1(r.Context(), p.Markdown)
 			if err != nil {
 				return nil, err
 			}
-			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_markdown", func(current *blocks.Tree) error {
+			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaImport, "import_markdown", func(current *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 				*current = *tree
 				return nil
 			}, p.ExpectedUpdatedAt)
@@ -492,14 +351,19 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"document_id":         stringSchema("document uuid"),
 			"block":               map[string]any{"type": "object", "description": "canonical block; see hash://schema/blocks"},
 		}, []string{"expected_updated_at", "document_id", "block"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string          `json:"expected_updated_at"`
 				DocumentID        string          `json:"document_id"`
 				Block             json.RawMessage `json:"block"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -514,9 +378,9 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return nil, fmt.Errorf("invalid block: %w", err)
 			}
 			doc, err := mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "append_block",
-				func(t *blocks.Tree) error {
+				func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 					t.Blocks = append(t.Blocks, blk)
-					return blocks.Validate(t)
+					return blocks.ValidateForSendV1(t, admission)
 				}, p.ExpectedUpdatedAt)
 			return doc, err
 		},
@@ -532,15 +396,20 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"block_id":            stringSchema("id of the top-level block to replace"),
 			"block":               map[string]any{"type": "object", "description": "replacement canonical block; see hash://schema/blocks"},
 		}, []string{"document_id", "block_id", "block", "expected_updated_at"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string          `json:"expected_updated_at"`
 				DocumentID        string          `json:"document_id"`
 				BlockID           string          `json:"block_id"`
 				Block             json.RawMessage `json:"block"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -558,8 +427,8 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return nil, fmt.Errorf("invalid block: %w", err)
 			}
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "update_block",
-				func(t *blocks.Tree) error {
-					return updateTopLevelBlock(t, p.BlockID, replacement)
+				func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
+					return updateTopLevelBlockWithAdmissionV1(t, p.BlockID, replacement, admission)
 				}, p.ExpectedUpdatedAt)
 		},
 	})
@@ -573,14 +442,19 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"document_id":         stringSchema("document uuid"),
 			"block_id":            stringSchema("id of the block to remove"),
 		}, []string{"expected_updated_at", "document_id", "block_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string `json:"expected_updated_at"`
 				DocumentID        string `json:"document_id"`
 				BlockID           string `json:"block_id"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -591,7 +465,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return nil, err
 			}
 			doc, err := mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "delete_block",
-				func(t *blocks.Tree) error {
+				func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 					filtered := make([]blocks.Block, 0, len(t.Blocks))
 					removed := false
 					for _, b := range t.Blocks {
@@ -620,14 +494,19 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"document_id":         stringSchema("document uuid"),
 			"block_ids":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		}, []string{"expected_updated_at", "document_id", "block_ids"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string   `json:"expected_updated_at"`
 				DocumentID        string   `json:"document_id"`
 				BlockIDs          []string `json:"block_ids"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -638,7 +517,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return nil, err
 			}
 			doc, err := mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "reorder_blocks",
-				func(t *blocks.Tree) error {
+				func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 					byID := map[string]blocks.Block{}
 					for _, b := range t.Blocks {
 						byID[b.ID] = b
@@ -674,8 +553,13 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"label":               stringSchema("optional human label, eg 'Client signature'"),
 			"required":            map[string]any{"type": "boolean", "const": true, "default": true, "description": "signature fields are always required"},
 		}, []string{"expected_updated_at", "document_id", "recipient_role"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string `json:"expected_updated_at"`
 				DocumentID        string `json:"document_id"`
@@ -683,7 +567,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				Label             string `json:"label"`
 				Required          *bool  `json:"required"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -706,9 +590,9 @@ func registerAuthoringTools(s *Server, d Deps) {
 				},
 			}
 			return mutateDocumentTree(r, d, u.OrgID, u.UserID, id, versions.ViaMCP, "add_signature_field",
-				func(t *blocks.Tree) error {
+				func(t *blocks.Tree, admission blocks.ConditionalSendAdmissionV1) error {
 					t.Blocks = append(t.Blocks, block)
-					return blocks.Validate(t)
+					return blocks.ValidateForSendV1(t, admission)
 				}, p.ExpectedUpdatedAt)
 		},
 	})
@@ -722,28 +606,33 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"expected_updated_at": stringSchema("updated_at from the observed document"),
 			"variables":           map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "name → string value map"},
 		}, []string{"document_id", "variables", "expected_updated_at"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ExpectedUpdatedAt string          `json:"expected_updated_at"`
 				DocumentID        string          `json:"document_id"`
 				Variables         json.RawMessage `json:"variables"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
 			if err != nil {
 				return nil, errors.New("document_id must be a uuid")
 			}
-			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
+			if err = auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
 			vars := p.Variables
 			if len(vars) == 0 {
 				vars = json.RawMessage(`{}`)
 			}
-			if _, err := blocks.ParseVariableValues(vars); err != nil {
+			if _, err = blocks.ParseVariableValues(vars); err != nil {
 				return nil, fmt.Errorf("invalid variables: %w", err)
 			}
 			if d.Pool == nil || d.Audit == nil {
@@ -753,57 +642,8 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-			defer cancel()
-			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = authoring.Rollback(ctx, tx) }()
-			guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
-			if err != nil {
-				return nil, err
-			}
-			q := d.Queries.WithTx(tx)
-			existing := guard.Document
-			if existing.SourceKind != "blocks" {
-				return nil, authoring.ErrDocumentNotDraft
-			}
-			actorID := guard.UserID()
-			if err := checkDocumentObservation(existing, p.ExpectedUpdatedAt); err != nil {
-				return nil, err
-			}
-			doc, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
-				ID: id, OrgID: u.OrgID, BlocksJson: existing.BlocksJson, VariablesJson: vars,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if d.Versions != nil {
-				if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
-					DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-					BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &actorID,
-					Via: versions.ViaMCP, Summary: "set_variables",
-				}); err != nil {
-					return nil, err
-				}
-			}
-			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &actorID, DocumentID: &id,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "set_variables"},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := guard.Recheck(ctx); err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
-			return doc, nil
+			return blockauthoring.MutatePlainDraftV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "set_variables"}, id, versions.ViaMCP, p.ExpectedUpdatedAt, checkDocumentObservation, blockauthoring.PlainDraftMutationInputV1{VariablesOnly: true, Variables: vars})
+
 		},
 	})
 
@@ -843,7 +683,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			engine := recipientauthoring.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
 			actor := recipients.MutationActor{
 				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "add_recipient",
 				IP: clientIP(r), UserAgent: r.UserAgent(),
@@ -852,7 +692,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if role == "" {
 				role = "signer"
 			}
-			return engine.Create(r.Context(), actor, id, recipients.Values{
+			return engine.CreateOwnedV1(r.Context(), d.PDFCreationSessions, d.Queries, actor, id, recipients.Values{
 				Email: p.Email, Name: p.Name, Role: role, OrderIndex: p.OrderIndex, Locale: p.Locale,
 			})
 		},
@@ -903,12 +743,12 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			engine := recipientauthoring.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
 			actor := recipients.MutationActor{
 				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "update_recipient",
 				IP: clientIP(r), UserAgent: r.UserAgent(),
 			}
-			return engine.Update(r.Context(), actor, docID, rid, recipients.Patch{
+			return engine.UpdateOwnedV1(r.Context(), d.PDFCreationSessions, d.Queries, actor, docID, rid, recipients.Patch{
 				Email: p.Email, Name: p.Name, Role: p.Role, OrderIndex: p.OrderIndex, Locale: p.Locale,
 			})
 		},
@@ -946,16 +786,16 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			engine := recipients.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
+			engine := recipientauthoring.MutationEngine{Pool: d.Pool, Audit: d.Audit, Billing: d.Billing}
 			actor := recipients.MutationActor{
 				OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "delete_recipient",
 				IP: clientIP(r), UserAgent: r.UserAgent(),
 			}
-			deleted, err := engine.Delete(r.Context(), actor, docID, rid)
+			deleted, err := engine.DeleteOwnedV1(r.Context(), d.PDFCreationSessions, d.Queries, actor, docID, rid)
 			if err != nil {
-				return nil, err
+				return deleted, err
 			}
-			return map[string]any{"deleted": deleted.ID.String()}, nil
+			return &ownedRecipientDeletedToolResultV1{owner: deleted}, nil
 		},
 	})
 }
@@ -968,7 +808,7 @@ func normalizeMCPRecipientUpdate(existing *generated.Recipient, email, name, rol
 
 // mutateDocumentTree applies fn to the document's block tree under a draft +
 // blocks-source guard, persists the result, and emits the audit event.
-func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn func(t *blocks.Tree) error, expected string) (any, error) {
+func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn pdfadmission.BlocksEditV1, expected string) (any, error) {
 	if d.Pool == nil || d.Audit == nil {
 		return nil, errors.New("atomic audit dependencies unavailable")
 	}
@@ -976,75 +816,13 @@ func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID 
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: orgID, UserID: userID, Authorize: authorize}, docID)
-	if err != nil {
-		return nil, err
-	}
-	q := d.Queries.WithTx(tx)
-	existing := guard.Document
-	if existing.SourceKind != "blocks" {
-		return nil, authoring.ErrDocumentNotDraft
-	}
-	actorID := guard.UserID()
-	if err := checkDocumentObservation(existing, expected); err != nil {
-		return nil, err
-	}
-
-	tree, err := blocks.ParseTree(existing.BlocksJson)
-	if err != nil {
-		return nil, fmt.Errorf("existing blocks_json invalid: %w", err)
-	}
-	if err := fn(tree); err != nil {
-		return nil, err
-	}
-	if err := blocks.Validate(tree); err != nil {
-		return nil, fmt.Errorf("post-edit validation: %w", err)
-	}
-	raw, err := json.Marshal(tree)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
-		ID: docID, OrgID: orgID, BlocksJson: raw, VariablesJson: existing.VariablesJson,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if d.Versions != nil {
-		if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
-			DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-			BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &actorID,
-			Via: via, Summary: toolName,
-		}); err != nil {
-			return nil, err
-		}
-	}
-	pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: orgID, ActorUserID: &actorID, DocumentID: &docID,
-		Kind:    audit.KindDocumentUpdated,
-		Payload: map[string]any{"via": "mcp", "tool": toolName, "blocks": len(tree.Blocks)},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	d.Audit.Publish(pending)
-	return doc, nil
+	return blockauthoring.MutateTreeV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "mcp", Tool: toolName}, docID, via, expected, checkDocumentObservation, fn)
 }
 
 func updateTopLevelBlock(tree *blocks.Tree, blockID string, replacement blocks.Block) error {
+	return updateTopLevelBlockWithAdmissionV1(tree, blockID, replacement, nil)
+}
+func updateTopLevelBlockWithAdmissionV1(tree *blocks.Tree, blockID string, replacement blocks.Block, admission blocks.ConditionalSendAdmissionV1) error {
 	if tree == nil {
 		return errors.New("block tree is nil")
 	}
@@ -1054,7 +832,7 @@ func updateTopLevelBlock(tree *blocks.Tree, blockID string, replacement blocks.B
 			// endpoint and preventing an update from silently becoming a rename.
 			replacement.ID = blockID
 			tree.Blocks[i] = replacement
-			return blocks.Validate(tree)
+			return blocks.ValidateForSendV1(tree, admission)
 		}
 	}
 	return errors.New("block_id not found at top level")

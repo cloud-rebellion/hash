@@ -16,6 +16,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/crmconnection"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/google/uuid"
 )
@@ -236,6 +237,7 @@ func (s *Server) recheckCRMTemplateObservation(ctx context.Context, actor author
 	if err != nil {
 		return err
 	}
+	defer current.closeOwnedV1()
 	if identity != nil && (current.connection == nil || current.connection.Status != "active" || crmIdentity(current.connection) != *identity) {
 		return errCRMTemplateChanged
 	}
@@ -251,9 +253,18 @@ func (s *Server) handleCRMTemplateObservations(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, actor.OrgID, pdfadmission.HTMLCRMTemplateObservationInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	var in CRMTemplateObservationRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
-	if decodeCRMTemplateJSON(r, &in) != nil || in.Candidate == nil {
+	decodeErr := decodeCRMTemplateJSON(r, &in)
+	if writeHTMLAuthoringInputFailureV1(w, decodeErr) {
+		return
+	}
+	if decodeErr != nil || in.Candidate == nil {
 		s.writeCRMTemplateError(w, errCRMTemplateInput)
 		return
 	}
@@ -268,6 +279,7 @@ func (s *Server) handleCRMTemplateObservations(w http.ResponseWriter, r *http.Re
 		s.writeCRMTemplateError(w, err)
 		return
 	}
+	defer current.closeOwnedV1()
 	observation, err := s.observeCRMTemplate(ctx, current, *in.Candidate, in.Mappings)
 	if err != nil {
 		s.writeCRMTemplateError(w, err)
@@ -297,6 +309,11 @@ func (s *Server) handleCRMTemplateSearch(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, actor.OrgID, pdfadmission.HTMLCRMTemplateSearchInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	var in struct {
 		CRMTemplateWitness
 		Kind   crmconnection.RecordKind `json:"kind"`
@@ -304,7 +321,11 @@ func (s *Server) handleCRMTemplateSearch(w http.ResponseWriter, r *http.Request)
 		Offset int                      `json:"offset"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-	if decodeCRMTemplateJSON(r, &in) != nil {
+	decodeErr := decodeCRMTemplateJSON(r, &in)
+	if writeHTMLAuthoringInputFailureV1(w, decodeErr) {
+		return
+	}
+	if decodeErr != nil {
 		s.writeCRMTemplateError(w, errCRMTemplateInput)
 		return
 	}
@@ -324,6 +345,7 @@ func (s *Server) handleCRMTemplateSearch(w http.ResponseWriter, r *http.Request)
 		s.writeCRMTemplateError(w, err)
 		return
 	}
+	defer current.closeOwnedV1()
 	conn, err := s.crmActiveConnection(&crmDocumentContext{connection: current.connection})
 	if err != nil {
 		s.writeCRMTemplateError(w, err)

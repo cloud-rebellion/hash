@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -298,9 +299,41 @@ func (l *Logger) LogTx(ctx context.Context, tx pgx.Tx, e Entry) (PendingEvent, e
 
 // Publish releases post-commit subscribers for an event appended by LogTx.
 // It performs no database work and is safe to call only after commit.
-func (l *Logger) Publish(p PendingEvent) {
+func (l *Logger) Publish(p PendingEvent) { l.publishJoinedV1(p, nil) }
+
+// PublishJoinedV1 calls lastUse only after every actual hook returns. It grants
+// no work, commit, replay or retirement authority; the fixed native caller owns
+// those separate proofs. A hook ignoring cancellation retains its consumer.
+func (l *Logger) PublishJoinedV1(p PendingEvent, lastUse func()) { l.publishJoinedV1(p, lastUse) }
+
+func (l *Logger) publishJoinedV1(p PendingEvent, lastUse func()) {
+	// Detach scalar identities before asynchronous hooks. Interior pointers
+	// into a retained Document/Recipient/User must not keep those entire
+	// source models alive after their actual consumer has ended. Payload
+	// fanout admission remains a separate downstream lifetime responsibility.
+	eventID := p.ID
 	e := p.Entry
-	slog.Debug("audit", "kind", e.Kind, "event_id", p.ID, "org_id", e.OrgID)
+	if e.DocumentID != nil {
+		id := *e.DocumentID
+		e.DocumentID = &id
+	}
+	if e.RecipientID != nil {
+		id := *e.RecipientID
+		e.RecipientID = &id
+	}
+	if e.ActorUserID != nil {
+		id := *e.ActorUserID
+		e.ActorUserID = &id
+	}
+	slog.Debug("audit", "kind", e.Kind, "event_id", eventID, "org_id", e.OrgID)
+	if len(l.hooks) == 0 {
+		if lastUse != nil {
+			lastUse()
+		}
+		return
+	}
+	var remaining atomic.Int64
+	remaining.Store(int64(len(l.hooks)))
 	for _, h := range l.hooks {
 		h := h
 		// Hooks run asynchronously with a hard per-hook timeout. The
@@ -311,13 +344,18 @@ func (l *Logger) Publish(p PendingEvent) {
 		// HTTP handler.
 		go func() {
 			defer func() {
+				if remaining.Add(-1) == 0 && lastUse != nil {
+					lastUse()
+				}
+			}()
+			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("audit hook panicked", "kind", e.Kind, "panic_type", fmt.Sprintf("%T", r))
 				}
 			}()
 			hctx, cancel := context.WithTimeout(context.Background(), AuditHookTimeout)
 			defer cancel()
-			h(hctx, p.ID, e)
+			h(hctx, eventID, e)
 		}()
 	}
 }

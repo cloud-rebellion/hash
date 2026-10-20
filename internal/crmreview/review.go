@@ -142,6 +142,15 @@ func CRMSemanticDigest(rows []*generated.DocumentVariableBinding) (string, error
 // new review-only domain over their strict canonical tree and exact strings.
 // Uploaded PDF printed text is not an editable CRM destination.
 func ContentCommitment(doc *generated.Document) (string, error) {
+	return contentCommitmentForSendV1(doc, nil)
+}
+
+// Native Send admission observes only the original decimal parser boundary;
+// original unicode/key/JSON/content validation order and commitment stay exact.
+func ContentCommitmentForSendV1(doc *generated.Document, admission blocks.ConditionalSendAdmissionV1) (string, error) {
+	return contentCommitmentForSendV1(doc, admission)
+}
+func contentCommitmentForSendV1(doc *generated.Document, admission blocks.ConditionalSendAdmissionV1) (string, error) {
 	if doc == nil || doc.ID == uuid.Nil || doc.OrgID == uuid.Nil {
 		return "", ErrInvalid
 	}
@@ -152,7 +161,7 @@ func ContentCommitment(doc *generated.Document) (string, error) {
 		sourcejson.Validate(doc.BlocksJson) != nil || !validUnicodeEscapes(doc.BlocksJson) || !exactBlockKeys(doc.BlocksJson) {
 		return "", ErrInvalid
 	}
-	tree, err := blocks.ParseCanonicalTree(doc.BlocksJson)
+	tree, err := blocks.ParseCanonicalTreeForSendV1(doc.BlocksJson, admission)
 	if err != nil {
 		return "", ErrInvalid
 	}

@@ -345,7 +345,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-psql_args=(psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator $'\t' --pset footer=off)
+# Keep the canonical query byte-identical. This one psql connection owns the
+# read-only snapshot and local planner policy; quiet mode keeps stdout pure TSV.
+psql_args=(psql --no-psqlrc --quiet --single-transaction --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator $'\t' --pset footer=off
+  --command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;')
 if [[ -n "$database" ]]; then
   psql_args+=(--dbname "$database")
 fi

@@ -98,6 +98,12 @@ func buildAIRuntime(cfg *config.Config, q *generated.Queries) (*ai.Runtime, erro
 	// the same). A nil resolver leaves the instance-default path unchanged.
 	if cfg.AIShieldKey != "" {
 		keyRaw, _ := hex.DecodeString(cfg.AIShieldKey) // validated above
+		resolveSettings := func(row *generated.OrgAiSetting) (ai.Provider, bool, error) {
+			return ai.ResolveOrganizationProviderV1(row, keyRaw, allowPrivate)
+		}
+		rt.ResolveNativeOrgProvider = func(_ context.Context, row *generated.OrgAiSetting) (ai.Provider, bool, error) {
+			return resolveSettings(row)
+		}
 		rt.ResolveOrgProvider = func(ctx context.Context, orgID uuid.UUID, requestQueries *generated.Queries) (ai.Provider, bool, error) {
 			if requestQueries == nil {
 				return nil, false, errors.New("AI organization provider store unavailable")
@@ -109,20 +115,7 @@ func buildAIRuntime(cfg *config.Config, q *generated.Queries) (*ai.Runtime, erro
 			if err != nil || row == nil || row.OrgID != orgID {
 				return nil, false, errors.New("AI organization provider lookup failed")
 			}
-			if !row.Enabled {
-				return nil, false, nil
-			}
-			plain, err := ai.AESDecrypt(keyRaw, row.ApiKeyCt)
-			if err != nil {
-				return nil, false, errors.New("AI organization provider credential unavailable")
-			}
-			switch row.Provider {
-			case "anthropic":
-				return ai.NewAnthropicProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true, nil
-			case "mistral":
-				return ai.NewMistralProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true, nil
-			}
-			return nil, false, errors.New("AI organization provider unsupported")
+			return resolveSettings(row)
 		}
 	}
 	return rt, nil

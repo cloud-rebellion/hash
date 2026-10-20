@@ -27,6 +27,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/evidence"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/manualfit"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -65,8 +66,19 @@ type verifyInput struct {
 // endpoint so the marketing page can post user-supplied values from a
 // downloaded audit certificate and confirm authenticity in one click.
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	release, err := importguard.Shared.AcquireAnonymous()
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "verification capacity unavailable")
+		return
+	}
+	defer release()
+	r.Body = http.MaxBytesReader(w, r.Body, 6*manualfit.MaxCertificatePayloadBytesV1+65536)
+	raw, err := io.ReadAll(r.Body)
 	var in verifyInput
-	if err := decodeJSON(r, &in); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err != nil || uniqueJSONObjectV1(raw) != nil || decoder.Decode(&in) != nil || len(in.Payload) > int(manualfit.MaxCertificatePayloadBytesV1) || len(in.SignatureB64) > int(manualfit.MaxCertificateSignatureBytesV1) || len(in.PublicKeyB64) > int(manualfit.MaxIssuerKeyBytesV1) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -76,8 +88,12 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	ok := sign.Verify(in.PublicKeyB64, in.Payload, in.SignatureB64)
 	trusted := evidenceKeyIsTrusted(in.PublicKeyB64, s.EvidenceTrustedPublicKeys)
+	commitments, claimErr := evidence.ParseCertificateCommitments([]byte(in.Payload))
+	fitted := commitments.FitsIndexSchema != "" || bytes.Contains([]byte(in.Payload), []byte("data-hash-fits-index-"))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"valid": ok, "issuer_trusted": trusted, "authentic_hash_evidence": ok && trusted,
+		"valid": ok, "issuer_trusted": trusted, "authentic_hash_evidence": ok && trusted && !fitted && claimErr == nil,
+		"verification_scope": "certificate-signature", "certificate_commitments_valid": claimErr == nil,
+		"fitted_archive_required": fitted, "fitted_archive_verified": false,
 	})
 }
 
@@ -91,6 +107,8 @@ type VerifyBundleReport struct {
 	Issuer                      string              `json:"issuer"`
 	GeneratedAt                 string              `json:"generated_at"`
 	CompletionEffectiveAt       string              `json:"completion_effective_at,omitempty"`
+	VerificationScope           string              `json:"verification_scope,omitempty"`
+	FittedArchiveVerified       bool                `json:"fitted_archive_verified,omitempty"`
 	SignatureValid              bool                `json:"signature_valid"`
 	SignatureNote               string              `json:"signature_note,omitempty"`
 	ManifestSignatureValid      bool                `json:"manifest_signature_valid"`
@@ -117,10 +135,10 @@ type VerifyBundleCheck struct {
 	Detail   string `json:"detail,omitempty"`
 }
 
-const maxVerifyBundleSize = 160 * 1024 * 1024 // exact final (<=128 MiB) + bounded evidence attachments
+const maxVerifyBundleSize = 160 * 1024 * 1024 // historical PDF or fitted Store ZIP (format-specific member caps)
 
 // handleVerifyBundle accepts a multipart upload of a Hash evidence
-// bundle PDF, extracts the attachments via pdfcpu, then verifies
+// bundle (historical PDF or schema4 Store ZIP), then verifies
 //
 //   - every attachment's SHA-256 matches the issuer-signed manifest
 //   - the exact final-pdf.pdf digest matches the signed certificate claim
@@ -186,6 +204,9 @@ func VerifyEvidenceBundle(pdfBytes []byte, trustedPublicKeys ...string) VerifyBu
 // VerifyEvidenceBundleWithTrust is the production verification core with
 // role-separated issuer trust.
 func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) VerifyBundleReport {
+	if bytes.HasPrefix(pdfBytes, []byte{'P', 'K', 3, 4}) {
+		return VerifyEvidenceArchiveWithTrust(pdfBytes, trust)
+	}
 	report := VerifyBundleReport{Checks: []VerifyBundleCheck{}}
 	conf := pdfmodel.NewDefaultConfiguration()
 	conf.ValidationMode = pdfmodel.ValidationRelaxed
@@ -228,9 +249,18 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 		}
 		files[a.FileName] = raw
 	}
+	return verifyEvidenceFilesWithTrust(files, trust, false)
+}
+
+func verifyEvidenceFilesWithTrust(files map[string][]byte, trust EvidenceTrustSet, storeZIP bool) VerifyBundleReport {
+	report := VerifyBundleReport{Checks: []VerifyBundleCheck{}}
 	manifestRaw, ok := files["manifest.json"]
 	if !ok {
 		report.Errors = append(report.Errors, "manifest.json missing from bundle attachments")
+		return report
+	}
+	if int64(len(manifestRaw)) > manualfit.MaxEvidenceManifestBytesV1 || uniqueJSONObjectV1(manifestRaw) != nil {
+		report.Errors = append(report.Errors, "manifest JSON is oversized, duplicate or malformed")
 		return report
 	}
 	report.Manifest = json.RawMessage(manifestRaw)
@@ -245,16 +275,19 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 		report.Errors = append(report.Errors, "parse manifest: trailing JSON value")
 		return report
 	}
-	if manifest.SchemaVersion != evidence.LegacyManifestSchemaVersion && manifest.SchemaVersion != evidence.CurrentManifestSchemaVersion {
+	if manifest.SchemaVersion != evidence.LegacyManifestSchemaVersion && manifest.SchemaVersion != evidence.CurrentManifestSchemaVersion && manifest.SchemaVersion != evidence.FittedManifestSchemaVersion {
 		report.Errors = append(report.Errors, fmt.Sprintf("unsupported evidence manifest schema_version %d", manifest.SchemaVersion))
 	}
-	if manifest.SchemaVersion == evidence.CurrentManifestSchemaVersion {
+	if manifest.SchemaVersion == evidence.CurrentManifestSchemaVersion || manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
 		completionEffectiveAt, completionErr := time.Parse(time.RFC3339Nano, manifest.CompletionEffectiveAt)
 		if completionErr != nil || completionEffectiveAt.IsZero() || completionEffectiveAt.UTC().Format(time.RFC3339Nano) != manifest.CompletionEffectiveAt {
 			report.Errors = append(report.Errors, "manifest completion_effective_at is not canonical UTC RFC3339")
 		}
 	} else if manifest.SchemaVersion == evidence.LegacyManifestSchemaVersion && manifest.CompletionEffectiveAt != "" {
 		report.Errors = append(report.Errors, "legacy evidence manifest must not declare completion_effective_at")
+	}
+	if storeZIP != (manifest.SchemaVersion == evidence.FittedManifestSchemaVersion) {
+		report.Errors = append(report.Errors, "schema4 requires the bounded Store ZIP format; historical schemas require their PDF format")
 	}
 	if manifest.ManifestSigDomain != "hash:evidence-manifest:v1" {
 		report.Errors = append(report.Errors, "manifest signature domain is missing or unsupported")
@@ -271,6 +304,10 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 	report.Issuer = manifest.Issuer
 	report.GeneratedAt = manifest.GeneratedAt
 	report.CompletionEffectiveAt = manifest.CompletionEffectiveAt
+	report.VerificationScope = "historical-pdf-bundle"
+	if manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
+		report.VerificationScope = "schema4-fitted-archive"
+	}
 	report.ManifestSigningKeySHA256 = manifest.ManifestSigningKeySHA256
 	report.CertificateSigningKeySHA256 = manifest.CertificateSigningKeySHA256
 
@@ -311,6 +348,19 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 		"manifest.json": {}, "final-pdf.pdf": {}, "events.json": {}, "versions.json": {},
 		"manifest-public-key.pem": {}, "certificate-public-key.pem": {},
 		"audit-cert.pdf": {}, "audit-cert-payload.txt": {}, "audit-cert-signature.txt": {},
+	}
+	if manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
+		declaredAttachments["signature-fit-index.json"] = struct{}{}
+		indexChecks, indexNames, indexErr := verifySchema4FilesV1(files, manifest, report.CertificatePublicKeyB64, false)
+		report.Checks = append(report.Checks, indexChecks...)
+		if indexErr != nil {
+			report.Errors = append(report.Errors, indexErr.Error())
+		}
+		for _, name := range indexNames {
+			declaredAttachments[name] = struct{}{}
+		}
+	} else if manifest.CeremonyEpochAt != "" || manifest.FinalPDFObject != nil || manifest.FitsIndexSHA256 != "" || manifest.FitsIndexObject != nil || manifest.FitsIndexObjectSHA256 != "" || manifest.EvidenceRetainUntil != "" {
+		report.Errors = append(report.Errors, "historical schema unexpectedly declares fitted index fields")
 	}
 	if len(manifest.QTSP) > 0 {
 		report.Warnings = append(report.Warnings, "Legacy QTSP attachment hashes were integrity-checked only; Hash does not validate these records as QES, establish certificate trust or document-digest binding, or assert legal effect")
@@ -404,6 +454,13 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 	} else {
 		report.SignatureNote = "cert payload, signature, or public key missing - cannot run ed25519 verify"
 	}
+	if manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
+		checks, _, err := verifySchema4FilesV1(files, manifest, report.CertificatePublicKeyB64, true)
+		report.Checks = append(report.Checks, checks...)
+		if err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		}
+	}
 	report.KeyTrusted = report.ManifestKeyTrusted && report.CertificateKeyTrusted
 
 	if payloadPresent {
@@ -413,7 +470,7 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 		} else {
 			completionOK := manifest.SchemaVersion == evidence.LegacyManifestSchemaVersion && commitments.CompletionEffectiveAt == ""
 			completionDetail := "legacy schema has no signed completion-effective timestamp"
-			if manifest.SchemaVersion == evidence.CurrentManifestSchemaVersion {
+			if manifest.SchemaVersion == evidence.CurrentManifestSchemaVersion || manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
 				completionOK = commitments.CompletionEffectiveAt != "" && commitments.CompletionEffectiveAt == manifest.CompletionEffectiveAt
 				completionDetail = "signed certificate and signed export manifest completion-effective timestamps must agree"
 			}
@@ -421,6 +478,13 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 				Name: "signed-completion-effective-at", Expected: commitments.CompletionEffectiveAt,
 				Actual: manifest.CompletionEffectiveAt, OK: completionOK, Detail: completionDetail,
 			})
+			if manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
+				actual := manifest.FitsIndexSHA256 + "/" + manifest.FitsIndexObjectSHA256 + "/" + manifest.EvidenceRetainUntil
+				expected := commitments.FitsIndexSHA256 + "/" + commitments.FitsIndexObjectSHA256 + "/" + commitments.EvidenceRetainUntil
+				report.Checks = append(report.Checks, VerifyBundleCheck{Name: "signed-fitted-index-claim", Expected: expected, Actual: actual, OK: commitments.FitsIndexSchema == manualfit.FitsIndexSchemaV1 && actual == expected, Detail: "certificate and export must bind the same completed signed index, exact object identity and retention expiry"})
+			} else if commitments.FitsIndexSchema != "" {
+				report.Errors = append(report.Errors, "fitted certificate cannot be downgraded to a historical evidence schema")
+			}
 			nameDigest := sha256.Sum256([]byte(manifest.DocumentName))
 			identityActual := manifest.DocumentID + "/" + manifest.OrgID + "/" + hex.EncodeToString(nameDigest[:])
 			identityExpected := commitments.DocumentID + "/" + commitments.OrgID + "/" + commitments.DocumentNameSHA256
@@ -465,6 +529,9 @@ func VerifyEvidenceBundleWithTrust(pdfBytes []byte, trust EvidenceTrustSet) Veri
 			report.OK = false
 			break
 		}
+	}
+	if manifest.SchemaVersion == evidence.FittedManifestSchemaVersion {
+		report.FittedArchiveVerified = report.OK
 	}
 	return report
 }

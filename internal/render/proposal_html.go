@@ -82,7 +82,7 @@ func SanitizeForRender(rawHTML string) string {
 func sanitizeStyleElements(input string) string {
 	return reStyleElement.ReplaceAllStringFunc(input, func(element string) string {
 		openEnd := strings.IndexByte(element, '>')
-		closeStart := strings.LastIndex(strings.ToLower(element), "</style")
+		closeStart := lastStyleCloseIndex(element)
 		if openEnd < 0 || closeStart <= openEnd {
 			return ""
 		}
@@ -480,4 +480,30 @@ func resourceURLScheme(value string) (string, bool) {
 		}
 	}
 	return value[:colon], true
+}
+
+// lastStyleCloseIndex uses original byte offsets. Unicode lowercasing may
+// change UTF-8 length and must never supply an index for slicing source HTML.
+func lastStyleCloseIndex(input string) int {
+	const close = "</style"
+	for i := len(input) - len(close); i >= 0; i-- {
+		if input[i] != '<' {
+			continue
+		}
+		match := true
+		for j := range len(close) {
+			c := input[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != close[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }

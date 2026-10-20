@@ -288,9 +288,16 @@ func (q *Queries) GetRecipientForShare(ctx context.Context, arg GetRecipientForS
 }
 
 const invalidateRecipientTokens = `-- name: InvalidateRecipientTokens :exec
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $1
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET magic_token_expires_at = now()
-WHERE document_id = $1
+FROM locked_document d
+WHERE r.document_id = $1 AND d.id = r.document_id
 `
 
 // Expire every magic link when a ceremony terminates
@@ -345,10 +352,18 @@ func (q *Queries) ListRecipientsByDocument(ctx context.Context, documentID uuid.
 }
 
 const markRecipientSent = `-- name: MarkRecipientSent :execrows
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $2
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET status = 'sent',
     sent_at = now()
-WHERE id = $1 AND document_id = $2 AND status = 'pending'
+FROM locked_document d
+WHERE r.id = $1 AND r.document_id = $2
+  AND d.id = r.document_id AND r.status = 'pending'
 `
 
 type MarkRecipientSentParams struct {
@@ -369,14 +384,19 @@ func (q *Queries) MarkRecipientSent(ctx context.Context, arg MarkRecipientSentPa
 }
 
 const rotateCompletedArtifactToken = `-- name: RotateCompletedArtifactToken :execrows
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $4 AND d.status = 'completed'
+  FOR UPDATE OF d
+)
 UPDATE recipients r
 SET magic_token_hash = $1,
     magic_token_expires_at = $2
-FROM documents d
+FROM locked_document d
 WHERE r.id = $3
   AND r.document_id = $4
   AND d.id = r.document_id
-  AND d.status = 'completed'
   AND r.status IN ('signed','accepted')
 `
 
@@ -407,34 +427,49 @@ func (q *Queries) RotateCompletedArtifactToken(ctx context.Context, arg RotateCo
 }
 
 const rotateRecipientMagicToken = `-- name: RotateRecipientMagicToken :exec
-UPDATE recipients
-SET magic_token_hash       = $3,
-    magic_token_expires_at = $4
-WHERE id = $1 AND document_id = $2
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $4
+  FOR UPDATE OF d
+)
+UPDATE recipients r
+SET magic_token_hash = $1,
+    magic_token_expires_at = $2
+FROM locked_document d
+WHERE r.id = $3 AND r.document_id = $4
+  AND d.id = r.document_id
 `
 
 type RotateRecipientMagicTokenParams struct {
-	ID                  uuid.UUID          `json:"id"`
-	DocumentID          uuid.UUID          `json:"document_id"`
 	MagicTokenHash      []byte             `json:"magic_token_hash"`
 	MagicTokenExpiresAt pgtype.Timestamptz `json:"magic_token_expires_at"`
+	ID                  uuid.UUID          `json:"id"`
+	DocumentID          uuid.UUID          `json:"document_id"`
 }
 
 func (q *Queries) RotateRecipientMagicToken(ctx context.Context, arg RotateRecipientMagicTokenParams) error {
 	_, err := q.db.Exec(ctx, rotateRecipientMagicToken,
-		arg.ID,
-		arg.DocumentID,
 		arg.MagicTokenHash,
 		arg.MagicTokenExpiresAt,
+		arg.ID,
+		arg.DocumentID,
 	)
 	return err
 }
 
 const setCompletedArtifactTokenExpiry = `-- name: SetCompletedArtifactTokenExpiry :exec
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $2
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET magic_token_expires_at = $1
-WHERE document_id = $2
-  AND status IN ('signed','accepted')
+FROM locked_document d
+WHERE r.document_id = $2
+  AND d.id = r.document_id AND r.status IN ('signed','accepted')
 `
 
 type SetCompletedArtifactTokenExpiryParams struct {
@@ -452,21 +487,29 @@ func (q *Queries) SetCompletedArtifactTokenExpiry(ctx context.Context, arg SetCo
 }
 
 const setRecipientStatus = `-- name: SetRecipientStatus :exec
-UPDATE recipients
-SET status = $3,
-    sent_at = CASE WHEN $3 = 'sent' THEN now() ELSE sent_at END,
-    first_viewed_at = CASE WHEN $3 = 'viewed' AND first_viewed_at IS NULL THEN now() ELSE first_viewed_at END,
-    signed_at = CASE WHEN $3 = 'signed' THEN now() ELSE signed_at END,
-    declined_reason = CASE WHEN $3 = 'declined' THEN $4 ELSE declined_reason END
-WHERE id = $1 AND document_id = $2
-  AND status NOT IN ('signed','accepted','declined')
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $4
+  FOR UPDATE OF d
+)
+UPDATE recipients r
+SET status = $1,
+    sent_at = CASE WHEN $1 = 'sent' THEN now() ELSE r.sent_at END,
+    first_viewed_at = CASE WHEN $1 = 'viewed' AND r.first_viewed_at IS NULL THEN now() ELSE r.first_viewed_at END,
+    signed_at = CASE WHEN $1 = 'signed' THEN now() ELSE r.signed_at END,
+    declined_reason = CASE WHEN $1 = 'declined' THEN $2 ELSE r.declined_reason END
+FROM locked_document d
+WHERE r.id = $3 AND r.document_id = $4
+  AND d.id = r.document_id
+  AND r.status NOT IN ('signed','accepted','declined')
 `
 
 type SetRecipientStatusParams struct {
-	ID             uuid.UUID   `json:"id"`
-	DocumentID     uuid.UUID   `json:"document_id"`
 	Status         string      `json:"status"`
 	DeclinedReason pgtype.Text `json:"declined_reason"`
+	ID             uuid.UUID   `json:"id"`
+	DocumentID     uuid.UUID   `json:"document_id"`
 }
 
 // Status precondition: a recipient already in a terminal state (signed,
@@ -475,10 +518,10 @@ type SetRecipientStatusParams struct {
 // decline/view request; terminal double-writes are no-ops.
 func (q *Queries) SetRecipientStatus(ctx context.Context, arg SetRecipientStatusParams) error {
 	_, err := q.db.Exec(ctx, setRecipientStatus,
-		arg.ID,
-		arg.DocumentID,
 		arg.Status,
 		arg.DeclinedReason,
+		arg.ID,
+		arg.DocumentID,
 	)
 	return err
 }

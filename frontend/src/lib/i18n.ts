@@ -60,6 +60,8 @@ const en: Dict = {
   'sign.signed.title': 'Signed',
   'sign.signed.allParties': 'The document is fully signed by all parties.',
   'sign.signed.download': 'Download signed PDF',
+  'sign.completed.downloadAudit': 'Download audit certificate',
+  'sign.completed.downloadsUnavailable': 'The document is complete. Download links are unavailable on this page. Use the time-limited completion email links or contact the sender for copies.',
   'sign.signed.recorded': 'Your signature is recorded. The document will finalise once all parties have signed.',
   'sign.accept.title': 'Review and accept',
   'sign.accept.body': 'Read the document, then click Accept to acknowledge it. No signature is required.',

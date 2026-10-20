@@ -4,20 +4,18 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/envelopes"
 )
@@ -43,13 +41,18 @@ func registerEnvelopeTools(s *Server, d Deps) {
 				"description": "Existing draft document UUIDs to bundle, in the order signers should see them.",
 			},
 		}, []string{"name", "child_ids"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				Name     string   `json:"name"`
 				ChildIDs []string `json:"child_ids"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			if p.Name == "" {
@@ -69,43 +72,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := validateEnvelopeIDs(ids); err != nil {
 				return nil, err
 			}
-			envDoc, err := commitEnvelopeMutation(r.Context(), d, uuid.Nil, ids,
-				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
-					if err := d.Billing.LockDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-						return nil, err
-					}
-					env, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-						OrgID: u.OrgID, Name: p.Name, BlocksJson: []byte(`{"version":1,"blocks":[]}`), VariablesJson: []byte(`{}`), SenderID: u.UserID,
-					})
-					if err != nil {
-						return nil, err
-					}
-					if err := d.Billing.EnforceDocumentQuotaMutation(ctx, q, u.OrgID); err != nil {
-						return nil, err
-					}
-					engine := envelopes.New(q)
-					envDoc, err := engine.PromoteToEnvelope(ctx, env.ID, u.OrgID)
-					if err != nil {
-						return nil, envelopeTargetError(err)
-					}
-					for i, cid := range ids {
-						if _, err := engine.Attach(ctx, envDoc.ID, cid, u.OrgID, int32(i+1)); err != nil {
-							return nil, envelopeTargetError(err)
-						}
-					}
-					return envDoc, nil
-				},
-				func(row *generated.Document) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &row.ID, Kind: audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "create_envelope", "child_count": len(ids)},
-					}
-				},
-			)
+			owned, err := commitOwnedEnvelopeV1(r, d, "create_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeCreateV1, Children: ids, Name: p.Name})
 			if err != nil {
-				return nil, envelopeMutationError(err)
+				return owned, envelopeMutationError(err)
 			}
-			return envelopeRow(envDoc), nil
+			return newOwnedEnvelopeToolResultV1(envelopeRow(owned.Document), owned), nil
 		},
 	})
 
@@ -116,12 +87,17 @@ func registerEnvelopeTools(s *Server, d Deps) {
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid to promote"),
 		}, []string{"document_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				DocumentID string `json:"document_id"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.DocumentID)
@@ -131,22 +107,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			row, err := commitEnvelopeMutation(r.Context(), d, id, nil,
-				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
-					row, err := envelopes.New(q).PromoteToEnvelope(ctx, id, u.OrgID)
-					return row, envelopeTargetError(err)
-				},
-				func(*generated.Document) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "promote_to_envelope"},
-					}
-				},
-			)
+			owned, err := commitOwnedEnvelopeV1(r, d, "promote_to_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopePromoteV1, Root: id})
 			if err != nil {
-				return nil, envelopeMutationError(err)
+				return owned, envelopeMutationError(err)
 			}
-			return envelopeRow(row), nil
+			return newOwnedEnvelopeToolResultV1(envelopeRow(owned.Document), owned), nil
 		},
 	})
 
@@ -159,14 +124,19 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			"child_id":    stringSchema("child document uuid"),
 			"position":    intSchema("1-indexed position; omit to append", 0, 1000, 0),
 		}, []string{"envelope_id", "child_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				EnvelopeID string `json:"envelope_id"`
 				ChildID    string `json:"child_id"`
 				Position   int32  `json:"position"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			envID, err := uuid.Parse(p.EnvelopeID)
@@ -185,22 +155,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), childID); err != nil {
 				return nil, err
 			}
-			row, err := commitEnvelopeMutation(r.Context(), d, envID, []uuid.UUID{childID},
-				func(ctx context.Context, q *generated.Queries, _ map[uuid.UUID]*generated.Document) (*generated.Document, error) {
-					row, err := envelopes.New(q).Attach(ctx, envID, childID, u.OrgID, p.Position)
-					return row, envelopeTargetError(err)
-				},
-				func(*generated.Document) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "attach_to_envelope", "child_id": childID.String()},
-					}
-				},
-			)
+			owned, err := commitOwnedEnvelopeV1(r, d, "attach_to_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeAttachV1, Root: envID, Children: []uuid.UUID{childID}, Position: p.Position})
 			if err != nil {
-				return nil, envelopeMutationError(err)
+				return owned, envelopeMutationError(err)
 			}
-			return envelopeRow(row), nil
+			return newOwnedEnvelopeToolResultV1(envelopeRow(owned.Document), owned), nil
 		},
 	})
 
@@ -211,12 +170,17 @@ func registerEnvelopeTools(s *Server, d Deps) {
 		InputSchema: schemaObject(map[string]any{
 			"child_id": stringSchema("child document uuid"),
 		}, []string{"child_id"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				ChildID string `json:"child_id"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			id, err := uuid.Parse(p.ChildID)
@@ -226,7 +190,7 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			child, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
+			child, err := d.Queries.GetEnvelopeTopologyChildParentV1(r.Context(), generated.GetEnvelopeTopologyChildParentV1Params{ID: id, OrgID: u.OrgID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, authoring.ErrDocumentNotFound
 			}
@@ -242,26 +206,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
 				return nil, err
 			}
-			row, err := commitEnvelopeMutation(r.Context(), d, envID, []uuid.UUID{id},
-				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) (*generated.Document, error) {
-					current := docs[id]
-					if current == nil || !current.ParentEnvelopeID.Valid || uuid.UUID(current.ParentEnvelopeID.Bytes) != envID {
-						return nil, errEnvelopeTargetIneligible
-					}
-					row, err := envelopes.New(q).Detach(ctx, id, u.OrgID)
-					return row, envelopeTargetError(err)
-				},
-				func(*generated.Document) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "detach_from_envelope", "child_id": id.String()},
-					}
-				},
-			)
+			owned, err := commitOwnedEnvelopeV1(r, d, "detach_from_envelope", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeDetachV1, Root: envID, Children: []uuid.UUID{id}})
 			if err != nil {
-				return nil, envelopeMutationError(err)
+				return owned, envelopeMutationError(err)
 			}
-			return envelopeRow(row), nil
+			return newOwnedEnvelopeToolResultV1(envelopeRow(owned.Document), owned), nil
 		},
 	})
 
@@ -276,13 +225,18 @@ func registerEnvelopeTools(s *Server, d Deps) {
 				"items": map[string]any{"type": "string"},
 			},
 		}, []string{"envelope_id", "child_id_order"}),
-		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+		Handler: func(r *http.Request, args json.RawMessage) (result any, failure error) {
 			u, _ := auth.FromContext(r.Context())
+			input, err := d.PDFCreationSessions.NewBlocksArgumentsV1(r.Context(), u.OrgID, args)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
 				EnvelopeID   string   `json:"envelope_id"`
 				ChildIDOrder []string `json:"child_id_order"`
 			}
-			if err := MustParseArgs(args, &p); err != nil {
+			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
 			}
 			envID, err := uuid.Parse(p.EnvelopeID)
@@ -303,40 +257,15 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err := validateEnvelopeIDs(ids); err != nil {
 				return nil, err
 			}
-			kids, err := commitEnvelopeMutation(r.Context(), d, envID, ids,
-				func(ctx context.Context, q *generated.Queries, docs map[uuid.UUID]*generated.Document) ([]*generated.ListEnvelopeChildMetadataForReadRow, error) {
-					if !docs[envID].IsEnvelope || docs[envID].ParentEnvelopeID.Valid {
-						return nil, errEnvelopeTargetIneligible
-					}
-					for _, id := range ids {
-						child := docs[id]
-						if child == nil || !child.ParentEnvelopeID.Valid || uuid.UUID(child.ParentEnvelopeID.Bytes) != envID {
-							return nil, errEnvelopeTargetIneligible
-						}
-					}
-					engine := envelopes.New(q)
-					if err := engine.Reorder(ctx, envID, u.OrgID, ids); err != nil {
-						return nil, envelopeTargetError(err)
-					}
-					return q.ListEnvelopeChildMetadataForRead(ctx, generated.ListEnvelopeChildMetadataForReadParams{
-						ParentEnvelopeID: pgtype.UUID{Bytes: envID, Valid: true}, OrgID: u.OrgID,
-					})
-				},
-				func([]*generated.ListEnvelopeChildMetadataForReadRow) audit.Entry {
-					return audit.Entry{
-						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &envID, Kind: audit.KindDocumentUpdated,
-						Payload: map[string]any{"via": "mcp", "tool": "reorder_envelope_children", "count": len(ids)},
-					}
-				},
-			)
+			owned, err := commitOwnedEnvelopeV1(r, d, "reorder_envelope_children", blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeReorderV1, Root: envID, Children: ids})
 			if err != nil {
-				return nil, envelopeMutationError(err)
+				return owned, envelopeMutationError(err)
 			}
-			out := make([]map[string]any, 0, len(kids))
-			for _, c := range kids {
-				out = append(out, envelopeMetadataRow(c))
+			out := make([]map[string]any, 0, len(owned.Children))
+			for _, child := range owned.Children {
+				out = append(out, envelopeMetadataRow(child))
 			}
-			return map[string]any{"children": out, "count": len(out)}, nil
+			return newOwnedEnvelopeToolResultV1(map[string]any{"children": out, "count": len(out)}, owned), nil
 		},
 	})
 
@@ -472,100 +401,6 @@ func envelopeTargetError(err error) error {
 		return errEnvelopeTargetIneligible
 	}
 	return err
-}
-
-// Envelope membership is authoring of the whole instrument. Lock its root
-// before its children, as send does, then validate every affected draft's
-// evidence/privacy state. The original key and member remain locked until the
-// audit and last authorization check commit together.
-func commitEnvelopeMutation[T any](parent context.Context, d Deps, root uuid.UUID, requested []uuid.UUID,
-	mutate func(context.Context, *generated.Queries, map[uuid.UUID]*generated.Document) (T, error), event func(T) audit.Entry,
-) (T, error) {
-	var zero T
-	if d.Pool == nil || d.Audit == nil {
-		return zero, errors.New("atomic audit dependencies unavailable")
-	}
-	authorize, err := auth.APIKeyTransactionAuthorization(parent, root, mcpScopeWriteAuthoring)
-	if err != nil {
-		return zero, err
-	}
-	u, ok := auth.FromContext(parent)
-	if !ok {
-		return zero, auth.ErrMutationPermissionRevoked
-	}
-	ctx, cancel := context.WithTimeout(parent, authoring.MutationTimeout)
-	defer cancel()
-	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return zero, err
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	actor := authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}
-	docs := make(map[uuid.UUID]*generated.Document)
-	guards := []*authoring.DraftGuard{}
-	ids := append([]uuid.UUID(nil), requested...)
-	if root != uuid.Nil {
-		guard, err := authoring.LockDraft(ctx, tx, actor, root)
-		if err != nil {
-			return zero, err
-		}
-		docs[root], guards = guard.Document, append(guards, guard)
-		if guard.Document.IsEnvelope {
-			kids, err := envelopes.New(q).Children(ctx, root, u.OrgID)
-			if err != nil {
-				return zero, err
-			}
-			for _, child := range kids {
-				ids = append(ids, child.ID)
-			}
-		}
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
-	for _, id := range ids {
-		if _, locked := docs[id]; locked {
-			continue
-		}
-		guard, err := authoring.LockDraft(ctx, tx, actor, id)
-		if err != nil {
-			return zero, err
-		}
-		docs[id], guards = guard.Document, append(guards, guard)
-	}
-	var member *authoring.MemberGuard
-	if root == uuid.Nil {
-		member, err = authoring.LockAuthor(ctx, tx, actor)
-		if err != nil {
-			return zero, err
-		}
-	}
-	value, err := mutate(ctx, q, docs)
-	if err != nil {
-		return zero, err
-	}
-	entry := event(value)
-	if entry.OrgID != u.OrgID || entry.ActorUserID == nil || *entry.ActorUserID != u.UserID {
-		return zero, auth.ErrMutationPermissionRevoked
-	}
-	pending, err := d.Audit.LogTx(ctx, tx, entry)
-	if err != nil {
-		return zero, err
-	}
-	for _, guard := range guards {
-		if err := guard.Recheck(ctx); err != nil {
-			return zero, err
-		}
-	}
-	if member != nil {
-		if err := member.Recheck(ctx); err != nil {
-			return zero, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return zero, err
-	}
-	d.Audit.Publish(pending)
-	return value, nil
 }
 
 func envelopeMutationError(err error) error {

@@ -10,7 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -18,12 +18,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/authoring"
-	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 )
 
 var errHTMLTemplateConflict = errors.New("HTML template revision changed or is not approved")
@@ -38,7 +36,7 @@ type htmlTemplateInput struct {
 // decodeHTMLMasterJSON retains the same strict interpretation as legal JSON
 // while permitting the separately bounded inline assets of an HTML design.
 func decodeHTMLMasterJSON(r *http.Request, dst any) error {
-	raw, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, htmlmaster.MaxMasterJSONBytes+(2<<20)))
+	raw, err := readHTMLAuthoringInputJSONV1(r, htmlmaster.MaxMasterJSONBytes+(2<<20))
 	if err != nil {
 		return err
 	}
@@ -68,7 +66,7 @@ func parseHTMLTemplateInput(r *http.Request) (htmlTemplateInput, htmlmaster.Temp
 	if len(in.VariablesJSON) == 0 {
 		in.VariablesJSON = json.RawMessage("{}")
 	}
-	committed, err := htmlmaster.CanonicalTemplate(in.HTMLMasterJSON, in.VariablesJSON)
+	committed, err := canonicalHTMLAuthoringInputV1(r, in.HTMLMasterJSON, in.VariablesJSON)
 	return in, committed, err
 }
 
@@ -99,6 +97,9 @@ func (s *Server) handleCreateHTMLTemplate(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
+		return
+	}
 	release, err := importguard.Shared.Acquire(u.OrgID)
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
@@ -106,8 +107,16 @@ func (s *Server) handleCreateHTMLTemplate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer release()
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLTemplateMasterInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	in, content, err := parseHTMLTemplateInput(r)
 	if err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -119,36 +128,22 @@ func (s *Server) handleCreateHTMLTemplate(w http.ResponseWriter, r *http.Request
 		writeScanError(w, err)
 		return
 	}
-	digest, _ := hex.DecodeString(content.SHA256)
-	t, err := s.createTemplateAuthorized(r, u.UserID, u.OrgID,
-		func(ctx context.Context, q *generated.Queries) (*generated.Template, error) {
-			t, err := q.CreateHTMLTemplate(ctx, generated.CreateHTMLTemplateParams{
-				OrgID: u.OrgID, Name: in.Name, HtmlMasterJson: content.MasterJSON,
-				VariablesJson: content.DefaultsJSON, HtmlContentSha256: digest, CreatedBy: u.UserID,
-			})
-			if err != nil {
-				return nil, err
-			}
-			_, err = q.InsertHTMLTemplateRevision(ctx, generated.InsertHTMLTemplateRevisionParams{
-				TemplateID: t.ID, OrgID: u.OrgID, ExpectedVersion: t.Version,
-				HtmlMasterJson: content.MasterJSON, VariablesJson: content.DefaultsJSON,
-				ContentSha256: digest, CreatedBy: u.UserID,
-			})
-			return t, err
-		}, func(t *generated.Template) audit.Entry {
-			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindTemplateCreated,
-				Payload: map[string]any{"template_id": t.ID, "source_kind": "html", "version": t.Version, "content_sha256": content.SHA256, "approved": false}}
-		})
+	t, closeConsumer, err := s.writeHTMLTemplateOwnedV1(r, u.UserID, u.OrgID, uuid.Nil, in, content)
+
 	if err != nil {
 		s.writeHTMLTemplateError(w, "create HTML template", err)
 		return
 	}
+	defer closeConsumer()
 	writeTemplateResponse(w, http.StatusCreated, t)
 }
 
 func (s *Server) handleUpdateHTMLTemplate(w http.ResponseWriter, r *http.Request) {
 	u, ok := requireSessionUser(w, r.Context())
 	if !ok {
+		return
+	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
 		return
 	}
 	id, ok := parseUUIDParam(w, r, "id")
@@ -162,8 +157,16 @@ func (s *Server) handleUpdateHTMLTemplate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer release()
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLTemplateMasterInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	in, content, err := parseHTMLTemplateInput(r)
 	if err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -175,33 +178,13 @@ func (s *Server) handleUpdateHTMLTemplate(w http.ResponseWriter, r *http.Request
 		writeScanError(w, err)
 		return
 	}
-	digest, _ := hex.DecodeString(content.SHA256)
-	t, err := s.mutateTemplateAuthorized(r, u.UserID, u.OrgID, id,
-		func(ctx context.Context, q *generated.Queries, current *generated.Template) (*generated.Template, error) {
-			if current.SourceKind != "html" || current.Version != in.ExpectedVersion {
-				return nil, errHTMLTemplateConflict
-			}
-			t, err := q.UpdateHTMLTemplate(ctx, generated.UpdateHTMLTemplateParams{
-				ID: id, OrgID: u.OrgID, Name: in.Name, HtmlMasterJson: content.MasterJSON,
-				VariablesJson: content.DefaultsJSON, HtmlContentSha256: digest, ExpectedVersion: in.ExpectedVersion,
-			})
-			if err != nil {
-				return nil, err
-			}
-			_, err = q.InsertHTMLTemplateRevision(ctx, generated.InsertHTMLTemplateRevisionParams{
-				TemplateID: id, OrgID: u.OrgID, ExpectedVersion: t.Version,
-				HtmlMasterJson: content.MasterJSON, VariablesJson: content.DefaultsJSON,
-				ContentSha256: digest, CreatedBy: u.UserID,
-			})
-			return t, err
-		}, func(t *generated.Template) audit.Entry {
-			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindTemplateUpdated,
-				Payload: map[string]any{"template_id": id, "source_kind": "html", "version": t.Version, "content_sha256": content.SHA256, "approved": false}}
-		})
+	t, closeConsumer, err := s.writeHTMLTemplateOwnedV1(r, u.UserID, u.OrgID, id, in, content)
+
 	if err != nil {
 		s.writeHTMLTemplateError(w, "update HTML template", err)
 		return
 	}
+	defer closeConsumer()
 	writeTemplateResponse(w, http.StatusOK, t)
 }
 
@@ -217,12 +200,23 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
+		return
+	}
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
 	}
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLTemplateApprovalInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	var in htmlTemplateApprovalInput
 	if err := decodeSignerJSON(r, &in); err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -251,42 +245,13 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 	// the chained audit append. Expiry during an audit lock wait rolls back the
 	// approval and audit together.
 	actor.Authorize = htmlTemplatePreviewReceiptAuthorization(actor.Authorize, preview)
-	revision, err := authoring.CommitOwnerMutation(r.Context(), s.Pool, s.Audit, actor,
-		func(ctx context.Context, q *generated.Queries) (*generated.HtmlTemplateRevision, error) {
-			t, err := q.GetHTMLTemplateForUpdate(ctx, generated.GetHTMLTemplateForUpdateParams{ID: id, OrgID: u.OrgID})
-			if err != nil {
-				return nil, err
-			}
-			if t.Version != in.ExpectedVersion || !bytes.Equal(t.HtmlContentSha256, digest) {
-				return nil, errHTMLTemplateConflict
-			}
-			current, err := q.GetHTMLTemplateRevision(ctx, generated.GetHTMLTemplateRevisionParams{TemplateID: id, OrgID: u.OrgID, Version: in.ExpectedVersion})
-			if err != nil {
-				return nil, err
-			}
-			if _, err := toHTMLTemplateDetailResponse(t, current); err != nil {
-				return nil, errHTMLTemplateConflict
-			}
-			if current.ApprovedBy.Valid && current.ApprovedAt.Valid {
-				return current, nil
-			}
-			return q.ApproveHTMLTemplateRevision(ctx, generated.ApproveHTMLTemplateRevisionParams{
-				TemplateID: id, OrgID: u.OrgID, ExpectedVersion: in.ExpectedVersion, ExpectedContentSha256: digest, ApprovedBy: u.UserID,
-			})
-		}, func(revision *generated.HtmlTemplateRevision) audit.Entry {
-			return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindTemplateUpdated,
-				Payload: map[string]any{
-					"template_id": id, "source_kind": "html", "version": revision.Version,
-					"content_sha256": in.ExpectedContentSHA256, "approved": true,
-					"preview_id": preview.PreviewID, "preview_pdf_sha256": preview.PDFSHA256,
-					"preview_materialization_sha256": preview.MaterializationSHA256, "preview_page_count": preview.PageCount,
-					"previewed_by": preview.ReviewerID, "previewed_at": preview.IssuedAt,
-				}}
-		})
+	revision, closeConsumer, err := s.approveHTMLTemplateOwnedV1(r.Context(), actor, id, in, digest, preview)
+
 	if err != nil {
 		s.writeHTMLTemplateError(w, "approve HTML template", err)
 		return
 	}
+	defer closeConsumer()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"template_id": id, "version": revision.Version, "content_sha256": in.ExpectedContentSHA256,
 		"approved_by": uuid.UUID(revision.ApprovedBy.Bytes), "approved_at": revision.ApprovedAt.Time,
@@ -294,11 +259,19 @@ func (s *Server) handleApproveHTMLTemplate(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) writeHTMLTemplateError(w http.ResponseWriter, operation string, err error) {
+	if observed, captured := pdfadmission.ApplicationSessionStartObservationForV1(err); captured {
+		slog.Warn("owned application session startup failed", "phase", int(observed.Phase),
+			"error_class", int(observed.ErrorClass), "start_context_state", int(observed.ContextState))
+	}
+	if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
+		writeError(w, http.StatusServiceUnavailable, "HTML authoring is temporarily unavailable")
+		return
+	}
 	if errors.Is(err, errHTMLTemplatePreviewReceipt) {
 		writeError(w, http.StatusConflict, "saved-design preview is invalid, changed or expired; preview and review it again")
 		return
 	}
-	if errors.Is(err, errHTMLTemplateConflict) || errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, errHTMLTemplateConflict) || errors.Is(err, pdfadmission.ErrHTMLAuthoringKindV1) || errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "HTML template revision changed or is unavailable; refresh and review it again")
 		return
 	}

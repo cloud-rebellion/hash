@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/timeline"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -255,13 +256,26 @@ func tsParam(t *time.Time) pgtype.Timestamptz {
 
 func mcpDiffLookup(ctx context.Context, ve *versions.Engine, orgID uuid.UUID) timeline.VersionDiffLookup {
 	_ = orgID
-	return func(docID string, eventTime time.Time) (any, bool, error) {
+	return func(docID string, eventTime time.Time) (result any, found bool, retErr error) {
+		defer func() {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				result = nil
+				found = false
+				retErr = cancelErr
+			}
+		}()
+		if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+			return nil, false, cancelErr
+		}
 		id, err := uuid.Parse(docID)
 		if err != nil {
 			return nil, false, nil
 		}
 		rows, err := ve.History(ctx, id, 100)
 		if err != nil {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				return nil, false, cancelErr
+			}
 			return nil, false, err
 		}
 		target := latestVersionAtOrBefore(rows, eventTime)
@@ -270,10 +284,16 @@ func mcpDiffLookup(ctx context.Context, ve *versions.Engine, orgID uuid.UUID) ti
 		}
 		prior, err := ve.GetByNo(ctx, id, target.VersionNo-1)
 		if err != nil {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				return nil, false, cancelErr
+			}
 			return nil, false, nil
 		}
-		changes, err := versions.Diff(prior.BlockTreeJson, target.BlockTreeJson)
+		changes, err := versions.DiffContext(ctx, prior.BlockTreeJson, target.BlockTreeJson)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, err
+			}
 			return nil, false, nil
 		}
 		return changes, true, nil

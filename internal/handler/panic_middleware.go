@@ -11,11 +11,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// panicMiddleware logs a panic with the full stack trace before chi's
-// stdlib Recoverer kicks in. Recoverer returns 500 but writes a thin
-// log line; for an e-sign legal record we want the stack on disk so a
-// follow-up post-mortem isn't flying blind. Wrapped Recoverer still
-// emits the 500 so the contract callers expect is unchanged.
+// panicMiddleware retains code-stack diagnostics without the recovered value.
+// The outer Hash recovery preserves the existing HTTP500/abort behavior.
 func panicMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -27,16 +24,32 @@ func panicMiddleware(next http.Handler) http.Handler {
 					panic(rec)
 				}
 				slog.Error("http handler panicked",
-					"err", rec,
+					"category", "panic",
 					"path", safeAccessPath(r.URL.Path),
 					"method", r.Method,
 					"request_id", middleware.GetReqID(r.Context()),
 					"stack", string(debug.Stack()),
 				)
-				// Re-panic so chi.middleware.Recoverer (mounted right
-				// after this middleware) writes the standard 500 and
-				// resets state.
+				// Re-panic so the outer Hash recovery writes the standard500.
 				panic(rec)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Keep chi's500/abort/upgrade behavior without its raw panic printer. Inner
+// observers retain fixed diagnostics and code stacks; no panic value is logged.
+func hashRecoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if value := recover(); value != nil {
+				if value == http.ErrAbortHandler {
+					panic(value)
+				}
+				if r.Header.Get("Connection") != "Upgrade" {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
 			}
 		}()
 		next.ServeHTTP(w, r)

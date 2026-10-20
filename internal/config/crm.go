@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"github.com/bright-interaction/hash/internal/crmconnection"
+	"github.com/bright-interaction/hash/internal/nethard"
 	"strings"
 )
 
@@ -20,6 +21,14 @@ func validateCRMConfiguration(c *Config) error {
 	}
 	if c.CRMEncryptionKeyPrevious != "" && c.CRMEncryptionKey == "" {
 		return errors.New("HASH_CRM_ENCRYPTION_KEY_PREVIOUS requires HASH_CRM_ENCRYPTION_KEY")
+	}
+	// Check the optional strict policy before the disabled-connector early return.
+	// No development setting can relax this HTTPS/pinned lane.
+	if c.BrightCRMTrustedPrivateCIDRs != "" {
+		origin, err := crmconnection.CanonicalOrigin(c.BrightCRMURL, false)
+		if err != nil || nethard.ValidateCRMPrivateEgressV1(origin, c.BrightCRMTrustedPrivateCIDRs) != nil {
+			return errors.New("HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS requires a configured HTTPS CRM origin and valid exact private host prefixes")
+		}
 	}
 	if c.CRMEncryptionKey == "" {
 		return nil

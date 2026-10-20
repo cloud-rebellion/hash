@@ -13,7 +13,7 @@ import (
 func TestRollbackResultJSONExposesEveryDurableBoundary(t *testing.T) {
 	raw, err := json.Marshal(rollbackResult{
 		Safe: false, Complete: true, SealingDocuments: 1, SendIntents: 2,
-		FinalizingDocuments: 3, FinalizationIntents: 4,
+		FinalizingDocuments: 3, FinalizationIntents: 4, PackageSendAttempts: 5, PackageResponses: 6, ParticipantReports: 7, ParticipantReportDeliveries: 8, OrdinaryPreparations: 9, OrdinaryOutputs: 10, OrdinaryLegacyIntents: 11,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,8 @@ func TestRollbackResultJSONExposesEveryDurableBoundary(t *testing.T) {
 	for _, field := range []string{
 		`"safe":false`, `"complete":true`, `"sealing_documents":1`,
 		`"send_sealing_intents":2`, `"finalizing_documents":3`,
-		`"document_finalization_intents":4`,
+		`"document_finalization_intents":4`, `"document_package_send_attempts_v1":5`,
+		`"document_package_responses_v1":6`, `"document_participant_reports_v1":7`, `"document_participant_report_deliveries_v1":8`, `"document_ordinary_finalization_preparations_v1":9`, `"document_ordinary_finalization_outputs_v1":10`, `"document_ordinary_finalization_legacy_intents_v1":11`,
 	} {
 		if !strings.Contains(string(raw), field) {
 			t.Fatalf("rollback result %s is missing %s", raw, field)

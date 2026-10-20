@@ -1,10 +1,53 @@
-import {expect,test} from 'bun:test';
-import {readFileSync} from 'node:fs';
-const source=readFileSync(new URL('../../routes/sign/[token]/+page.svelte',import.meta.url),'utf8');
-const start=source.indexOf('  async function loadComments(');const end=source.indexOf('  async function sendComment()',start);
-const code=new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start,end));
-const bind=new Function('env',`with(env){${code};return loadComments;}`);
-function fixture(){const calls:any[]=[];const env:any={$page:{params:{token:'t'}},ctx:{recipient:{id:'r'}},commentLoadRevision:0,comments:['retained'],commentRefreshError:null,fetch:()=>new Promise((resolve,reject)=>calls.push({resolve,reject}))};return{env,calls,load:bind(env) as (token?:string,signal?:AbortSignal)=>Promise<void>};}
-test('signer refresh failure retains thread and displays HTTP error',async()=>{const{env,calls,load}=fixture();const pending=load();calls[0].resolve({ok:false,status:503});await pending;expect(env.comments).toEqual(['retained']);expect(env.commentRefreshError).toContain('HTTP 503');});
-test('older signer refresh cannot replace newer thread',async()=>{const{env,calls,load}=fixture();const old=load();const fresh=load();calls[1].resolve({ok:true,json:async()=>({comments:['new']})});await fresh;calls[0].resolve({ok:true,json:async()=>({comments:['old']})});await old;expect(env.comments).toEqual(['new']);});
-test('aborted signer refresh cannot report error',async()=>{const{env,calls,load}=fixture();const controller=new AbortController();const pending=load('t',controller.signal);controller.abort();calls[0].reject(new Error('aborted'));await pending;expect(env.commentRefreshError).toBe(null);expect(env.comments).toEqual(['retained']);});
+import { expect, test } from 'bun:test';
+import { chatFixture, message, messages, signerSource, staffSource } from './commentHistory-fixture.test-support';
+for (const drift of ['token', 'recipient', 'document', 'notice', 'source', 'artifact']) {
+  test(`signer read and send ignore late ${drift} context`, async () => {
+    for (const send of [false, true]) {
+      const f = chatFixture(true); await f.seed(); const pending = send ? f.send() : f.load();
+      if (drift === 'token') f.env.$page.params.token = 'different';
+      if (drift === 'recipient') f.env.ctx.recipient.id = 'different';
+      if (drift === 'document') f.env.ctx.document_id = 'different';
+      if (drift === 'notice') f.env.ctx.privacy.notice_digest = 'different';
+      if (drift === 'source') f.env.ctx.source_kind = 'pdf';
+      if (drift === 'artifact') f.env.ctx.pdf_observation = { document_id: 'doc', recipient_id: 'recipient', pdf_sha256: 'a'.repeat(64) };
+      f.env.commentBody = 'new draft'; f.env.signError = 'current error'; f.env.postingComment = true;
+      if (send) f.calls[0].resolve({ ok: true }); else f.resolvePage(f.calls[0], messages('wrong'));
+      await pending; expect(f.env.comments).toEqual([message('retained')]); expect(f.env.commentBody).toBe('new draft');
+      expect(f.env.signError).toBe('current error'); expect(f.env.postingComment).toBe(true); expect(f.calls).toHaveLength(1);
+    }
+  });
+}
+
+function installPreEffect(source: string, env: any, staff = false) {
+  const start = source.indexOf('  $effect.pre(() => {');
+  const end = source.indexOf(staff ? '  beforeNavigate(' : '  $effect(() => {', start);
+  let effect!: () => void;
+  env.$effect = { pre: (callback: () => void) => { effect = callback; } };
+  env.untrack = (callback: () => void) => callback();
+  new Function('env', `with(env) { ${new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end))} }`)(env);
+  return effect;
+}
+test('signer first history GET survives the actual ceremony-establishing preeffect', async () => {
+  const f = chatFixture(true); f.env.acknowledgedScopeKey = '';
+  const pending = f.load(); const effect = installPreEffect(signerSource, f.env); effect();
+  expect(f.calls).toHaveLength(1); expect(f.calls[0].options.signal.aborted).toBe(false); expect(f.env.commentLoading).toBe(true);
+  f.resolvePage(f.calls[0], messages('first')); await pending;
+  expect(f.env.comments).toEqual([message('first')]); expect(f.env.commentLoading).toBe(false);
+});
+test('signer notice and source preeffect cancels stale work, clears old thread and keeps draft', async () => {
+  for (const drift of ['notice', 'source']) {
+    const f = chatFixture(true); await f.seed(); const pending = f.load();
+    if (drift === 'notice') f.env.ctx.privacy.notice_digest = 'new'; else f.env.ctx.source_kind = 'pdf';
+    const effect = installPreEffect(signerSource, f.env); effect();
+    expect(f.calls[0].options.signal.aborted).toBe(true); expect(f.env.commentLoading).toBe(false); expect(f.env.commentBody).toBe('first');
+    f.resolvePage(f.calls[0], messages('stale')); await pending; expect(f.env.comments).toEqual([]); expect(f.env.noticeAcknowledged).toBe(false);
+  }
+});
+test('staff organisation preeffect retires old reads and pending sends without discarding a draft', async () => {
+  for (const send of [false, true]) {
+    const f = chatFixture(); await f.seed(); const effect = installPreEffect(staffSource, f.env, true); effect();
+    const pending = send ? f.send() : f.load(); f.env.doc.org_id = 'new'; effect();
+    expect(f.env.commentLoading).toBe(false); expect(f.env.postingComment).toBe(false); expect(f.env.commentBody).toBe('first');
+    f.calls[0].reject(new Error('stale')); await pending; expect(f.env.comments).toEqual([]); expect(f.env.error).toBeNull();
+  }
+});

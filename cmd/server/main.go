@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ import (
 	"github.com/bright-interaction/hash/internal/handler"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
@@ -76,7 +78,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -89,10 +91,20 @@ func run() error {
 	// No-op unless FLARE_DSN is set (injected by the deploy step). Release and
 	// environment must describe the deployed artifact; reporting every event as
 	// release "dev" made production regressions impossible to correlate.
-	flarereport.InitFlare("hash", cfg.Release, cfg.Environment)
-
 	ctx := context.Background()
-	if err := sanitize.ConfigurePDFWorker(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment); err != nil {
+	telemetryReady := make(chan struct{})
+	telemetry := flarereport.InitFlareWithContext(ctx, telemetryReady, "hash", cfg.Release, cfg.Environment)
+	defer func() {
+		if runErr != nil {
+			flarereport.CaptureOperationFailure(ctx, flarereport.OperationHTTP, flarereport.FailureUnavailable)
+		}
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := telemetry.Close(cleanup); err != nil {
+			slog.Warn("telemetry shutdown incomplete", "category", "deadline")
+		}
+	}()
+	if err := sanitize.ConfigurePDFWorkerWithObserverV1(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment, flarereport.PDFWorkerObserverV1(ctx)); err != nil {
 		return err
 	}
 	if err := malwarescan.Configure(ctx, cfg.MalwareSocket, cfg.Environment); err != nil {
@@ -143,6 +155,25 @@ func run() error {
 	// don't double-pool.
 	if err := runMigrations(ctx, cfg.DBURL); err != nil {
 		return fmt.Errorf("migrations: %w", err)
+	}
+
+	// A single configured process allocation serves both authoring and signing.
+	// Missing allocation preserves startup/auth, while those admission seams fail closed.
+	var workRuntime *pdfadmission.WorkRuntimeV1
+	if cfg.WorkRuntime != nil {
+		workRuntime, err = pdfadmission.NewWorkRuntimeV1(pool, cfg.WorkRuntime.Limits, cfg.WorkRuntime.TotalDBConnections)
+		if err != nil {
+			return errors.New("configured process work runtime unavailable")
+		}
+		defer func() {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelCleanup()
+			if err := workRuntime.CloseV1(cleanupCtx); err != nil {
+				// The final observer remains charged until genuine whole-process or
+				// controller retirement. Closing is not permission to credit its grant.
+				slog.Warn("process work cleanup remains unresolved")
+			}
+		}()
 	}
 
 	queries := generated.New(pool)
@@ -226,7 +257,11 @@ func run() error {
 	dispatch.RegisterWebhookFanout(auditLog, queries)
 
 	apiKeys := &auth.PgVerifier{Queries: queries}
-	pdfClient := render.NewGotenberg(cfg.GotenbergURL)
+	pdfClient, pdfConfigErr := render.NewGotenbergWithSignatureFitToken(cfg.GotenbergURL, cfg.GotenbergSignatureFitToken)
+	if pdfConfigErr != nil {
+		slog.Error("private signature renderer configuration invalid")
+		os.Exit(1)
+	}
 
 	// Mailer: the server never sends inline. It enqueues into email_deliveries
 	// (durable); the worker's email-dispatch loop drains the queue over SMTP
@@ -273,6 +308,7 @@ func run() error {
 
 	signEngine := &sign.Engine{
 		Pool:         pool,
+		WorkRuntime:  workRuntime,
 		Queries:      queries,
 		Storage:      store,
 		PDF:          pdfClient,
@@ -310,6 +346,19 @@ func run() error {
 		},
 	}
 
+	if workRuntime != nil {
+		if err := signEngine.InitializeWorkRuntimeV1(); err != nil {
+			return errors.New("configured signing work runtime unavailable")
+		}
+		defer func() {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelCleanup()
+			if err := signEngine.CloseWorkRuntimeRequestsV1(cleanupCtx); err != nil {
+				slog.Warn("signing request cleanup remains unresolved")
+			}
+		}()
+	}
+
 	// Phase 10.2 evidence builder. OTS anchoring is opt-in via env so
 	// laptop dev doesn't hit the public calendar on every test.
 	var otsAnchor evidence.OTSAnchor = evidence.NoopOTSAnchor{}
@@ -317,6 +366,10 @@ func run() error {
 		otsAnchor = evidence.NewHTTPOTSAnchor(cfg.EvidenceOTSEndpoint)
 	}
 	trustedEvidenceKeys := evidenceTrustedPublicKeys(signer.PublicKeyBase64(), cfg.AuditTrustedPublicKeys)
+	fittedIndexCommitments, err := evidence.NewPostgresFitsIndexCommitmentStoreV1(queries)
+	if err != nil {
+		return fmt.Errorf("init completed fitted index reader: %w", err)
+	}
 	evidenceBuilder := &evidence.Builder{
 		Q:                            queries,
 		Storage:                      store,
@@ -326,6 +379,7 @@ func run() error {
 		Issuer:                       "Hash / " + cfg.OperatorName,
 		Signer:                       signer,
 		CertificateTrustedPublicKeys: trustedEvidenceKeys,
+		FitsIndexCommitments:         fittedIndexCommitments,
 	}
 
 	// Phase 11 AI-app helpers. Each wraps the ai.Runtime + one of the
@@ -387,7 +441,12 @@ func run() error {
 	var crmClient *crmconnection.Client
 	var crmKeys *crmconnection.Keyring
 	if cfg.BrightCRMURL != "" {
-		crmClient, err = crmconnection.NewClient(cfg.BrightCRMURL, allowPrivateIntegrations && cfg.Environment == "development")
+		if cfg.BrightCRMTrustedPrivateCIDRs != "" {
+			// Strict private pins never share the development blanket-bypass constructor.
+			crmClient, err = crmconnection.NewTrustedPrivateClientV1(cfg.BrightCRMURL, cfg.BrightCRMTrustedPrivateCIDRs)
+		} else {
+			crmClient, err = crmconnection.NewClient(cfg.BrightCRMURL, allowPrivateIntegrations && cfg.Environment == "development")
+		}
 		if err != nil {
 			return errors.New("CRM origin configuration invalid")
 		}
@@ -407,6 +466,7 @@ func run() error {
 	// all route through it so the magic-token TTL, variable freeze, eIDAS
 	// guard, and billing quota are enforced in exactly one place.
 	sendEngine := &send.Engine{
+		WorkRuntime: workRuntime,
 		Pool:        pool,
 		Queries:     queries,
 		Audit:       auditLog,
@@ -431,33 +491,35 @@ func run() error {
 	// (signer + evidence + branding resolver + envelopes + eidas + AI
 	// apps) by value without us having to wire late-bound setters.
 	mcpServer := mcp.New(mcp.Deps{
-		Pool:           pool,
-		Queries:        queries,
-		Storage:        store,
-		PDF:            pdfClient,
-		Audit:          auditLog,
-		Mailer:         mailer,
-		Versions:       versionsEngine,
-		Resolver:       resolverEngine,
-		AIRuntime:      aiRuntime,
-		Envelopes:      envelopesEngine,
-		EIDAS:          eidasEngine,
-		Evidence:       evidenceBuilder,
-		Clarifier:      clarifier,
-		Negotiator:     negotiator,
-		Bilingual:      bilingual,
-		RiskAnalyzer:   riskAnalyzer,
-		Compliance:     complianceSeeder,
-		Billing:        billingEngine,
-		Send:           sendEngine,
-		PublicURL:      cfg.PublicURL,
-		Environment:    cfg.Environment,
-		WebhookSecrets: webhookKeys,
-		RenderEmail:    renderEmailForMCP(cfg.OperatorName),
+		PDFCreationSessions: workRuntime.SessionsV1(),
+		Pool:                pool,
+		Queries:             queries,
+		Storage:             store,
+		PDF:                 pdfClient,
+		Audit:               auditLog,
+		Mailer:              mailer,
+		Versions:            versionsEngine,
+		Resolver:            resolverEngine,
+		AIRuntime:           aiRuntime,
+		Envelopes:           envelopesEngine,
+		EIDAS:               eidasEngine,
+		Evidence:            evidenceBuilder,
+		Clarifier:           clarifier,
+		Negotiator:          negotiator,
+		Bilingual:           bilingual,
+		RiskAnalyzer:        riskAnalyzer,
+		Compliance:          complianceSeeder,
+		Billing:             billingEngine,
+		Send:                sendEngine,
+		PublicURL:           cfg.PublicURL,
+		Environment:         cfg.Environment,
+		WebhookSecrets:      webhookKeys,
+		RenderEmail:         renderEmailForMCP(cfg.OperatorName),
 	})
 
 	srv := &handler.Server{
 		Pool:                       pool,
+		HTMLCreationSessions:       workRuntime.SessionsV1(),
 		Queries:                    queries,
 		Storage:                    store,
 		Audit:                      auditLog,
@@ -521,9 +583,14 @@ func run() error {
 	defer signal.Stop(stop)
 	serveErr := make(chan error, 1)
 
+	listener, listenErr := net.Listen("tcp", httpServer.Addr)
+	if listenErr != nil {
+		return fmt.Errorf("http server failed: %w", listenErr)
+	}
+	close(telemetryReady)
 	go func() {
 		slog.Info("hash listening", "addr", httpServer.Addr, "public_url", cfg.PublicURL)
-		serveErr <- httpServer.ListenAndServe()
+		serveErr <- httpServer.Serve(listener)
 	}()
 
 	select {
@@ -646,10 +713,14 @@ func runMigrations(ctx context.Context, dsn string) error {
 	if err != nil {
 		return err
 	}
-	// Use a single connection wrapped via stdlib for goose.
+	// Startup cancellation and the runner cap cover lock wait and migration SQL.
+	migrationCtx, stopMigration := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopMigration()
 	db := stdlib.OpenDB(*cfg.ConnConfig)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	defer db.Close()
-	return mdb.RunMigrations(db)
+	return mdb.RunMigrationsContext(migrationCtx, db)
 }
 
 func parseLogLevel(s string) slog.Level {

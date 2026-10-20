@@ -7,10 +7,12 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -26,40 +28,170 @@ import (
 
 type reviseAuthorizationFixture struct {
 	changeResolutionFixture
-	doc       *generated.Document
-	request   *generated.ChangeRequest
-	recipient *generated.Recipient
-	user      *generated.User
+	owned              *ownedPublicReadFixtureV1
+	recipientMail      int
+	recipientMailState string
+	doc                *generated.Document
+	request            *generated.ChangeRequest
+	recipient          *generated.Recipient
+	user               *generated.User
 }
 
 func setupReviseAuthorizationE2E(t *testing.T, role string) reviseAuthorizationFixture {
 	t.Helper()
-	f := setupChangeResolutionE2E(t)
-	user, err := f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.owner, OrgID: f.org, Role: role})
+	return nativeNegotiationAuthorizationBirth263(t, role)
+}
+
+// The original payment-term assertions now start from genuine public source,
+// party/field authoring, normal Send, original notice and RequestChanges. There
+// is one real runtime, the original128/64 allocation and no seeded sent/request/
+// event/cache row. Role changes happen only after this actual owner journey.
+func nativeNegotiationAuthorizationBirth263(t *testing.T, role string) reviseAuthorizationFixture {
+	t.Helper()
+	q, document := nativeBindingDocument259(t, false)
+	if !document.UpdatedAt.Valid {
+		t.Fatal("actual draft edit clock absent")
+	}
+	patch, err := json.Marshal(updateDocumentInput{ExpectedUpdatedAt: document.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), BlocksJSON: json.RawMessage(`{"version":1,"blocks":[{"id":"payment-term","type":"paragraph","text":"Original payment term"},{"id":"sign","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, request := f.seed(t)
-	recipients, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
-	if err != nil || len(recipients) != 1 {
-		t.Fatalf("revision fixture recipients=%d err=%v", len(recipients), err)
+	if r := submitSessionOperationE2E(q.f.s, http.MethodPatch, "/api/v1/documents/"+document.ID.String(), string(patch), q.cookie); r.Code != http.StatusOK {
+		t.Fatal("genuine payment-term authoring failed", r.Code)
 	}
-	recipient := recipients[0]
+	r := submitSessionOperationE2E(q.f.s, http.MethodPost, "/api/v1/documents/"+document.ID.String()+"/send", `{"lawful_basis":"contract"}`, q.cookie)
+	var sent sendDocumentResponse
+	if r.Code != http.StatusOK || json.Unmarshal(r.Body.Bytes(), &sent) != nil || sent.Status != "sent" || len(sent.Links) != 1 {
+		t.Fatal("genuine authorization normal Send failed", r.Code)
+	}
+	u, err := url.Parse(sent.Links[0].URL)
+	if err != nil || !strings.HasPrefix(u.Path, "/sign/") {
+		t.Fatal("genuine authorization invitation absent", err)
+	}
+	token := strings.TrimPrefix(u.Path, "/sign/")
+	bootstrap := q.requestV1(token, "")
+	var page signerContextResponse
+	if bootstrap.Code != http.StatusOK || json.Unmarshal(bootstrap.Body.Bytes(), &page) != nil || page.Privacy.NoticeDigest == "" {
+		t.Fatal("genuine authorization notice absent", bootstrap.Code)
+	}
+	body := `{"message":"Revise the payment term.","block_id":"payment-term","quote":"Original payment term","proposed":"Revised payment term"}`
+	request := httptest.NewRequest(http.MethodPost, q.f.s.PublicURL+"/sign/"+token+"/request-changes", strings.NewReader(body)).WithContext(q.f.ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", q.f.s.PublicURL)
+	request.Header.Set(signerNoticeDigestHeader, page.Privacy.NoticeDigest)
+	w := httptest.NewRecorder()
+	q.f.s.Routes().ServeHTTP(w, request)
+	if w.Code != http.StatusOK {
+		t.Fatal("genuine authorization pause failed", w.Code)
+	}
+	document, err = q.f.q.GetDocument(q.f.ctx, generated.GetDocumentParams{ID: document.ID, OrgID: q.f.org})
+	if err != nil || document.Status != "changes_requested" {
+		t.Fatal("genuine paused document absent", err)
+	}
+	changes, err := q.f.q.ListChangeRequests(q.f.ctx, document.ID)
+	if err != nil || len(changes) != 1 || changes[0].Status != "open" {
+		t.Fatal("genuine original change request absent", err)
+	}
+	change, err := q.f.q.GetChangeRequest(q.f.ctx, generated.GetChangeRequestParams{ID: changes[0].ID, OrgID: q.f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	people, err := q.f.q.ListRecipientsByDocument(q.f.ctx, document.ID)
+	if err != nil || len(people) != 1 || people[0].ID != sent.Links[0].RecipientID {
+		t.Fatal("genuine original recipient absent", err)
+	}
+	user, err := q.f.q.UpdateUserRole(q.f.ctx, generated.UpdateUserRoleParams{ID: q.f.user.ID, OrgID: q.f.org, Role: role})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := changeResolutionFixture{ctx: q.f.ctx, pool: q.f.pool, q: q.f.q, s: q.f.s, org: q.f.org, owner: user.ID, cookie: dsrSessionCookieE2E(t, q.f.s, user.ID, user.SessionGeneration, time.Hour)}
+	f := reviseAuthorizationFixture{changeResolutionFixture: base, owned: q, doc: document, request: change, recipient: people[0], user: user}
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*)::integer,coalesce(jsonb_agg(to_jsonb(ed) ORDER BY ed.id),'[]'::jsonb)::text FROM email_deliveries ed WHERE to_email=$1`, f.recipient.Email).Scan(&f.recipientMail, &f.recipientMailState); err != nil || f.recipientMail != 1 {
+		t.Fatal("genuine original invitation baseline absent", err)
+	}
+	nativeBindingMeasurement259(t, q.f, document.ID)
+	q.assertObserversOnlyV1(t)
+	return f
+}
+
+// These are additional refusal witnesses, not source/cache creation authority.
+// The original full document/party/request/evidence/audit/outbox snapshot is
+// retained by each caller; cache/history rows are now required exact as well.
+func nativeNegotiationAuthorizationCaches263(t *testing.T, q *ownedPublicReadFixtureV1, document uuid.UUID) string {
+	t.Helper()
+	var state string
+	err := q.f.pool.QueryRow(q.f.ctx, `SELECT jsonb_build_object(
+	 'policy',(SELECT to_jsonb(m) FROM document_signing_policy_sizes_v1 m WHERE document_id=$1),
+	 'response',(SELECT to_jsonb(m) FROM html_creation_response_sizes_v1 m WHERE document_id=$1),
+	 'report',(SELECT to_jsonb(m) FROM document_read_report_sizes_v1 m WHERE document_id=$1),
+	 'event_sizes',(SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY event_id),'[]'::jsonb) FROM html_snapshot_event_payload_sizes_v1 m WHERE document_id=$1),
+	 'field_sizes',(SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY field_id),'[]'::jsonb) FROM field_signing_policy_sizes_v1 m WHERE document_id=$1),
+	 'versions',(SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY id),'[]'::jsonb) FROM document_versions v WHERE document_id=$1),
+	 'retired',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY id),'[]'::jsonb) FROM html_document_materialization_snapshots s WHERE document_id=$1))::text`, document).Scan(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+// Every async operation has a cancellation owner, exact lock release and a
+// finite completion join registered after the fixture's own cleanup. The
+// original engine10s, wait3s and result4s bounds are unchanged.
+func nativeNegotiationHTTPJob263(t *testing.T, original context.Context, held pgx.Tx, run func(context.Context) *httptest.ResponseRecorder) <-chan *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(original)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	done := make(chan struct{})
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := f.pool.Exec(ctx, `DELETE FROM email_deliveries WHERE to_email=$1`, recipient.Email); err != nil { //nolint:rawsql -- synthetic fixture cleanup
-			t.Error(err)
-		}
-		if _, err := f.pool.Exec(ctx, `DELETE FROM orgs WHERE id=$1`, f.org); err != nil { //nolint:rawsql -- synthetic fixture cleanup
-			t.Error(err)
+		cancel()
+		cleanup, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = held.Rollback(cleanup)
+		stop()
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+			t.Error("native negotiation HTTP operation did not join before fixture cleanup")
 		}
 	})
-	return reviseAuthorizationFixture{changeResolutionFixture: f, doc: doc, request: request, recipient: recipient, user: user}
+	go func() {
+		defer close(done)
+		result <- run(ctx)
+	}()
+	return result
+}
+
+func awaitNativeNegotiationLock263(t *testing.T, q *ownedPublicReadFixtureV1, holder pgx.Tx, query, event string) {
+	t.Helper()
+	var pid int32
+	if err := holder.QueryRow(q.f.ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(q.f.ctx, 3*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		var count int
+		err := q.f.pool.QueryRow(ctx, `SELECT count(*)::integer FROM pg_stat_activity a
+		 WHERE datname=current_database() AND state='active' AND query LIKE $1 AND wait_event=$2
+		 AND $3=ANY(pg_blocking_pids(a.pid)) AND application_name=$4`, "%"+query+"%", event, pid, q.f.pool.Config().ConnConfig.RuntimeParams["application_name"]).Scan(&count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count == 1 {
+			return
+		}
+		if count > 1 {
+			t.Fatal("multiple requests reached the exact native negotiation blocker")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("negotiation did not wait on its exact %s %s blocker", query, event)
 }
 
 func (f reviseAuthorizationFixture) submit(cookie string) *httptest.ResponseRecorder {
-	return submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/revise", "", cookie)
+	return f.submitContext(context.Background(), cookie)
+}
+func (f reviseAuthorizationFixture) submitContext(ctx context.Context, cookie string) *httptest.ResponseRecorder {
+	return submitSessionOperationContextE2E(ctx, f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/revise", "", cookie)
 }
 
 // Include the full legal rows and credentials, not just the document status.
@@ -80,7 +212,7 @@ func (f reviseAuthorizationFixture) snapshot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return state
+	return state + "\n" + nativeNegotiationAuthorizationCaches263(t, f.owned, f.doc.ID)
 }
 
 func (f reviseAuthorizationFixture) assertUnchanged(t *testing.T, before string) {
@@ -88,6 +220,7 @@ func (f reviseAuthorizationFixture) assertUnchanged(t *testing.T, before string)
 	if f.snapshot(t) != before {
 		t.Fatal("refused revision changed document content, recipients, tokens, change requests, legal evidence, audit, or outbox")
 	}
+	f.owned.assertObserversOnlyV1(t)
 }
 
 func TestReviseRechecksAuthorizationAfterDocumentWaitE2E(t *testing.T) {
@@ -109,9 +242,8 @@ func TestReviseRechecksAuthorizationAfterDocumentWaitE2E(t *testing.T) {
 				ttl = time.Second
 			}
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			result := nativeNegotiationHTTPJob263(t, f.ctx, blocked, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitContext(ctx, cookie) })
+			awaitNativeNegotiationLock263(t, f.owned, blocked, "-- name: GetHTMLCeremonyWorkflowAccessV1", "transactionid")
 			want := http.StatusForbidden
 			switch change {
 			case "demotion":
@@ -153,9 +285,8 @@ func TestReviseExpiryDuringAuditWaitRollsBackE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- f.submit(cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+	result := nativeNegotiationHTTPJob263(t, f.ctx, blocked, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitContext(ctx, cookie) })
+	awaitNativeNegotiationLock263(t, f.owned, blocked, "-- name: AcquireOrgChainLock", "advisory")
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)
@@ -193,9 +324,15 @@ func TestReviseSenderAndOwnerCommitAtomicallyE2E(t *testing.T) {
 				t.Fatalf("revision audit actor=%s err=%v", actor, err)
 			}
 			var emails int
-			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM email_deliveries WHERE to_email=$1`, f.recipient.Email).Scan(&emails); err != nil || emails != 0 { //nolint:rawsql
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM email_deliveries WHERE to_email=$1`, f.recipient.Email).Scan(&emails); err != nil || emails != f.recipientMail { //nolint:rawsql
 				t.Fatalf("revision unexpectedly delivered email: count=%d err=%v", emails, err)
 			}
+			var mailState string
+			if err := f.pool.QueryRow(f.ctx, `SELECT coalesce(jsonb_agg(to_jsonb(ed) ORDER BY ed.id),'[]'::jsonb)::text FROM email_deliveries ed WHERE to_email=$1`, f.recipient.Email).Scan(&mailState); err != nil || mailState != f.recipientMailState {
+				t.Fatal("revision changed the actual preexisting invitation rows", err)
+			}
+			nativeBindingMeasurement259(t, f.owned.f, f.doc.ID)
+			f.owned.assertObserversOnlyV1(t)
 		})
 	}
 }
@@ -332,5 +469,8 @@ func TestReviseAuthenticatedEngineAndTrustedCallerE2E(t *testing.T) {
 		if err != nil || doc == nil || doc.Status != "draft" {
 			t.Fatalf("trusted internal revision failed: err=%v", err)
 		}
+		doc.CloseConsumerV1()
+		nativeBindingMeasurement259(t, f.owned.f, f.doc.ID)
+		f.owned.assertObserversOnlyV1(t)
 	})
 }

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { advanceCleanHTMLObservation, currentHTMLSource, htmlPlacementPins, htmlRevisionGroups, htmlRevisionInput, revisionDraft, validateHTMLHistory, validateHTMLSource, verifiedHTMLGeneratedFields, verifiedHTMLRevision } from './htmlRevision';
 import type { DocumentField, DocumentResponse, HTMLDocumentSource, Recipient } from './api/client';
 import { blankHTMLSigningPage } from './htmlAuthor';
-import { contractTemplateFixture } from './htmlTemplate.test';
+import { contractTemplateFixture } from './htmlTemplateFixtures';
 
 export const documentID = '10000000-0000-4000-8000-000000000001', orgID = '20000000-0000-4000-8000-000000000002';
 export const senderID = '30000000-0000-4000-8000-000000000003', templateID = '40000000-0000-4000-8000-000000000004';

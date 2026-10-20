@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -93,6 +94,7 @@ func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string) life
 			t.Error(err)
 		}
 	})
+	setupHTMLAuthoringNativeFixtureV1(t, f)
 	return f
 }
 
@@ -111,6 +113,11 @@ func htmlTemplateInputE2E(t *testing.T, expected int32, label string) htmlTempla
 
 func submitHTMLTemplateE2E(t *testing.T, f lifecycleAuthorizationFixture, operation string, id uuid.UUID, input any, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
+	return submitHTMLTemplateContextE2E(t, f.ctx, f, operation, id, input, cookie)
+}
+
+func submitHTMLTemplateContextE2E(t *testing.T, ctx context.Context, f lifecycleAuthorizationFixture, operation string, id uuid.UUID, input any, cookie string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +128,7 @@ func submitHTMLTemplateE2E(t *testing.T, f lifecycleAuthorizationFixture, operat
 	} else if operation == "approve" {
 		path = "/api/v1/templates/" + id.String() + "/html/approve"
 	}
-	return submitSessionOperationE2E(f.s, method, path, string(body), cookie)
+	return submitSessionOperationContextE2E(ctx, f.s, method, path, string(body), cookie)
 }
 
 func createHTMLTemplateE2E(t *testing.T, f lifecycleAuthorizationFixture) *generated.Template {
@@ -285,43 +292,237 @@ func TestHTMLTemplateTenantAndOwnerRefusalsE2E(t *testing.T) {
 	}
 }
 
-func TestHTMLTemplateConcurrentUpdateCASHasOneWinnerE2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
-	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
-	template := createHTMLTemplateE2E(t, f)
-	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	start := make(chan struct{})
-	result := make(chan *httptest.ResponseRecorder, 2)
-	for _, label := range []string{"Concurrent A", "Concurrent B"} {
-		input := htmlTemplateInputE2E(t, template.Version, label)
-		go func() {
-			<-start
-			result <- submitHTMLTemplateE2E(t, f, "update", template.ID, input, cookie)
-		}()
+// This preparation crosses the actual signed-cookie/live-user/origin/role
+// middleware and original strict parser/scanner. The direct native test below
+// represents two already-admitted jobs; it does not claim public HTTP admission.
+func prepareNativeHTMLTemplateMutationE2E(t *testing.T, ctx context.Context, f lifecycleAuthorizationFixture, id uuid.UUID, input htmlTemplateInput, cookie string) (*http.Request, htmlTemplateInput, htmlmaster.TemplateCommitment) {
+	t.Helper()
+	body, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
 	}
-	close(start)
-	counts := map[int]int{}
-	for range 2 {
-		w := receiveSessionOperationE2E(t, result)
-		counts[w.Code]++
-		if w.Code != http.StatusOK && w.Code != http.StatusConflict {
-			t.Fatalf("concurrent HTML update=%d %s", w.Code, w.Body.String())
-		}
+	req := httptest.NewRequest(http.MethodPatch, f.s.PublicURL+"/api/v1/templates/"+id.String()+"/html", bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", f.s.PublicURL)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
+	var admitted *http.Request
+	capture := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { admitted = r })
+	guarded := f.s.requireSameOriginMutation(auth.RequireSession(f.s.Cookies, SessionCookieName, f.s.Queries)(auth.RequireRoleForWrites(auth.RoleSender)(capture)))
+	w := httptest.NewRecorder()
+	guarded.ServeHTTP(w, req)
+	if admitted == nil {
+		t.Fatalf("original native mutation credential was not admitted: %d", w.Code)
 	}
-	if counts[http.StatusOK] != 1 || counts[http.StatusConflict] != 1 {
-		t.Fatalf("concurrent version CAS=%v, want one commit and one conflict", counts)
+	user, ok := auth.FromContext(admitted.Context())
+	if !ok || user.OrgID != f.org || user.UserID != f.user.ID {
+		t.Fatal("native mutation lost its original authenticated actor")
 	}
-	current, err := f.q.GetHTMLTemplate(f.ctx, generated.GetHTMLTemplateParams{ID: template.ID, OrgID: f.org})
+	parsed, content, err := parseHTMLTemplateInput(admitted)
+	if err != nil {
+		t.Fatal("parse exact native HTML mutation input:", err)
+	}
+	if err := scanHTMLMaster(admitted.Context(), content.MasterJSON); err != nil {
+		t.Fatal("scan exact native HTML mutation input:", err)
+	}
+	return admitted, parsed, content
+}
+
+func holdHTMLTemplateParentE2E(t *testing.T, f lifecycleAuthorizationFixture, id uuid.UUID) (pgx.Tx, int32) {
+	t.Helper()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.q.WithTx(tx).GetTemplateForUpdate(f.ctx, generated.GetTemplateForUpdateParams{ID: id, OrgID: f.org}); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatal(err)
+	}
+	var pid int32
+	if err := tx.QueryRow(f.ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatal(err)
+	} //nolint:rawsql -- exact transaction holding this scoped parent row
+	return tx, pid
+}
+
+func assertHTMLTemplateSingleUpdateE2E(t *testing.T, f lifecycleAuthorizationFixture, id uuid.UUID) *generated.Template {
+	t.Helper()
+	current, err := f.q.GetHTMLTemplate(f.ctx, generated.GetHTMLTemplateParams{ID: id, OrgID: f.org})
 	if err != nil || current.Version != 2 {
 		t.Fatalf("concurrent current version=%+v err=%v", current, err)
 	}
 	var revisions, updateEvents int
 	if err := f.pool.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM html_template_revisions WHERE template_id=$1),
-		(SELECT count(*) FROM events WHERE org_id=$2 AND kind='template.updated')`, template.ID, f.org).Scan(&revisions, &updateEvents); err != nil { //nolint:rawsql -- exact winning data/audit count
+	 (SELECT count(*) FROM events WHERE org_id=$2 AND kind='template.updated')`, id, f.org).Scan(&revisions, &updateEvents); err != nil { //nolint:rawsql -- exact winning data/audit count
 		t.Fatal(err)
 	}
 	if revisions != 2 || updateEvents != 1 {
 		t.Fatalf("CAS left revisions=%d updates=%d, want2/1", revisions, updateEvents)
+	}
+	return current
+}
+
+func TestHTMLTemplateHTTPImportCapacityAndStaleCASE2E(t *testing.T) {
+	database := isolateHTMLTemplateDatabaseE2E(t)
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	template := createHTMLTemplateE2E(t, f)
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	before := htmlTemplateSnapshotE2E(t, f)
+	hold, holderPID := holdHTMLTemplateParentE2E(t, f, template.ID)
+	defer hold.Rollback(context.Background())
+	requestCtx, cancelRequest := context.WithCancel(f.ctx)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	finished := make(chan struct{})
+	defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, hold)
+	first := htmlTemplateInputE2E(t, template.Version, "HTTP winner")
+	go func() {
+		defer close(finished)
+		result <- submitHTMLTemplateContextE2E(t, requestCtx, f, "update", template.ID, first, cookie)
+	}()
+	awaitHTMLAuthoringTemplateParentWaitersE2E(t, f, holderPID, 1)
+	second := htmlTemplateInputE2E(t, template.Version, "HTTP capacity refused")
+	if w := submitHTMLTemplateE2E(t, f, "update", template.ID, second, cookie); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second same-org HTTP update=%d want429", w.Code)
+	}
+	assertHTMLTemplateUnchangedE2E(t, f, before)
+	if err := hold.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w := receiveSessionOperationE2E(t, result); w.Code != http.StatusOK {
+		t.Fatalf("first admitted HTTP update=%d want200 %s", w.Code, w.Body.String())
+	}
+	afterWinner := htmlTemplateSnapshotE2E(t, f)
+	if w := submitHTMLTemplateE2E(t, f, "update", template.ID, second, cookie); w.Code != http.StatusConflict {
+		t.Fatalf("subsequent stale HTTP update=%d want409 %s", w.Code, w.Body.String())
+	}
+	assertHTMLTemplateUnchangedE2E(t, f, afterWinner)
+	assertHTMLTemplateSingleUpdateE2E(t, f, template.ID)
+}
+
+func TestHTMLTemplateConcurrentUpdateCASHasOneWinnerE2E(t *testing.T) {
+	database := isolateHTMLTemplateDatabaseE2E(t)
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	template := createHTMLTemplateE2E(t, f)
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	requestCtx, cancelRequest := context.WithCancel(f.ctx)
+	defer cancelRequest()
+	type prepared struct {
+		request *http.Request
+		input   htmlTemplateInput
+		content htmlmaster.TemplateCommitment
+	}
+	jobs := make([]prepared, 0, 2)
+	for _, label := range []string{"Concurrent A", "Concurrent B"} {
+		req, input, content := prepareNativeHTMLTemplateMutationE2E(t, requestCtx, f, template.ID, htmlTemplateInputE2E(t, template.Version, label), cookie)
+		jobs = append(jobs, prepared{req, input, content})
+	}
+	hold, holderPID := holdHTMLTemplateParentE2E(t, f, template.ID)
+	defer hold.Rollback(context.Background())
+	type completed struct {
+		job           int
+		template      *generated.Template
+		closeConsumer func()
+		err           error
+	}
+	results := make(chan completed, 2)
+	defer func() {
+		// Later defers join both actual native calls first. Any returned outcome
+		// still in this channel has transferred its real consumer to this caller.
+		for {
+			select {
+			case out := <-results:
+				if out.closeConsumer != nil {
+					out.closeConsumer()
+				}
+			default:
+				return
+			}
+		}
+	}()
+	for index, job := range jobs {
+		finished := make(chan struct{})
+		defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, hold)
+		go func() {
+			defer close(finished)
+			result, closeConsumer, err := f.s.writeHTMLTemplateOwnedV1(job.request, f.user.ID, f.org, template.ID, job.input, job.content)
+			results <- completed{index, result, closeConsumer, err}
+		}()
+	}
+	// Both genuine factory-owned calls reach the same actual parent lock
+	// before either can commit; no foreign transaction or import lease is adopted.
+	awaitHTMLAuthoringTemplateParentWaitersE2E(t, f, holderPID, 2)
+	if err := hold.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	winner, loser := -1, -1
+	for range 2 {
+		select {
+		case out := <-results:
+			if out.closeConsumer != nil {
+				t.Cleanup(out.closeConsumer)
+			}
+			switch {
+			case out.err == nil && out.template != nil && out.closeConsumer != nil:
+				if winner != -1 {
+					t.Fatal("native CAS committed twice")
+				}
+				winner = out.job
+			case errors.Is(out.err, errHTMLTemplateConflict) && out.template == nil && out.closeConsumer == nil:
+				if loser != -1 {
+					t.Fatal("native CAS had two conflicts")
+				}
+				loser = out.job
+			default:
+				t.Fatalf("native CAS result was neither exact success nor original conflict: %v", out.err)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatal("actual native CAS call did not return")
+		}
+	}
+	if winner < 0 || loser < 0 || winner == loser {
+		t.Fatal("native CAS lost its exact winner/loser")
+	}
+	current := assertHTMLTemplateSingleUpdateE2E(t, f, template.ID)
+	if hex.EncodeToString(current.HtmlContentSha256) != jobs[winner].content.SHA256 {
+		t.Fatal("native CAS persisted different winner content")
+	}
+	loserDigest, _ := hex.DecodeString(jobs[loser].content.SHA256)
+	var loserRevisions, winnerEvents int
+	if err := f.pool.QueryRow(f.ctx, `SELECT
+	 (SELECT count(*) FROM html_template_revisions WHERE template_id=$1 AND content_sha256=$2),
+	 (SELECT count(*) FROM events WHERE org_id=$3 AND kind='template.updated' AND payload_json->>'content_sha256'=$4)`, template.ID, loserDigest, f.org, jobs[winner].content.SHA256).Scan(&loserRevisions, &winnerEvents); err != nil || loserRevisions != 0 || winnerEvents != 1 {
+		t.Fatal("native CAS loser changed retained source or winner audit")
+	} //nolint:rawsql -- exact loser source and winning audit cardinality
+}
+
+func TestHTMLTemplateUpdatePinsPrecedeMissingCacheE2E(t *testing.T) {
+	database := isolateHTMLTemplateDatabaseE2E(t)
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	template := createHTMLTemplateE2E(t, f)
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	if tag, err := f.pool.Exec(f.ctx, "DELETE FROM html_authoring_template_sizes_v1 WHERE template_id=$1 AND org_id=$2", template.ID, f.org); err != nil || tag.RowsAffected() != 1 {
+		t.Fatal("remove exact genuine fresh update cache")
+	} //nolint:rawsql -- exact disposable cache, never an expanded repair
+	before := htmlTemplateSnapshotE2E(t, f)
+	for _, tc := range []struct {
+		name    string
+		version int32
+		status  int
+	}{
+		{"unchanged_version_stays_unavailable", template.Version, http.StatusServiceUnavailable},
+		{"different_version_is_conflict", template.Version + 1, http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := htmlTemplateInputE2E(t, tc.version, "Refused cache probe")
+			if w := submitHTMLTemplateE2E(t, f, "update", template.ID, in, cookie); w.Code != tc.status {
+				t.Fatalf("missing-cache update=%d want%d", w.Code, tc.status)
+			}
+			assertHTMLTemplateUnchangedE2E(t, f, before)
+			var caches int
+			if err := f.pool.QueryRow(f.ctx, "SELECT count(*) FROM html_authoring_template_sizes_v1 WHERE template_id=$1 AND org_id=$2", template.ID, f.org).Scan(&caches); err != nil || caches != 0 {
+				t.Fatal("refused update refreshed missing cache")
+			} //nolint:rawsql -- exact absence witness, no source expansion
+		})
 	}
 }
 
@@ -349,23 +550,29 @@ func TestHTMLTemplateOriginalAuthorityAfterLocksE2E(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer hold.Rollback(context.Background())
-				query := "-- name: GetTemplateForUpdate"
+				query := "-- name: GetHTMLAuthoringTemplateHeaderForUpdateV1"
 				switch operation {
 				case "create":
 					_, err = f.q.WithTx(hold).UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "owner"})
-					query = "-- name: GetUserForShare"
+					query = "-- name: GetHTMLAuthoringActorHeaderV1"
 				case "approve":
 					_, err = f.q.WithTx(hold).GetOrgForOwnerMutation(f.ctx, f.org)
-					query = "-- name: GetOrgForOwnerMutation"
+					query = "-- name: GetHTMLAuthoringOwnerHeaderV1"
 				default:
 					_, err = f.q.WithTx(hold).GetTemplateForUpdate(f.ctx, generated.GetTemplateForUpdateParams{ID: template.ID, OrgID: f.org})
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
+				requestCtx, cancelRequest := context.WithCancel(f.ctx)
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- submitHTMLTemplateE2E(t, f, operation, template.ID, input, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, query, "transactionid")
+				finished := make(chan struct{})
+				defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, hold)
+				go func() {
+					defer close(finished)
+					result <- submitHTMLTemplateContextE2E(t, requestCtx, f, operation, template.ID, input, cookie)
+				}()
+				awaitHTMLAuthoringOperationLockE2E(t, f, query, "transactionid")
 				q := f.q
 				if operation == "create" {
 					q = q.WithTx(hold)
@@ -422,9 +629,15 @@ func TestHTMLTemplateAuditWaitExpiryRollsBackE2E(t *testing.T) {
 			if err := f.q.WithTx(hold).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
+			requestCtx, cancelRequest := context.WithCancel(f.ctx)
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- submitHTMLTemplateE2E(t, f, operation, template.ID, input, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+			finished := make(chan struct{})
+			defer joinHTMLAuthoringRequestE2E(t, cancelRequest, finished, hold)
+			go func() {
+				defer close(finished)
+				result <- submitHTMLTemplateContextE2E(t, requestCtx, f, operation, template.ID, input, cookie)
+			}()
+			awaitHTMLAuthoringOperationLockE2E(t, f, "-- name: AcquireOrgChainLock", "advisory")
 			awaitSessionCookieExpiryE2E(t, f.s, cookie)
 			if err := hold.Commit(f.ctx); err != nil {
 				t.Fatal(err)
@@ -739,9 +952,13 @@ func htmlMigrationPartsE2E(t *testing.T) (string, string) {
 		t.Fatal("PDF provenance migration requires Up/Down")
 	}
 	branded, err := os.ReadFile("../db/migrations/00076_branded_signing_pages.sql")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	brandedParts := strings.SplitN(string(branded), "-- +goose Down", 2)
-	if len(brandedParts) != 2 { t.Fatal("Branded page migration requires Up/Down") }
+	if len(brandedParts) != 2 {
+		t.Fatal("Branded page migration requires Up/Down")
+	}
 	return parts[0] + "\n" + dependentParts[0] + "\n" + provenanceParts[0] + "\n" + brandedParts[0], brandedParts[1] + "\n" + provenanceParts[1] + "\n" + dependentParts[1] + "\n" + parts[1]
 }
 

@@ -1,3 +1,5 @@
+import { checkedPackageSendObservation, checkedPackageSendReceipt, checkedPackageSendInspection, type PackageSendObservation, type PackageSendReceipt } from '../packageSend';
+import { commentQuery, latestComments, type CommentPage, type CommentSelection } from '../commentHistory';
 // Hash frontend API client.
 import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot, HTMLSigningPage } from '../htmlTemplate';
 
@@ -99,9 +101,10 @@ export class APIError extends Error {
  constructor(public status: number, message: string) { super(message); }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const opts: RequestInit = {
     method,
+    signal,
     credentials: 'include',
     headers: { Accept: 'application/json' }
   };
@@ -441,8 +444,8 @@ export async function importProposalHTML(
   return request('POST', '/api/v1/documents/import', { name, html, landscape });
 }
 
-export async function getDocument(id: string): Promise<DocumentResponse> {
-  return request('GET', `/api/v1/documents/${id}`);
+export async function getDocument(id: string, signal?: AbortSignal): Promise<DocumentResponse> {
+  return request('GET', `/api/v1/documents/${id}`, undefined, signal);
 }
 
 export interface ChangeRequest {
@@ -483,8 +486,8 @@ export interface DocComment {
   created_at: string;
 }
 
-export async function listComments(id: string): Promise<{ comments: DocComment[] }> {
-  return request('GET', `/api/v1/documents/${id}/comments`);
+export async function listComments(id: string, selection: CommentSelection = latestComments, signal?: AbortSignal): Promise<CommentPage> {
+  return request('GET', `/api/v1/documents/${encodeURIComponent(id)}/comments${commentQuery(selection)}`, undefined, signal);
 }
 
 export async function postComment(id: string, body: string): Promise<DocComment> {
@@ -745,6 +748,7 @@ export interface SignerLink {
 export interface SendResult {
   status: string;
   links: SignerLink[];
+  package_send?: PackageSendReceipt;
 }
 
 /**
@@ -756,6 +760,7 @@ export interface SendResult {
  */
 export class SendError extends Error {
   status: number;
+  packageSend?: PackageSendReceipt;
   upgradeURL?: string;
   requiredTier?: string;
   currentTier?: string;
@@ -769,15 +774,33 @@ export class SendError extends Error {
 
 export type LawfulBasis = 'contract';
 
-export async function sendDocument(docID: string, lawfulBasis: LawfulBasis): Promise<SendResult> {
+export async function inspectPackageSendAttempt(documentID: string, attemptID: string, signal?: AbortSignal): Promise<'active'|'completed'|'aborted'|'not_recorded'> {
+  // Validate the selector before interpolating a path.
+  checkedPackageSendInspection({attempt_id:attemptID,outcome:'active',retry_authorized:false},attemptID);
+  const response=await fetch(`/api/v1/documents/${documentID}/send-attempts/${attemptID}`,{credentials:'include',cache:'no-store',signal,headers:{Accept:'application/json'}});
+  if(!response.ok) throw new Error('Send inspection is unavailable. Refresh the saved document before continuing.');
+  return checkedPackageSendInspection(await response.json(),attemptID);
+}
+
+
+export async function sendDocument(docID: string, lawfulBasis: LawfulBasis, packageSend?: PackageSendObservation): Promise<SendResult> {
+  const selection=packageSend===undefined ? undefined : checkedPackageSendObservation(packageSend);
   const res = await fetch(`/api/v1/documents/${docID}/send`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lawful_basis: lawfulBasis }),
+    body: JSON.stringify({ lawful_basis: lawfulBasis, ...(selection ? {package_send:selection}: {}) }),
   });
   if (res.ok) {
-    return (await res.json()) as SendResult;
+    const value=await res.json() as SendResult;
+    if(selection) {
+      if(!value || typeof value.status!=='string') throw new Error('Missing package Send status. Inspect the document.');
+      const receipt=checkedPackageSendReceipt(value.package_send,value.status);
+      if(!Array.isArray(value.links) || value.links.length!==0 || (res.status===202)!==(receipt.outcome==='active')) throw new Error('Inspect the package Send outcome before continuing.');
+      return {status:value.status,links:[],package_send:receipt};
+    }
+    if(value.package_send!==undefined) throw new Error('Unexpected package Send result. Inspect the document.');
+    return value;
   }
   // Parse the structured error so the panel can render an upgrade CTA or the
   // exact eIDAS tier gap rather than a flat string.
@@ -790,6 +813,7 @@ export async function sendDocument(docID: string, lawfulBasis: LawfulBasis): Pro
   const message =
     (typeof body.error === 'string' && body.error) || `${res.status} ${res.statusText}`;
   const err = new SendError(res.status, message);
+  if (selection && body.package_send!==undefined) err.packageSend=checkedPackageSendReceipt(body.package_send);
   if (typeof body.upgrade_url === 'string') err.upgradeURL = body.upgrade_url;
   if (typeof body.required_tier === 'string') err.requiredTier = body.required_tier;
   if (typeof body.current_tier === 'string') err.currentTier = body.current_tier;

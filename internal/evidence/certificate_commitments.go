@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/manualfit"
 	"github.com/google/uuid"
 )
 
@@ -21,6 +22,10 @@ import (
 // They let a verifier distinguish a merely self-consistent export from the
 // contract and document-event set committed at ceremony time.
 type CertificateCommitments struct {
+	ParticipantReportSchema    string
+	ParticipantReportSHA256    string
+	ParticipantReportCutoff    string
+	ParticipantReportRows      int64
 	DocumentID                 string
 	OrgID                      string
 	DocumentNameSHA256         string
@@ -32,6 +37,10 @@ type CertificateCommitments struct {
 	DocumentEventsSHA256       string
 	DocumentEventsCount        int
 	DocumentEventsScope        string
+	FitsIndexSchema            string
+	FitsIndexSHA256            string
+	FitsIndexObjectSHA256      string
+	EvidenceRetainUntil        string
 }
 
 const (
@@ -122,7 +131,46 @@ func ParseCertificateCommitments(payload []byte) (CertificateCommitments, error)
 	if present && (!chainScopePresent || !eventsScopePresent) {
 		return CertificateCommitments{}, errors.New("signed completion evidence omits its audit scope")
 	}
+	// New fitted ceremonies carry all four non-circular index/expiry claims.
+	// Absence preserves exact legacy schema2/3 parsing; partial presence refuses.
+	fitsSchema, schemaPresent, err := optionalCertificateTextClaim(payload, "data-hash-fits-index-schema")
+	if err != nil {
+		return CertificateCommitments{}, err
+	}
+	fitsSHA, shaPresent, err := optionalCertificateTextClaim(payload, "data-hash-fits-index-sha256")
+	if err != nil {
+		return CertificateCommitments{}, err
+	}
+	fitsObjectSHA, objectPresent, err := optionalCertificateTextClaim(payload, "data-hash-fits-index-object-sha256")
+	if err != nil {
+		return CertificateCommitments{}, err
+	}
+	retainUntil, retainPresent, err := optionalCertificateTextClaim(payload, "data-hash-evidence-retain-until")
+	if err != nil {
+		return CertificateCommitments{}, err
+	}
+	if schemaPresent || shaPresent || objectPresent || retainPresent {
+		if !schemaPresent || !shaPresent || !objectPresent || !retainPresent || !present || fitsSchema != manualfit.FitsIndexSchemaV1 {
+			return CertificateCommitments{}, errors.New("signed fitted evidence claims must be complete and versioned")
+		}
+		if _, err := certificateSHA256Claim(payload, "data-hash-fits-index-sha256"); err != nil {
+			return CertificateCommitments{}, err
+		}
+		if _, err := certificateSHA256Claim(payload, "data-hash-fits-index-object-sha256"); err != nil {
+			return CertificateCommitments{}, err
+		}
+		completed, err := time.Parse(time.RFC3339Nano, completionEffectiveAt)
+		retained, rerr := time.Parse(time.RFC3339, retainUntil)
+		if err != nil || rerr != nil || retained.IsZero() || retained.Nanosecond() != 0 || retained.UTC().Format(time.RFC3339) != retainUntil || !retained.Equal(manualfit.RetentionFloorV1(completed)) {
+			return CertificateCommitments{}, errors.New("signed fitted evidence expiry does not match completion")
+		}
+	}
+	report, err := parseParticipantReportClaimVersioned(payload, documentID)
+	if err != nil {
+		return CertificateCommitments{}, err
+	}
 	return CertificateCommitments{
+		ParticipantReportSchema: report.schema, ParticipantReportSHA256: report.digest, ParticipantReportCutoff: report.cutoff, ParticipantReportRows: report.rows,
 		DocumentID:                 documentID,
 		OrgID:                      orgID,
 		DocumentNameSHA256:         documentNameSHA,
@@ -134,6 +182,7 @@ func ParseCertificateCommitments(payload []byte) (CertificateCommitments, error)
 		DocumentEventsSHA256:       eventsSHA,
 		DocumentEventsCount:        eventsCount,
 		DocumentEventsScope:        eventsScope,
+		FitsIndexSchema:            fitsSchema, FitsIndexSHA256: fitsSHA, FitsIndexObjectSHA256: fitsObjectSHA, EvidenceRetainUntil: retainUntil,
 	}, nil
 }
 

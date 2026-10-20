@@ -45,8 +45,15 @@ WHERE document_id = $1 AND status = 'open';
 -- Reset only recipients who have never produced legal evidence. Revise checks
 -- the whole ceremony first; this predicate is a second DB-level defense so a
 -- future caller can never erase a signature/acceptance timestamp in place.
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = sqlc.arg(document_id)
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET status = 'pending', signed_at = NULL
-WHERE document_id = $1
-  AND status NOT IN ('declined','signed','accepted')
-  AND signed_at IS NULL;
+FROM locked_document d
+WHERE r.document_id = sqlc.arg(document_id) AND d.id = r.document_id
+  AND r.status NOT IN ('declined','signed','accepted')
+  AND r.signed_at IS NULL;

@@ -91,6 +91,60 @@ func (q *Queries) CreateBlocksTemplate(ctx context.Context, arg CreateBlocksTemp
 	return &i, err
 }
 
+const createFreshHTMLTemplateV1 = `-- name: CreateFreshHTMLTemplateV1 :one
+INSERT INTO templates (id,org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256)
+VALUES ($1::uuid,$2::uuid,$3::text,'html',$4::jsonb,$5::jsonb,$6::uuid,$7::bytea)
+RETURNING id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required, html_master_json, html_content_sha256, pdf_sanitization_report
+`
+
+type CreateFreshHTMLTemplateV1Params struct {
+	ID                uuid.UUID       `json:"id"`
+	OrgID             uuid.UUID       `json:"org_id"`
+	Name              string          `json:"name"`
+	HtmlMasterJson    json.RawMessage `json:"html_master_json"`
+	VariablesJson     json.RawMessage `json:"variables_json"`
+	CreatedBy         uuid.UUID       `json:"created_by"`
+	HtmlContentSha256 []byte          `json:"html_content_sha256"`
+}
+
+// Fixed native authoring owner supplies this exact previously unused ID.
+// Primary-key INSERT establishes new-row scope; no caller row is adopted.
+func (q *Queries) CreateFreshHTMLTemplateV1(ctx context.Context, arg CreateFreshHTMLTemplateV1Params) (*Template, error) {
+	row := q.db.QueryRow(ctx, createFreshHTMLTemplateV1,
+		arg.ID,
+		arg.OrgID,
+		arg.Name,
+		arg.HtmlMasterJson,
+		arg.VariablesJson,
+		arg.CreatedBy,
+		arg.HtmlContentSha256,
+	)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+		&i.HtmlMasterJson,
+		&i.HtmlContentSha256,
+		&i.PdfSanitizationReport,
+	)
+	return &i, err
+}
+
 const createHTMLTemplate = `-- name: CreateHTMLTemplate :one
 INSERT INTO templates (org_id, name, source_kind, html_master_json, variables_json, created_by, html_content_sha256)
 VALUES ($1, $2, 'html', $3, $4, $5, $6)
@@ -201,6 +255,26 @@ func (q *Queries) CreatePDFTemplate(ctx context.Context, arg CreatePDFTemplatePa
 		&i.PdfSanitizationReport,
 	)
 	return &i, err
+}
+
+const getHTMLAuthoringTargetKindForUpdateV1 = `-- name: GetHTMLAuthoringTargetKindForUpdateV1 :one
+SELECT (source_kind='html')::boolean AS is_html FROM templates
+WHERE id=$1::uuid AND org_id=$2::uuid AND archived_at IS NULL
+FOR UPDATE
+`
+
+type GetHTMLAuthoringTargetKindForUpdateV1Params struct {
+	TemplateID uuid.UUID `json:"template_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+// Cheap classification preserves existing 404 (missing/foreign/archived) versus
+// 409 (active non-HTML target), without selecting any unadmitted JSON body.
+func (q *Queries) GetHTMLAuthoringTargetKindForUpdateV1(ctx context.Context, arg GetHTMLAuthoringTargetKindForUpdateV1Params) (bool, error) {
+	row := q.db.QueryRow(ctx, getHTMLAuthoringTargetKindForUpdateV1, arg.TemplateID, arg.OrgID)
+	var is_html bool
+	err := row.Scan(&is_html)
+	return is_html, err
 }
 
 const getHTMLTemplate = `-- name: GetHTMLTemplate :one

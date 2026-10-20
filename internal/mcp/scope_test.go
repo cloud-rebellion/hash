@@ -25,7 +25,7 @@ import (
 // register an org webhook, enumerate the org, or mint new org documents).
 func TestDocScopeSafeToolsMembership(t *testing.T) {
 	mustAllow := []string{
-		"get_document", "update_block", "list_recipients", "get_document_events", "list_documents",
+		"get_document", "get_document_attachments", "update_block", "list_recipients", "get_document_events", "list_documents",
 		"search_documents", "send_document", "void_document", "run_risk_analysis",
 		"resolve_document_branding", "set_document_routing_tier",
 		"list_envelope_children", "get_envelope_manifest", "download_final_pdf",
@@ -37,7 +37,7 @@ func TestDocScopeSafeToolsMembership(t *testing.T) {
 		"list_webhooks", "list_webhook_deliveries", "create_document",
 		"create_pdf_document", "create_envelope", "seed_compliance_baseline",
 		"set_compliance_flag_status", "get_org_metrics", "bind_variable_to_org_setting",
-		"get_org_activity",
+		"get_org_activity", "add_document_attachment", "save_document_attachments",
 	}
 	for _, n := range mustAllow {
 		if !docScopeSafeTools[n] {

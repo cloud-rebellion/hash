@@ -76,6 +76,7 @@ func RequireSession(cookies *SignedCookie, cookieName string, users SessionUserS
 				return
 			}
 			if err != nil {
+				logSessionLookupFailure(r.Context(), err)
 				http.Error(w, "session authorization unavailable", http.StatusServiceUnavailable)
 				return
 			}

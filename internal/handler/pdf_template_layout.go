@@ -1,48 +1,25 @@
 // SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 // Copyright (c) Bright Interaction
-
 package handler
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"math"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/pdflayout"
+	"github.com/bright-interaction/hash/internal/pdftemplateauthoring"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/authoring"
-	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/importguard"
-	"github.com/bright-interaction/hash/internal/pdflayout"
-	"github.com/bright-interaction/hash/internal/sanitize"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type savePDFTemplateInput struct {
-	Name              string                 `json:"name"`
-	ExpectedUpdatedAt string                 `json:"expected_updated_at"`
-	ExpectedFieldIDs  []uuid.UUID            `json:"expected_field_ids"`
-	Parties           []savePDFTemplateParty `json:"parties"`
-}
+type savePDFTemplateInput = pdflayout.ExportInputV1
+type savePDFTemplateParty = pdflayout.ExportPartyV1
 
-type savePDFTemplateParty struct {
-	RecipientID uuid.UUID `json:"recipient_id"`
-	Role        string    `json:"role"`
-	Label       string    `json:"label"`
-}
-
-// handleSavePDFTemplate exports a fresh locked draft's signature placement into
-// named slots. Recipient identities, IDs, tokens and captured values are never
-// part of the reusable design. The isolated parser runs before the transaction;
-// its exact source identity is then checked under the draft guard.
+// Original public input, import guard, pre-inspection and locked draft policies
+// are preserved by the fixed native producer; reusable layout contains no IDs,
+// tokens, captured values or recipient identities.
 func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 	u, ok := requireSessionUser(w, r.Context())
 	if !ok {
@@ -52,9 +29,19 @@ func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input, err := s.HTMLCreationSessions.NewBlocksHTTPInputV1(r.Context(), u.OrgID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "PDF layout input capacity unavailable")
+		return
+	}
+	defer input.CloseConsumerV1()
 	var in savePDFTemplateInput
 	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err = input.WithHTTPBodyV1(r.Context(), r.Body, func(raw []byte) error { return decodeSignerJSONBytesV1(raw, &in) }); err != nil {
+		if errors.Is(err, pdfadmission.ErrBlocksInputV1) {
+			writeError(w, http.StatusServiceUnavailable, "PDF layout input capacity unavailable")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -90,183 +77,30 @@ func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	inspectionCtx, inspectionCancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer inspectionCancel()
-	admitted, err := s.Queries.GetDocument(inspectionCtx, generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "document not found")
-		return
+	result, err := pdftemplateauthoring.CaptureV1(r.Context(), pdftemplateauthoring.CaptureDependenciesV1{Sessions: s.HTMLCreationSessions, Audit: s.Audit, Storage: s.Storage}, pdftemplateauthoring.CaptureActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id, expected, in)
+	if result != nil {
+		defer result.CloseConsumerV1()
 	}
 	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if admitted.SourceKind != "pdf" || admitted.Status != "draft" {
-		writeError(w, http.StatusConflict, "save a PDF layout from an editable PDF draft")
-		return
-	}
-	if len(admitted.HtmlSourceJson) > 0 {
-		writeError(w, http.StatusConflict, "reuse the approved HTML design to render a fresh document; static PDF template export of HTML documents is unavailable")
-		return
-	}
-	if !admitted.UpdatedAt.Valid || !expected.Equal(admitted.UpdatedAt.Time) {
-		writeError(w, http.StatusPreconditionFailed, "document changed; review the current design")
-		return
-	}
-	if !admitted.PdfStorageKey.Valid || len(admitted.PdfSha256) != sha256.Size {
-		writeError(w, http.StatusConflict, "PDF source has no verified content commitment")
-		return
-	}
-	body, err := readDocumentArtifact(inspectionCtx, s.Storage, admitted, admitted.PdfStorageKey.String, admitted.PdfSha256, admitted.PdfStorageVersionID)
-	if err != nil {
-		writeInternalErrorMsg(w, "verify PDF layout source", err)
-		return
-	}
-	pages, err := sanitize.PageCountWithContext(inspectionCtx, body)
-	if err != nil || pages < 1 || pages > sanitize.MaxPDFPages {
-		if err == nil {
-			err = errors.New("source page count exceeds intake limit")
+		switch {
+		case errors.Is(err, pdflayout.ErrPrecondition), errors.Is(err, pdfadmission.ErrPDFLayoutSourceChangedV1), errors.Is(err, pdfadmission.ErrPDFLayoutInspectionChangedV1):
+			writeError(w, http.StatusPreconditionFailed, err.Error())
+		case errors.Is(err, pdflayout.ErrInvalid):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, pdfadmission.ErrPDFLayoutNotEditableV1), errors.Is(err, pdfadmission.ErrPDFLayoutHTMLSourceV1), errors.Is(err, pdfadmission.ErrPDFLayoutCommitmentV1):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, pdfadmission.ErrPDFLayoutInspectionV1), errors.Is(err, pdfadmission.ErrPDFLayoutCaptureV1), errors.Is(err, pdfadmission.ErrApplicationSessionV1), errors.Is(err, pdfadmission.ErrApplicationAdmissionV1), errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1), errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1):
+			writeError(w, http.StatusServiceUnavailable, "PDF layout temporarily unavailable")
+		default:
+			s.writeDraftAuthoringError(w, "save PDF layout", err)
 		}
-		writeInternalErrorMsg(w, "inspect PDF layout pages", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
-	if err != nil {
-		s.writeDraftAuthoringError(w, "save PDF layout", err)
-		return
-	}
-	current := guard.Document
-	if len(current.HtmlSourceJson) > 0 {
-		writeError(w, http.StatusConflict, "reuse the approved HTML design to render a fresh document; static PDF template export of HTML documents is unavailable")
-		return
-	}
-	if !samePDFTemplateSource(admitted, current) || !current.UpdatedAt.Time.Equal(expected) {
-		writeError(w, http.StatusPreconditionFailed, "document or PDF source changed; review the current design")
-		return
-	}
-	q := generated.New(tx)
-	recs, err := q.ListRecipientsByDocument(ctx, id)
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	fields, err := q.ListFieldsByDocument(ctx, id)
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	layout, err := exportPDFLayout(current, recs, fields, in, int32(pages))
-	if errors.Is(err, pdflayout.ErrPrecondition) {
-		writeError(w, http.StatusPreconditionFailed, err.Error())
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	canonical, err := json.Marshal(layout)
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	template, err := q.CreatePDFTemplate(ctx, generated.CreatePDFTemplateParams{
-		OrgID: u.OrgID, Name: strings.TrimSpace(in.Name), CreatedBy: u.UserID, PdfStorageKey: current.PdfStorageKey, PdfSha256: current.PdfSha256,
-		PdfStorageVersionID: current.PdfStorageVersionID, EvidenceVersionPinRequired: current.EvidenceVersionPinsRequired,
-		PageCount: pgtype.Int4{Int32: int32(pages), Valid: true}, FieldsJson: canonical,
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id, Kind: audit.KindTemplateCreated,
-		Payload: map[string]any{"template_id": template.ID, "source_kind": "pdf", "name": template.Name, "layout_version": layout.Version, "party_count": len(layout.Parties), "field_count": len(layout.Fields)}})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		s.writeDraftAuthoringError(w, "save PDF layout", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	s.Audit.Publish(pending)
-	writeTemplateResponse(w, http.StatusCreated, template)
+	writeTemplateResponse(w, http.StatusCreated, result.Template)
 }
-
 func samePDFTemplateSource(a, b *generated.Document) bool {
-	return a != nil && b != nil && b.SourceKind == "pdf" && a.PdfStorageKey == b.PdfStorageKey && a.PdfStorageVersionID == b.PdfStorageVersionID &&
-		a.EvidenceVersionPinsRequired == b.EvidenceVersionPinsRequired && bytes.Equal(a.PdfSha256, b.PdfSha256)
+	return pdflayout.SamePDFTemplateSourceV1(a, b)
 }
-
 func exportPDFLayout(doc *generated.Document, recs []*generated.Recipient, fields []*generated.DocumentField, in savePDFTemplateInput, pages int32) (*pdflayout.Layout, error) {
-	if len(fields) != len(in.ExpectedFieldIDs) {
-		return nil, pdflayout.ErrPrecondition
-	}
-	expected := make(map[uuid.UUID]bool, len(in.ExpectedFieldIDs))
-	for _, id := range in.ExpectedFieldIDs {
-		if id == uuid.Nil || expected[id] {
-			return nil, fmt.Errorf("%w: observed field IDs must be unique", pdflayout.ErrInvalid)
-		}
-		expected[id] = true
-	}
-	currentRecipients := make(map[uuid.UUID]*generated.Recipient, len(recs))
-	for _, rec := range recs {
-		if rec != nil && rec.DocumentID == doc.ID {
-			currentRecipients[rec.ID] = rec
-		}
-	}
-	owners := make(map[uuid.UUID]savePDFTemplateParty, len(in.Parties))
-	layout := &pdflayout.Layout{Version: 1, Parties: make([]pdflayout.Party, 0, len(in.Parties)), Fields: make([]pdflayout.Field, 0, len(fields))}
-	for _, party := range in.Parties {
-		if party.RecipientID == uuid.Nil || currentRecipients[party.RecipientID] == nil {
-			return nil, pdflayout.ErrPrecondition
-		}
-		if _, exists := owners[party.RecipientID]; exists {
-			return nil, fmt.Errorf("%w: a recipient cannot own multiple slots", pdflayout.ErrInvalid)
-		}
-		owners[party.RecipientID] = party
-		layout.Parties = append(layout.Parties, pdflayout.Party{Role: party.Role, Label: party.Label})
-	}
-	used := make(map[uuid.UUID]bool, len(owners))
-	for _, field := range fields {
-		if field == nil || !expected[field.ID] || field.DocumentID != doc.ID {
-			return nil, pdflayout.ErrPrecondition
-		}
-		if field.Type != "signature" || !field.Required || field.Value.Valid || field.CompletedAt.Valid || !field.RecipientID.Valid {
-			return nil, fmt.Errorf("%w: save required signature fields only; remove fillable fields before saving", pdflayout.ErrInvalid)
-		}
-		id := uuid.UUID(field.RecipientID.Bytes)
-		party, exists := owners[id]
-		if !exists {
-			return nil, pdflayout.ErrPrecondition
-		}
-		used[id] = true
-		values := make([]float64, 4)
-		for i, value := range []pgtype.Numeric{field.XPct, field.YPct, field.WPct, field.HPct} {
-			number, err := value.Float64Value()
-			if err != nil || !number.Valid || math.IsNaN(number.Float64) || math.IsInf(number.Float64, 0) {
-				return nil, fmt.Errorf("%w: invalid persisted geometry", pdflayout.ErrInvalid)
-			}
-			values[i] = number.Float64
-		}
-		layout.Fields = append(layout.Fields, pdflayout.Field{PartyRole: party.Role, Type: "signature", Page: field.Page, XPct: values[0], YPct: values[1], WPct: values[2], HPct: values[3], Required: true, Label: field.Label.String})
-	}
-	if len(used) != len(owners) {
-		return nil, fmt.Errorf("%w: every party must own a signature field", pdflayout.ErrInvalid)
-	}
-	if err := layout.Validate(pages); err != nil {
-		return nil, err
-	}
-	return layout, nil
+	return pdflayout.ExportDocumentLayoutV1(doc, recs, fields, in, pages)
 }

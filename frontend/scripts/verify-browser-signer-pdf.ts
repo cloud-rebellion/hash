@@ -25,7 +25,7 @@ const ownerCookie = typeof fixture.ownerCookie === 'string' ? /^([A-Za-z0-9_-]{1
 if (!/^https:\/\/127\.0\.0\.1:\d+$/.test(fixture.base) || !uuid.test(fixture.documentID)
   || !digest.test(fixture.pdfSHA256) || !digest.test(fixture.sourceCommitment)
   || !Number.isInteger(fixture.pageCount) || fixture.pageCount < 2 || fixture.pageCount > 12
-  || fixture.materializationRevision !== 1 || fixture.rendererVersion !== '8.36.0-hash.1'
+  || fixture.materializationRevision !== 1 || fixture.rendererVersion !== '8.36.0-hash.5'
   || !ownerCookie || fixture.parties?.length !== 2 || fixture.parties[0].recipientID === fixture.parties[1].recipientID
   || fixture.parties.some(p => !validToken(p.token) || !uuid.test(p.recipientID) || !uuid.test(p.fieldID) || !p.name)
   || !fixture.legacy || !validToken(fixture.legacy.token) || !uuid.test(fixture.legacy.documentID)

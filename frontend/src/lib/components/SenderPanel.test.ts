@@ -1,10 +1,11 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { checkedPackageSendObservation } from '../packageSend';
 import { sameRecipientDraft } from './senderDraft';
 
 const source = readFileSync(new URL('./SenderPanel.svelte', import.meta.url), 'utf8');
 const names = ['captureScope', 'isCurrent', 'currentForm', 'recipientDraftChanged', 'hasMeaningfulDraft', 'confirmFormReplacement',
-  'intendedPartyConflicts', 'refreshSourceRecipients', 'changeDocLocale', 'refresh', 'initializePanel', 'openAdd', 'openEdit', 'closeForm', 'submitForm', 'remove', 'send', 'remind', 'voidDoc', 'copyLink'];
+  'intendedPartyConflicts', 'refreshSourceRecipients', 'changeDocLocale', 'refresh', 'initializePanel', 'openAdd', 'openEdit', 'closeForm', 'submitForm', 'remove', 'send', 'adoptPackageReview', 'reconcilePackageSelection', 'acceptPackageStatus', 'reconcilePackageSend', 'remind', 'voidDoc', 'copyLink'];
 function callback(name: string): string {
   let start = source.indexOf(`function ${name}(`);
   if (source.slice(start - 6, start) === 'async ') start -= 6;
@@ -26,7 +27,7 @@ function fixture() {
   const env: any = {
     documentID: 'A', boundDocumentID: 'A', $page: { params: { id: 'A' } }, panelRevision: 1, refreshRevision: 0, disposed: false,
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
-    requiresSignature: true, reviewRequired: false, revisionBlocked: false, crmBlocked: false, crmBusy: false, onCRMReviewRequired: undefined, onMutationStateChange: undefined, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
+    requiresSignature: true, reviewRequired: false, revisionBlocked: false, crmBlocked: false, crmBusy: false, attachmentsBlocked:false, attachmentsMessage:"", packageSend:undefined, packageReviewRequired:false,packageReviewRevision:0,packageReconciliationBusy:false,observedPackageReviewRevision:0,onPackageReviewRequired:(inspect:boolean)=>calls.push({kind:"package-review",args:[inspect]}),packageStatus:{stop:async()=>{},start:()=>{}},pendingPackageAttempt:null,packageUncertain:false,checkingPackage:false,externalMutationBusy:false, onDraftStateChange:undefined, onCRMReviewRequired: undefined, onMutationStateChange: undefined, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     intendedParties: [], recipientIdentityLocked: false, sourceCommitment: '', observedSourceCommitment: '',
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
@@ -34,16 +35,17 @@ function fixture() {
     loading: false, error: null, recipientRefreshError: null, sendErr: null, showForm: false,
     editingId: null, fName: '', fEmail: '', fRole: 'signer', fLocale: 'en', saving: false, formRevision: 0, formBaseline: null,
     removingID: null, busy: null, links: null, lawfulBasis: '', remindedFlash: null, copiedID: null,
-    reminderTimer: null, copyTimer: null, sameRecipientDraft, tick: async () => {},
+    reminderTimer: null, copyTimer: null, sameRecipientDraft, checkedPackageSendObservation, tick: async () => {},
     onStatusChange: (next: string) => calls.push({ kind: 'status', args: [next] }),
     onRecipientsChange: () => recipientChanges.push(env.boundDocumentID),
     listRecipients: pending('list'), createRecipient: pending('create'), updateRecipient: pending('update'),
-    deleteRecipient: pending('delete'), sendDocument: pending('send'), remindDocument: pending('remind'), voidDocument: pending('void'),
+    deleteRecipient: pending('delete'), getDocument:pending('document'),inspectPackageSendAttempt:pending('inspect'),sendDocument: pending('send'), remindDocument: pending('remind'), voidDocument: pending('void'),
     navigator: { clipboard: { writeText: pending('clipboard') } },
     window: { confirm: (message: string) => { prompts.push(message); return env.confirmed; } },
     confirm: () => env.confirmed, prompt: () => 'Audit reason', confirmed: false, SendError: class extends Error {},
     setTimeout, clearTimeout
   };
+  Object.defineProperty(env,'otherMutationBusy',{get:()=>env.crmBusy || env.externalMutationBusy});
   const actions = bind(env);
   Object.defineProperty(env, 'partyConflicts', { get: () => actions.intendedPartyConflicts() });
   return { env, calls, prompts, recipientChanges, actions };
@@ -231,4 +233,34 @@ test('an unreviewed HTML PDF cannot dispatch Send even with complete recipients 
   await state.actions.send();
   expect(state.calls).toEqual([]);
   expect(state.env.busy).toBeNull();
+});
+
+test('attachment write barrier refuses recipient save and Send but still permits cancelling the local form',async()=>{const f=fixture();f.actions.openAdd();f.env.fName='Unsaved';f.env.fEmail='local@example.test';expect(f.actions.recipientDraftChanged()).toBe(true);f.env.externalMutationBusy=true;f.env.attachmentsBlocked=true;await f.actions.submitForm();await f.actions.send();expect(f.calls).toHaveLength(0);f.actions.closeForm();expect(f.env.showForm).toBe(true);f.env.confirmed=true;f.actions.closeForm();expect(f.env.showForm).toBe(false);expect(f.calls).toHaveLength(0);});
+
+
+test('package Send captures the saved selection before props change and retains queued attempt',async()=>{const f=fixture();f.env.lawfulBasis='contract';const selected={expected_updated_at:'2026-10-19T12:03:04.123456Z',package_id:'4e972fb2-ae22-4c84-a52d-93d66507b080',generation:'7'};f.env.packageSend=selected;const pending=f.actions.send();expect(f.calls[0].args[2]).toEqual(selected);f.env.packageSend=undefined;f.calls[0].resolve({status:'sealing',links:[],package_send:{attempt_id:'3190d00e-c777-4a5b-9e90-63b95532a99c',outcome:'active',reconciliation_required:true}});await Promise.resolve();await Promise.resolve();const list=f.calls.find(c=>c.kind==='list');if(list)list.resolve(f.env.recipients);await pending;expect(f.env.pendingPackageAttempt).toBe('3190d00e-c777-4a5b-9e90-63b95532a99c');expect(f.calls.some(c=>c.kind==='status'&&c.args[0]==='sealing')).toBe(true);});
+test('network loss on package Send blocks repeat and inspection uses only GET owners',async()=>{const f=fixture();f.env.lawfulBasis='contract';f.env.packageSend={expected_updated_at:'2026-10-19T12:03:04Z',package_id:'4e972fb2-ae22-4c84-a52d-93d66507b080',generation:'7'};const pending=f.actions.send();f.calls[0].reject(new Error('network loss'));await pending;expect(f.env.packageUncertain).toBe(true);await f.actions.send();expect(f.calls.filter(c=>c.kind==='send')).toHaveLength(1);const check=f.actions.reconcilePackageSend();await Promise.resolve();const request=f.calls.find(c=>c.kind==='document');request.resolve({id:'A',status:'sealing'});await Promise.resolve();await Promise.resolve();const list=f.calls.find(c=>c.kind==='list');if(list)list.resolve(f.env.recipients);await check;expect(f.calls.filter(c=>c.kind==='send')).toHaveLength(1);});
+
+test('stale package409 blocks repeated Send until explicit inspected selection adoption',async()=>{
+ const f=fixture();f.env.lawfulBasis='contract';f.env.packageSend={expected_updated_at:'2026-10-19T12:03:04Z',package_id:'4e972fb2-ae22-4c84-a52d-93d66507b080',generation:'7'};
+ const rejected=f.actions.send();const failure=new f.env.SendError('Review and reconcile the exact document and saved attachment selection');failure.status=409;f.calls[0].reject(failure);await rejected;
+ expect(f.env.packageReviewRequired).toBe(true);expect(f.calls.find(c=>c.kind==='package-review').args).toEqual([false]);
+ await f.actions.send();expect(f.calls.filter(c=>c.kind==='send')).toHaveLength(1);
+ f.env.externalMutationBusy=true; // the attachment's own dirty/readback barrier must not block inspection
+ f.actions.reconcilePackageSelection();expect(f.calls.filter(c=>c.kind==='package-review').at(-1).args).toEqual([true]);
+ f.env.externalMutationBusy=false;
+ f.env.packageSend={...f.env.packageSend,generation:'8',expected_updated_at:'2026-10-19T12:03:05Z'};
+ f.actions.adoptPackageReview(1);expect(f.env.packageReviewRequired).toBe(false);
+ const sent=f.actions.send();const request=f.calls.filter(c=>c.kind==='send').at(-1);expect(request.args[2].generation).toBe('8');request.resolve({status:'sealing',links:[],package_send:{attempt_id:'3190d00e-c777-4a5b-9e90-63b95532a99c',outcome:'active',reconciliation_required:true}});
+ await Promise.resolve();await Promise.resolve();f.calls.find(c=>c.kind==='list').resolve(f.env.recipients);await sent;
+});
+test('observed sent retires the queued attempt banner while refreshing actual recipients',async()=>{
+ const f=fixture();f.env.pendingPackageAttempt='3190d00e-c777-4a5b-9e90-63b95532a99c';const scope=f.actions.captureScope();
+ const applied=f.actions.acceptPackageStatus('sent',scope);expect(f.env.pendingPackageAttempt).toBe(null);expect(f.calls[0].args).toEqual(['sent']);f.calls.find(c=>c.kind==='list').resolve(f.env.recipients);await applied;
+});
+test('package reconciliation still refuses independent mutations and recipient drafts',()=>{
+ for(const busy of ['packageReconciliationBusy','crmBusy','saving','savingLocale','removingID','checkingPackage','busy']){
+  const f=fixture();f.env.packageReviewRequired=true;f.env.externalMutationBusy=true;f.env[busy]=busy==='removingID'?'recipient':busy==='busy'?'send':true;
+  f.actions.reconcilePackageSelection();expect(f.calls).toEqual([]);
+ }
 });

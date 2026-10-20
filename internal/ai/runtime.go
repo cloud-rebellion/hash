@@ -115,13 +115,15 @@ type Handle any
 
 // Runtime is the single entry point for AI calls. Hold one process-wide.
 type Runtime struct {
-	Q         *generated.Queries
-	Shield    Shield
-	Cache     *Cache
-	Providers map[string]Provider // keyed by Provider.Name(), e.g. "mistral"
-	Default   string              // provider name to use when caller doesn't specify
-	Embedder  Embedder            // see embedder.go
-	PromptReg *PromptRegistry
+	nativeWorkflow           NativeWorkflowV1
+	ResolveNativeOrgProvider func(context.Context, *generated.OrgAiSetting) (Provider, bool, error)
+	Q                        *generated.Queries
+	Shield                   Shield
+	Cache                    *Cache
+	Providers                map[string]Provider // keyed by Provider.Name(), e.g. "mistral"
+	Default                  string              // provider name to use when caller doesn't specify
+	Embedder                 Embedder            // see embedder.go
+	PromptReg                *PromptRegistry
 
 	// CompletionAudit is a request-bound writer. When configured, persistence
 	// is required before returning a completion; Q still supplies recipient PII.
@@ -231,7 +233,21 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	var ok bool
 	// Per-org BYOAI override: only when the caller did not pin a provider.
 	if providerName == "" && r.ResolveOrgProvider != nil && opts.OrgID != uuid.Nil {
-		p, has, err := r.ResolveOrgProvider(ctx, opts.OrgID, r.Q)
+		var p Provider
+		var has bool
+		var err error
+		if r.nativeWorkflow != nil {
+			if NativeWorkflowFromContextV1(ctx) != r.nativeWorkflow || r.ResolveNativeOrgProvider == nil {
+				return Response{}, ErrNativeWorkflowV1
+			}
+			var row *generated.OrgAiSetting
+			row, err = r.nativeWorkflow.ReadOrganizationProviderV1(ctx, opts.OrgID)
+			if err == nil {
+				p, has, err = r.ResolveNativeOrgProvider(ctx, row)
+			}
+		} else {
+			p, has, err = r.ResolveOrgProvider(ctx, opts.OrgID, r.Q)
+		}
 		if err != nil {
 			return Response{}, errors.New("AI organization provider unavailable")
 		}
@@ -252,6 +268,23 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 		}
 	}
 
+	if r.nativeWorkflow != nil {
+		if err := nativeCompletionValuesV1(req, Response{}, 0); err != nil {
+			return Response{}, err
+		}
+		if NativeWorkflowFromContextV1(ctx) != r.nativeWorkflow {
+			return Response{}, ErrNativeWorkflowV1
+		}
+		if err := r.nativeWorkflow.PrepareUsageV1(ctx, provider.Name(), provider.Model(), req.PromptName, req.PromptVersion); err != nil {
+			return Response{}, ErrCompletionAudit
+		}
+		owned, err := r.nativeWorkflow.WrapProviderV1(ctx, provider)
+		if err != nil {
+			return Response{}, err
+		}
+		provider = owned
+	}
+
 	// Gather the document's party names so Shield redacts them too: no regex
 	// catches a free-text personal name, but the recipients table knows them.
 	//
@@ -265,13 +298,45 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	// so the text only reaches an EU-hosted processor. Callers can pass extra
 	// non-recipient party names via opts.KnownPII; closing the gap fully needs an
 	// NER/address pass, deferred.
+	var knownBytes int64
+	for _, term := range opts.KnownPII {
+		var err error
+		knownBytes, err = NativeCostV1(knownBytes, int64(len(term)), 4)
+		if err != nil {
+			return Response{}, err
+		}
+	}
+	knownCost, err := NativeCostV1(knownBytes, int64(len(opts.KnownPII)), 256)
+	if err != nil {
+		return Response{}, err
+	}
+	if err = RetainNativeV1(ctx, knownCost); err != nil {
+		return Response{}, err
+	}
 	known := append([]string{}, opts.KnownPII...)
-	if opts.DocumentID != nil && r.Q != nil {
-		recs, rerr := r.Q.ListRecipientsByDocument(ctx, *opts.DocumentID)
-		if rerr != nil && r.CompletionAudit != nil {
+	if opts.DocumentID != nil && (r.Q != nil || r.nativeWorkflow != nil) {
+		var recs []*generated.Recipient
+		var nativeNames []string
+		var rerr error
+		if r.nativeWorkflow != nil {
+			nativeNames, rerr = r.nativeWorkflow.ReadRecipientNamesV1(ctx, *opts.DocumentID)
+		} else {
+			recs, rerr = r.Q.ListRecipientsByDocument(ctx, *opts.DocumentID)
+		}
+		if rerr != nil && (r.CompletionAudit != nil || r.nativeWorkflow != nil) {
 			return Response{}, errors.New("AI party context unavailable")
 		}
 		if rerr == nil {
+			if r.nativeWorkflow != nil {
+				if err := RetainNativeV1(ctx, int64(len(nativeNames))*256+4096); err != nil {
+					return Response{}, err
+				}
+				for _, name := range nativeNames {
+					if strings.TrimSpace(name) != "" {
+						known = append(known, name)
+					}
+				}
+			}
 			for _, rec := range recs {
 				if rec != nil && strings.TrimSpace(rec.Name) != "" {
 					known = append(known, rec.Name)
@@ -303,14 +368,14 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 
 	// Shield outbound. Both system and user blocks are tokenized; we
 	// re-stitch with the same handle so Untokenize works.
-	shieldedUser, handle, err := r.Shield.Tokenize(ctx, req.User, known...)
+	shieldedUser, handle, err := tokenizeForNativeV1(ctx, r.Shield, req.User, known...)
 	if err != nil {
 		if auditErr := r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err); auditErr != nil {
 			return Response{}, auditErr
 		}
 		return Response{}, fmt.Errorf("shield tokenize: %w", err)
 	}
-	shieldedSystem, _, err := r.Shield.Tokenize(ctx, req.System, known...)
+	shieldedSystem, _, err := tokenizeForNativeV1(ctx, r.Shield, req.System, known...)
 	if err != nil {
 		if auditErr := r.writeAudit(ctx, opts, provider, req, Response{}, 0, false, err); auditErr != nil {
 			return Response{}, auditErr
@@ -333,7 +398,7 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 	resp.LatencyMs = latency
 
 	// Shield inbound.
-	plain, err := r.Shield.Untokenize(ctx, resp.Text, handle)
+	plain, err := untokenizeForNativeV1(ctx, r.Shield, resp.Text, handle)
 	if err != nil {
 		if auditErr := r.writeAudit(ctx, opts, provider, req, resp, latency, false, err); auditErr != nil {
 			return Response{}, auditErr
@@ -364,9 +429,14 @@ func CacheKey(req Request) string {
 }
 
 func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provider, req Request, resp Response, latency int, success bool, err error) error {
-	if r.Q == nil && r.CompletionAudit == nil {
+	if r.Q == nil && r.CompletionAudit == nil && r.nativeWorkflow == nil {
 		return nil
 	} // tests may run without DB
+	if r.nativeWorkflow != nil {
+		if validation := nativeCompletionValuesV1(req, resp, latency); validation != nil {
+			return validation
+		}
+	}
 	errStr := ""
 	if err != nil {
 		errStr = "completion failed" // provider diagnostics may contain credentials or private text
@@ -393,6 +463,13 @@ func (r *Runtime) writeAudit(ctx context.Context, opts CompleteOptions, p Provid
 		Success:              success,
 		Error:                errStr,
 		TransferJurisdiction: TransferJurisdictionForEndpoint(p.Endpoint()),
+	}
+	if r.nativeWorkflow != nil {
+		observation := newCompletionObservationV1(ctx, r.nativeWorkflow, params)
+		if err := r.nativeWorkflow.ObserveUsageV1(ctx, observation); err != nil {
+			return ErrCompletionAudit
+		}
+		return nil
 	}
 	if r.CompletionAudit != nil {
 		if err := r.CompletionAudit(ctx, params); err != nil {

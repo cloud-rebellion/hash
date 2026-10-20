@@ -252,12 +252,13 @@ export class CRMDocumentController {
     this.update({ fresh: false, busy: null, confirmation: '', search: null, observation: null, readback: null, needsReadback: uncertain,
       readbackReason: uncertain ? this.state.readbackReason ?? 'uncertain' : null }); }
   dispose() { this.interrupt(); this.disposed = true; }
-  syncDocument(d: DocumentResponse) { if (crmDocumentPin(d) === crmDocumentPin(this.doc)) return; this.interrupt(); this.doc = d; }
+  syncDocument(d: DocumentResponse) { if (crmDocumentPin(d) === crmDocumentPin(this.doc)) return; const retained=this.hasLocalIntent(); this.interrupt(); this.doc = d; if(retained) this.update({needsReadback:true,readbackReason:this.state.readbackReason ?? 'stale',error:'The saved agreement changed. Inspect its saved CRM result; your local mapping choices are retained.'}); }
   private baseline(c: CRMDocumentContext) {
     const mappings = crmBaseline(c), selected: CRMDocumentState['selected'] = {};
     for (const m of mappings) selected[m.source_kind] = { kind: m.source_kind, id: m.source_ref, label: m.source_ref, secondary: '', record_updated_at: '' };
     return { context: c, mappings, selected, fresh: true, needsReadback: false, readbackReason: null, readback: null, search: null, observation: null, confirmation: '' };
   }
+  hasLocalIntent(): boolean { const c=this.state.context; if(!c) return false; const baseline=crmBaseline(c); return crmMappingKey(this.state.mappings)!==crmMappingKey(baseline) || !!this.state.observation || !!this.state.confirmation || Object.entries(this.state.selected).some(([kind,choice]) => !!choice && !baseline.some(m=>m.source_kind===kind && m.source_ref===choice.id)); }
   sendBlocked(): boolean { const s = this.state, c = s.context; return !!s.busy || !s.fresh || s.needsReadback || !c || c.mapping_review_required
     || crmMappingKey(s.mappings) !== crmMappingKey(crmBaseline(c)) || !!s.observation?.content_changed; }
   canDiscover(): boolean { const c = this.state.context; return !!c && c.supported && c.available && c.connection?.status === 'active' && this.state.fresh && !this.state.needsReadback && !this.state.busy; }

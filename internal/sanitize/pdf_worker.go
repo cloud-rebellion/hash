@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,7 @@ import (
 
 const pdfWorkerTimeout = 15 * time.Second
 const pdfWorkerHeaderLimit = 4096
-const pdfWorkerProtocolVersion = 2
+const pdfWorkerProtocolVersion = 3
 const pdfWorkerReadinessInterval = 10 * time.Second
 const defaultPDFWorkerPath = "/usr/local/bin/hash-pdf-worker"
 
@@ -33,8 +34,9 @@ var ErrPDFWorkerCapacity = errors.New("sanitize: isolated PDF worker capacity ex
 var activePDFWorker atomic.Pointer[pdfWorker]
 
 type pdfWorker struct {
-	path  string
-	slots chan struct{}
+	observer PDFWorkerObserverV1
+	path     string
+	slots    chan struct{}
 
 	readinessMu    sync.Mutex
 	readinessUntil time.Time
@@ -43,27 +45,41 @@ type pdfWorker struct {
 }
 
 type pdfWorkerRequest struct {
-	ProtocolVersion   int    `json:"protocol_version"`
-	Operation         string `json:"operation"`
-	Length            int    `json:"length"`
-	Asset             string `json:"asset,omitempty"`
-	BodyLength        int    `json:"body_length,omitempty"`
-	SigningPageLength int    `json:"signing_page_length,omitempty"`
+	ProtocolVersion      int                         `json:"protocol_version"`
+	Operation            string                      `json:"operation"`
+	Length               int                         `json:"length"`
+	Asset                string                      `json:"asset,omitempty"`
+	BodyLength           int                         `json:"body_length,omitempty"`
+	SigningPageLength    int                         `json:"signing_page_length,omitempty"`
+	SignatureLength      int                         `json:"signature_length,omitempty"`
+	DisclosureLength     int                         `json:"disclosure_length,omitempty"`
+	ProviderBindings     *PDFProviderOverlayBindings `json:"provider_bindings,omitempty"`
+	ManualMetadataLength int                         `json:"manual_metadata_length,omitempty"`
 }
 
 type pdfWorkerResponse struct {
-	ProtocolVersion int                     `json:"protocol_version"`
-	Length          int                     `json:"length"`
-	Pages           int                     `json:"pages,omitempty"`
-	Report          *Report                 `json:"report,omitempty"`
-	Error           string                  `json:"error,omitempty"`
-	Composition     *PDFCompositionManifest `json:"composition,omitempty"`
+	ProtocolVersion  int                         `json:"protocol_version"`
+	Length           int                         `json:"length"`
+	Pages            int                         `json:"pages,omitempty"`
+	Report           *Report                     `json:"report,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+	Composition      *PDFCompositionManifest     `json:"composition,omitempty"`
+	ProviderOverlay  *PDFProviderOverlayManifest `json:"provider_overlay,omitempty"`
+	ManualOverlay    *PDFManualOverlayManifest   `json:"manual_overlay,omitempty"`
+	ManualLayers     *PDFManualLayersManifest    `json:"manual_layers,omitempty"`
+	ManualOperations string                      `json:"manual_operations,omitempty"`
 }
 
 // ConfigurePDFWorker is called before server/worker admission. Outside explicit
 // development the bundled, Linux-hardened executable is mandatory. A configured
 // but broken worker never falls back to parsing customer bytes in the parent.
 func ConfigurePDFWorker(ctx context.Context, path string, environment string) error {
+	return ConfigurePDFWorkerWithObserverV1(ctx, path, environment, nil)
+}
+
+// ConfigurePDFWorkerWithObserverV1 binds a fixed trusted parent observer at
+// worker-instance birth. Child execution and development opt-out are unchanged.
+func ConfigurePDFWorkerWithObserverV1(ctx context.Context, path string, environment string, observer PDFWorkerObserverV1) error {
 	// Preserve a failed-closed state if startup configuration is invalid.
 	activePDFWorker.Store(&pdfWorker{})
 	if path == "" {
@@ -80,7 +96,7 @@ func ConfigurePDFWorker(ctx context.Context, path string, environment string) er
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 || info.Mode().Perm()&0022 != 0 {
 		return ErrPDFWorkerUnavailable
 	}
-	w := &pdfWorker{path: path, slots: make(chan struct{}, 2)}
+	w := &pdfWorker{path: path, slots: make(chan struct{}, 2), observer: observer}
 	if _, _, err := w.run(ctx, pdfWorkerRequest{Operation: "probe"}, nil); err != nil {
 		return fmt.Errorf("%w: startup probe failed", ErrPDFWorkerUnavailable)
 	}
@@ -173,7 +189,7 @@ func (w *pdfWorker) composeSigningPage(ctx context.Context, asset string, bodyPD
 	return result, nil
 }
 
-func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []byte) (pdfWorkerResponse, []byte, error) {
+func (w *pdfWorker) runBoundedV1(parent context.Context, request pdfWorkerRequest, raw []byte) (pdfWorkerResponse, []byte, error) {
 	if w.path == "" {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
@@ -222,7 +238,7 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
 	if response.Error != "" {
-		if response.Length != 0 || response.Report != nil || response.Pages != 0 || response.Composition != nil {
+		if response.Length != 0 || response.Report != nil || response.Pages != 0 || response.Composition != nil || response.ProviderOverlay != nil || response.ManualOverlay != nil || response.ManualLayers != nil || response.ManualOperations != "" {
 			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 		}
 		switch response.Error {
@@ -233,18 +249,89 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 		case "active-content":
 			return pdfWorkerResponse{}, nil, ErrActivePDFContent
 		case "invalid-pdf":
-			return pdfWorkerResponse{}, nil, errors.New("sanitize: invalid PDF")
+			return pdfWorkerResponse{}, nil, ErrPDFInvalid
+		case "invalid-provider-overlay":
+			if request.Operation != pdfProviderOverlayOperation {
+				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+			}
+			return pdfWorkerResponse{}, nil, ErrPDFProviderOverlay
 		case "invalid-signing-page":
 			if request.Operation != pdfComposeSigningPageOperation {
 				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 			}
 			return pdfWorkerResponse{}, nil, ErrPDFSigningPageInvalid
+		case "invalid-manual-overlay":
+			if request.Operation != pdfManualInspectOperation && request.Operation != pdfManualOverlayOperation && request.Operation != pdfManualLayersOperation && request.Operation != pdfManualFragmentOperation {
+				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+			}
+			return pdfWorkerResponse{}, nil, ErrPDFManualOverlay
+		case "invalid-manual-layers":
+			if request.Operation != pdfManualLayersOperation {
+				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+			}
+			return pdfWorkerResponse{}, nil, ErrPDFManualLayers
+		case "invalid-manual-fragment":
+			if request.Operation != pdfManualLayersOperation && request.Operation != pdfManualFragmentOperation {
+				return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+			}
+			return pdfWorkerResponse{}, nil, ErrPDFManualFragment
 		default:
+			if request.Operation == pdfProviderOverlayOperation {
+				return pdfWorkerResponse{}, nil, providerOverlayErrorFromCode(response.Error)
+			}
 			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 		}
 	}
+	if request.Operation != "probe" && response.ManualOperations != "" {
+		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
+	if request.Operation != pdfProviderOverlayOperation && response.ProviderOverlay != nil {
+		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
 	if request.Operation != pdfComposeSigningPageOperation && response.Composition != nil {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
+	if request.Operation != pdfManualOverlayOperation && response.ManualOverlay != nil {
+		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
+	if request.Operation != pdfManualLayersOperation && response.ManualLayers != nil {
+		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+	}
+	if request.Operation == pdfManualFragmentOperation {
+		n := request.ManualMetadataLength
+		var descriptor manualFragmentRequestV1
+		admission, err := DecodePDFManualFragmentAdmission(body)
+		if n < 1 || n > manualMetadataLimit || n >= len(raw) || decodeManualLayersJSON(raw[:n], &descriptor) != nil || validateManualFragmentRequestV1(descriptor, raw[n:]) != nil || response.Pages != 0 || response.Report != nil || err != nil || admission.PDFSHA256 != descriptor.PDFSHA256 || admission.PDFBytes != descriptor.PDFBytes || admission.WidthPoints != descriptor.WidthPoints || admission.HeightPoints != descriptor.HeightPoints {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+	}
+	if request.Operation == pdfManualLayersOperation {
+		n := request.ManualMetadataLength
+		var batch manualLayersBatchV1
+		if n < 1 || n > manualMetadataLimit || n >= len(raw) || decodeManualLayersJSON(raw[:n], &batch) != nil || batch.SchemaVersion != 1 || validateManualLayerDescriptorsV1(batch.Layers, batch.Pages) != nil || response.Pages != 0 || response.Report == nil || response.ManualLayers == nil {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+		m := *response.ManualLayers
+		if ValidatePDFManualLayersResult(PDFManualLayersResult{Result{body, *response.Report}, m}) != nil || m.DescriptorSHA256 != pdfSHA(raw[:n]) || m.SourceSHA256 != batch.SourceSHA256 || m.SourceBytes != batch.SourceBytes || m.GeometrySHA256 != batch.GeometrySHA256 || m.Pages != batch.Pages || m.Layers != len(batch.Layers) {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+	}
+	if request.Operation == pdfManualInspectOperation {
+		var geometry PDFManualGeometry
+		if response.Pages != 0 || response.Report != nil || response.Length < 1 || decodeManualJSON(body, &geometry) != nil || validateManualGeometry(geometry, raw) != nil {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+	}
+	if request.Operation == pdfManualOverlayOperation {
+		n := request.ManualMetadataLength
+		var batch manualOverlayBatch
+		if n < 1 || n > manualMetadataLimit || n >= len(raw) || decodeManualJSON(raw[:n], &batch) != nil || response.Pages != 0 || response.Report == nil || response.ManualOverlay == nil || response.Report.Asset != "manual-stamped-pdf" {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+		m := *response.ManualOverlay
+		if validateManualResult(PDFManualOverlayResult{Result{body, *response.Report}, m}) != nil || m.DescriptorSHA256 != pdfSHA(raw[:n]) || m.SourceSHA256 != batch.SourceSHA256 || m.SourceBytes != batch.SourceBytes || m.GeometrySHA256 != batch.GeometrySHA256 || m.Pages != batch.Pages || m.Overlays != len(batch.Overlays) {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
 	}
 	if request.Operation == "clean" && (response.Pages != 0 || response.Length < 1 || response.Report == nil || ValidatePDFResult(*response.Report, pdfSHA(raw), pdfSHA(body), int64(len(raw)), int64(len(body))) != nil) {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
@@ -252,7 +339,7 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 	if request.Operation == "pages" && (response.Pages < 1 || response.Pages > MaxPDFPages || response.Length != 0 || response.Report != nil) {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
-	if request.Operation == "probe" && (response.Pages != 1 || response.Length != 0 || response.Report != nil) {
+	if request.Operation == "probe" && (response.Pages != 1 || response.Length != 0 || response.Report != nil || response.ManualOperations != pdfManualOperationsCapabilityV1) {
 		return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 	}
 	if request.Operation == pdfComposeSigningPageOperation {
@@ -261,6 +348,17 @@ func (w *pdfWorker) run(parent context.Context, request pdfWorkerRequest, raw []
 		}
 		result := PDFCompositionResult{Result: Result{Bytes: body, Report: *response.Report}, Composition: *response.Composition}
 		if response.Report.Asset != request.Asset || response.Composition.BodySHA256 != pdfSHA(raw[:request.BodyLength]) || response.Composition.SigningPageSHA256 != pdfSHA(raw[request.BodyLength:]) || ValidatePDFCompositionResult(result) != nil {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+	}
+	if request.Operation == pdfProviderOverlayOperation {
+		if !validProviderRequest(request, len(raw)) || response.Pages != 0 || response.Length < 1 || response.Report == nil || response.ProviderOverlay == nil || response.Report.Asset != request.Asset {
+			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
+		}
+		m := response.ProviderOverlay
+		b := request.BodyLength
+		s := request.SignatureLength
+		if m.BindingsSHA256 != PDFProviderOverlayBindingsSHA256(*request.ProviderBindings) || m.BaseSHA256 != pdfSHA(raw[:b]) || m.BaseBytes != int64(b) || m.SignatureSHA256 != pdfSHA(raw[b:b+s]) || m.DisclosureSHA256 != pdfSHA(raw[b+s:]) || ValidatePDFProviderOverlayResult(PDFProviderOverlayResult{Result: Result{Bytes: body, Report: *response.Report}, Overlay: *m}) != nil {
 			return pdfWorkerResponse{}, nil, ErrPDFWorkerUnavailable
 		}
 	}
@@ -303,9 +401,9 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 		allowed := false
 		switch target.(type) {
 		case *pdfWorkerRequest:
-			allowed = key == "protocol_version" || key == "operation" || key == "length" || key == "asset" || key == "body_length" || key == "signing_page_length"
+			allowed = key == "protocol_version" || key == "operation" || key == "length" || key == "asset" || key == "body_length" || key == "signing_page_length" || key == "signature_length" || key == "disclosure_length" || key == "provider_bindings" || key == "manual_metadata_length"
 		case *pdfWorkerResponse:
-			allowed = key == "protocol_version" || key == "length" || key == "pages" || key == "report" || key == "error" || key == "composition"
+			allowed = key == "protocol_version" || key == "length" || key == "pages" || key == "report" || key == "error" || key == "composition" || key == "provider_overlay" || key == "manual_overlay" || key == "manual_layers" || key == "manual_operations"
 		}
 		if !allowed || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return ErrPDFWorkerUnavailable
@@ -317,6 +415,14 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 		}
 	}
 	if request, ok := target.(*pdfWorkerRequest); ok {
+		_, manual := fields["manual_metadata_length"]
+		if request.Operation == pdfManualOverlayOperation || request.Operation == pdfManualLayersOperation || request.Operation == pdfManualFragmentOperation {
+			if !manual || request.ManualMetadataLength < 1 || request.ManualMetadataLength > manualMetadataLimit || request.ManualMetadataLength >= request.Length {
+				return ErrPDFWorkerUnavailable
+			}
+		} else if manual {
+			return ErrPDFWorkerUnavailable
+		}
 		if _, exists := fields["operation"]; !exists {
 			return ErrPDFWorkerUnavailable
 		}
@@ -326,7 +432,20 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 			if !body || !suffix {
 				return ErrPDFWorkerUnavailable
 			}
+		} else if request.Operation == pdfProviderOverlayOperation {
+			if !body || suffix || !validProviderRequest(*request, request.Length) {
+				return ErrPDFWorkerUnavailable
+			}
 		} else if body || suffix {
+			return ErrPDFWorkerUnavailable
+		}
+		_, signature := fields["signature_length"]
+		_, disclosure := fields["disclosure_length"]
+		_, bindings := fields["provider_bindings"]
+		if request.Operation != pdfProviderOverlayOperation && (signature || disclosure || bindings) {
+			return ErrPDFWorkerUnavailable
+		}
+		if request.Operation == pdfProviderOverlayOperation && (!signature || !disclosure || !bindings || !providerExactJSONShape(fields["provider_bindings"], reflect.TypeOf(PDFProviderOverlayBindings{}))) {
 			return ErrPDFWorkerUnavailable
 		}
 	}
@@ -340,7 +459,27 @@ func readPDFWorkerHeader(reader *bufio.Reader, target any) error {
 			return ErrPDFWorkerUnavailable
 		}
 	}
+	if response, ok := target.(*pdfWorkerResponse); ok && response.ProviderOverlay != nil {
+		if _, err := DecodePDFProviderOverlayManifest(fields["provider_overlay"]); err != nil {
+			return ErrPDFWorkerUnavailable
+		}
+	}
+	if response, ok := target.(*pdfWorkerResponse); ok && response.ManualOverlay != nil {
+		var manifest PDFManualOverlayManifest
+		if decodeManualJSON(fields["manual_overlay"], &manifest) != nil || validateManualManifest(manifest) != nil {
+			return ErrPDFWorkerUnavailable
+		}
+	}
+	if response, ok := target.(*pdfWorkerResponse); ok && response.ManualLayers != nil {
+		if _, err := DecodePDFManualLayersManifest(fields["manual_layers"]); err != nil {
+			return ErrPDFWorkerUnavailable
+		}
+	}
 	return nil
+}
+
+func validProviderRequest(r pdfWorkerRequest, n int) bool {
+	return r.ProviderBindings != nil && validProviderBindings(*r.ProviderBindings) && r.BodyLength > 0 && r.SignatureLength > 0 && r.DisclosureLength > 0 && r.BodyLength <= n && r.SignatureLength <= n-r.BodyLength && r.DisclosureLength == n-r.BodyLength-r.SignatureLength && r.SigningPageLength == 0
 }
 
 // encoding/json otherwise accepts duplicate object keys (including nested
@@ -412,10 +551,10 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 	if request.ProtocolVersion != pdfWorkerProtocolVersion || request.Length < 0 || request.Length > MaxPDFBytes || len(request.Asset) > 128 {
 		return ErrPDFWorkerUnavailable
 	}
-	if request.Operation != "probe" && request.Operation != "clean" && request.Operation != "pages" && request.Operation != pdfComposeSigningPageOperation {
+	if request.Operation != "probe" && request.Operation != "clean" && request.Operation != "pages" && request.Operation != pdfComposeSigningPageOperation && request.Operation != pdfProviderOverlayOperation && request.Operation != pdfManualInspectOperation && request.Operation != pdfManualOverlayOperation && request.Operation != pdfManualLayersOperation && request.Operation != pdfManualFragmentOperation {
 		return ErrPDFWorkerUnavailable
 	}
-	if request.Operation == "probe" && request.Length != 0 || request.Operation != "clean" && request.Operation != pdfComposeSigningPageOperation && request.Asset != "" {
+	if request.Operation == "probe" && request.Length != 0 || request.Operation != "clean" && request.Operation != pdfComposeSigningPageOperation && request.Operation != pdfProviderOverlayOperation && request.Asset != "" {
 		return ErrPDFWorkerUnavailable
 	}
 	if request.Operation == pdfComposeSigningPageOperation && (request.BodyLength < 1 || request.SigningPageLength < 1 || request.BodyLength > request.Length || request.SigningPageLength != request.Length-request.BodyLength) {
@@ -439,6 +578,12 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 			result, err = cleanPDF("probe", "application/pdf", fixture.Bytes())
 			if err == nil {
 				response.Pages, err = pageCountInProcess(result.Bytes)
+				if err == nil {
+					err = probeManualOperationsV1(result.Bytes)
+				}
+				if err == nil {
+					response.ManualOperations = pdfManualOperationsCapabilityV1
+				}
 			}
 		}
 	case "clean":
@@ -452,6 +597,46 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 		response.Pages, err = pageCountInProcess(raw)
 		if err == nil && response.Pages > MaxPDFPages {
 			err = ErrTooManyPages
+		}
+	case pdfManualInspectOperation:
+		var geometry PDFManualGeometry
+		geometry, err = manualGeometryInProcess(raw)
+		if err == nil {
+			body, err = json.Marshal(geometry)
+			if len(body) > manualMetadataLimit {
+				err = ErrPDFManualOverlay
+			}
+		}
+	case pdfManualOverlayOperation:
+		var result PDFManualOverlayResult
+		result, err = manualOverlayInProcess(raw, request.ManualMetadataLength)
+		if err == nil {
+			response.Report, response.ManualOverlay = &result.Report, &result.Overlay
+			body = result.Bytes
+		}
+	case pdfManualFragmentOperation:
+		var admission PDFManualFragmentAdmission
+		admission, err = manualFragmentInProcess(raw, request.ManualMetadataLength)
+		if err == nil {
+			body, err = json.Marshal(admission)
+			if len(body) > manualMetadataLimit {
+				err = ErrPDFManualFragment
+			}
+		}
+	case pdfManualLayersOperation:
+		var result PDFManualLayersResult
+		result, err = manualLayersInProcess(raw, request.ManualMetadataLength)
+		if err == nil {
+			response.Report, response.ManualLayers = &result.Report, &result.Layers
+			body = result.Bytes
+		}
+	case pdfProviderOverlayOperation:
+		var result PDFProviderOverlayResult
+		b, s := request.BodyLength, request.SignatureLength
+		result, err = providerOverlayInProcess(request.Asset, raw[:b], raw[b:b+s], raw[b+s:], *request.ProviderBindings)
+		if err == nil {
+			response.Report, response.ProviderOverlay = &result.Report, &result.Overlay
+			body = result.Bytes
 		}
 	case pdfComposeSigningPageOperation:
 		var result PDFCompositionResult
@@ -469,13 +654,21 @@ func ServePDFWorker(input io.Reader, output io.Writer) error {
 			response.Error = "too-many-pages"
 		case errors.Is(err, ErrActivePDFContent):
 			response.Error = "active-content"
+		case errors.Is(err, ErrPDFProviderOverlay):
+			response.Error = providerOverlayErrorCode(err)
 		case errors.Is(err, ErrPDFSigningPageInvalid):
 			response.Error = "invalid-signing-page"
+		case errors.Is(err, ErrPDFManualLayers):
+			response.Error = "invalid-manual-layers"
+		case errors.Is(err, ErrPDFManualFragment):
+			response.Error = "invalid-manual-fragment"
+		case errors.Is(err, ErrPDFManualOverlay):
+			response.Error = "invalid-manual-overlay"
 		default:
 			response.Error = "invalid-pdf"
 		}
 		body = nil
-		response.Pages, response.Report, response.Composition = 0, nil, nil
+		response.Pages, response.Report, response.Composition, response.ProviderOverlay, response.ManualOverlay, response.ManualLayers, response.ManualOperations = 0, nil, nil, nil, nil, nil, ""
 	}
 	response.Length = len(body)
 	header, err := json.Marshal(response)

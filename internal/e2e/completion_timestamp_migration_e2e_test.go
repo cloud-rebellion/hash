@@ -20,12 +20,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pressly/goose/v3"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // Migration 00059 refuses to guess the timestamp already signed by an older
@@ -43,7 +41,7 @@ func TestCompletionTimestampMigrationCutoverAndRollbackGuardsE2E(t *testing.T) {
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
 
-	must(t, mdb.RunMigrationsUpTo(migConn, 58), "migrate scratch database to pre-completion-timestamp version 58")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 58), "migrate scratch database to pre-completion-timestamp version 58")
 	historicalID := seedDocument(t, ctx, pool, "completion timestamp historical")
 	inFlightID := seedDocument(t, ctx, pool, "completion timestamp in flight")
 	historicalCompletedAt := time.Date(2026, 8, 30, 9, 8, 7, 654321000, time.UTC)
@@ -54,7 +52,7 @@ func TestCompletionTimestampMigrationCutoverAndRollbackGuardsE2E(t *testing.T) {
 	_, err = pool.Exec(ctx, `UPDATE documents SET status = 'finalizing' WHERE id = $1`, inFlightID)
 	must(t, err, "seed older in-flight finalization")
 
-	err = mdb.RunMigrationsUpTo(migConn, 59)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 59)
 	if err == nil || !strings.Contains(err.Error(), "in-flight finalization") {
 		t.Fatalf("migration 00059 with active finalization = %v, want explicit inventory refusal", err)
 	}
@@ -89,14 +87,14 @@ func TestCompletionTimestampMigrationCutoverAndRollbackGuardsE2E(t *testing.T) {
 		path.Join(preCutoverBase, "audit-payload-"+hex.EncodeToString(preCutoverDigest[:])+".txt"),
 		path.Join(preCutoverBase, "audit-signature-"+hex.EncodeToString(preCutoverDigest[:])+".txt"))
 	must(t, err, "seed orphaned pre-cutover finalization intent")
-	err = mdb.RunMigrationsUpTo(migConn, 59)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 59)
 	if err == nil || !strings.Contains(err.Error(), "in-flight finalization") {
 		t.Fatalf("migration 00059 with active intent = %v, want explicit inventory refusal", err)
 	}
 	assertAppliedMigrationVersion(t, ctx, pool, 58)
 	_, err = pool.Exec(ctx, `DELETE FROM document_finalization_intents WHERE document_id=$1`, inFlightID)
 	must(t, err, "drain older finalization intent inventory")
-	must(t, mdb.RunMigrationsUpTo(migConn, 59), "retry completion timestamp migration after drain")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 59), "retry completion timestamp migration after drain")
 	assertAppliedMigrationVersion(t, ctx, pool, 59)
 
 	var historicalBound bool
@@ -305,11 +303,7 @@ func TestCompletionTimestampMigrationCutoverAndRollbackGuardsE2E(t *testing.T) {
 	// Even after normal publication deletes the durable intent, rolling back
 	// would lose the provenance required to distinguish this bound completion
 	// from historical evidence. The real Goose down path must be one-way now.
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
-	err = goose.DownTo(migConn, "../db/migrations", 58)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 58)
 	if err == nil || !strings.Contains(err.Error(), "bound evidence has been completed") {
 		t.Fatalf("migration 00059 down after a bound completion = %v, want one-way refusal", err)
 	}
@@ -337,7 +331,7 @@ func TestCompletionTimestampMigrationCleanDownReapplyPreservesClassificationE2E(
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
 
-	must(t, mdb.RunMigrationsUpTo(migConn, 58), "migrate clean rollback database to version 58")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 58), "migrate clean rollback database to version 58")
 	historicalID := seedDocument(t, ctx, pool, "completion timestamp clean rollback historical")
 	activeID := seedDocument(t, ctx, pool, "completion timestamp clean rollback active")
 	historicalCompletedAt := time.Date(2026, 8, 29, 6, 5, 4, 321000000, time.UTC)
@@ -346,15 +340,11 @@ func TestCompletionTimestampMigrationCleanDownReapplyPreservesClassificationE2E(
 		`UPDATE documents SET status = 'completed', completed_at = $2 WHERE id = $1`,
 		historicalID, historicalCompletedAt)
 	must(t, err, "seed clean-rollback historical completion")
-	must(t, mdb.RunMigrationsUpTo(migConn, 59), "apply completion timestamp migration before clean rollback")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 59), "apply completion timestamp migration before clean rollback")
 	assertCompletionClassifications(t, ctx, pool, historicalID, activeID, historicalCompletedAt)
 	assertLegacyEnvelopeCompletionClassification(t, ctx, pool, legacyEnvelopeID, legacyChildID, legacyEnvelopeAt, legacyChildAt)
 
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
-	must(t, goose.DownTo(migConn, "../db/migrations", 58), "clean rollback completion timestamp migration")
+	must(t, mdb.RunMigrationsDownToContext(ctx, migConn, 58), "clean rollback completion timestamp migration")
 	assertAppliedMigrationVersion(t, ctx, pool, 58)
 	var completionColumnAbsent bool
 	must(t, pool.QueryRow(ctx,
@@ -367,7 +357,7 @@ func TestCompletionTimestampMigrationCleanDownReapplyPreservesClassificationE2E(
 		t.Fatal("clean migration 00059 rollback left completion provenance columns behind")
 	}
 
-	must(t, mdb.RunMigrationsUpTo(migConn, 59), "reapply completion timestamp migration after clean rollback")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 59), "reapply completion timestamp migration after clean rollback")
 	assertAppliedMigrationVersion(t, ctx, pool, 59)
 	assertCompletionClassifications(t, ctx, pool, historicalID, activeID, historicalCompletedAt)
 	assertLegacyEnvelopeCompletionClassification(t, ctx, pool, legacyEnvelopeID, legacyChildID, legacyEnvelopeAt, legacyChildAt)
@@ -388,7 +378,7 @@ func TestCompletionTimestampFollowsArticle13EnvelopeAndSignatureHighWatersE2E(t 
 	defer cleanup()
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
-	must(t, mdb.RunMigrationsUpTo(migConn, 60), "migrate completion chronology database to pre-epoch version 60")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 60), "migrate completion chronology database to pre-epoch version 60")
 
 	parentID := seedDocument(t, ctx, pool, "completion chronology envelope")
 	_, err := pool.Exec(ctx, `UPDATE documents SET is_envelope=TRUE WHERE id=$1`, parentID)
@@ -423,7 +413,7 @@ func TestCompletionTimestampFollowsArticle13EnvelopeAndSignatureHighWatersE2E(t 
 		must(t, err, "seed active completion chronology document")
 		appendArticle13SendEvent(t, ctx, pool, item.id, article13MarkerPayload(t, item.sentAt))
 	}
-	must(t, mdb.RunMigrationsUpTo(migConn, 61), "apply Article 13 epoch migration to future envelope chronology")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 61), "apply Article 13 epoch migration to future envelope chronology")
 	assertAppliedMigrationVersion(t, ctx, pool, 61)
 
 	signatureAt := childTwoSentAt.Add(3 * time.Hour)
@@ -439,7 +429,7 @@ func TestCompletionTimestampFollowsArticle13EnvelopeAndSignatureHighWatersE2E(t 
 		imageDigest[:], signatureAt)
 	must(t, err, "seed future signature high-water")
 
-	claimed, err := generated.New(pool).BeginDocumentFinalization(ctx, generated.BeginDocumentFinalizationParams{
+	claimed, err := newHistoricalFamilySQL62(t, pool).BeginDocumentFinalization(ctx, generated.BeginDocumentFinalizationParams{
 		RetentionYears: 7,
 		ID:             parentID,
 		OrgID:          orgID,
@@ -466,22 +456,29 @@ func TestCompletionTimestampFollowsArticle13EnvelopeAndSignatureHighWatersE2E(t 
 	}
 }
 
-// A child-addressed mutation owns the child row lock until its comment and
-// audit event commit. The family claim must wait for that lock before it
-// allocates the completion high-water, then atomically freeze every child to
-// the root's exact completion and retention commitments. A fresh child comment
-// must observe finalizing and fail without adding a post-high-water row.
+// This historical SQL60-62 fixture proves that a child transaction drains
+// before the canonical family freeze allocates its high-water, and every child
+// inherits the root's exact commitments. Genuine current application comment
+// and standalone-child refusal are covered by the native handler family test.
 func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T) {
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL to run")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	pool, cleanup := scratchDatabase(t, ctx, dsn)
-	defer cleanup()
+	freezeJoinConfirmed := true
+	defer func() {
+		if !freezeJoinConfirmed {
+			t.Error("unjoined historical worker: scratch pool retained for enclosing owned-fixture teardown")
+			return
+		}
+		cleanup()
+	}()
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
-	must(t, mdb.RunMigrationsUpTo(migConn, 60), "migrate family-freeze database to pre-epoch version 60")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 60), "migrate family-freeze database to pre-epoch version 60")
 
 	parentID := seedDocument(t, ctx, pool, "family freeze envelope")
 	_, err := pool.Exec(ctx, `UPDATE documents SET is_envelope=TRUE WHERE id=$1`, parentID)
@@ -501,9 +498,9 @@ func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T)
 		must(t, err, "seed active family-freeze member")
 		appendArticle13SendEvent(t, ctx, pool, id, article13MarkerPayload(t, memberSentAt))
 	}
-	must(t, mdb.RunMigrationsUpTo(migConn, 62), "apply Article 13 and inbox migrations to family-freeze database")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 62), "apply Article 13 and inbox migrations to family-freeze database")
 
-	q := generated.New(pool)
+	q := newHistoricalFamilySQL62(t, pool)
 	candidates, err := q.GetStrandedDocuments(ctx, 50)
 	must(t, err, "select active stranded roots")
 	if len(candidates) != 0 {
@@ -512,9 +509,13 @@ func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T)
 
 	mutationTx, err := pool.Begin(ctx)
 	must(t, err, "begin child mutation")
-	defer func() { _ = mutationTx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		_ = mutationTx.Rollback(rollbackCtx)
+	}()
 	mutationQ := generated.New(mutationTx)
-	lockedChild, err := mutationQ.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: childOneID, OrgID: orgID})
+	lockedChild, err := q.WithTx(mutationTx).GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: childOneID, OrgID: orgID})
 	must(t, err, "lock child for mutation")
 	if lockedChild.Status != "in_progress" {
 		t.Fatalf("child mutation locked status %q, want in_progress", lockedChild.Status)
@@ -534,77 +535,131 @@ func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T)
 	})
 	must(t, err, "append child comment event in mutation")
 
-	rootLocked := make(chan struct{})
-	freezeResult := make(chan error, 1)
-	go func() {
-		freezeTx, beginErr := pool.Begin(ctx)
-		if beginErr != nil {
-			freezeResult <- beginErr
+	// Allocate both transactions and register joined cleanup before launching.
+	// The observer uses an independent third connection and the exact waiter,
+	// blocker and canonical child-lock query; elapsed time is not a lock proof.
+	freezeTx, err := pool.Begin(ctx)
+	must(t, err, "begin family freeze transaction")
+	freezePID := freezeTx.Conn().PgConn().PID()
+	freezeWire := freezeTx.Conn().PgConn().Conn()
+	mutationPID := mutationTx.Conn().PgConn().PID()
+	joinUntil := time.Now().Add(7 * time.Second)
+	done := make(chan struct{})
+	var freezeErr error
+	freezeJoinConfirmed = false
+	defer func() {
+		cancel()
+		softUntil := joinUntil.Add(-time.Second)
+		rollbackCtx, stop := context.WithDeadline(context.Background(), softUntil)
+		_ = mutationTx.Rollback(rollbackCtx)
+		stop()
+		select {
+		case <-done:
+			freezeJoinConfirmed = true
 			return
+		default:
 		}
-		defer func() { _ = freezeTx.Rollback(ctx) }()
-		q := generated.New(freezeTx)
-		root, lockErr := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: parentID, OrgID: orgID})
-		if lockErr != nil {
-			freezeResult <- lockErr
+		softTimer := time.NewTimer(max(time.Until(softUntil), time.Nanosecond))
+		select {
+		case <-done:
+			softTimer.Stop()
+			freezeJoinConfirmed = true
 			return
+		case <-softTimer.C:
 		}
-		close(rootLocked)
-		listed, listErr := q.ListEnvelopeChildren(ctx, generated.ListEnvelopeChildrenParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: parentID, Valid: true}, OrgID: orgID,
-		})
-		if listErr != nil {
-			freezeResult <- listErr
-			return
+		// net.Conn supports concurrent Close. Interrupt only the physical wire;
+		// the worker retains exclusive ownership of every pgx transaction call.
+		_ = freezeWire.Close()
+		hardTimer := time.NewTimer(max(time.Until(joinUntil), time.Nanosecond))
+		defer hardTimer.Stop()
+		select {
+		case <-done:
+			freezeJoinConfirmed = true
+		case <-hardTimer.C:
+			t.Error("historical freeze worker did not join within original absolute budget")
 		}
-		sort.Slice(listed, func(i, j int) bool { return listed[i].ID.String() < listed[j].ID.String() })
-		for _, child := range listed {
-			if _, lockErr = q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: child.ID, OrgID: orgID}); lockErr != nil {
-				freezeResult <- lockErr
-				return
-			}
-		}
-		claimed, claimErr := q.BeginDocumentFinalization(ctx, generated.BeginDocumentFinalizationParams{
-			RetentionYears: 7, ID: root.ID, OrgID: root.OrgID,
-		})
-		if claimErr != nil {
-			freezeResult <- claimErr
-			return
-		}
-		frozen, freezeErr := q.BeginEnvelopeChildrenFinalization(ctx, generated.BeginEnvelopeChildrenFinalizationParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: parentID, Valid: true}, OrgID: orgID,
-		})
-		if freezeErr != nil {
-			freezeResult <- freezeErr
-			return
-		}
-		if len(frozen) != len(listed) {
-			freezeResult <- errors.New("family freeze returned a partial child set")
-			return
-		}
-		for _, child := range frozen {
-			if child.Status != "finalizing" || !child.CompletionEffectiveAtBound ||
-				!child.CompletionEffectiveAt.Time.Equal(claimed.CompletionEffectiveAt.Time) ||
-				!child.FinalizationRetainUntil.Time.Equal(claimed.FinalizationRetainUntil.Time) {
-				freezeResult <- errors.New("family freeze returned divergent child commitments")
-				return
-			}
-		}
-		freezeResult <- freezeTx.Commit(ctx)
 	}()
-
-	<-rootLocked
-	select {
-	case freezeErr := <-freezeResult:
-		t.Fatalf("family freeze bypassed held child mutation lock: %v", freezeErr)
-	case <-time.After(100 * time.Millisecond):
+	go func() {
+		defer close(done)
+		defer func() {
+			rollbackCtx, stop := context.WithDeadline(context.Background(), joinUntil)
+			defer stop()
+			_ = freezeTx.Rollback(rollbackCtx)
+		}()
+		freezeErr = func() error {
+			q := q.WithTx(freezeTx)
+			root, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: parentID, OrgID: orgID})
+			if err != nil {
+				return err
+			}
+			listed, err := q.ListEnvelopeChildren(ctx, generated.ListEnvelopeChildrenParams{
+				ParentEnvelopeID: pgtype.UUID{Bytes: parentID, Valid: true}, OrgID: orgID,
+			})
+			if err != nil {
+				return err
+			}
+			sort.Slice(listed, func(i, j int) bool { return listed[i].ID.String() < listed[j].ID.String() })
+			for _, child := range listed {
+				if _, err = q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: child.ID, OrgID: orgID}); err != nil {
+					return err
+				}
+			}
+			claimed, err := q.BeginDocumentFinalization(ctx, generated.BeginDocumentFinalizationParams{
+				RetentionYears: 7, ID: root.ID, OrgID: root.OrgID,
+			})
+			if err != nil {
+				return err
+			}
+			frozen, err := q.BeginEnvelopeChildrenFinalization(ctx, generated.BeginEnvelopeChildrenFinalizationParams{
+				ParentEnvelopeID: pgtype.UUID{Bytes: parentID, Valid: true}, OrgID: orgID,
+			})
+			if err != nil {
+				return err
+			}
+			if len(frozen) != len(listed) {
+				return errors.New("family freeze returned a partial child set")
+			}
+			for _, child := range frozen {
+				if child.Status != "finalizing" || !child.CompletionEffectiveAtBound ||
+					!child.CompletionEffectiveAt.Valid || !child.FinalizationRetainUntil.Valid ||
+					!child.CompletionEffectiveAt.Time.Equal(claimed.CompletionEffectiveAt.Time) ||
+					!child.FinalizationRetainUntil.Time.Equal(claimed.FinalizationRetainUntil.Time) {
+					return errors.New("family freeze returned divergent child commitments")
+				}
+			}
+			return freezeTx.Commit(ctx)
+		}()
+	}()
+	waitCtx, stopWait := context.WithTimeout(ctx, 2*time.Second)
+	defer stopWait()
+	for {
+		select {
+		case <-done:
+			t.Fatalf("family freeze bypassed held child mutation lock: %v", freezeErr)
+		default:
+		}
+		var blocked bool
+		must(t, pool.QueryRow(waitCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+			WHERE a.pid=$1 AND a.datname=current_database() AND a.wait_event_type='Lock'
+			AND $2::integer=ANY(pg_blocking_pids(a.pid)) AND a.query=$3)`,
+			freezePID, mutationPID, q.sql["GetDocumentForUpdate"]).Scan(&blocked), "observe exact historical child-lock wait")
+		if blocked {
+			break
+		}
+		select {
+		case <-done:
+			t.Fatalf("family freeze exited before exact lock witness: %v", freezeErr)
+		case <-waitCtx.Done():
+			t.Fatal("canonical family freeze never waited on the held child mutation")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	must(t, mutationTx.Commit(ctx), "commit child mutation before family high-water")
 	select {
-	case freezeErr := <-freezeResult:
-		must(t, freezeErr, "commit family freeze after child mutation")
-	case <-time.After(2 * time.Second):
-		t.Fatal("family freeze did not resume after child mutation committed")
+	case <-done:
+		must(t, freezeErr, "commit and join family freeze after child mutation")
+	case <-time.After(min(2*time.Second, max(time.Until(joinUntil), time.Nanosecond))):
+		t.Fatal("family freeze did not join after child mutation committed")
 	}
 
 	var effectiveAt, commentEventAt time.Time
@@ -621,24 +676,20 @@ func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T)
 	if len(candidates) != 1 || candidates[0].ID != parentID || candidates[0].ParentEnvelopeID.Valid {
 		t.Fatalf("frozen retry candidates = %+v, want only root %s", candidates, parentID)
 	}
-	engine := &sign.Engine{Pool: pool, Queries: q, Audit: logger}
-	if err := engine.FinalizeStranded(ctx, orgID, childOneID); !errors.Is(err, sign.ErrEnvelopeChildFinalization) {
-		t.Fatalf("standalone child retry error = %v, want ErrEnvelopeChildFinalization", err)
-	}
 	var childIntents int
 	must(t, pool.QueryRow(ctx, `SELECT count(*) FROM document_finalization_intents WHERE document_id IN ($1,$2)`, childOneID, childTwoID).Scan(&childIntents), "count child finalization intents")
 	if childIntents != 0 {
-		t.Fatalf("standalone child refusal created %d finalization intents", childIntents)
+		t.Fatalf("historical root-only freeze created %d child finalization intents", childIntents)
 	}
 
-	if _, err := engine.SenderComment(ctx, orgID, childOneID, senderID, "Late Sender", "must not cross the high-water"); !errors.Is(err, sign.ErrDocumentNotCommentable) {
-		t.Fatalf("post-freeze child comment error = %v, want ErrDocumentNotCommentable", err)
-	}
+	// Current-schema native post-freeze child refusal is verified by handler's
+	// TestOwnedBlockEnvelopeCommentFinalizationAndFrozenEvidenceE2E. Preserve
+	// this historical SQL60-62 freeze/drain and root-only retry selection independently.
 	var comments, commentEvents int
 	must(t, pool.QueryRow(ctx, `SELECT count(*) FROM document_comments WHERE document_id=$1`, childOneID).Scan(&comments), "count child comments after freeze")
 	must(t, pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE document_id=$1 AND kind='document.comment_posted'`, childOneID).Scan(&commentEvents), "count child comment events after freeze")
 	if comments != 1 || commentEvents != 1 {
-		t.Fatalf("post-freeze child mutation changed rows: comments=%d events=%d, want 1/1", comments, commentEvents)
+		t.Fatalf("historical SQL freeze changed drained rows: comments=%d events=%d, want 1/1", comments, commentEvents)
 	}
 }
 

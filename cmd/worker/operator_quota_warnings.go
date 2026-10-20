@@ -10,26 +10,31 @@ import (
 	"math"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
-
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Internal entitlements have no subscription row. Deduplicate their monthly
 // warnings using the committed audit event under the same org quota lock used
 // by authoring. Queue, marker and audit commit atomically without fake billing.
 func (w *worker) sendOperatorQuotaWarning(ctx context.Context, orgID uuid.UUID) {
+	w.sendOperatorQuotaWarningObserved(ctx, orgID)
+}
+func (w *worker) sendOperatorQuotaWarningObserved(ctx context.Context, orgID uuid.UUID) flarereport.JobInvocationState {
 	if w.pool == nil || w.audit == nil || !w.billing.OperatorMode() {
-		return
+		return flarereport.InvocationUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := w.queueOperatorQuotaWarning(ctx, orgID); err != nil {
 		slog.Warn("operator_quota_warning", "org_id", orgID, "err", err)
+		return flarereport.InvocationPartial
 	}
+	return flarereport.InvocationReturned
 }
 func (w *worker) queueOperatorQuotaWarning(ctx context.Context, orgID uuid.UUID) error {
 	tx, err := w.pool.Begin(ctx)

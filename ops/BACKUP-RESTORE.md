@@ -392,8 +392,9 @@ Docker volume or database.
 6. Create an empty recovery database and restore
    `postgresql/hash.pgdump` with `pg_restore --exit-on-error
    --single-transaction --no-owner --no-acl`. Run the restored
-   `tools/ops/recovery-object-inventory.sql` against it with `ON_ERROR_STOP=1`
-   and compare the result byte-for-byte to
+   `tools/ops/recovery-object-inventory.sql` against it with `ON_ERROR_STOP=1`,
+   the read-only snapshot and inventory-local JIT policy described below,
+   and unaligned, tuples-only, tab-separated output. Compare byte-for-byte to
    `postgresql/recovery-object-inventory.tsv`. Any difference fails the drill.
 7. Point the restored `tools/scripts/verify-recovery-objects.sh` at that
    isolated database and restored MinIO bucket. Inject PostgreSQL and S3
@@ -772,6 +773,22 @@ For AWS S3 itself, omit `--endpoint`. The verifier uses
 - Hash-hosted organisation and document-override logos whose stable route is
   `/branding/logo/<org UUID>.<ext>`. Truly external logo URLs are not bucket
   objects and are excluded.
+
+Inventory execution uses one read-only, repeatable-read transaction with
+`SET LOCAL jit = off`. This avoids LLVM compilation overhead from the recursive
+inventory plan without changing the query, its reference classes, or any
+database, role or connection-pool default. The setting expires on commit or
+rollback. The Go storage cutover check keeps its block-evidence gate in the same
+snapshot as the inventory.
+
+For manual `psql` inventory reads, retain `--no-psqlrc`, `ON_ERROR_STOP=1`,
+unaligned tuples-only tab-separated output, and use `--quiet --single-transaction`
+with `--command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;'`
+before `--file tools/ops/recovery-object-inventory.sql` (or `--file -` for stdin).
+Keep the canonical SQL file unchanged. Quiet mode prevents transaction command
+tags from entering the thirteen-column TSV. Apply the same wrapper to source,
+restored, and before/after-dump reads; a query error must fail the read rather
+than leave a partial inventory accepted as a complete capture.
 
 Document/template/source/final/signature rows carry their expected SHA-256 and,
 for current records, their exact expected VersionId. Content-addressed

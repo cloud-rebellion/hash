@@ -72,7 +72,7 @@ func (c *Clarifier) Clarify(ctx context.Context, in ClarifyInput) (ClarifyResult
 	if err != nil {
 		return ClarifyResult{}, fmt.Errorf("clarifier: prompt: %w", err)
 	}
-	req, err := prompt.Render(map[string]string{
+	req, err := ai.RenderPromptV1(ctx, prompt, map[string]string{
 		"Locale":             locale,
 		"ClauseText":         in.ClauseText,
 		"SurroundingContext": in.SurroundingContext,
@@ -89,6 +89,9 @@ func (c *Clarifier) Clarify(ctx context.Context, in ClarifyInput) (ClarifyResult
 		CacheKey:   ai.CacheKey(req),
 	})
 	if err != nil {
+		return ClarifyResult{}, err
+	}
+	if err := ai.PrepareFeatureResultV1(ctx, resp.Text); err != nil {
 		return ClarifyResult{}, err
 	}
 	return ClarifyResult{

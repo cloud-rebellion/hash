@@ -51,12 +51,34 @@ WITH finalizing_root AS MATERIALIZED (
                    JOIN documents member ON member.id = e.document_id
                    WHERE e.org_id = root.org_id
                      AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(c.created_at) + interval '1 microsecond'
+                   FROM document_comments c
+                   JOIN documents member ON member.id = c.document_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(v.created_at) + interval '1 microsecond'
+                   FROM document_versions v
+                   JOIN documents member ON member.id = v.document_id AND member.org_id = v.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(p.updated_at) + interval '1 microsecond'
+                   FROM document_proposals p
+                   JOIN documents member ON member.id = p.document_id AND member.org_id = p.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
                ), '-infinity'::timestamptz)
            ) AS effective_at
     FROM finalizing_root root
 )
 UPDATE documents AS target
 SET status = 'finalizing',
+    participant_report_schema = 'hash-participant-report-v2',
     completion_effective_at_bound = TRUE,
     completion_effective_at = COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
     -- Object Lock timestamps have whole-second precision. Round upward after
@@ -77,7 +99,7 @@ WHERE target.id = lifecycle_clock.id
   AND target.status = 'in_progress'
   AND target.sent_at IS NOT NULL
   AND target.deleted_at IS NULL
-RETURNING target.id, target.org_id, target.template_id, target.name, target.status, target.routing_mode, target.source_kind, target.blocks_json, target.variables_json, target.rendered_pdf_key, target.rendered_pdf_sha, target.pdf_storage_key, target.pdf_sha256, target.final_pdf_key, target.final_pdf_sha, target.audit_cert_key, target.expires_at, target.sent_at, target.completed_at, target.sender_id, target.metadata, target.created_at, target.updated_at, target.parent_envelope_id, target.envelope_position, target.is_envelope, target.metadata_redaction_report, target.routing_tier, target.negotiation_enabled, target.bilingual_target_lang, target.lawful_basis, target.deleted_at, target.default_locale, target.requires_signature, target.audit_payload_key, target.audit_payload_sha256, target.audit_signature_key, target.audit_signature_sha256, target.pdf_storage_version_id, target.rendered_pdf_version_id, target.final_pdf_version_id, target.audit_cert_sha256, target.audit_cert_version_id, target.audit_payload_version_id, target.audit_signature_version_id, target.evidence_version_pins_required, target.completion_effective_at, target.completion_effective_at_bound, target.finalization_retain_until, target.article13_notice_epoch_at, target.article13_notice_schema, target.article13_notice_epoch_v61_committed, target.html_source_json, target.html_reviewed_pdf_sha256, target.html_reviewed_by, target.html_reviewed_at, target.html_current_materialization_id, target.html_current_source_json, target.html_current_page_count, target.html_current_materialization_sequence, target.html_reviewed_materialization_id, target.html_effective_source_commitment
+RETURNING target.id, target.org_id, target.template_id, target.name, target.status, target.routing_mode, target.source_kind, target.blocks_json, target.variables_json, target.rendered_pdf_key, target.rendered_pdf_sha, target.pdf_storage_key, target.pdf_sha256, target.final_pdf_key, target.final_pdf_sha, target.audit_cert_key, target.expires_at, target.sent_at, target.completed_at, target.sender_id, target.metadata, target.created_at, target.updated_at, target.parent_envelope_id, target.envelope_position, target.is_envelope, target.metadata_redaction_report, target.routing_tier, target.negotiation_enabled, target.bilingual_target_lang, target.lawful_basis, target.deleted_at, target.default_locale, target.requires_signature, target.audit_payload_key, target.audit_payload_sha256, target.audit_signature_key, target.audit_signature_sha256, target.pdf_storage_version_id, target.rendered_pdf_version_id, target.final_pdf_version_id, target.audit_cert_sha256, target.audit_cert_version_id, target.audit_payload_version_id, target.audit_signature_version_id, target.evidence_version_pins_required, target.completion_effective_at, target.completion_effective_at_bound, target.finalization_retain_until, target.article13_notice_epoch_at, target.article13_notice_schema, target.article13_notice_epoch_v61_committed, target.html_source_json, target.html_reviewed_pdf_sha256, target.html_reviewed_by, target.html_reviewed_at, target.html_current_materialization_id, target.html_current_source_json, target.html_current_page_count, target.html_current_materialization_sequence, target.html_reviewed_materialization_id, target.html_effective_source_commitment, target.signature_fit_reserved_bytes, target.fits_index_required, target.fits_index_preparation_id, target.fits_index_storage_key, target.fits_index_version_id, target.fits_index_sha256, target.fits_index_bytes, target.signature_fit_original_payload_bytes, target.signature_fit_original_authority_bytes, target.signature_fit_original_authority_count, target.signing_admission_policy, target.signing_admission_active_id, target.signing_admission_sealed_id, target.signing_admission_count, target.signing_admission_static_bytes, target.signing_admission_ordinary_bytes, target.signing_admission_plan_bytes, target.signature_fit_request_binding_bytes, target.signature_fit_request_binding_count, target.participant_report_schema
 `
 
 type BeginDocumentFinalizationParams struct {
@@ -89,8 +111,9 @@ type BeginDocumentFinalizationParams struct {
 // The surrounding transaction holds the root row lock and has rechecked the
 // exact recipient readiness predicate. Capture one post-readiness timestamp,
 // but never let database clock rollback place completion before the durable
-// send epoch or any already-committed response/signature in the envelope
-// family. PostgreSQL timestamps have microsecond precision, so advancing each
+// send epoch or any already-committed response or retained participant-history
+// row in the envelope family. PostgreSQL timestamps have microsecond precision,
+// so advancing each
 // prior high-water by one microsecond gives a strict and representable order.
 func (q *Queries) BeginDocumentFinalization(ctx context.Context, arg BeginDocumentFinalizationParams) (*Document, error) {
 	row := q.db.QueryRow(ctx, beginDocumentFinalization, arg.RetentionYears, arg.ID, arg.OrgID)
@@ -158,6 +181,26 @@ func (q *Queries) BeginDocumentFinalization(ctx context.Context, arg BeginDocume
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }
@@ -209,7 +252,7 @@ WHERE documents.id = $13
       AND i.audit_signature_version_id = $12
       AND i.evidence_version_pins_required = TRUE
   )
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, pdf_storage_version_id, rendered_pdf_version_id, final_pdf_version_id, audit_cert_sha256, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, completion_effective_at_bound, finalization_retain_until, article13_notice_epoch_at, article13_notice_schema, article13_notice_epoch_v61_committed, html_source_json, html_reviewed_pdf_sha256, html_reviewed_by, html_reviewed_at, html_current_materialization_id, html_current_source_json, html_current_page_count, html_current_materialization_sequence, html_reviewed_materialization_id, html_effective_source_commitment, signature_fit_reserved_bytes, fits_index_required, fits_index_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes, signature_fit_original_payload_bytes, signature_fit_original_authority_bytes, signature_fit_original_authority_count, signing_admission_policy, signing_admission_active_id, signing_admission_sealed_id, signing_admission_count, signing_admission_static_bytes, signing_admission_ordinary_bytes, signing_admission_plan_bytes, signature_fit_request_binding_bytes, signature_fit_request_binding_count, participant_report_schema
 `
 
 type CompleteDocumentFinalizationParams struct {
@@ -310,6 +353,26 @@ func (q *Queries) CompleteDocumentFinalization(ctx context.Context, arg Complete
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }
@@ -328,7 +391,7 @@ INSERT INTO document_finalization_intents (
     $12, $13, $14,
     $15, $16, $17
 )
-RETURNING document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until
+RETURNING document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until, fitted_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes
 `
 
 type CreateDocumentFinalizationIntentParams struct {
@@ -397,6 +460,11 @@ func (q *Queries) CreateDocumentFinalizationIntent(ctx context.Context, arg Crea
 		&i.EvidenceVersionPinsRequired,
 		&i.CompletionEffectiveAt,
 		&i.RetainUntil,
+		&i.FittedPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
 	)
 	return &i, err
 }
@@ -420,7 +488,7 @@ func (q *Queries) DeleteDocumentFinalizationIntent(ctx context.Context, arg Dele
 }
 
 const getDocumentFinalizationIntent = `-- name: GetDocumentFinalizationIntent :one
-SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until FROM document_finalization_intents
+SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until, fitted_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes FROM document_finalization_intents
 WHERE document_id = $1 AND org_id = $2
 `
 
@@ -457,12 +525,17 @@ func (q *Queries) GetDocumentFinalizationIntent(ctx context.Context, arg GetDocu
 		&i.EvidenceVersionPinsRequired,
 		&i.CompletionEffectiveAt,
 		&i.RetainUntil,
+		&i.FittedPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
 	)
 	return &i, err
 }
 
 const getDocumentFinalizationIntentForUpdate = `-- name: GetDocumentFinalizationIntentForUpdate :one
-SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until FROM document_finalization_intents
+SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until, fitted_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes FROM document_finalization_intents
 WHERE document_id = $1 AND org_id = $2
 FOR UPDATE
 `
@@ -500,12 +573,17 @@ func (q *Queries) GetDocumentFinalizationIntentForUpdate(ctx context.Context, ar
 		&i.EvidenceVersionPinsRequired,
 		&i.CompletionEffectiveAt,
 		&i.RetainUntil,
+		&i.FittedPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
 	)
 	return &i, err
 }
 
 const listPendingDocumentFinalizations = `-- name: ListPendingDocumentFinalizations :many
-SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until FROM document_finalization_intents
+SELECT document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until, fitted_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes FROM document_finalization_intents
 ORDER BY updated_at, document_id
 LIMIT $1
 `
@@ -544,6 +622,11 @@ func (q *Queries) ListPendingDocumentFinalizations(ctx context.Context, limit in
 			&i.EvidenceVersionPinsRequired,
 			&i.CompletionEffectiveAt,
 			&i.RetainUntil,
+			&i.FittedPreparationID,
+			&i.FitsIndexStorageKey,
+			&i.FitsIndexVersionID,
+			&i.FitsIndexSha256,
+			&i.FitsIndexBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -633,7 +716,7 @@ WHERE document_id = $5
   AND audit_cert_version_id IS NULL
   AND audit_payload_version_id IS NULL
   AND audit_signature_version_id IS NULL
-RETURNING document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until
+RETURNING document_id, org_id, mode, final_pdf_key, final_pdf_sha256, audit_cert_key, audit_cert_sha256, audit_payload_key, audit_payload_sha256, audit_signature_key, audit_signature_sha256, retention_started_at, retention_completed_at, attempts, last_error, created_at, updated_at, final_pdf_version_id, audit_cert_version_id, audit_payload_version_id, audit_signature_version_id, evidence_version_pins_required, completion_effective_at, retain_until, fitted_preparation_id, fits_index_storage_key, fits_index_version_id, fits_index_sha256, fits_index_bytes
 `
 
 type PinLegacyDocumentFinalizationIntentVersionsParams struct {
@@ -683,6 +766,11 @@ func (q *Queries) PinLegacyDocumentFinalizationIntentVersions(ctx context.Contex
 		&i.EvidenceVersionPinsRequired,
 		&i.CompletionEffectiveAt,
 		&i.RetainUntil,
+		&i.FittedPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
 	)
 	return &i, err
 }

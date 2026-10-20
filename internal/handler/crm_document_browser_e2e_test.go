@@ -210,7 +210,7 @@ func TestCRMDocumentWithExternalBrowserE2E(t *testing.T) {
 	}
 	version, readErr := io.ReadAll(io.LimitReader(probe.Body, 256))
 	_ = probe.Body.Close()
-	if readErr != nil || probe.StatusCode != http.StatusOK || strings.TrimSpace(string(version)) != "8.36.0-hash.1" {
+	if readErr != nil || probe.StatusCode != http.StatusOK || strings.TrimSpace(string(version)) != "8.36.0-hash.5" {
 		t.Fatal("required exact renderer version differs")
 	}
 
@@ -666,7 +666,7 @@ func TestCRMDocumentWithExternalBrowserE2E(t *testing.T) {
 	if !reflect.DeepEqual(applyStatuses, []int{409, 409, 200, 200, 200}) || !reflect.DeepEqual(controls, []string{"set-value", "revoke", "restore-active"}) || manualRevision != 1 || PDFReview != 1 || sends != 0 || crmPeer.unexpected.Load() != 0 || crmPeer.searches.Load() < 1 || crmPeer.records.Load() < 1 || crmPeer.accounts.Load() != 4+2*(crmPeer.searches.Load()+crmPeer.records.Load()) {
 		t.Fatal("browser dispatch/control/provider inventory differs from bounded journey")
 	}
-	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "actualPostgreSQL": true, "actualRendererVersion": "8.36.0-hash.1", "mandatoryIsolatedPDFWorker": true,
+	receipt, _ := json.MarshalIndent(map[string]any{"result": "pass", "actualPostgreSQL": true, "actualRendererVersion": "8.36.0-hash.5", "mandatoryIsolatedPDFWorker": true,
 		"builtFrontend": true, "protectedSyntheticCRMClient": true, "syntheticS3Provider": true, "exactVersionedPDFReads": true,
 		"artifact_sha256": artifactHashes, "artifacts": artifactProofs, "org_id": f.org, "user_id": f.user.ID, "document_id": final.ID,
 		"content_expectations": map[string]string{"initial_value": crmDocumentBrowserInitialE2E, "applied_value": crmDocumentBrowserDriftE2E,

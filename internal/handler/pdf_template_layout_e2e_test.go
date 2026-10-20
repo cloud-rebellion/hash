@@ -21,8 +21,11 @@ import (
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -33,13 +36,106 @@ func layoutFixtureJSONE2E() json.RawMessage {
 
 func setupNamedPDFLayoutE2E(t *testing.T) (lifecycleAuthorizationFixture, *generated.Template) {
 	t.Helper()
-	f, tpl := setupDocumentCreationE2E(t, "pdf")
-	var err error
-	tpl, err = f.q.UpdatePDFTemplateFields(f.ctx, generated.UpdatePDFTemplateFieldsParams{ID: tpl.ID, OrgID: f.org, FieldsJson: layoutFixtureJSONE2E()})
+	q := newOwnedPublicReadFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, q)
+	f := q.f
+	if err := malwarescan.Configure(f.ctx, "", "development"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := malwarescan.Configure(context.Background(), "", "development"); err != nil {
+			t.Error(err)
+		}
+	})
+	request := ownedPlainRequestV1(t, q, "REST", "create_pdf_document", "", nil, fieldBrowserPDF("Synthetic named-party PDF template"))
+	request.URL.Path = "/api/v1/templates"
+	request.RequestURI = request.URL.Path
+	response := httptest.NewRecorder()
+	f.s.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("actual named-template upload=%d %s", response.Code, response.Body.String())
+	}
+	var uploaded templateResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &uploaded); err != nil || uploaded.ID == uuid.Nil {
+		t.Fatal("actual named-template upload omitted identity", err)
+	}
+	response = updateNamedPDFLayoutE2E(t, f, uploaded.ID, q.cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("actual named-template layout update=%d %s", response.Code, response.Body.String())
+	}
+	template, err := f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: uploaded.ID, OrgID: f.org})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f, tpl
+	ownedPDFTemplateExactSourceV1(t, q, template.ID)
+	ownedPlainAssertDrainedV1(t, q)
+	return f, template
+}
+func updateNamedPDFLayoutE2E(t *testing.T, f lifecycleAuthorizationFixture, id uuid.UUID, cookie string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"fields_json": layoutFixtureJSONE2E()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return submitSessionOperationE2E(f.s, http.MethodPatch, "/api/v1/templates/"+id.String(), string(raw), cookie)
+}
+
+// This PDF-layout-only factory preserves the original credential helpers and
+// explicitly supplies their actual production native source factory.
+func enableOwnedPDFLayoutMCPE2E(f lifecycleAuthorizationFixture) {
+	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Storage: f.s.Storage, Versions: versions.New(f.q), Billing: f.s.Billing, PDFCreationSessions: f.s.HTMLCreationSessions, PublicURL: f.s.PublicURL})
+}
+func namedPDFLayoutCredentialE2E(t *testing.T, f lifecycleAuthorizationFixture, transport string, expires bool) (string, uuid.UUID, time.Time) {
+	t.Helper()
+	credential, id, expiry := documentCreationCredentialE2E(t, f, transport, expires)
+	if transport == "mcp" {
+		enableOwnedPDFLayoutMCPE2E(f)
+	}
+	return credential, id, expiry
+}
+
+// Explicitly prepare only the actual custom quota-plan fixture before its
+// target routes run. No target reader repairs catalog measurements.
+func prepareNamedPDFLayoutPlanE2E(t *testing.T, f lifecycleAuthorizationFixture, slug string) {
+	t.Helper()
+	var plan uuid.UUID
+	if err := f.pool.QueryRow(f.ctx, "SELECT id FROM billing_plans WHERE slug=$1", slug).Scan(&plan); err != nil || plan == uuid.Nil {
+		t.Fatal("actual custom plan scalar identity unavailable", err)
+	} //nolint:rawsql -- scalar fixture identity only
+	owner, err := f.s.HTMLCreationSessions.ControlledMeasurePlanSourceV1(f.ctx, plan)
+	if owner != nil {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := owner.CloseV1(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if err != nil || owner == nil {
+		t.Fatal("explicit custom plan source preparation failed", err)
+	}
+	receipt, err := owner.ReceiptV1()
+	if err != nil || receipt.Kind != "plan" || receipt.SourceID != plan || receipt.OrgID != uuid.Nil || receipt.WireBytes <= 0 || receipt.ServerVersionNum != 160015 || !receipt.CreatedAt.Valid || !receipt.MeasuredAt.Valid {
+		t.Fatal("custom plan source lacks exact acknowledged M95 receipt", err)
+	}
+	owner.CloseConsumerV1()
+	cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err = owner.CloseV1(cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.CloseV1(cleanup); err != nil {
+		t.Fatal("custom plan close is not idempotent", err)
+	}
+	if err = f.s.HTMLCreationSessions.ReconcileCleanupV1(cleanup); err != nil {
+		t.Fatal(err)
+	}
+	pending := f.s.HTMLCreationSessions.PendingV1()
+	if pending.WorkSessions != 0 || pending.UnknownStarts != 0 || pending.HTMLAdmissions != 0 || pending.HTMLInputProducers != 0 || pending.CatalogMaintenance != 0 || pending.ObserverSessions != 2 {
+		t.Fatal("explicit actual custom source work was not joined", pending)
+	}
 }
 
 func layoutCreationArgsE2E(tpl *generated.Template) map[string]any {
@@ -53,7 +149,7 @@ func TestPDFLayoutInstantiationCreatesFreshPartiesAndFieldsE2E(t *testing.T) {
 	for _, transport := range []string{"rest", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
 			f, tpl := setupNamedPDFLayoutE2E(t)
-			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
+			credential, _, _ := namedPDFLayoutCredentialE2E(t, f, transport, false)
 			var previousIDs = map[uuid.UUID]bool{}
 			for i := 0; i < 2; i++ {
 				args := layoutCreationArgsE2E(tpl)
@@ -121,7 +217,7 @@ func TestPDFLayoutInstantiationRefusesStaleIncompleteAndQuotaBindingsE2E(t *test
 		for _, failure := range []string{"missing-version", "stale-version", "missing-party", "duplicate-party", "unknown-party", "bad-email", "recipient-quota"} {
 			t.Run(transport+"/"+failure, func(t *testing.T) {
 				f, tpl := setupNamedPDFLayoutE2E(t)
-				credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
+				credential, _, _ := namedPDFLayoutCredentialE2E(t, f, transport, false)
 				args := layoutCreationArgsE2E(tpl)
 				want := http.StatusBadRequest
 				switch failure {
@@ -145,9 +241,10 @@ func TestPDFLayoutInstantiationRefusesStaleIncompleteAndQuotaBindingsE2E(t *test
 						t.Fatal(err)
 					}
 					t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM billing_plans WHERE slug=$1`, slug) })
+					prepareNamedPDFLayoutPlanE2E(t, f, slug)
 					f.s.Billing = billing.NewOperator(f.q, []config.OperatorEntitlement{{OrgID: f.org, PlanSlug: slug, ReviewRef: "synthetic-layout-quota"}})
 					if transport == "mcp" {
-						enableDocumentCreationMCPE2E(f)
+						enableOwnedPDFLayoutMCPE2E(f)
 					}
 					want = http.StatusPaymentRequired
 				}
@@ -164,42 +261,57 @@ func TestPDFLayoutInstantiationRechecksTemplateAndFinalCredentialE2E(t *testing.
 		for _, wait := range []string{"updated-template", "expired-audit"} {
 			t.Run(transport+"/"+wait, func(t *testing.T) {
 				f, tpl := setupNamedPDFLayoutE2E(t)
-				credential, _, expiry := documentCreationCredentialE2E(t, f, transport, wait == "expired-audit")
+				credential, _, expiry := namedPDFLayoutCredentialE2E(t, f, transport, wait == "expired-audit")
 				before := f.snapshot(t)
 				blocked, err := f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer blocked.Rollback(context.Background())
+				if err = f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
+					t.Fatal(err)
+				}
+				var actualUpdate chan *httptest.ResponseRecorder
 				if wait == "updated-template" {
-					if _, err := f.q.WithTx(blocked).GetTemplateForUpdate(f.ctx, generated.GetTemplateForUpdateParams{ID: tpl.ID, OrgID: f.org}); err != nil {
+					// The real public writer owns its real parent UPDATE lock and fresh M97
+					// while waiting at the original org audit lock. No caller Tx/cache is used.
+					actualUpdate = make(chan *httptest.ResponseRecorder, 1)
+					cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+					raw, err := json.Marshal(map[string]any{"fields_json": layoutFixtureJSONE2E()})
+					if err != nil {
 						t.Fatal(err)
 					}
-				} else {
-					if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
-						t.Fatal(err)
-					}
+					go func() {
+						actualUpdate <- submitSessionOperationE2E(f.s, http.MethodPatch, "/api/v1/templates/"+tpl.ID.String(), string(raw), cookie)
+					}()
+					awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
 				}
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() {
 					result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, layoutCreationArgsE2E(tpl))
 				}()
-				marker, lock := "-- name: GetTemplateForShare", "transactionid"
+				marker, lock := "-- name: GetPDFTemplateSourceHeaderForShareV1", "transactionid"
 				if wait == "expired-audit" {
 					marker, lock = "pg_advisory_xact_lock", "advisory"
 				}
 				awaitSessionOperationLockE2E(t, f.ctx, f.pool, marker, lock)
 				want := http.StatusPreconditionFailed
-				if wait == "updated-template" {
-					if _, err := f.q.WithTx(blocked).UpdatePDFTemplateFields(f.ctx, generated.UpdatePDFTemplateFieldsParams{ID: tpl.ID, OrgID: f.org, FieldsJson: layoutFixtureJSONE2E()}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
+				if wait == "expired-audit" {
 					expireDocumentCreationCredentialE2E(t, f, transport, credential, expiry)
 					want = http.StatusUnauthorized
 				}
-				if err := blocked.Commit(f.ctx); err != nil {
+				if err = blocked.Commit(f.ctx); err != nil {
 					t.Fatal(err)
+				}
+				if actualUpdate != nil {
+					response := receiveSessionOperationE2E(t, actualUpdate)
+					if response.Code != http.StatusOK {
+						t.Fatalf("actual concurrent named-template update=%d %s", response.Code, response.Body.String())
+					}
+					current, err := f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: tpl.ID, OrgID: f.org})
+					if err != nil || current.Version != tpl.Version+1 {
+						t.Fatal("genuine concurrent template writer did not advance the real version", err)
+					}
 				}
 				assertDocumentCreationRefusedE2E(t, f, transport, receiveSessionOperationE2E(t, result), want, "", before)
 			})
@@ -209,36 +321,8 @@ func TestPDFLayoutInstantiationRechecksTemplateAndFinalCredentialE2E(t *testing.
 
 func setupSavePDFLayoutE2E(t *testing.T) (lifecycleAuthorizationFixture, savePDFTemplateInput) {
 	t.Helper()
-	f, peer := setupImportAuthorizationE2E(t)
-	body := fieldBrowserPDF("Synthetic reusable two-party PDF")
-	key := "org/" + f.org.String() + "/documents/layout-source.pdf"
-	peer.mu.Lock()
-	peer.objects[key] = body
-	peer.mu.Unlock()
-	digest := sha256.Sum256(body)
-	doc, err := f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Reusable PDF draft", PdfStorageKey: pgtype.Text{String: key, Valid: true}, PdfSha256: digest[:], PdfStorageVersionID: pgtype.Text{String: "import-version-1", Valid: true}, EvidenceVersionPinsRequired: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.doc = doc
-	in := savePDFTemplateInput{Name: "Reusable parties", ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)}
-	for i, role := range []string{"provider", "client"} {
-		_, hash, err := auth.MintMagicToken()
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec, err := f.q.CreateRecipient(f.ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Name: "Prior Person " + role, Email: "prior-" + role + "@example.test", Locale: "en", MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		field, err := f.q.CreateDraftField(f.ctx, generated.CreateDraftFieldParams{DocumentID: doc.ID, OrgID: f.org, RecipientID: pgtype.UUID{Bytes: rec.ID, Valid: true}, Type: "signature", Page: 1, XPct: layoutNumberE2E(int64(10 + 45*i)), YPct: layoutNumberE2E(70), WPct: layoutNumberE2E(25), HPct: layoutNumberE2E(8), Required: true, OptionsJson: []byte(`{}`)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		in.Parties = append(in.Parties, savePDFTemplateParty{RecipientID: rec.ID, Role: role, Label: strings.ToUpper(role[:1]) + role[1:]})
-		in.ExpectedFieldIDs = append(in.ExpectedFieldIDs, field.ID)
-	}
-	return f, in
+	q, input := newOwnedPDFLayoutCaptureFixtureV1(t)
+	return q.f, input
 }
 
 func layoutNumberE2E(value int64) pgtype.Numeric {
@@ -361,7 +445,7 @@ func TestPDFLayoutSaveRechecksOriginalSessionAfterParentAndAuditWaitE2E(t *testi
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
 			result := make(chan *httptest.ResponseRecorder, 1)
 			go func() { result <- submitSavePDFLayoutE2E(f, in, cookie) }()
-			marker, lock := "-- name: GetDocumentForUpdate", "transactionid"
+			marker, lock := "-- name: GetHTMLRevisionDocumentReadHeaderV1", "transactionid"
 			if wait == "audit-expiry" {
 				marker, lock = "pg_advisory_xact_lock", "advisory"
 			}
@@ -404,7 +488,7 @@ func TestPDFLayoutSaveRejectsSourceOrFieldDriftDuringInspectionE2E(t *testing.T)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			result := make(chan *httptest.ResponseRecorder, 1)
 			go func() { result <- submitSavePDFLayoutE2E(f, in, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetHTMLRevisionDocumentReadHeaderV1", "transactionid")
 			switch change {
 			case "source-version":
 				_, err = blocked.Exec(f.ctx, `UPDATE documents SET pdf_storage_version_id='unreviewed-new-version' WHERE id=$1`, f.doc.ID)
@@ -445,7 +529,7 @@ func TestPDFLayoutMaterializationAuditFailureRollsBackAllPartiesAndFieldsE2E(t *
 	for _, transport := range []string{"rest", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
 			f, tpl := setupNamedPDFLayoutE2E(t)
-			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
+			credential, _, _ := namedPDFLayoutCredentialE2E(t, f, transport, false)
 			function := "hash_layout_audit_fail_" + strings.ReplaceAll(f.org.String(), "-", "")
 			trigger := function + "_trg"
 			if _, err := f.pool.Exec(f.ctx, fmt.Sprintf(`CREATE FUNCTION "%s"() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN IF NEW.org_id='%s'::uuid AND NEW.kind='document.field_added' THEN RAISE EXCEPTION 'synthetic layout field audit failure'; END IF; RETURN NEW; END $body$`, function, f.org)); err != nil {
@@ -474,10 +558,14 @@ func TestPDFLayoutMaterializationAuditFailureRollsBackAllPartiesAndFieldsE2E(t *
 
 func TestPDFLayoutSaveRechecksOriginalSessionAfterVerifiedStorageWaitE2E(t *testing.T) {
 	f, in := setupSavePDFLayoutE2E(t)
-	peer := &importStoragePeer{objects: map[string][]byte{f.doc.PdfStorageKey.String: fieldBrowserPDF("Synthetic reusable two-party PDF")}}
+	body, err := readDocumentArtifact(f.ctx, f.s.Storage, f.doc, f.doc.PdfStorageKey.String, f.doc.PdfSha256, f.doc.PdfStorageVersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := &fieldBrowserStoragePeer{bucket: "hash-import-fixture", version: f.doc.PdfStorageVersionID.String, objects: map[string][]byte{f.doc.PdfStorageKey.String: body}, reads: make(map[string]int)}
 	entered, resume := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "layout-source.pdf") {
+		if r.Method == http.MethodGet && r.URL.Path == "/hash-import-fixture/"+f.doc.PdfStorageKey.String {
 			close(entered)
 			select {
 			case <-resume:
@@ -488,7 +576,6 @@ func TestPDFLayoutSaveRechecksOriginalSessionAfterVerifiedStorageWaitE2E(t *test
 		peer.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	var err error
 	f.s.Storage, err = storage.New(f.ctx, storage.Config{Endpoint: strings.TrimPrefix(server.URL, "http://"), Region: "us-east-1", Bucket: "hash-import-fixture", AccessKey: "synthetic-layout", SecretKey: "synthetic-layout-secret", BucketLookup: "path", AllowInsecureDevelopmentEndpoint: true, SkipTransientLifecycle: true})
 	if err != nil {
 		t.Fatal(err)

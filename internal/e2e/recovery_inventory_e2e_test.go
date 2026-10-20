@@ -13,7 +13,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	mdb "github.com/bright-interaction/hash/internal/db"
+	"github.com/bright-interaction/hash/internal/recoveryinventory"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,21 +33,35 @@ type canonicalRecoveryInventoryRow struct {
 	version             string
 	versionConflict     bool
 	legacyVersionLookup bool
+	expectedRetainUntil string
 }
 
 func readCanonicalRecoveryInventory(t *testing.T, ctx context.Context, pool *pgxpool.Pool, inventorySQL []byte) map[string]canonicalRecoveryInventoryRow {
 	t.Helper()
 	// Execute the operator inventory file unchanged. Testing a copied/reduced
 	// query would miss retention predicates or grouping drift in the real drill.
-	rows, err := pool.Query(ctx, string(inventorySQL))
+	inventoryTx, err := recoveryinventory.Begin(ctx, pool)
+	must(t, err, "begin canonical inventory snapshot")
+	defer func() { must(t, recoveryinventory.Rollback(inventoryTx), "close canonical inventory snapshot") }()
+	rows, err := inventoryTx.Query(ctx, string(inventorySQL))
 	must(t, err, "execute canonical recovery inventory")
 	defer rows.Close()
+	wantColumns := [...]string{"object_key_b64", "object_key_json", "reference_classes", "owners", "org_ids", "expected_sha256", "hash_conflict", "legal_evidence", "reference_count", "expected_version_id", "version_conflict", "legacy_version_lookup_allowed", "expected_retain_until"}
+	columns := rows.FieldDescriptions()
+	if len(columns) != len(wantColumns) {
+		t.Fatalf("canonical inventory schema has %d columns, want %d", len(columns), len(wantColumns))
+	}
+	for i, expected := range wantColumns {
+		if columns[i].Name != expected {
+			t.Fatalf("canonical inventory column %d is %q, want %q", i+1, columns[i].Name, expected)
+		}
+	}
 	result := map[string]canonicalRecoveryInventoryRow{}
 	for rows.Next() {
 		var row canonicalRecoveryInventoryRow
 		var keyB64, keyJSON string
 		must(t, rows.Scan(&keyB64, &keyJSON, &row.classes, &row.owners, &row.orgs, &row.hash, &row.hashConflict,
-			&row.legalEvidence, &row.references, &row.version, &row.versionConflict, &row.legacyVersionLookup), "scan canonical inventory row")
+			&row.legalEvidence, &row.references, &row.version, &row.versionConflict, &row.legacyVersionLookup, &row.expectedRetainUntil), "scan canonical inventory row")
 		decoded, err := base64.StdEncoding.DecodeString(keyB64)
 		must(t, err, "decode inventory exact object key")
 		must(t, json.Unmarshal([]byte(keyJSON), &row.key), "decode inventory display key")
@@ -75,7 +92,23 @@ func assertCanonicalRecoveryInventoryRow(t *testing.T, rows map[string]canonical
 }
 
 func TestCanonicalRecoveryInventoryRetainsSoftDeletedDraftObjectsE2E(t *testing.T) {
-	ctx, pool, orgID, userID := setupCollabArchiveRetentionE2E(t)
+	dsn := os.Getenv("HASH_E2E_DB_URL")
+	if dsn == "" {
+		t.Skip("set HASH_E2E_DB_URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool, cleanup := scratchDatabase(t, ctx, dsn)
+	t.Cleanup(cleanup)
+	migrationDB := stdlibConn(t, pool)
+	t.Cleanup(func() { must(t, migrationDB.Close(), "close inventory migration connection") })
+	// The whole operator inventory reads the current schema, unlike the archive
+	// expiry fixture deliberately pinned to migration72. Keep that helper historical.
+	must(t, mdb.RunMigrationsContext(ctx, migrationDB), "migrate canonical inventory fixture to current schema")
+	must(t, migrationDB.Close(), "close inventory migration connection")
+	var orgID, userID uuid.UUID
+	must(t, pool.QueryRow(ctx, `INSERT INTO orgs(name,plan) VALUES('archive retention','pro') RETURNING id`).Scan(&orgID), "retention org")
+	must(t, pool.QueryRow(ctx, `INSERT INTO users(org_id,email,name,role) VALUES($1,$2,'Owner','owner') RETURNING id`, orgID, uuid.NewString()+"@retention.test").Scan(&userID), "retention owner")
 	inventorySQL, err := os.ReadFile("../../ops/recovery-object-inventory.sql")
 	must(t, err, "read operator canonical recovery inventory")
 	inventoryDigest := sha256.Sum256(inventorySQL)
@@ -121,20 +154,22 @@ VALUES($1,$2,$3,'shared recovery objects','blocks',$4,$5,$6,$7,true)`, templateI
 	owners := []string{"document:" + docID.String(), "template:" + templateID.String()}
 	sharedOwners := strings.Join(owners, ",") // document sorts before template.
 	source := canonicalRecoveryInventoryRow{key: sourceKey, classes: "document_source_pdf,template_source_pdf", owners: sharedOwners,
-		orgs: orgID.String(), hash: hex.EncodeToString(sourceHash[:]), references: 2, version: sourcePin}
+		orgs: orgID.String(), hash: hex.EncodeToString(sourceHash[:]), references: 2, version: sourcePin, expectedRetainUntil: "-"}
 	rendered := canonicalRecoveryInventoryRow{key: renderedKey, classes: "document_rendered_pdf", owners: "document:" + docID.String(),
-		orgs: orgID.String(), hash: hex.EncodeToString(renderedHash[:]), references: 1, version: renderedPin}
+		orgs: orgID.String(), hash: hex.EncodeToString(renderedHash[:]), references: 1, version: renderedPin, expectedRetainUntil: "-"}
 	image := canonicalRecoveryInventoryRow{key: imageKey, classes: "document_block_image,template_block_image", owners: sharedOwners,
-		orgs: orgID.String(), hash: "-", references: 3, version: "-"}
+		orgs: orgID.String(), hash: "-", references: 3, version: "-", expectedRetainUntil: "-"}
 	historicalImage := canonicalRecoveryInventoryRow{key: versionImageKey, classes: "document_version_block_image", owners: "document_version:" + versionID.String(),
-		orgs: orgID.String(), hash: "-", references: 1, version: "-"}
+		orgs: orgID.String(), hash: "-", references: 1, version: "-", expectedRetainUntil: "-"}
 	before := readCanonicalRecoveryInventory(t, ctx, pool, inventorySQL)
 	if len(before) != 4 {
 		t.Fatalf("retained draft inventory contains %d objects, want four", len(before))
 	}
 	for _, expected := range []canonicalRecoveryInventoryRow{source, rendered, image, historicalImage} {
 		// Exact equality also verifies legal_evidence=false, no hash/version
-		// conflicts, and no legacy lookup for the pinned modern PDF identities.
+		// conflicts, no legacy lookup for the pinned modern PDF identities, and
+		// expected_retain_until="-": these retained drafts/templates have no legal
+		// ceremony deadline. The absence is distinct from an unread/empty column.
 		assertCanonicalRecoveryInventoryRow(t, before, expected)
 	}
 	// Shared provenance must expose conflicting hash/version identities rather
@@ -143,7 +178,7 @@ VALUES($1,$2,$3,'shared recovery objects','blocks',$4,$5,$6,$7,true)`, templateI
 	_, err = pool.Exec(ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id=$3 WHERE id=$1`, templateID, conflictingHash[:], "different-exact-version")
 	must(t, err, "seed conflicting shared source identity")
 	conflicted := readCanonicalRecoveryInventory(t, ctx, pool, inventorySQL)[sourceKey]
-	if !conflicted.hashConflict || !conflicted.versionConflict || conflicted.legalEvidence || conflicted.references != 2 || conflicted.owners != sharedOwners {
+	if !conflicted.hashConflict || !conflicted.versionConflict || conflicted.legalEvidence || conflicted.expectedRetainUntil != "-" || conflicted.references != 2 || conflicted.owners != sharedOwners {
 		t.Fatalf("conflicting shared identity was hidden: %+v", conflicted)
 	}
 	_, err = pool.Exec(ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id=$3 WHERE id=$1`, templateID, sourceHash[:], sourcePin)
@@ -164,5 +199,5 @@ VALUES($1,$2,$3,'shared recovery objects','blocks',$4,$5,$6,$7,true)`, templateI
 	if _, present := after[versionImageKey]; present {
 		t.Fatal("retired parent version image survived without a remaining owner")
 	}
-	t.Logf("canonical inventory SHA256=%s; four soft-deleted draft objects/pins/provenance verified; shared conflicts visible; parent retirement preserves two template-owned objects", hex.EncodeToString(inventoryDigest[:]))
+	t.Logf("canonical inventory SHA256=%s; exact13-column schema and four soft-deleted draft objects/pins/provenance/no-legal-deadline values verified; shared conflicts visible; parent retirement preserves two template-owned objects", hex.EncodeToString(inventoryDigest[:]))
 }

@@ -3,18 +3,18 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { FileSignature, LayoutDashboard, FileText, LayoutTemplate, Settings, ShieldCheck } from 'lucide-svelte';
-  import { installFlareBrowserCapture } from '$lib/flare-client';
+  import { installRuntimeFlareBrowserCapture } from '$lib/flare-client';
 
   let { children } = $props();
 
   let me = $state<{ email: string; role: string } | null>(null);
 
   // App chrome (the global nav) renders on the authenticated app surfaces only.
-  // The public signer ceremony (/sign), legal pages, the auth screens, and the
+  // The public signer ceremony (/sign), completed files (/completed), legal pages, the auth screens, and the
   // marketing/login root render standalone with no nav.
   const path = $derived($page.url.pathname);
   const showChrome = $derived(
-    !(path === '/' || path.startsWith('/sign') || path.startsWith('/legal') || path.startsWith('/auth'))
+    !(path === '/' || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/legal') || path.startsWith('/auth'))
   );
 
   const navItems = [
@@ -30,11 +30,7 @@
   }
 
   onMount(() => {
-    const stopFlareCapture = installFlareBrowserCapture({
-      dsn: import.meta.env.PUBLIC_FLARE_DSN,
-      environment: import.meta.env.PUBLIC_FLARE_ENVIRONMENT || 'production',
-      release: import.meta.env.PUBLIC_FLARE_RELEASE
-    });
+    const stopFlareCapture = installRuntimeFlareBrowserCapture();
 
     void (async () => {
       // Only the app surfaces need the identity; skip the probe on public pages.

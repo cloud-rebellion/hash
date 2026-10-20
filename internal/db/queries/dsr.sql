@@ -34,6 +34,24 @@ SELECT EXISTS (
 -- cannot prove complete fulfillment while any of this tenant's HTML authoring
 -- inventory exists, including archived templates and historical snapshots.
 SELECT EXISTS (
+    SELECT 1 FROM document_packages_v1 p WHERE p.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_send_attempts_v1 a WHERE a.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_responses_v1 r WHERE r.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_ordinary_finalization_preparations_v1 p WHERE p.org_id=sqlc.arg(org_id)::uuid AND (p.retain_until>=clock_timestamp() OR p.bodies_retired_at IS NULL)
+    UNION ALL
+    SELECT 1 FROM document_participant_reports_v1 r WHERE r.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_participant_report_legacy_intents_v1 r WHERE r.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_captures_v1 c WHERE c.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_package_capture_members_v1 c WHERE c.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_attachment_drafts_v1 a WHERE a.org_id = sqlc.arg(org_id)::uuid
+    UNION ALL
     SELECT 1 FROM html_template_revisions r WHERE r.org_id = sqlc.arg(org_id)::uuid
     UNION ALL
     SELECT 1 FROM templates t WHERE t.org_id = sqlc.arg(org_id)::uuid
@@ -90,13 +108,18 @@ RETURNING *;
 -- cross-tenant erasure IDOR. The JOIN + org predicate means a recipient
 -- belonging to another tenant matches 0 rows; callers treat 0 rows as a
 -- hard failure so a stale/cross-tenant id can never report "fulfilled".
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  JOIN recipients target ON target.document_id = d.id
+  WHERE target.id = sqlc.arg(id) AND d.org_id = sqlc.arg(org_id)
+  FOR UPDATE OF d
+)
 UPDATE recipients r
-SET email = $2,
-    name = $3
-FROM documents d
-WHERE r.id = $1
-  AND r.document_id = d.id
-  AND d.org_id = $4;
+SET email = sqlc.arg(email),
+    name = sqlc.arg(name)
+FROM locked_document d
+WHERE r.id = sqlc.arg(id) AND r.document_id = d.id;
 
 -- name: ExportSubjectData :many
 -- Article 15 + 20 data export: every recipient row for the supplied

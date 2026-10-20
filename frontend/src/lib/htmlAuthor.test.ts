@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { assetByteLength, blankHTMLAuthorDraft, blankHTMLContractProfile, draftFromHTMLTemplate, htmlAssetFromFile, htmlAuthorFingerprint, htmlAuthorInput } from './htmlAuthor';
 import type { HTMLAsset } from './htmlTemplate';
-import { contractTemplateFixture, signingPageTemplateFixture } from './htmlTemplate.test';
+import { contractTemplateFixture, signingPageTemplateFixture } from './htmlTemplateFixtures';
 
 function draft() {
   return { ...blankHTMLAuthorDraft(), name: 'Reusable design', html: '<p><span data-hash-value="company"></span></p><div data-hash-section="scope"></div>',

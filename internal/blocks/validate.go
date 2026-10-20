@@ -21,6 +21,10 @@ const MaxTreeBlocks = 10_000
 // before we render or persist it. Errors include the offending block id
 // when available so agents can self-correct.
 func Validate(t *Tree) error {
+	return validateTreeForSendV1(t, nil)
+}
+
+func validateTreeForSendV1(t *Tree, work *conditionalSendWorkV1) error {
 	if t == nil {
 		return fmt.Errorf("%w: tree is nil", ErrInvalidBlock)
 	}
@@ -32,10 +36,14 @@ func Validate(t *Tree) error {
 	}
 
 	seen := make(map[string]struct{})
-	return validateBlocks(t.Blocks, seen, "", 1)
+	return validateBlocksForSendV1(t.Blocks, seen, "", 1, work)
 }
 
 func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string, depth int) error {
+	return validateBlocksForSendV1(blocks, seen, parentPath, depth, nil)
+}
+
+func validateBlocksForSendV1(blocks []Block, seen map[string]struct{}, parentPath string, depth int, work *conditionalSendWorkV1) error {
 	if depth > MaxTreeDepth {
 		return fmt.Errorf("%w: block nesting exceeds %d levels", ErrInvalidBlock, MaxTreeDepth)
 	}
@@ -58,7 +66,7 @@ func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string,
 			return fmt.Errorf("%w: type=%q at %s (id=%s)", ErrUnknownType, b.Type, path, b.ID)
 		}
 
-		if err := validateForType(b); err != nil {
+		if err := validateForTypeForSendV1(b, work); err != nil {
 			return fmt.Errorf("%w at %s (id=%s): %v", ErrInvalidBlock, path, b.ID, err)
 		}
 
@@ -66,7 +74,7 @@ func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string,
 			if !b.Type.IsContainer() {
 				return fmt.Errorf("%w: type=%q at %s carries content but is not a container", ErrInvalidBlock, b.Type, path)
 			}
-			if err := validateBlocks(b.Content, seen, path, depth+1); err != nil {
+			if err := validateBlocksForSendV1(b.Content, seen, path, depth+1, work); err != nil {
 				return err
 			}
 		}
@@ -75,6 +83,10 @@ func validateBlocks(blocks []Block, seen map[string]struct{}, parentPath string,
 }
 
 func validateForType(b *Block) error {
+	return validateForTypeForSendV1(b, nil)
+}
+
+func validateForTypeForSendV1(b *Block, work *conditionalSendWorkV1) error {
 	if err := validateCanonicalPayload(b); err != nil {
 		return err
 	}
@@ -134,7 +146,7 @@ func validateForType(b *Block) error {
 		if len(b.Content) == 0 {
 			return errors.New("conditional requires at least one content block")
 		}
-		if _, err := ConditionVariableNames(expression); err != nil {
+		if _, err := conditionVariableNamesForSendV1(expression, work); err != nil {
 			return fmt.Errorf("conditional expression: %w", err)
 		}
 	case TypeRawHTML:

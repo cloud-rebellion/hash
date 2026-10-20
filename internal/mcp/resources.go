@@ -130,7 +130,7 @@ func capabilitiesPayload(s *Server) map[string]any {
 			"states": []string{"draft", "sent", "completed", "declined", "voided", "expired"},
 			"stages": []map[string]any{
 				{"stage": "author (draft)", "tools": "create_document, append_block/update_block/reorder_blocks, add_recipient, update_recipient, delete_recipient, add_signature_field, add_document_field, set_variables, bind_variable; verify with list_recipients + list_document_fields", "note": "only mutable in draft; recipients are editable up to send"},
-				{"stage": "send", "tools": "send_document", "note": "OUTWARD ACTION: emails every recipient a magic-link sign URL and freezes recipients + variables. Confirm with the human first. void_document / send_reminder manage a sent doc"},
+				{"stage": "send", "tools": "send_document", "note": "OUTWARD ACTION: queues invitations after immutable evidence sealing. Saved attachments require the exact reviewed package_send observation; status=sealing is pending, not sent. Inspect uncertain outcomes with get_document_send_attempt. Confirm with the human first. void_document / remind_recipient manage a sent doc"},
 				{"stage": "track", "tools": "get_document, list_recipients, get_document_events, document_brief prompt", "note": "poll recipient status while the ceremony runs"},
 				{"stage": "complete", "tools": "download_final_pdf, download_audit_cert (any plan); export_evidence_package + get_evidence_manifest (paid evidence_bundle)", "note": "available once status=completed; hands off the signed contract + tamper-evidence"},
 			},

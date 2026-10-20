@@ -24,18 +24,21 @@ import (
 )
 
 type changeResolutionAuthorizationFixture struct {
-	base      changeResolutionFixture
-	doc       *generated.Document
-	request   *generated.ChangeRequest
-	user      *generated.User
-	published atomic.Int32
+	base               changeResolutionFixture
+	owned              *ownedPublicReadFixtureV1
+	recipientMail      int
+	recipientMailState string
+	doc                *generated.Document
+	request            *generated.ChangeRequest
+	user               *generated.User
+	published          atomic.Int32
 }
 
 func setupChangeResolutionAuthorizationE2E(t *testing.T, role string) *changeResolutionAuthorizationFixture {
 	t.Helper()
 	paused := setupReviseAuthorizationE2E(t, role)
 	f := &changeResolutionAuthorizationFixture{
-		base: paused.changeResolutionFixture, doc: paused.doc, request: paused.request, user: paused.user,
+		base: paused.changeResolutionFixture, owned: paused.owned, doc: paused.doc, request: paused.request, user: paused.user, recipientMail: paused.recipientMail, recipientMailState: paused.recipientMailState,
 	}
 	if _, err := f.base.q.SetOrgChangeApprovalMode(f.base.ctx, generated.SetOrgChangeApprovalModeParams{ID: f.base.org, ChangeApprovalMode: "auto_apply"}); err != nil {
 		t.Fatal(err)
@@ -49,16 +52,19 @@ func setupChangeResolutionAuthorizationE2E(t *testing.T, role string) *changeRes
 }
 
 func (f *changeResolutionAuthorizationFixture) submit(approve bool, cookie string) *httptest.ResponseRecorder {
+	return f.submitContext(context.Background(), approve, cookie)
+}
+func (f *changeResolutionAuthorizationFixture) submitContext(ctx context.Context, approve bool, cookie string) *httptest.ResponseRecorder {
 	action := "deny"
 	if approve {
 		action = "approve"
 	}
-	return submitSessionOperationE2E(f.base.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/change-requests/"+f.request.ID.String()+"/"+action, "", cookie)
+	return submitSessionOperationContextE2E(ctx, f.base.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/change-requests/"+f.request.ID.String()+"/"+action, "", cookie)
 }
 
 func (f *changeResolutionAuthorizationFixture) snapshot(t *testing.T) string {
 	t.Helper()
-	return f.base.snapshot(t, f.doc.ID)
+	return f.base.snapshot(t, f.doc.ID) + "\n" + nativeNegotiationAuthorizationCaches263(t, f.owned, f.doc.ID)
 }
 
 func (f *changeResolutionAuthorizationFixture) assertUnchanged(t *testing.T, before string) {
@@ -66,6 +72,7 @@ func (f *changeResolutionAuthorizationFixture) assertUnchanged(t *testing.T, bef
 	if f.snapshot(t) != before || f.published.Load() != 0 {
 		t.Fatal("refused resolution changed document/request/history/evidence/audit/outbox or published an event")
 	}
+	f.owned.assertObserversOnlyV1(t)
 }
 
 func (f *changeResolutionAuthorizationFixture) assertCommitted(t *testing.T, approve bool, actor uuid.UUID) {
@@ -89,43 +96,49 @@ func (f *changeResolutionAuthorizationFixture) assertCommitted(t *testing.T, app
 	} else if string(doc.BlocksJson) != string(f.doc.BlocksJson) {
 		t.Fatal("authorized denial changed document content")
 	}
-	var count, actorCount, outbox int
-	if err := f.base.pool.QueryRow(f.base.ctx, `SELECT count(*),count(*) FILTER (WHERE actor_user_id=$3)
-		FROM events WHERE document_id=$1 AND payload_json->>'change_request'=$2`, f.doc.ID, f.request.ID.String(), actor).Scan(&count, &actorCount); err != nil { //nolint:rawsql -- exact canonical fixture actor and subject
+	var count, actorCount, requestCount, totalCount, outbox int
+	// Fresh requests and decisions now share the actual change_request ID.
+	// Keep the original one-decision/one-canonical-actor oracle, and prove
+	// the other same-ID row is the original public request, not an ignored event.
+	if err := f.base.pool.QueryRow(f.base.ctx, `SELECT
+		count(*) FILTER (WHERE payload_json ? 'resolution'),
+		count(*) FILTER (WHERE payload_json ? 'resolution' AND actor_user_id=$3 AND recipient_id IS NULL
+		  AND kind=$4 AND payload_json->>'resolution'=$5 AND payload_json=convert_from(payload_hashed,'UTF8')::jsonb),
+		count(*) FILTER (WHERE NOT (payload_json ? 'resolution') AND actor_user_id IS NULL AND recipient_id=$6
+		  AND kind=$4 AND payload_json->>'message'=$7 AND payload_json->>'block_id'=$8
+		  AND payload_json->>'quote'=$9 AND payload_json->>'context'=$10 AND payload_json->>'proposed'=$11
+		  AND payload_json=convert_from(payload_hashed,'UTF8')::jsonb),
+		count(*)
+		FROM events WHERE document_id=$1 AND org_id=$12 AND payload_json->>'change_request'=$2`,
+		f.doc.ID, f.request.ID.String(), actor, audit.KindChangesRequested, want, f.request.RecipientID,
+		f.request.Message, f.request.BlockID, f.request.Quote, f.request.Context, f.request.Proposed, f.base.org).
+		Scan(&count, &actorCount, &requestCount, &totalCount); err != nil { //nolint:rawsql -- exact original fixture request and canonical decision, no event excluded from total
 		t.Fatal(err)
 	}
 	if err := f.base.pool.QueryRow(f.base.ctx, `SELECT count(*) FROM email_deliveries
 		WHERE to_email IN (SELECT email FROM recipients WHERE document_id=$1)`, f.doc.ID).Scan(&outbox); err != nil { //nolint:rawsql
 		t.Fatal(err)
 	}
-	if count != 1 || actorCount != 1 || outbox != 0 || f.published.Load() != 1 {
+	if count != 1 || actorCount != 1 || outbox != f.recipientMail || f.published.Load() != 1 {
 		t.Fatalf("authorized resolution effects: events=%d canonical=%d outbox=%d published=%d", count, actorCount, outbox, f.published.Load())
 	}
+	if requestCount != 1 || totalCount != 2 {
+		t.Fatalf("resolution lost its original public request or extra same-ID event: requests=%d total=%d", requestCount, totalCount)
+	}
+
+	var mailState string
+	if err := f.base.pool.QueryRow(f.base.ctx, `SELECT coalesce(jsonb_agg(to_jsonb(ed) ORDER BY ed.id),'[]'::jsonb)::text FROM email_deliveries ed WHERE to_email IN (SELECT email FROM recipients WHERE document_id=$1)`, f.doc.ID).Scan(&mailState); err != nil || mailState != f.recipientMailState {
+		t.Fatal("resolution changed the actual preexisting invitation rows", err)
+	}
+	nativeBindingMeasurement259(t, f.owned.f, f.doc.ID)
+	f.owned.assertObserversOnlyV1(t)
 }
 
 // Correlate the observed wait with the exact synthetic blocker, rather than
 // accepting a different request's similarly named query as concurrency proof.
 func awaitChangeResolutionLockE2E(t *testing.T, f *changeResolutionAuthorizationFixture, holder pgx.Tx, query, event string) {
 	t.Helper()
-	var pid int32
-	if err := holder.QueryRow(f.base.ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(f.base.ctx, 3*time.Second)
-	defer cancel()
-	for ctx.Err() == nil {
-		var waiting bool
-		if err := f.base.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
-			WHERE datname=current_database() AND state='active' AND query LIKE $1
-			AND wait_event=$2 AND $3=ANY(pg_blocking_pids(pid)))`, "%"+query+"%", event, pid).Scan(&waiting); err != nil { //nolint:rawsql
-			t.Fatal(err)
-		}
-		if waiting {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("resolution did not wait on its exact %s %s blocker", query, event)
+	awaitNativeNegotiationLock263(t, f.owned, holder, query, event)
 }
 
 func TestChangeResolutionSessionRechecksAfterParentWaitE2E(t *testing.T) {
@@ -152,9 +165,8 @@ func TestChangeResolutionSessionRechecksAfterParentWaitE2E(t *testing.T) {
 					ttl = time.Second
 				}
 				cookie := dsrSessionCookieE2E(t, f.base.s, f.user.ID, f.user.SessionGeneration, ttl)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(approve, cookie) }()
-				awaitChangeResolutionLockE2E(t, f, blocked, "-- name: GetDocumentForUpdate", "transactionid")
+				result := nativeNegotiationHTTPJob263(t, f.base.ctx, blocked, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitContext(ctx, approve, cookie) })
+				awaitChangeResolutionLockE2E(t, f, blocked, "-- name: GetHTMLCeremonyWorkflowAccessV1", "transactionid")
 				want := http.StatusForbidden
 				switch change {
 				case "demotion":
@@ -207,8 +219,7 @@ func TestChangeResolutionSessionExpiryDuringAuditWaitRollsBackE2E(t *testing.T) 
 				t.Fatal(err)
 			}
 			cookie := dsrSessionCookieE2E(t, f.base.s, f.user.ID, f.user.SessionGeneration, time.Second)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(approve, cookie) }()
+			result := nativeNegotiationHTTPJob263(t, f.base.ctx, blocked, func(ctx context.Context) *httptest.ResponseRecorder { return f.submitContext(ctx, approve, cookie) })
 			awaitChangeResolutionLockE2E(t, f, blocked, "-- name: AcquireOrgChainLock", "advisory")
 			awaitSessionCookieExpiryE2E(t, f.base.s, cookie)
 			if err := blocked.Commit(f.base.ctx); err != nil {

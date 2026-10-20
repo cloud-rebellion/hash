@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -58,13 +59,26 @@ func (p *guardedAIProviderE2E) Complete(ctx context.Context, req ai.Request) (ai
 
 type guardedAIAppsFixture struct {
 	lifecycleAuthorizationFixture
-	provider   *guardedAIProviderE2E
-	proposalID uuid.UUID
+	provider       *guardedAIProviderE2E
+	nativeProvider ai.Provider // staff HTTP fixture only; legacy generic consumers keep provider
+	proposalID     uuid.UUID
+	baselineEvents map[uuid.UUID]string
+	owned          *ownedPublicReadFixtureV1
 }
 
 func setupGuardedAIAppsMCPE2E(t *testing.T, sent, blocking bool) guardedAIAppsFixture {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, "sender", sent, false)
+	return setupGuardedAIAppsMCPWithOwned324E2E(t, sent, blocking, newOwnedAutomationAuthorizationFixtureV1(t))
+}
+
+// The actual allocation/tracer is fixed before pool/runtime/document birth.
+// Existing default callers retain the exact original constructor and profile.
+func setupGuardedAIAppsMCPWithOwned324E2E(t *testing.T, sent, blocking bool, owned *ownedPublicReadFixtureV1) guardedAIAppsFixture {
+	t.Helper()
+	if owned == nil {
+		t.Fatal("actual owned fixture required")
+	}
+	f := setupNativeLifecycleAuthorizationWithFixture257d(t, "sender", sent, false, owned)
 	provider := &guardedAIProviderE2E{entered: make(chan ai.Request, 16)}
 	if blocking {
 		provider.release = make(chan struct{})
@@ -76,16 +90,75 @@ func setupGuardedAIAppsMCPE2E(t *testing.T, sent, blocking bool) guardedAIAppsFi
 	runtime := ai.New(f.q, shield, nil, provider)
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
 	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, PublicURL: f.s.PublicURL,
-		Clarifier: &aiapps.Clarifier{Runtime: runtime}, Negotiator: &aiapps.Negotiator{Runtime: runtime}, RiskAnalyzer: &aiapps.RiskAnalyzer{Runtime: runtime}, Bilingual: &aiapps.Bilingual{Runtime: runtime}})
-	proposal, err := f.q.InsertProposal(f.ctx, generated.InsertProposalParams{DocumentID: f.doc.ID, OrgID: f.org, ProposedBy: pgtype.UUID{Bytes: f.user.ID, Valid: true}, BlockID: "agreement", ProposalKind: "counter", ProposedText: "Reviewed original proposal", Rationale: "fixture", DiffJson: []byte(`{}`)})
-	if err != nil {
-		t.Fatal(err)
+		Clarifier: &aiapps.Clarifier{Runtime: runtime}, Negotiator: &aiapps.Negotiator{Runtime: runtime}, RiskAnalyzer: &aiapps.RiskAnalyzer{Runtime: runtime}, Bilingual: &aiapps.Bilingual{Runtime: runtime}, PDFCreationSessions: owned.runtime.SessionsV1()})
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	response := submitSessionOperationE2E(f.s, "POST", "/api/v1/documents/"+f.doc.ID.String()+"/proposals", `{"block_id":"agreement","proposal_kind":"counter","proposed_text":"Reviewed original proposal","rationale":"fixture"}`, cookie)
+	var proposal struct{ ID uuid.UUID }
+	if response.Code != 201 || json.Unmarshal(response.Body.Bytes(), &proposal) != nil || proposal.ID == uuid.Nil {
+		t.Fatal("actual native authorization parent proposal", response.Code, response.Body.String())
 	}
 	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return guardedAIAppsFixture{f, provider, proposal.ID}
+	return guardedAIAppsFixture{lifecycleAuthorizationFixture: f, provider: provider, proposalID: proposal.ID, baselineEvents: aiAppEventSnapshotE2E(t, f), owned: owned}
+}
+
+func completeGuardedAIAppsDocumentE2E(t *testing.T, f *guardedAIAppsFixture) {
+	t.Helper()
+	response := f.lifecycleAuthorizationFixture.submit("send", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	var sent sendDocumentResponse
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &sent) != nil || sent.Status != "sent" || len(sent.Links) != 1 || sent.Links[0].RecipientID != f.recipient.ID {
+		t.Fatal("actual AI terminal-fixture Send failed", response.Code, response.Body.String())
+	}
+	link, err := url.Parse(sent.Links[0].URL)
+	if err != nil || !strings.HasPrefix(link.Path, "/sign/") {
+		t.Fatal("actual AI terminal-fixture invitation absent", err)
+	}
+	result, err := ordinaryPreparationSign249(t, f.owned, strings.TrimPrefix(link.Path, "/sign/"), sent.Links[0].Name)
+	if err != nil || result == nil || !result.Completed {
+		t.Fatal("actual AI terminal-fixture signing/report failed", err)
+	}
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil || f.doc.Status != "completed" {
+		t.Fatal("actual AI terminal-fixture completion absent", err)
+	}
+	f.owned.f = f.lifecycleAuthorizationFixture
+}
+
+// Real native source/proposal birth now has its own immutable audit history.
+// Preserve every full original row while counting all later events, including
+// unexpected non-AI events. Never delete history or filter only expected kinds.
+func aiAppEventSnapshotE2E(t *testing.T, f lifecycleAuthorizationFixture) map[uuid.UUID]string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx, `SELECT e.id,encode(sha256(convert_to(to_jsonb(e)::text,'UTF8')),'hex') FROM events e WHERE e.org_id=$1`, f.org)
+	if err != nil {
+		t.Fatal("read genuine AI fixture event baseline", err)
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]string)
+	for rows.Next() {
+		var id uuid.UUID
+		var digest string
+		if err := rows.Scan(&id, &digest); err != nil {
+			t.Fatal(err)
+		}
+		result[id] = digest
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func assertAISetupEventsUnchangedE2E(t *testing.T, f guardedAIAppsFixture) {
+	t.Helper()
+	current := aiAppEventSnapshotE2E(t, f.lifecycleAuthorizationFixture)
+	for id, digest := range f.baselineEvents {
+		if current[id] != digest {
+			t.Fatal("AI action changed or removed original native setup event", id)
+		}
+	}
 }
 func (f guardedAIAppsFixture) args(tool string) map[string]any {
 	switch tool {
@@ -156,14 +229,14 @@ func TestAIAppsMCPOriginalAuthorityAfterDocumentWaitE2E(t *testing.T) {
 	for _, tool := range []string{"clarify_clause", "suggest_counter_clause", "propose_counter_clause", "set_proposal_status", "run_risk_analysis", "check_bilingual_equivalence"} {
 		for _, change := range []string{"key-delete", "scope-reduction", "demotion"} {
 			t.Run(tool+"/"+change, func(t *testing.T) {
-				f := setupGuardedAIAppsMCPE2E(t, false, false)
+				f := setupStaffAIAppsHTTP300E2E(t, false, false)
 				mint, keyID := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 				blocked := holdAuthoringDocumentMCPE2E(t, f.lifecycleAuthorizationFixture, f.doc.ID)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(f.ctx, tool, mint.Plaintext) }()
-				query := "-- name: GetDocumentForShare"
+				result, cancel, joined := guardedAIAsync264(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submit(ctx, tool, mint.Plaintext) })
+				defer guardedAICleanup264(t, blocked, cancel, joined)
+				query := "-- name: LockDocumentAIRootV1"
 				if tool == "propose_counter_clause" || tool == "set_proposal_status" {
-					query = "-- name: GetDocumentForUpdate"
+					query = "-- name: LockManualNegotiationRootV1"
 				}
 				awaitSessionOperationLockE2E(t, f.ctx, f.pool, query, "transactionid")
 				var err error
@@ -197,7 +270,7 @@ func TestAIAppsMCPProposalAuditRollbackAndActiveNegotiationE2E(t *testing.T) {
 	for _, tool := range []string{"propose_counter_clause", "set_proposal_status"} {
 		for _, sent := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/sent-%t", tool, sent), func(t *testing.T) {
-				f := setupGuardedAIAppsMCPE2E(t, sent, false)
+				f := setupStaffAIAppsHTTP300E2E(t, sent, false)
 				mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 				before := authoringMCPStateE2E(t, f.lifecycleAuthorizationFixture)
 				kind := "negotiation.proposed"
@@ -244,13 +317,13 @@ func TestAIAppsMCPProposalAuditRollbackAndActiveNegotiationE2E(t *testing.T) {
 func TestAIAppsMCPProviderExpiryRetainsTruthfulUsageAndRefusesResultE2E(t *testing.T) {
 	for _, tool := range []string{"clarify_clause", "suggest_counter_clause", "run_risk_analysis", "check_bilingual_equivalence"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupGuardedAIAppsMCPE2E(t, false, true)
+			f := setupStaffAIAppsHTTP300E2E(t, false, true)
 			mint, keyID := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 			if _, err := f.pool.Exec(f.ctx, `UPDATE api_keys SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`, keyID); err != nil {
 				t.Fatal(err)
 			} //nolint:rawsql
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(f.ctx, tool, mint.Plaintext) }()
+			result, cancel, joined := guardedAIAsync264(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return f.submit(ctx, tool, mint.Plaintext) })
+			defer guardedAICleanup264(t, nil, cancel, joined)
 			req := awaitAIProviderE2E(t, f.provider)
 			if strings.Contains(req.User, "alice@example.com") || strings.Contains(req.User, "Lifecycle signer") {
 				t.Fatal("retained adapter lost Shield or recipient PII context")
@@ -264,7 +337,7 @@ func TestAIAppsMCPProviderExpiryRetainsTruthfulUsageAndRefusesResultE2E(t *testi
 			if strings.Contains(w.Body.String(), "Reviewed AI suggestion") {
 				t.Fatal("expired request disclosed result")
 			}
-			assertAIReceiptCostE2E(t, f, 2)
+			assertStaffAIHTTPReceiptCost300E2E(t, f, 2)
 		})
 	}
 }
@@ -278,8 +351,9 @@ func assertAIReceiptCostE2E(t *testing.T, f guardedAIAppsFixture, eventCount int
 	if err := f.pool.QueryRow(f.ctx, `SELECT a.id,a.input_tokens,a.output_tokens,a.actor_user_id,a.document_id,a.provider,a.model,a.shield_active FROM ai_completion_audit a JOIN events e ON e.id=a.id AND e.org_id=a.org_id AND e.document_id=a.document_id AND e.actor_user_id=a.actor_user_id AND e.kind='ai.requested' WHERE a.org_id=$1`, f.org).Scan(&id, &in, &out, &actor, &doc, &provider, &model, &active); err != nil || in != 23 || out != 11 || actor != f.user.ID || doc != f.doc.ID || provider != f.provider.Name() || model != f.provider.Model() || !active {
 		t.Fatalf("truthful receipt-linked usage invalid: %s %d %d %v", id, in, out, err)
 	} //nolint:rawsql
-	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count != eventCount {
-		t.Fatalf("AI request/cost/result event count=%d want%d err%v", count, eventCount, err)
+	assertAISetupEventsUnchangedE2E(t, f)
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count-len(f.baselineEvents) != eventCount {
+		t.Fatalf("AI request/cost/result event count=%d want%d err%v", count-len(f.baselineEvents), eventCount, err)
 	} //nolint:rawsql
 	return id
 }
@@ -287,7 +361,7 @@ func assertAIReceiptCostE2E(t *testing.T, f guardedAIAppsFixture, eventCount int
 func TestAIAppsMCPRequiredRequestResultAuditAndSuccessfulProviderE2E(t *testing.T) {
 	for _, tool := range []string{"clarify_clause", "suggest_counter_clause", "run_risk_analysis", "check_bilingual_equivalence"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupGuardedAIAppsMCPE2E(t, false, false)
+			f := setupStaffAIAppsHTTP300E2E(t, false, false)
 			mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 			before := authoringMCPStateE2E(t, f.lifecycleAuthorizationFixture)
 			drop := aiAppAuditFaultE2E(t, f, "ai.requested", false)
@@ -307,7 +381,7 @@ func TestAIAppsMCPRequiredRequestResultAuditAndSuccessfulProviderE2E(t *testing.
 				t.Fatal("result audit no-row misclassified", got)
 			}
 			drop()
-			assertAIReceiptCostE2E(t, f, 2)
+			assertStaffAIHTTPReceiptCost300E2E(t, f, 2)
 			// A new request is dispatched rather than reusing an unscoped cached result.
 			_ = fieldMCPTextE2E(t, f.submit(f.ctx, tool, mint.Plaintext), false)
 			if f.provider.calls.Load() != 2 {
@@ -317,19 +391,20 @@ func TestAIAppsMCPRequiredRequestResultAuditAndSuccessfulProviderE2E(t *testing.
 			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM ai_completion_audit WHERE org_id=$1`, f.org).Scan(&count); err != nil || count != 2 {
 				t.Fatal("second successful usage missing", err)
 			} //nolint:rawsql
-			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count != 5 {
-				t.Fatal("successful AI request/result evidence missing", count, err)
+			assertAISetupEventsUnchangedE2E(t, f)
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count-len(f.baselineEvents) != 5 {
+				t.Fatal("successful AI request/result evidence missing", count-len(f.baselineEvents), err)
 			} //nolint:rawsql
 		})
 	}
 }
 
 func TestAIAppsMCPReceiptScopeAndTerminalPrivacyGuardsE2E(t *testing.T) {
-	f := setupGuardedAIAppsMCPE2E(t, false, false)
+	f := setupStaffAIAppsHTTP300E2E(t, false, false)
 	mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 	_ = fieldMCPTextE2E(t, f.submit(f.ctx, "clarify_clause", mint.Plaintext), false)
-	request := assertAIReceiptCostE2E(t, f, 3)
-	other := setupGuardedAIAppsMCPE2E(t, false, false)
+	request := assertStaffAIHTTPReceiptCost300E2E(t, f, 3)
+	other := setupStaffAIAppsHTTP300E2E(t, false, false)
 	params := generated.InsertRequestedAICompletionAuditParams{RequestEventID: request, OrgID: f.org, DocumentID: f.doc.ID, ActorUserID: f.user.ID, Provider: "duplicate", Model: "duplicate", PromptName: "duplicate", Success: true, Error: "", TransferJurisdiction: "local"}
 	before := authoringMCPStateE2E(t, f.lifecycleAuthorizationFixture)
 	for _, change := range []string{"duplicate", "foreign-org", "foreign-document", "foreign-actor", "missing"} {
@@ -360,7 +435,7 @@ func TestAIAppsMCPReceiptScopeAndTerminalPrivacyGuardsE2E(t *testing.T) {
 	}
 	for _, state := range []string{"sealing", "finalizing", "completed", "voided", "deleted", "privacy"} {
 		t.Run(state, func(t *testing.T) {
-			f := setupGuardedAIAppsMCPE2E(t, state != "privacy" && state != "deleted" && state != "sealing", false)
+			f := setupStaffAIAppsHTTP300E2E(t, state != "privacy" && state != "deleted" && state != "sealing" && state != "completed", false)
 			mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 			if state == "privacy" {
 				if _, err := f.q.CreateDataSubjectRequest(f.ctx, generated.CreateDataSubjectRequestParams{OrgID: f.org, DocumentID: pgtype.UUID{Bytes: f.doc.ID, Valid: true}, SubjectEmail: "fixture@privacy.test", SubjectName: "Fixture", Kind: "erasure", RequestedVia: "sender", PayloadJson: []byte(`{}`)}); err != nil {
@@ -378,23 +453,20 @@ func TestAIAppsMCPReceiptScopeAndTerminalPrivacyGuardsE2E(t *testing.T) {
 				if _, err := f.q.BeginDocumentSendSealing(f.ctx, generated.BeginDocumentSendSealingParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 					t.Fatal(err)
 				}
-			} else if state == "finalizing" || state == "completed" {
+			} else if state == "completed" {
+				completeGuardedAIAppsDocumentE2E(t, &f)
+			} else if state == "finalizing" {
 				if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET status='in_progress' WHERE id=$1`, f.doc.ID); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := f.q.BeginDocumentFinalization(f.ctx, generated.BeginDocumentFinalizationParams{ID: f.doc.ID, OrgID: f.org, RetentionYears: 7}); err != nil {
 					t.Fatal(err)
 				}
-				if state == "completed" {
-					if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET status='completed',completed_at=completion_effective_at WHERE id=$1`, f.doc.ID); err != nil {
-						t.Fatal(err)
-					}
-				}
 			} else {
 				if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET status=$2 WHERE id=$1`, f.doc.ID, state); err != nil {
 					t.Fatal(err)
 				}
-			} //nolint:rawsql -- real send snapshot precedes synthetic terminal gates; no final artifact claimed
+			} //nolint:rawsql -- actual completion or Send precedes the remaining synthetic refusal-only states
 			before := authoringMCPStateE2E(t, f.lifecycleAuthorizationFixture)
 			for _, tool := range []string{"propose_counter_clause", "set_proposal_status", "clarify_clause", "run_risk_analysis"} {
 				_ = fieldMCPTextE2E(t, f.submit(f.ctx, tool, mint.Plaintext), true)
@@ -407,23 +479,28 @@ func TestAIAppsMCPReceiptScopeAndTerminalPrivacyGuardsE2E(t *testing.T) {
 }
 
 func TestAIAppsMCPProviderCancellationRetainsUsageE2E(t *testing.T) {
-	f := setupGuardedAIAppsMCPE2E(t, false, true)
+	f := setupStaffAIAppsHTTP300E2E(t, false, true)
 	mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- f.submit(ctx, "clarify_clause", mint.Plaintext) }()
+	result, requestCancel, joined := guardedAIAsync264(ctx, func(call context.Context) *httptest.ResponseRecorder {
+		return f.submit(call, "clarify_clause", mint.Plaintext)
+	})
+	defer guardedAICleanup264(t, nil, requestCancel, joined)
 	awaitAIProviderE2E(t, f.provider)
 	cancel()
 	w := receiveSessionOperationE2E(t, result)
 	if fieldMCPTextE2E(t, w, true) != "AI or negotiation operation failed" {
 		t.Fatal("cancelled AI request disclosed diagnostic")
 	}
-	assertAIReceiptCostE2E(t, f, 2)
+	// The actual HTTP response was not received before cancellation. Numeric
+	// usage is therefore 0/0, unlike the old fake that returned 23/11 on error.
+	usage := assertStaffAIHTTPNumericCost300E2E(t, f, 2, 0, 0)
+	assertStaffAIHTTPFailedUsage300E2E(t, f, usage)
 }
 
 func TestAIAppsMCPDocumentTokenOneClaimAndProposalBindingE2E(t *testing.T) {
-	f := setupGuardedAIAppsMCPE2E(t, false, false)
+	f := setupStaffAIAppsHTTP300E2E(t, false, false)
 	token, err := auth.MintDocumentAgentKey()
 	if err != nil {
 		t.Fatal(err)
@@ -442,7 +519,7 @@ func TestAIAppsMCPDocumentTokenOneClaimAndProposalBindingE2E(t *testing.T) {
 	args["block_id"] = "missing"
 	before := authoringMCPStateE2E(t, f.lifecycleAuthorizationFixture)
 	_ = fieldMCPTextE2E(t, submitAuthoringMCPE2E(f.lifecycleAuthorizationFixture, f.ctx, "propose_counter_clause", mint.Plaintext, args), true)
-	otherDoc, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Sibling proposal", BlocksJson: f.doc.BlocksJson, VariablesJson: []byte(`{}`)})
+	otherDoc, err := guardedAISiblingNative264(t, f.lifecycleAuthorizationFixture, "Sibling proposal")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +539,7 @@ func TestAIAppsMCPDocumentTokenOneClaimAndProposalBindingE2E(t *testing.T) {
 }
 
 func TestAIAppsMCPCostAuditFailureRetainsUsageAndSuppressesDiagnosticsE2E(t *testing.T) {
-	f := setupGuardedAIAppsMCPE2E(t, false, false)
+	f := setupStaffAIAppsHTTP300E2E(t, false, false)
 	mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 	drop := aiAppAuditFaultE2E(t, f, "ai.completed", false)
 	capture := &webhookLogCapture{}
@@ -474,7 +551,7 @@ func TestAIAppsMCPCostAuditFailureRetainsUsageAndSuppressesDiagnosticsE2E(t *tes
 		t.Fatal("cost audit failure disclosed result")
 	}
 	drop()
-	assertAIReceiptCostE2E(t, f, 1)
+	assertStaffAIHTTPReceiptCost300E2E(t, f, 1)
 	for _, marker := range []string{"fixture private AI upstream credential", "SQLSTATE", "Reviewed AI suggestion"} {
 		if strings.Contains(w.Body.String(), marker) || strings.Contains(capture.String(), marker) {
 			t.Fatal("private AI diagnostic/result escaped response or logs", marker)
@@ -483,7 +560,7 @@ func TestAIAppsMCPCostAuditFailureRetainsUsageAndSuppressesDiagnosticsE2E(t *tes
 }
 
 func TestAIAppsMCPUsageInsertFailureRefusesResultE2E(t *testing.T) {
-	f := setupGuardedAIAppsMCPE2E(t, false, false)
+	f := setupStaffAIAppsHTTP300E2E(t, false, false)
 	mint, _ := mintAuthoringMCPE2E(t, f.lifecycleAuthorizationFixture)
 	name := "hash_ai_usage_fault_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err := f.pool.Exec(f.ctx, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.org_id='%s'::uuid THEN RETURN NULL; END IF; RETURN NEW; END $$; CREATE TRIGGER %s BEFORE INSERT ON ai_completion_audit FOR EACH ROW EXECUTE FUNCTION %s()`, name, f.org, name, name)); err != nil {

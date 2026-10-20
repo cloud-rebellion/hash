@@ -99,16 +99,16 @@ func registerFieldTools(s *Server, d Deps) {
 				ExpectedPDFSHA256: p.ExpectedPDFSHA256, ExpectedHTMLSourceCommitment: p.ExpectedHTMLSourceCommitment,
 				IP: clientIP(r), UserAgent: r.UserAgent(),
 			}
-			row, err := engine.Create(r.Context(), actor, docID, fields.CreateInput{
+			owned, err := engine.CreateOwnedV1(r.Context(), d.PDFCreationSessions, actor, docID, fields.CreateInput{
 				RecipientID: recipientID, Type: p.Type, Page: page,
 				XPct: optionalFieldBasisPoints(p.XPct, 0), YPct: optionalFieldBasisPoints(p.YPct, 0),
 				WPct: optionalFieldBasisPoints(p.WPct, 1500), HPct: optionalFieldBasisPoints(p.HPct, 400),
 				Required: required, Label: p.Label, Options: p.Options,
 			})
 			if err != nil {
-				return nil, err
+				return owned, err
 			}
-			return fieldRowToMCP(row), nil
+			return &ownedFieldToolResultV1{value: fieldRowToMCP(owned.Field), owner: owned}, nil
 		},
 	})
 
@@ -249,4 +249,23 @@ func fieldRowToMCP(f *generated.DocumentField) map[string]any {
 		out["options"] = json.RawMessage(f.OptionsJson)
 	}
 	return out
+}
+
+// The native field/source owner survives the actual central MCP serialization,
+// including failures. A by-value public map is not independent resource credit.
+type ownedFieldToolResultV1 struct {
+	value any
+	owner *fields.OwnedFieldResultV1
+}
+
+func (r *ownedFieldToolResultV1) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(r.value)
+}
+func (r *ownedFieldToolResultV1) CloseConsumerV1() {
+	if r != nil && r.owner != nil {
+		r.owner.CloseConsumerV1()
+	}
 }

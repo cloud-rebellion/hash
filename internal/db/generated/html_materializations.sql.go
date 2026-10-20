@@ -367,7 +367,7 @@ WHERE d.id = $1 AND d.org_id = $2
     AND m.id = $4 AND m.document_id = d.id AND m.org_id = d.org_id
     AND ((m.sequence = 1 AND d.html_current_materialization_id IS NULL)
          OR m.parent_id = d.html_current_materialization_id)
-RETURNING d.id, d.org_id, d.template_id, d.name, d.status, d.routing_mode, d.source_kind, d.blocks_json, d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key, d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key, d.expires_at, d.sent_at, d.completed_at, d.sender_id, d.metadata, d.created_at, d.updated_at, d.parent_envelope_id, d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier, d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at, d.default_locale, d.requires_signature, d.audit_payload_key, d.audit_payload_sha256, d.audit_signature_key, d.audit_signature_sha256, d.pdf_storage_version_id, d.rendered_pdf_version_id, d.final_pdf_version_id, d.audit_cert_sha256, d.audit_cert_version_id, d.audit_payload_version_id, d.audit_signature_version_id, d.evidence_version_pins_required, d.completion_effective_at, d.completion_effective_at_bound, d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed, d.html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at, d.html_current_materialization_id, d.html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence, d.html_reviewed_materialization_id, d.html_effective_source_commitment
+RETURNING d.id, d.org_id, d.template_id, d.name, d.status, d.routing_mode, d.source_kind, d.blocks_json, d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key, d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key, d.expires_at, d.sent_at, d.completed_at, d.sender_id, d.metadata, d.created_at, d.updated_at, d.parent_envelope_id, d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier, d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at, d.default_locale, d.requires_signature, d.audit_payload_key, d.audit_payload_sha256, d.audit_signature_key, d.audit_signature_sha256, d.pdf_storage_version_id, d.rendered_pdf_version_id, d.final_pdf_version_id, d.audit_cert_sha256, d.audit_cert_version_id, d.audit_payload_version_id, d.audit_signature_version_id, d.evidence_version_pins_required, d.completion_effective_at, d.completion_effective_at_bound, d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed, d.html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at, d.html_current_materialization_id, d.html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence, d.html_reviewed_materialization_id, d.html_effective_source_commitment, d.signature_fit_reserved_bytes, d.fits_index_required, d.fits_index_preparation_id, d.fits_index_storage_key, d.fits_index_version_id, d.fits_index_sha256, d.fits_index_bytes, d.signature_fit_original_payload_bytes, d.signature_fit_original_authority_bytes, d.signature_fit_original_authority_count, d.signing_admission_policy, d.signing_admission_active_id, d.signing_admission_sealed_id, d.signing_admission_count, d.signing_admission_static_bytes, d.signing_admission_ordinary_bytes, d.signing_admission_plan_bytes, d.signature_fit_request_binding_bytes, d.signature_fit_request_binding_count, d.participant_report_schema
 `
 
 type ProjectHTMLDocumentMaterializationParams struct {
@@ -448,6 +448,26 @@ func (q *Queries) ProjectHTMLDocumentMaterialization(ctx context.Context, arg Pr
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }

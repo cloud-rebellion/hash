@@ -3,7 +3,7 @@
 
 // Package evidence implements the cryptographically verifiable evidence bundle.
 //
-// Builds a single PDF containing:
+// Historical schemas2/3 build a single PDF containing:
 //
 //   - The audit certificate as the visible cover.
 //   - final-pdf.pdf as the exact, byte-for-byte signed contract attachment.
@@ -14,6 +14,10 @@
 //   - manifest-public-key.pem     current export-signing key
 //   - certificate-public-key.pem  ceremony certificate's historical key
 //   - cert.ots          optional OpenTimestamps proof for manifest.json
+//
+// Fitted schema4 exports a bounded Store ZIP with the signed frozen index,
+// exact source/base/manifests/spans/packages and the core receipt artifacts.
+// It does not render or reconstruct completed evidence from mutable rows.
 //
 // Full PDF/A-3 conformance (ICC color profile, XMP /A flag, tagged
 // structure) is a follow-up: pdfcpu's PDF/A validation is incomplete in
@@ -47,6 +51,7 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/manualfit"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -64,6 +69,8 @@ type Builder struct {
 	// raw Ed25519 issuer keys. A stored certificate can predate the key used to
 	// sign a newly generated export manifest.
 	CertificateTrustedPublicKeys []string
+	// Reads immutable completed index pins; never rebuilds an index from live rows.
+	FitsIndexCommitments FitsIndexCommitmentStoreV1
 }
 
 // Narrow dependency interfaces make the fail-closed export paths testable.
@@ -103,36 +110,43 @@ type OTSAnchor interface {
 
 // Manifest is the top-level JSON every reader cross-references.
 type Manifest struct {
-	SchemaVersion                 int            `json:"schema_version"`
-	GeneratedAt                   string         `json:"generated_at"`
-	Issuer                        string         `json:"issuer"`
-	DocumentID                    string         `json:"document_id"`
-	DocumentName                  string         `json:"document_name"`
-	OrgID                         string         `json:"org_id"`
-	FinalPDFSHA256                string         `json:"final_pdf_sha256"`
-	CompletionEffectiveAt         string         `json:"completion_effective_at,omitempty"`
-	AuditCertSHA256               string         `json:"audit_cert_sha256"`
-	EventsSHA256                  string         `json:"events_sha256"`
-	VersionsSHA256                string         `json:"versions_sha256"`
-	ManifestPublicKeyPEMSHA256    string         `json:"manifest_public_key_pem_sha256"`
-	ManifestSigningKeySHA256      string         `json:"manifest_signing_key_sha256"`
-	CertificatePublicKeyPEMSHA256 string         `json:"certificate_public_key_pem_sha256"`
-	CertificateSigningKeySHA256   string         `json:"certificate_signing_key_sha256"`
-	ManifestSignature             string         `json:"manifest_signature"`
-	ManifestSigDomain             string         `json:"manifest_signature_domain"`
-	CertPayloadSHA256             string         `json:"cert_payload_sha256,omitempty"`
-	CertSignatureSHA256           string         `json:"cert_signature_sha256,omitempty"`
-	SignatureAlgorithm            string         `json:"signature_algorithm,omitempty"`
-	SignatureDomain               string         `json:"signature_domain,omitempty"`
-	QTSP                          []QTSPBlock    `json:"qtsp,omitempty"`
-	Bundle                        BundleSummary  `json:"bundle"`
-	OpenTimestamps                *AnchorSummary `json:"open_timestamps,omitempty"`
-	Notes                         string         `json:"notes,omitempty"`
+	SchemaVersion                 int                    `json:"schema_version"`
+	GeneratedAt                   string                 `json:"generated_at"`
+	Issuer                        string                 `json:"issuer"`
+	DocumentID                    string                 `json:"document_id"`
+	DocumentName                  string                 `json:"document_name"`
+	OrgID                         string                 `json:"org_id"`
+	FinalPDFSHA256                string                 `json:"final_pdf_sha256"`
+	CompletionEffectiveAt         string                 `json:"completion_effective_at,omitempty"`
+	AuditCertSHA256               string                 `json:"audit_cert_sha256"`
+	EventsSHA256                  string                 `json:"events_sha256"`
+	VersionsSHA256                string                 `json:"versions_sha256"`
+	ManifestPublicKeyPEMSHA256    string                 `json:"manifest_public_key_pem_sha256"`
+	ManifestSigningKeySHA256      string                 `json:"manifest_signing_key_sha256"`
+	CertificatePublicKeyPEMSHA256 string                 `json:"certificate_public_key_pem_sha256"`
+	CertificateSigningKeySHA256   string                 `json:"certificate_signing_key_sha256"`
+	ManifestSignature             string                 `json:"manifest_signature"`
+	ManifestSigDomain             string                 `json:"manifest_signature_domain"`
+	CertPayloadSHA256             string                 `json:"cert_payload_sha256,omitempty"`
+	CertSignatureSHA256           string                 `json:"cert_signature_sha256,omitempty"`
+	SignatureAlgorithm            string                 `json:"signature_algorithm,omitempty"`
+	SignatureDomain               string                 `json:"signature_domain,omitempty"`
+	QTSP                          []QTSPBlock            `json:"qtsp,omitempty"`
+	Bundle                        BundleSummary          `json:"bundle"`
+	OpenTimestamps                *AnchorSummary         `json:"open_timestamps,omitempty"`
+	Notes                         string                 `json:"notes,omitempty"`
+	CeremonyEpochAt               string                 `json:"ceremony_epoch_at,omitempty"`
+	FinalPDFObject                *manualfit.ObjectPinV1 `json:"final_pdf_object,omitempty"`
+	FitsIndexSHA256               string                 `json:"fits_index_sha256,omitempty"`
+	FitsIndexObject               *manualfit.ObjectPinV1 `json:"fits_index_object,omitempty"`
+	FitsIndexObjectSHA256         string                 `json:"fits_index_object_sha256,omitempty"`
+	EvidenceRetainUntil           string                 `json:"evidence_retain_until,omitempty"`
 }
 
 const (
 	LegacyManifestSchemaVersion  = 2
-	CurrentManifestSchemaVersion = 3
+	CurrentManifestSchemaVersion = 3 // frozen ordinary completion evidence
+	FittedManifestSchemaVersion  = 4
 )
 
 const evidenceManifestSignatureDomain = "hash:evidence-manifest:v1"
@@ -205,9 +219,13 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		return nil, errors.New("evidence: builder dependencies are not configured")
 	}
 
+	fitCommitment, err := b.loadCommittedFitsIndexV1(ctx, doc)
+	if err != nil {
+		return nil, err
+	}
 	// 1. Pull the exact executed contract body. The audit certificate remains
 	// separate so it can non-circularly sign this byte digest.
-	finalPDF, err := readEvidenceArtifact(ctx, b.Storage, doc, doc.FinalPdfKey.String, doc.FinalPdfSha, doc.FinalPdfVersionID)
+	finalPDF, err := readSchema4OrLegacyArtifactV1(ctx, b.Storage, doc, doc.FinalPdfKey.String, doc.FinalPdfSha, doc.FinalPdfVersionID, fitCommitment.Required, manualfit.MaxFinalPDFBytesV1)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: load final PDF: %w", err)
 	}
@@ -228,7 +246,7 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		if len(certDigest) != sha256.Size && !doc.EvidenceVersionPinsRequired {
 			certDigest = digestFromContentAddressedArtifactKey(doc.AuditCertKey.String, "audit", ".pdf")
 		}
-		cert, err := readEvidenceArtifact(ctx, b.Storage, doc, doc.AuditCertKey.String, certDigest, doc.AuditCertVersionID)
+		cert, err := readSchema4OrLegacyArtifactV1(ctx, b.Storage, doc, doc.AuditCertKey.String, certDigest, doc.AuditCertVersionID, fitCommitment.Required, manualfit.MaxCertificatePDFBytesV1)
 		if err != nil {
 			return nil, fmt.Errorf("evidence: load declared audit certificate: %w", err)
 		}
@@ -246,7 +264,7 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		!doc.AuditSignatureKey.Valid || len(doc.AuditSignatureSha256) != sha256.Size {
 		return nil, errors.New("evidence: completed document is missing content-addressed certificate sidecar commitments")
 	}
-	certPayload, err := readEvidenceArtifact(ctx, b.Storage, doc, doc.AuditPayloadKey.String, doc.AuditPayloadSha256, doc.AuditPayloadVersionID)
+	certPayload, err := readSchema4OrLegacyArtifactV1(ctx, b.Storage, doc, doc.AuditPayloadKey.String, doc.AuditPayloadSha256, doc.AuditPayloadVersionID, fitCommitment.Required, manualfit.MaxCertificatePayloadBytesV1)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: load verified certificate payload: %w", err)
 	}
@@ -254,7 +272,7 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		return nil, fmt.Errorf("%w: certificate payload does not match its content-addressed storage key", ErrArtifactIntegrity)
 	}
 	certPayloadSHA := sha256.Sum256(certPayload)
-	certSignature, err := readEvidenceArtifact(ctx, b.Storage, doc, doc.AuditSignatureKey.String, doc.AuditSignatureSha256, doc.AuditSignatureVersionID)
+	certSignature, err := readSchema4OrLegacyArtifactV1(ctx, b.Storage, doc, doc.AuditSignatureKey.String, doc.AuditSignatureSha256, doc.AuditSignatureVersionID, fitCommitment.Required, manualfit.MaxCertificateSignatureBytesV1)
 	if err != nil {
 		return nil, fmt.Errorf("evidence: load verified certificate signature: %w", err)
 	}
@@ -283,7 +301,22 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 	} else if commitments.CompletionEffectiveAt != "" {
 		return nil, fmt.Errorf("%w: legacy-unbound document unexpectedly carries a completion-effective certificate claim", ErrArtifactIntegrity)
 	}
-	documentNameSHA := sha256.Sum256([]byte(doc.Name))
+	var fittedSnapshot *manualfit.FitsArchiveSnapshotV1
+	originalDocumentName := doc.Name
+	if fitCommitment.Required {
+		if !doc.CompletionEffectiveAtBound || commitments.FitsIndexSchema != manualfit.FitsIndexSchemaV1 {
+			return nil, fmt.Errorf("%w: required fitted index is not certificate-bound", ErrArtifactIntegrity)
+		}
+		fittedSnapshot, err = b.loadCompletedFitsArchiveV1(ctx, doc, fitCommitment.Object, commitments, certPayload, certSignature, finalPDF)
+		if err != nil {
+			return nil, err
+		}
+		originalDocumentName = fittedSnapshot.Index().Index().OriginalDocumentName()
+		manifestSchemaVersion = FittedManifestSchemaVersion
+	} else if commitments.FitsIndexSchema != "" {
+		return nil, fmt.Errorf("%w: fitted certificate has no committed index pin", ErrArtifactIntegrity)
+	}
+	documentNameSHA := sha256.Sum256([]byte(originalDocumentName))
 	if commitments.DocumentID != doc.ID.String() || commitments.OrgID != doc.OrgID.String() ||
 		commitments.DocumentNameSHA256 != hex.EncodeToString(documentNameSHA[:]) {
 		return nil, fmt.Errorf("%w: signed certificate identity does not match the document record", ErrArtifactIntegrity)
@@ -302,12 +335,22 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 	if len(eventRows) != commitments.DocumentEventsCount {
 		return nil, fmt.Errorf("%w: signed certificate commits to %d document events but %d are available", ErrArtifactIntegrity, commitments.DocumentEventsCount, len(eventRows))
 	}
-	eventsJSON, eventsCommitment, eventCount, err := BuildCeremonyEventsJSON(doc.ID, eventRows)
+	var eventsJSON []byte
+	var eventsCommitment string
+	var eventCount int
+	if fitCommitment.Required {
+		eventsJSON, eventsCommitment, eventCount, err = buildSchema4CeremonyEventsJSONV1(ctx, doc.ID, eventRows)
+	} else {
+		eventsJSON, eventsCommitment, eventCount, err = BuildCeremonyEventsJSON(doc.ID, eventRows)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if eventsCommitment != commitments.DocumentEventsSHA256 || eventCount != commitments.DocumentEventsCount {
 		return nil, fmt.Errorf("%w: ceremony events do not match the signed certificate commitment", ErrArtifactIntegrity)
+	}
+	if fitCommitment.Required && int64(len(eventsJSON)) > manualfit.MaxEventsJSONBytesV1 {
+		return nil, ErrEvidenceTooLarge
 	}
 	eventsSHA := sha256.Sum256(eventsJSON)
 
@@ -319,20 +362,28 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 	if len(versionRows) > maxEvidenceVersions {
 		return nil, fmt.Errorf("%w: document %s has more than %d versions", ErrEvidenceTooLarge, doc.ID, maxEvidenceVersions)
 	}
-	type versionDelta struct {
-		VersionNo  int32                  `json:"version_no"`
-		CreatedAt  string                 `json:"created_at"`
-		CreatedVia string                 `json:"created_via"`
-		Summary    string                 `json:"summary,omitempty"`
-		Diff       []versions.BlockChange `json:"diff,omitempty"`
-	}
 	deltas := make([]versionDelta, 0, len(versionRows))
+	var versionBudget *fitsVersionsJSONBudgetV1
+	if fitCommitment.Required {
+		versionBudget, err = newFitsVersionsJSONBudgetV1(ctx, doc.ID, len(versionRows), false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var rawVersionBytes int64
 	// versionRows is newest-first; iterate so each diff compares with
 	// the previous row in chronological order.
 	for i := 0; i < len(versionRows); i++ {
 		cur := versionRows[i]
 		if cur == nil {
 			return nil, errors.New("evidence: version history returned a nil row")
+		}
+		if fitCommitment.Required {
+			n := int64(len(cur.BlockTreeJson)) + int64(len(cur.Summary)) + int64(len(cur.CreatedVia))
+			if n > manualfit.MaxVersionsJSONBytesV1-rawVersionBytes {
+				return nil, ErrEvidenceTooLarge
+			}
+			rawVersionBytes += n
 		}
 		entry := versionDelta{
 			VersionNo:  cur.VersionNo,
@@ -348,22 +399,42 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 			if prior == nil {
 				return nil, fmt.Errorf("evidence: version %d predecessor query returned nil", cur.VersionNo)
 			}
-			changes, err := versions.Diff(prior.BlockTreeJson, cur.BlockTreeJson)
+			if fitCommitment.Required && int64(len(prior.BlockTreeJson)) > manualfit.MaxVersionsJSONBytesV1 {
+				return nil, ErrEvidenceTooLarge
+			}
+			var changes []versions.BlockChange
+			if fitCommitment.Required {
+				changes, err = versions.DiffContextWithAttributeLimit(ctx, prior.BlockTreeJson, cur.BlockTreeJson, manualfit.MaxVersionsJSONBytesV1)
+			} else {
+				changes, err = versions.DiffContext(ctx, prior.BlockTreeJson, cur.BlockTreeJson)
+			}
 			if err != nil {
+				if fitCommitment.Required && errors.Is(err, versions.ErrDiffTooLarge) {
+					return nil, ErrEvidenceTooLarge
+				}
 				return nil, fmt.Errorf("evidence: diff versions %d and %d: %w", cur.VersionNo-1, cur.VersionNo, err)
 			}
 			entry.Diff = changes
 		}
+		if versionBudget != nil {
+			// Refuse this expanded entry before retaining it or computing later diffs.
+			if err := versionBudget.version(ctx, entry); err != nil {
+				return nil, err
+			}
+		}
 		deltas = append(deltas, entry)
 	}
-	versionsJSON, err := json.MarshalIndent(map[string]any{
-		"schema_version": 1,
-		"document_id":    doc.ID.String(),
-		"versions":       deltas,
-		"count":          len(deltas),
-	}, "", "  ")
+	if versionBudget != nil {
+		if err := versionBudget.finish(ctx); err != nil {
+			return nil, err
+		}
+	}
+	versionsJSON, err := marshalEvidenceVersionsJSONV1(ctx, doc.ID, deltas, fitCommitment.Required)
 	if err != nil {
 		return nil, err
+	}
+	if fitCommitment.Required && int64(len(versionsJSON)) > manualfit.MaxVersionsJSONBytesV1 {
+		return nil, ErrEvidenceTooLarge
 	}
 	versionsSHA := sha256.Sum256(versionsJSON)
 
@@ -412,7 +483,7 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		GeneratedAt:                   time.Now().UTC().Format(time.RFC3339),
 		Issuer:                        b.Issuer,
 		DocumentID:                    doc.ID.String(),
-		DocumentName:                  doc.Name,
+		DocumentName:                  originalDocumentName,
 		OrgID:                         doc.OrgID.String(),
 		FinalPDFSHA256:                hex.EncodeToString(finalSHA[:]),
 		CompletionEffectiveAt:         manifestCompletionEffectiveAt,
@@ -440,9 +511,23 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 	if len(certSignature) > 0 {
 		manifest.CertSignatureSHA256 = hex.EncodeToString(certSignatureSHA[:])
 	}
+	if fittedSnapshot != nil {
+		pin := fitCommitment.Object
+		objectSHA, err := manualfit.ObjectPinSHA256V1(pin)
+		if err != nil {
+			return nil, err
+		}
+		finalPin := fittedSnapshot.Index().Index().Binding().FinalPDF
+		manifest.FinalPDFObject = &finalPin
+		manifest.CeremonyEpochAt = doc.SentAt.Time.UTC().Format(time.RFC3339Nano)
+		manifest.FitsIndexSHA256 = fittedSnapshot.Index().SHA256()
+		manifest.FitsIndexObject = &pin
+		manifest.FitsIndexObjectSHA256 = objectSHA
+		manifest.EvidenceRetainUntil = commitments.EvidenceRetainUntil
+	}
 	// 7. Optional OpenTimestamps anchor on the manifest's own SHA-256.
 	var otsBytes []byte
-	if b.OTSAnchor != nil {
+	if b.OTSAnchor != nil && fittedSnapshot == nil {
 		manifestForAnchor, err := json.Marshal(manifest)
 		if err != nil {
 			return nil, err
@@ -471,6 +556,13 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 		return nil, err
 	}
 
+	if fittedSnapshot != nil {
+		return buildSchema4ZIPV1(ctx, doc.ID, manifest, fittedSnapshot, []schema4AttachmentV1{
+			{Name: "manifest.json", Raw: manifestJSON}, {Name: "events.json", Raw: eventsJSON}, {Name: "versions.json", Raw: versionsJSON},
+			{Name: "manifest-public-key.pem", Raw: manifestPubKeyBytes}, {Name: "certificate-public-key.pem", Raw: certificatePubKeyBytes},
+			{Name: "audit-cert.pdf", Raw: certPDF}, {Name: "audit-cert-payload.txt", Raw: certPayload}, {Name: "audit-cert-signature.txt", Raw: certSignature},
+		})
+	}
 	// 8. Materialize attachments to a temp dir + run pdfcpu's
 	// AddAttachmentsFile. pdfcpu v0.12 requires file paths; we keep the
 	// temp dir on disk for the duration of the call and clean up after.

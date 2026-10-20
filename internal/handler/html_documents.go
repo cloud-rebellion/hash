@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -23,10 +24,11 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
-	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/ownedaudit"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -79,6 +81,9 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
+	if !s.requireHTMLAuthoringRuntimeV1(w) {
+		return
+	}
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
 		return
@@ -87,8 +92,16 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 		writeError(w, 400, "invalid template id")
 		return
 	}
+	r, closeInput, inputOK := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLDocumentCreationInputV1)
+	if !inputOK {
+		return
+	}
+	defer closeInput()
 	var in htmlDocumentInput
 	if err := decodeSignerJSON(r, &in); err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
 		writeError(w, 400, err.Error())
 		return
 	}
@@ -130,6 +143,7 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if committed != nil {
+			defer committed.closeOwnedWriterV1()
 			writeJSON(w, 200, committed.response())
 			return
 		}
@@ -161,11 +175,13 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 		s.writeCRMTemplateError(w, err)
 		return
 	}
+	defer admission.closeOwnedV1()
 	result, err := s.instantiateHTMLDocument(ctx, actor, id, in, digest, expires, admission, inputDigest)
 	if err != nil {
 		s.writeHTMLCreationError(w, err)
 		return
 	}
+	defer result.closeOwnedWriterV1()
 	status := http.StatusCreated
 	if result.replayed {
 		status = http.StatusOK
@@ -174,6 +190,10 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) writeHTMLCreationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pdfadmission.ErrHTMLCreationWriterV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) || errors.Is(err, pdfadmission.ErrHTMLAuditEventV1) {
+		writeError(w, 503, "HTML document creation is temporarily unavailable")
+		return
+	}
 	if errors.Is(err, errHTMLCreationAudit) {
 		writeError(w, 500, "document creation audit unavailable")
 		return
@@ -210,12 +230,13 @@ func (s *Server) writeHTMLCreationError(w http.ResponseWriter, err error) {
 // The saved origin is captured in a short transaction and rechecked in the
 // final transaction. Renderer, worker and storage operations occur between them.
 type preparedHTMLDraft struct {
-	revision *generated.HtmlTemplateRevision
-	content  htmlmaster.TemplateCommitment
-	compiled *htmlmaster.Compiled
-	values   map[string]string
-	sections htmlStringMap
-	rendered htmlmaster.Result
+	revision   *generated.HtmlTemplateRevision
+	content    htmlmaster.TemplateCommitment
+	compiled   *htmlmaster.Compiled
+	values     map[string]string
+	sections   htmlStringMap
+	rendered   htmlmaster.Result
+	closeOwned func()
 }
 
 func (prepared *preparedHTMLDraft) matches(revision *generated.HtmlTemplateRevision, content htmlmaster.TemplateCommitment) bool {
@@ -230,78 +251,121 @@ func (prepared *preparedHTMLDraft) matches(revision *generated.HtmlTemplateRevis
 func (s *Server) recheckHTMLPreparation(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, prepared *preparedHTMLDraft, crm *crmTemplatePopulationAdmission) error {
 	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, templateID)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, revision, content, err := s.lockHTMLCreationTemplate(ctx, tx, actor, templateID, in, digest)
-	if err != nil {
-		return err
-	}
-	if !prepared.matches(revision, content) {
-		return errHTMLTemplateConflict
-	}
-	if crm != nil {
-		if err = crm.checkLocked(ctx, s, tx, actor); err != nil {
+	defer o.closeConsumerV1(ctx)
+	defer func() { _ = o.closeSQLV1(ctx) }()
+	err = o.session.WithTxV1(ctx, func(ctx context.Context, owned generated.DBTX) error {
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		guard, revision, content, err := s.lockHTMLCreationTemplateRecheckV1(ctx, tx, actor, templateID, in, digest)
+		if err != nil {
 			return err
 		}
-	}
-	if err = guard.Recheck(ctx); err != nil {
+		if !prepared.matches(revision, content) {
+			return errHTMLTemplateConflict
+		}
+		if crm != nil {
+			if err = crm.checkLocked(ctx, s, tx, actor); err != nil {
+				return err
+			}
+		}
+		if err = guard.Recheck(ctx); err != nil {
+			return err
+		}
+		if in.ExpiresAt != "" {
+			at, err := time.Parse(time.RFC3339, in.ExpiresAt)
+			if err != nil || !at.After(time.Now()) {
+				return errCRMTemplateInput
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if in.ExpiresAt != "" {
-		at, err := time.Parse(time.RFC3339, in.ExpiresAt)
-		if err != nil || !at.After(time.Now()) {
-			return errCRMTemplateInput
-		}
-	}
-	return tx.Commit(ctx)
+	return o.session.CommitV1(ctx)
 }
 
 func (s *Server) lockHTMLCreationTemplate(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte) (*authoring.MemberGuard, *generated.HtmlTemplateRevision, htmlmaster.TemplateCommitment, error) {
-	q := generated.New(tx)
-	template, err := q.GetHTMLTemplateForShare(ctx, generated.GetHTMLTemplateForShareParams{ID: templateID, OrgID: actor.OrgID})
+	return s.lockHTMLCreationTemplateForV1(ctx, tx, actor, templateID, in, digest, false)
+}
+
+func (s *Server) lockHTMLCreationTemplateRecheckV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte) (*authoring.MemberGuard, *generated.HtmlTemplateRevision, htmlmaster.TemplateCommitment, error) {
+	return s.lockHTMLCreationTemplateForV1(ctx, tx, actor, templateID, in, digest, true)
+}
+
+// Only preparation/preview use the full retained materialization profile.
+// Final/recheck transactions compare pins and retain declarations/defaults only.
+func (s *Server) lockHTMLCreationTemplateForV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, recheck bool) (*authoring.MemberGuard, *generated.HtmlTemplateRevision, htmlmaster.TemplateCommitment, error) {
+	reader, err := htmlAuthoringReaderV1(tx)
 	if err != nil {
 		return nil, nil, htmlmaster.TemplateCommitment{}, err
 	}
-	if template.Version != in.ExpectedTemplateVersion || !bytes.Equal(template.HtmlContentSha256, digest) {
+	template, revision, err := reader.ReadTemplateRevisionV1(ctx, templateID, in.ExpectedTemplateVersion)
+	if err != nil {
+		return nil, nil, htmlmaster.TemplateCommitment{}, err
+	}
+	if template.Version != in.ExpectedTemplateVersion || !bytes.Equal(template.HtmlContentSha256, digest) ||
+		!revision.ApprovedBy.Valid || !revision.ApprovedAt.Valid || !bytes.Equal(revision.ContentSha256, digest) {
 		return nil, nil, htmlmaster.TemplateCommitment{}, errHTMLTemplateConflict
 	}
-	revision, err := q.GetHTMLTemplateRevisionForShare(ctx, generated.GetHTMLTemplateRevisionForShareParams{TemplateID: templateID, OrgID: actor.OrgID, Version: in.ExpectedTemplateVersion})
+	guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
 	if err != nil {
 		return nil, nil, htmlmaster.TemplateCommitment{}, err
 	}
-	if !revision.ApprovedBy.Valid || !revision.ApprovedAt.Valid || !bytes.Equal(revision.ContentSha256, digest) {
-		return nil, nil, htmlmaster.TemplateCommitment{}, errHTMLTemplateConflict
+	var content htmlmaster.TemplateCommitment
+	if recheck {
+		content, err = reader.CanonicalRetainedTemplateRecheckV1(ctx, templateID, in.ExpectedTemplateVersion)
+	} else {
+		content, err = reader.CanonicalRetainedTemplateV1(ctx, templateID, in.ExpectedTemplateVersion)
 	}
-	guard, err := authoring.LockAuthor(ctx, tx, actor)
-	if err != nil {
+	if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
 		return nil, nil, htmlmaster.TemplateCommitment{}, err
 	}
-	content, err := htmlmaster.CanonicalTemplate(revision.HtmlMasterJson, revision.VariablesJson)
 	if err != nil || content.SHA256 != in.ExpectedTemplateContentSHA256 {
 		return nil, nil, htmlmaster.TemplateCommitment{}, errHTMLTemplateConflict
 	}
 	return guard, revision, content, nil
 }
 
-func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, crm *crmTemplatePopulationAdmission) (*preparedHTMLDraft, error) {
+func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, crm *crmTemplatePopulationAdmission) (result *preparedHTMLDraft, failure error) {
 	readCtx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(readCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	o, err := s.openHTMLAuthoringV1(readCtx, actor.OrgID, templateID)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = authoring.Rollback(readCtx, tx) }()
-	guard, revision, content, err := s.lockHTMLCreationTemplate(readCtx, tx, actor, templateID, in, digest)
+	defer func() {
+		_ = o.closeSQLV1(ctx)
+		if result == nil {
+			o.closeConsumerV1(ctx)
+		}
+	}()
+	var revision *generated.HtmlTemplateRevision
+	var content htmlmaster.TemplateCommitment
+	err = o.session.WithTxV1(readCtx, func(readCtx context.Context, owned generated.DBTX) error {
+		// Bind actual typed input maps before defaults/input clones, Marshal or HTML.
+		producerValues := map[string]string(in.Values)
+		if crm != nil && crm.observation != nil {
+			producerValues = crm.observation.values
+		}
+		if err := o.reader.AcquireStringMapsV1(readCtx, producerValues, in.Sections); err != nil {
+			return err
+		}
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: o.reader}
+		guard, r, c, err := s.lockHTMLCreationTemplate(readCtx, tx, actor, templateID, in, digest)
+		if err != nil {
+			return err
+		}
+		revision, content = r, c
+		return guard.Recheck(readCtx)
+	})
 	if err != nil {
 		return nil, err
 	}
-	if err = guard.Recheck(readCtx); err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(readCtx); err != nil {
+	if err = o.session.CommitV1(readCtx); err != nil {
 		return nil, err
 	}
 	master, err := htmlmaster.Decode(content.MasterJSON)
@@ -333,17 +397,25 @@ func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, te
 	if err != nil {
 		return nil, err
 	}
-	return &preparedHTMLDraft{revision: revision, content: content, compiled: compiled, values: values, sections: sections, rendered: rendered}, nil
+	return &preparedHTMLDraft{revision: revision, content: content, compiled: compiled, values: values, sections: sections, rendered: rendered, closeOwned: func() { o.closeConsumerV1(ctx) }}, nil
 }
 
 func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, expires pgtype.Timestamptz, crm *crmTemplatePopulationAdmission, inputDigest string) (result *htmlCreationOutcome, failure error) {
 	if err := in.checkExpectedActor(actor); err != nil {
 		return nil, err
 	}
+	if s.HTMLCreationSessions == nil {
+		return nil, pdfadmission.ErrHTMLCreationWriterV1
+	}
 	prepared, err := s.prepareHTMLDraft(ctx, actor, templateID, in, digest, crm)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if result == nil && prepared.closeOwned != nil {
+			prepared.closeOwned()
+		}
+	}()
 	pdf, err := s.Sign.PDF.HTMLToPDF(ctx, prepared.rendered.HTML, render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"})
 	if err != nil {
 		return nil, err
@@ -381,166 +453,261 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	}()
 	finalCtx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
-	tx, err := s.Pool.BeginTx(finalCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = authoring.Rollback(finalCtx, tx) }()
-	q := generated.New(tx)
-	if in.RequestID != uuid.Nil {
-		// Retiring a request must fence final creation even when billing is
-		// intentionally disabled for a direct internal caller.
-		if err = q.LockBillingUsageForOrg(finalCtx, actor.OrgID.String()); err != nil {
-			return nil, err
-		}
-	}
-	if err = s.Billing.LockDocumentQuotaMutation(finalCtx, q, actor.OrgID); err != nil {
-		return nil, err
-	}
-	// A concurrent exact command can have committed while this request prepared
-	// its PDF. The quota lock serializes final creation; discard only our unused
-	// object and return the original durable result.
-	if in.RequestID != uuid.Nil {
-		existing, closed, err := readHTMLCreationResolution(finalCtx, q, actor, templateID, in.RequestID, inputDigest)
-		if err != nil {
-			return nil, err
-		}
-		if closed != nil {
-			return nil, errHTMLCreationRequestClosed
-		}
-		if existing != nil {
-			guard, err := authoring.LockAuthor(finalCtx, tx, actor)
-			if err != nil {
-				return nil, err
-			}
-			if err = guard.Recheck(finalCtx); err != nil {
-				return nil, err
-			}
-			if err = tx.Commit(finalCtx); err != nil {
-				return nil, err
-			}
-			return existing, nil
-		}
-	}
-	guard, revision, content, err := s.lockHTMLCreationTemplate(finalCtx, tx, actor, templateID, in, digest)
-	if err != nil {
-		return nil, err
-	}
-	if !prepared.matches(revision, content) {
-		return nil, errHTMLTemplateConflict
-	}
-	if expires.Valid && !expires.Time.After(time.Now()) {
-		return nil, errCRMTemplateInput
-	}
-	if crm != nil {
-		if err = crm.checkLocked(finalCtx, s, tx, actor); err != nil {
-			return nil, err
-		}
-	}
-	doc, err := artifact.Attach(finalCtx, q, actor.OrgID, actor.UserID, in.Name, templateID, expires)
-	if err != nil {
-		return nil, err
-	}
-	doc, err = q.GetDocument(finalCtx, generated.GetDocumentParams{ID: doc.ID, OrgID: actor.OrgID})
-	if err != nil {
-		return nil, err
-	}
 	variables, err := json.Marshal(prepared.values)
 	if err != nil {
 		return nil, err
 	}
-	doc, err = q.FreezeDocumentVariables(finalCtx, generated.FreezeDocumentVariablesParams{ID: doc.ID, OrgID: actor.OrgID, VariablesJson: variables, ExpectedUpdatedAt: doc.UpdatedAt})
+	sections, err := json.Marshal(prepared.sections)
 	if err != nil {
 		return nil, err
 	}
-	bindings, err := createHTMLContractParties(finalCtx, q, doc, prepared.compiled, input)
+	// Resource identity precedes only a real fresh INSERT; it grants no contract authority.
+	documentID := uuid.New()
+	session, err := s.HTMLCreationSessions.OpenV1(finalCtx, actor.OrgID, documentID)
 	if err != nil {
-		return nil, err
-	}
-	sourceInput := htmlsource.Input{TemplateID: templateID, TemplateVersion: revision.Version, TemplateContentSHA256: content.SHA256,
-		MasterJSON: content.MasterJSON, DefaultVarsJSON: content.DefaultsJSON, Values: prepared.values, Sections: prepared.sections,
-		TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time, PartyBindings: bindings}
-	if composed != nil {
-		sourceInput.SigningArtifact, err = htmlsource.NewSigningArtifact(prepared.compiled, input, bindings, composed.Composition)
-		if err != nil {
-			return nil, err
+		if session != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cleanupCancel()
+			_ = session.CloseV1(cleanupCtx)
 		}
+		return nil, err
 	}
-	provenance, err := htmlsource.New(sourceInput, doc)
+	admission, err := session.NewAdmissionV1(finalCtx)
 	if err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cleanupCancel()
+		_ = session.CloseV1(cleanupCtx)
 		return nil, err
 	}
-	doc, err = q.SetDocumentHTMLSource(finalCtx, generated.SetDocumentHTMLSourceParams{ID: doc.ID, OrgID: actor.OrgID, HtmlSourceJson: provenance, ExpectedUpdatedAt: doc.UpdatedAt})
-	if err != nil {
-		return nil, err
-	}
-	doc, _, err = htmlmaterialization.RegisterOrigin(finalCtx, q, doc, int32(artifact.PageCount()), actor.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if err = createHTMLSigningFields(finalCtx, q, doc); err != nil {
-		return nil, err
-	}
-	sourceCommitment, err := htmlsource.Commitment(doc)
-	if err != nil {
-		return nil, err
-	}
-	if err = s.Billing.EnforceDocumentQuotaMutation(finalCtx, q, actor.OrgID); err != nil {
-		return nil, err
-	}
-	if _, err = versions.New(q).Snapshot(finalCtx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
-		VariablesJS: doc.VariablesJson, HTMLSourceJSON: doc.HtmlSourceJson, HTMLMaterializationID: doc.HtmlCurrentMaterializationID,
-		CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "Created from approved HTML design"}); err != nil {
-		return nil, err
-	}
-	pending := []audit.PendingEvent{}
-	if crm != nil {
-		event, err := crm.persist(finalCtx, s, tx, actor, doc)
+	var reader *pdfadmission.ApplicationHTMLAuthoringReaderV1
+	var writer *pdfadmission.ApplicationHTMLCreationWriterV1
+	var pending []audit.PendingEvent
+	var pendingOwners []*pdfadmission.ApplicationHTMLAuditEventConsumerV1
+	defer func() {
+		if result == nil {
+			for _, owner := range pendingOwners {
+				if owner != nil {
+					owner.CloseConsumerV1()
+				}
+			}
+		}
+		if result == nil && reader != nil {
+			reader.CloseConsumerV1()
+		}
+		if result == nil && writer != nil {
+			writer.CloseConsumerV1()
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cleanupCancel()
+		closeErr := session.CloseV1(cleanupCtx)
+		_, reconcileErr := admission.ReconcileCleanupV1(cleanupCtx)
+		if result == nil {
+			failure = errors.Join(failure, closeErr, reconcileErr)
+		}
+	}()
+	err = session.WithTxV1(finalCtx, func(finalCtx context.Context, owned generated.DBTX) error {
+		reader, err = session.NewHTMLAuthoringReaderV1(finalCtx)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: reader}
+		q := generated.New(tx)
+		writer, err = session.NewHTMLCreationWriterV1(finalCtx, pdfadmission.HTMLCreationInputsV1{
+			StoredMaster: prepared.revision.HtmlMasterJson, StoredDefaults: prepared.revision.VariablesJson,
+			CanonicalMaster: prepared.content.MasterJSON, CanonicalDefaults: prepared.content.DefaultsJSON, Variables: variables, Sections: sections,
+		})
+		if err != nil {
+			return err
+		}
+
+		if in.RequestID != uuid.Nil {
+			// Retiring a request must fence final creation even when billing is
+			// intentionally disabled for a direct internal caller.
+			if err = q.LockBillingUsageForOrg(finalCtx, actor.OrgID.String()); err != nil {
+				return err
+			}
+		}
+		if err = s.Billing.LockDocumentQuotaMutation(finalCtx, q, actor.OrgID); err != nil {
+			return err
+		}
+		// A concurrent exact command can have committed while this request prepared
+		// its PDF. The quota lock serializes final creation; discard only our unused
+		// object and return the original durable result.
+		if in.RequestID != uuid.Nil {
+			existing, closed, err := readHTMLCreationResolution(finalCtx, q, actor, templateID, in.RequestID, inputDigest, reader)
+			if err != nil {
+				return err
+			}
+			if closed != nil {
+				return errHTMLCreationRequestClosed
+			}
+			if existing != nil {
+				guard, err := lockHTMLAuthorV1(finalCtx, tx, actor, false)
+				if err != nil {
+					return err
+				}
+				if err = guard.Recheck(finalCtx); err != nil {
+					return err
+				}
+				result = existing
+				result.replayed = true
+				return nil
+			}
+		}
+		guard, revision, content, err := s.lockHTMLCreationTemplateRecheckV1(finalCtx, tx, actor, templateID, in, digest)
+		if err != nil {
+			return err
+		}
+		if !prepared.matches(revision, content) {
+			return errHTMLTemplateConflict
+		}
+		if expires.Valid && !expires.Time.After(time.Now()) {
+			return errCRMTemplateInput
+		}
+		if crm != nil {
+			if err = crm.checkLocked(finalCtx, s, tx, actor); err != nil {
+				return err
+			}
+		}
+		doc, err := artifact.Attach(finalCtx, &htmlCreationAttachQueriesV1{Queries: q, writer: writer}, actor.OrgID, actor.UserID, in.Name, templateID, expires)
+		if err != nil {
+			return err
+		}
+		doc, err = q.GetDocument(finalCtx, generated.GetDocumentParams{ID: doc.ID, OrgID: actor.OrgID})
+		if err != nil {
+			return err
+		}
+		doc, err = writer.FreezeVariablesV1(finalCtx, doc.UpdatedAt)
+		if err != nil {
+			return err
+		}
+		bindings, err := createHTMLContractParties(finalCtx, q, doc, prepared.compiled, input)
+		if err != nil {
+			return err
+		}
+		sourceInput := htmlsource.Input{TemplateID: templateID, TemplateVersion: revision.Version, TemplateContentSHA256: content.SHA256,
+			MasterJSON: content.MasterJSON, DefaultVarsJSON: content.DefaultsJSON, Values: prepared.values, Sections: prepared.sections,
+			TemplateApprovedBy: uuid.UUID(revision.ApprovedBy.Bytes), TemplateApprovedAt: revision.ApprovedAt.Time, PartyBindings: bindings}
+		if composed != nil {
+			sourceInput.SigningArtifact, err = htmlsource.NewSigningArtifact(prepared.compiled, input, bindings, composed.Composition)
+			if err != nil {
+				return err
+			}
+		}
+		provenance, err := htmlsource.New(sourceInput, doc)
+		if err != nil {
+			return err
+		}
+		doc, err = writer.SetSourceAndOriginV1(finalCtx, provenance, doc.UpdatedAt, int32(artifact.PageCount()), actor.UserID)
+		if err != nil {
+			return err
+		}
+		if err = createHTMLSigningFields(finalCtx, q, doc); err != nil {
+			return err
+		}
+		if err = writer.MeasureFreshPolicyV1(finalCtx); err != nil {
+			return err
+		}
+		sourceCommitment, err := htmlsource.Commitment(doc)
+		if err != nil {
+			return err
+		}
+		if err = s.Billing.EnforceDocumentQuotaMutation(finalCtx, q, actor.OrgID); err != nil {
+			return err
+		}
+		if _, err = versions.New(q).Snapshot(finalCtx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
+			VariablesJS: doc.VariablesJson, HTMLSourceJSON: doc.HtmlSourceJson, HTMLMaterializationID: doc.HtmlCurrentMaterializationID,
+			CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "Created from approved HTML design"}); err != nil {
+			return err
+		}
+		pending = []audit.PendingEvent{}
+		pendingOwners = []*pdfadmission.ApplicationHTMLAuditEventConsumerV1{}
+		if crm != nil {
+			event, err := crm.persist(finalCtx, s, tx, actor, doc)
+			if err != nil {
+				return err
+			}
+			pending = append(pending, event)
+			pendingOwners = append(pendingOwners, nil)
+		}
+		var request *generated.HtmlDocumentCreationRequest
+		if in.RequestID != uuid.Nil {
+			commandDigest, err := hex.DecodeString(inputDigest)
+			if err != nil || len(commandDigest) != 32 {
+				return errHTMLCreationRequestConflict
+			}
+			request, err = q.InsertHTMLDocumentCreationRequest(finalCtx, generated.InsertHTMLDocumentCreationRequestParams{RequestID: in.RequestID, InputDigest: commandDigest,
+				HtmlSourceCommitment: sourceCommitment, PageCount: int32(artifact.PageCount()), DocumentID: doc.ID, OrgID: actor.OrgID, ActorUserID: actor.UserID, TemplateID: templateID})
+			if err != nil {
+				return err
+			}
+		}
+		event, eventOwner, err := ownedaudit.LogV1(s.Audit, finalCtx, session, pdfadmission.HTMLAuditDocumentCreatedV1, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: audit.KindDocumentCreated,
+			Payload: map[string]any{"source_kind": "pdf", "authoring_kind": "html", "template_id": templateID, "template_version": revision.Version,
+				"template_content_sha256": content.SHA256, "html_source_commitment": sourceCommitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256),
+				"review_required": true, "changed_sections": prepared.rendered.ChangedSections, "contract_party_bindings": bindings,
+				"contract_profile_digest": prepared.compiled.ProfileDigest(), "creation_request_id": in.RequestID, "creation_input_digest": inputDigest}})
+		if err != nil {
+			return errors.Join(errHTMLCreationAudit, err)
 		}
 		pending = append(pending, event)
-	}
-	var request *generated.HtmlDocumentCreationRequest
-	if in.RequestID != uuid.Nil {
-		commandDigest, err := hex.DecodeString(inputDigest)
-		if err != nil || len(commandDigest) != 32 {
-			return nil, errHTMLCreationRequestConflict
+		pendingOwners = append(pendingOwners, eventOwner)
+		if err = guard.Recheck(finalCtx); err != nil {
+			return err
 		}
-		request, err = q.InsertHTMLDocumentCreationRequest(finalCtx, generated.InsertHTMLDocumentCreationRequestParams{RequestID: in.RequestID, InputDigest: commandDigest,
-			HtmlSourceCommitment: sourceCommitment, PageCount: int32(artifact.PageCount()), DocumentID: doc.ID, OrgID: actor.OrgID, ActorUserID: actor.UserID, TemplateID: templateID})
-		if err != nil {
-			return nil, err
+		if crm != nil {
+			if err = crm.checkLocked(finalCtx, s, tx, actor); err != nil {
+				return err
+			}
 		}
-	}
-	event, err := s.Audit.LogTx(finalCtx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: audit.KindDocumentCreated,
-		Payload: map[string]any{"source_kind": "pdf", "authoring_kind": "html", "template_id": templateID, "template_version": revision.Version,
-			"template_content_sha256": content.SHA256, "html_source_commitment": sourceCommitment, "pdf_sha256": hex.EncodeToString(doc.PdfSha256),
-			"review_required": true, "changed_sections": prepared.rendered.ChangedSections, "contract_party_bindings": bindings,
-			"contract_profile_digest": prepared.compiled.ProfileDigest(), "creation_request_id": in.RequestID, "creation_input_digest": inputDigest}})
+		if expires.Valid && !expires.Time.After(time.Now()) {
+			return errCRMTemplateInput
+		}
+		result = &htmlCreationOutcome{document: doc, pages: artifact.PageCount(), request: request}
+		return nil
+	})
 	if err != nil {
-		return nil, errors.Join(errHTMLCreationAudit, err)
-	}
-	pending = append(pending, event)
-	if err = guard.Recheck(finalCtx); err != nil {
 		return nil, err
 	}
-	if crm != nil {
-		if err = crm.checkLocked(finalCtx, s, tx, actor); err != nil {
-			return nil, err
+	if result == nil {
+		return nil, pdfadmission.ErrHTMLCreationWriterV1
+	}
+	// A replay has no newly attached object; preserve only genuine new-creation uncertainty.
+	commitAttempted = !result.replayed
+	if err = session.CommitV1(finalCtx); err != nil {
+		// Observe only this SAME native owner after its synchronous Commit returns.
+		// A genuine pre-dispatch refusal may compensate the unused fresh object;
+		// every actual/unknown attempt retains it. This is no retirement/replay proof.
+		if !result.replayed && session.CommitDispatchObservationV1().NeverDispatchedV1() {
+			commitAttempted = false
+		}
+		result = nil
+		return nil, err
+	}
+	for i, event := range pending {
+		if pendingOwners[i] != nil {
+			if err = ownedaudit.PublishV1(s.Audit, event, pendingOwners[i]); err != nil {
+				return nil, err
+			}
+			pendingOwners[i] = nil
+		} else {
+			s.Audit.Publish(detachHTMLCreationEventIDsV1(event))
 		}
 	}
-	if expires.Valid && !expires.Time.After(time.Now()) {
-		return nil, errCRMTemplateInput
+	var closeOnce sync.Once
+	result.closeOwnedWriter = func() {
+		closeOnce.Do(func() {
+			writer.CloseConsumerV1()
+			reader.CloseConsumerV1()
+			if prepared.closeOwned != nil {
+				prepared.closeOwned()
+			}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cleanupCancel()
+			_ = s.HTMLCreationSessions.ReconcileCleanupV1(cleanupCtx)
+		})
 	}
-	commitAttempted = true
-	if err = tx.Commit(finalCtx); err != nil {
-		return nil, err
-	}
-	for _, event := range pending {
-		s.Audit.Publish(event)
-	}
-	return &htmlCreationOutcome{document: doc, pages: artifact.PageCount(), request: request}, nil
+	return result, nil
 }
 
 type htmlDocumentReviewInput struct {
@@ -578,61 +745,11 @@ func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusServiceUnavailable, "document review unavailable")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	document, release, err := s.reviewHTMLDocumentOwnedV1(r.Context(), authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id, in, expected, digest)
 	if err != nil {
-		writeInternalError(w, err)
+		s.writeOwnedHTMLReviewErrorV1(w, err)
 		return
 	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	q := generated.New(tx)
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
-	if err != nil {
-		s.writeDraftAuthoringError(w, "authorize HTML document review", err)
-		return
-	}
-	if len(guard.Document.HtmlSourceJson) == 0 || !guard.Document.UpdatedAt.Time.Equal(expected) || !bytes.Equal(guard.Document.PdfSha256, digest) {
-		writeError(w, http.StatusConflict, "document changed; preview and review its current PDF again")
-		return
-	}
-	sourceCommitment, err := htmlsource.Commitment(guard.Document)
-	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	if _, err := htmlmaterialization.Current(ctx, q, guard.Document); err != nil {
-		writeError(w, http.StatusConflict, "document source or history is inconsistent; review unavailable")
-		return
-	}
-	if (guard.Document.HtmlCurrentMaterializationID.Valid && in.ExpectedHTMLSourceCommitment == "") ||
-		(in.ExpectedHTMLSourceCommitment != "" && in.ExpectedHTMLSourceCommitment != sourceCommitment) {
-		writeError(w, http.StatusConflict, "document source changed; preview and review its current PDF again")
-		return
-	}
-	doc, err := q.MarkDocumentHTMLReviewed(ctx, generated.MarkDocumentHTMLReviewedParams{ID: id, OrgID: u.OrgID, ExpectedUpdatedAt: pgtype.Timestamptz{Time: expected, Valid: true}, ExpectedPdfSha256: digest, ReviewedBy: u.UserID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusForbidden, "only the document sender or an owner can review this PDF")
-		return
-	}
-	if err != nil {
-		s.writeDraftAuthoringError(w, "record HTML document review", err)
-		return
-	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated,
-		Payload: map[string]any{"html_pdf_reviewed": true, "pdf_sha256": in.ExpectedPDFSHA256, "html_source_commitment": sourceCommitment}})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		s.writeDraftAuthoringError(w, "authorize HTML review commit", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	s.Audit.Publish(pending)
-	writeJSON(w, http.StatusOK, toDocumentResponse(doc))
+	defer release()
+	writeJSON(w, http.StatusOK, toDocumentResponse(document))
 }

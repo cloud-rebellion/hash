@@ -51,7 +51,12 @@ SELECT d.id, d.org_id, d.template_id, d.name,
     d.finalization_retain_until, d.article13_notice_epoch_at, d.article13_notice_schema, d.article13_notice_epoch_v61_committed,
     NULL::jsonb AS html_source_json, d.html_reviewed_pdf_sha256, d.html_reviewed_by, d.html_reviewed_at,
     d.html_current_materialization_id, NULL::jsonb AS html_current_source_json, d.html_current_page_count, d.html_current_materialization_sequence,
-    d.html_reviewed_materialization_id, d.html_effective_source_commitment
+    d.html_reviewed_materialization_id, d.html_effective_source_commitment,
+    d.signature_fit_reserved_bytes, d.fits_index_required, d.fits_index_preparation_id, d.fits_index_storage_key,
+    d.fits_index_version_id, d.fits_index_sha256, d.fits_index_bytes, d.signature_fit_original_payload_bytes,
+    d.signature_fit_original_authority_bytes, d.signature_fit_original_authority_count, d.signing_admission_policy, d.signing_admission_active_id,
+    d.signing_admission_sealed_id, d.signing_admission_count, d.signing_admission_static_bytes, d.signing_admission_ordinary_bytes,
+    d.signing_admission_plan_bytes, d.signature_fit_request_binding_bytes, d.signature_fit_request_binding_count, d.participant_report_schema
 FROM documents d
 WHERE d.id = $1 AND d.org_id = $2 AND d.deleted_at IS NULL
 `
@@ -124,6 +129,26 @@ type GetDocumentReadProjectionRow struct {
 	HtmlCurrentMaterializationSequence pgtype.Int4        `json:"html_current_materialization_sequence"`
 	HtmlReviewedMaterializationID      pgtype.UUID        `json:"html_reviewed_materialization_id"`
 	HtmlEffectiveSourceCommitment      pgtype.Text        `json:"html_effective_source_commitment"`
+	SignatureFitReservedBytes          int64              `json:"signature_fit_reserved_bytes"`
+	FitsIndexRequired                  bool               `json:"fits_index_required"`
+	FitsIndexPreparationID             pgtype.UUID        `json:"fits_index_preparation_id"`
+	FitsIndexStorageKey                pgtype.Text        `json:"fits_index_storage_key"`
+	FitsIndexVersionID                 pgtype.Text        `json:"fits_index_version_id"`
+	FitsIndexSha256                    []byte             `json:"fits_index_sha256"`
+	FitsIndexBytes                     pgtype.Int8        `json:"fits_index_bytes"`
+	SignatureFitOriginalPayloadBytes   int64              `json:"signature_fit_original_payload_bytes"`
+	SignatureFitOriginalAuthorityBytes int64              `json:"signature_fit_original_authority_bytes"`
+	SignatureFitOriginalAuthorityCount int32              `json:"signature_fit_original_authority_count"`
+	SigningAdmissionPolicy             string             `json:"signing_admission_policy"`
+	SigningAdmissionActiveID           pgtype.UUID        `json:"signing_admission_active_id"`
+	SigningAdmissionSealedID           pgtype.UUID        `json:"signing_admission_sealed_id"`
+	SigningAdmissionCount              int32              `json:"signing_admission_count"`
+	SigningAdmissionStaticBytes        int64              `json:"signing_admission_static_bytes"`
+	SigningAdmissionOrdinaryBytes      int64              `json:"signing_admission_ordinary_bytes"`
+	SigningAdmissionPlanBytes          int64              `json:"signing_admission_plan_bytes"`
+	SignatureFitRequestBindingBytes    int64              `json:"signature_fit_request_binding_bytes"`
+	SignatureFitRequestBindingCount    int32              `json:"signature_fit_request_binding_count"`
+	ParticipantReportSchema            string             `json:"-"`
 }
 
 // This row retains the ordinary Document shape for scoped MCP list/search.
@@ -194,6 +219,26 @@ func (q *Queries) GetDocumentReadProjection(ctx context.Context, arg GetDocument
 		&i.HtmlCurrentMaterializationSequence,
 		&i.HtmlReviewedMaterializationID,
 		&i.HtmlEffectiveSourceCommitment,
+		&i.SignatureFitReservedBytes,
+		&i.FitsIndexRequired,
+		&i.FitsIndexPreparationID,
+		&i.FitsIndexStorageKey,
+		&i.FitsIndexVersionID,
+		&i.FitsIndexSha256,
+		&i.FitsIndexBytes,
+		&i.SignatureFitOriginalPayloadBytes,
+		&i.SignatureFitOriginalAuthorityBytes,
+		&i.SignatureFitOriginalAuthorityCount,
+		&i.SigningAdmissionPolicy,
+		&i.SigningAdmissionActiveID,
+		&i.SigningAdmissionSealedID,
+		&i.SigningAdmissionCount,
+		&i.SigningAdmissionStaticBytes,
+		&i.SigningAdmissionOrdinaryBytes,
+		&i.SigningAdmissionPlanBytes,
+		&i.SignatureFitRequestBindingBytes,
+		&i.SignatureFitRequestBindingCount,
+		&i.ParticipantReportSchema,
 	)
 	return &i, err
 }

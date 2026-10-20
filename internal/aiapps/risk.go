@@ -91,11 +91,30 @@ func (a *RiskAnalyzer) Analyze(ctx context.Context, in AnalyzeInput) (AnalyzeRes
 	if err != nil {
 		return AnalyzeResult{}, fmt.Errorf("risk_analyzer: prompt: %w", err)
 	}
+	riskCost := int64(4096)
+	for _, block := range in.Blocks {
+		var e error
+		riskCost, e = ai.NativeCostV1(riskCost, int64(len(block.ID)), 16)
+		if e != nil {
+			return AnalyzeResult{}, e
+		}
+		riskCost, e = ai.NativeCostV1(riskCost, int64(len(block.Text)), 16)
+		if e != nil {
+			return AnalyzeResult{}, e
+		}
+		riskCost, e = ai.NativeCostV1(riskCost, 1, 2048)
+		if e != nil {
+			return AnalyzeResult{}, e
+		}
+	}
+	if err := ai.RetainNativeV1(ctx, riskCost); err != nil {
+		return AnalyzeResult{}, err
+	}
 	encoded, err := encodeBlocksForRisk(in.Blocks)
 	if err != nil {
 		return AnalyzeResult{}, fmt.Errorf("encode blocks: %w", err)
 	}
-	req, err := prompt.Render(map[string]string{
+	req, err := ai.RenderPromptV1(ctx, prompt, map[string]string{
 		"Locale":        locale,
 		"BlocksJSON":    encoded,
 		"SenderContext": strOrDefault(in.SenderContext, "(none)"),
@@ -110,6 +129,9 @@ func (a *RiskAnalyzer) Analyze(ctx context.Context, in AnalyzeInput) (AnalyzeRes
 		CacheKey:   ai.CacheKey(req),
 	})
 	if err != nil {
+		return AnalyzeResult{}, err
+	}
+	if err := ai.PrepareFeatureResultV1(ctx, resp.Text); err != nil {
 		return AnalyzeResult{}, err
 	}
 	out := AnalyzeResult{

@@ -28,7 +28,7 @@ func setupEnvelopeMCPE2E(t *testing.T) (lifecycleAuthorizationFixture, uuid.UUID
 	f := setupLifecycleAuthorizationE2E(t, "sender", false, true)
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
 	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Envelopes: envelopes.New(f.q), PublicURL: f.s.PublicURL})
-	child, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Standalone child", BlocksJson: f.doc.BlocksJson, VariablesJson: []byte(`{}`)})
+	child, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Standalone child", BlocksJson: []byte(`{"version":1,"blocks":[]}`), VariablesJson: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

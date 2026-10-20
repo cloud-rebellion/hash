@@ -73,6 +73,12 @@ func (s *Server) prepareCRMTemplatePopulation(ctx context.Context, r *http.Reque
 	if err != nil {
 		return nil, err
 	}
+	retainCurrent := false
+	defer func() {
+		if !retainCurrent {
+			current.closeOwnedV1()
+		}
+	}()
 	observation, err := s.observeCRMTemplate(ctx, current, candidate, population.Mappings)
 	if err != nil {
 		return nil, err
@@ -92,6 +98,7 @@ func (s *Server) prepareCRMTemplatePopulation(ctx context.Context, r *http.Reque
 	if err = admission.checkDeadline(); err != nil {
 		return nil, err
 	}
+	retainCurrent = true
 	return admission, nil
 }
 
@@ -142,7 +149,7 @@ func (a *crmTemplatePopulationAdmission) checkLocked(ctx context.Context, s *Ser
 	if actor.OrgID != a.witness.ExpectedOrgID || actor.UserID != a.witness.ExpectedUserID {
 		return errCRMTemplateChanged
 	}
-	guard, current, err := s.lockCRMTemplate(ctx, tx, actor, a.source.response.TemplateID, a.witness.ExpectedTemplateVersion, a.witness.ExpectedTemplateContentSHA256)
+	guard, current, err := s.lockCRMTemplateRecheckV1(ctx, tx, actor, a.source.response.TemplateID, a.witness.ExpectedTemplateVersion, a.witness.ExpectedTemplateContentSHA256)
 	if err != nil {
 		return err
 	}
@@ -342,4 +349,10 @@ func crmTemplateCreateInputDigest(actor authoring.Actor, templateID uuid.UUID, i
 		return "", err
 	}
 	return crmScalarSHA("hash.html-template-document-command.v1\x00" + string(canonical)), nil
+}
+
+func (a *crmTemplatePopulationAdmission) closeOwnedV1() {
+	if a != nil && a.source != nil {
+		a.source.closeOwnedV1()
+	}
 }

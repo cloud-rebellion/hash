@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/bright-interaction/hash/internal/flarereport"
 )
 
 // Finalize-retry loop. When the last signer signs, the signature is committed
@@ -41,20 +43,40 @@ func (w *worker) loopFinalizeRetry(ctx context.Context) {
 }
 
 func (w *worker) runFinalizeRetryOnce(ctx context.Context) {
+	started := time.Now()
+	tick := flarereport.JobTick{Job: flarereport.JobFinalizeRetry}
+	returned := false
+	// Registered before the synchronous job work. Returning from FinalizeStranded
+	// is an invocation result, not proof that a final PDF/report exists.
+	defer func() {
+		if returned {
+			tick.Duration = time.Since(started)
+			w.telemetry.RecordJobTick(ctx, tick)
+		}
+	}()
 	docs, err := w.queries.GetStrandedDocuments(ctx, 50)
 	if err != nil {
+		tick.Unavailable = true
 		slog.Warn("finalize_retry: list stranded", "err", err)
+		returned = true
 		return
 	}
+	tick.Selected = int64(len(docs))
+	tick.BatchLimitReached = len(docs) == 50
 	for _, d := range docs {
+		observeJobAge(&tick, d.UpdatedAt)
+		tick.Attempted++
 		if err := w.signEngine.FinalizeStranded(ctx, d.OrgID, d.ID); err != nil {
+			tick.Failed++
 			// Don't poison the batch: log and move on. The doc stays stranded
 			// and is retried next tick once the underlying outage clears.
 			slog.Warn("finalize_retry: finalize failed",
 				"document_id", d.ID, "org_id", d.OrgID, "err", err)
 			continue
 		}
+		tick.Returned++
 		slog.Info("finalize_retry: re-finalized stranded document",
 			"document_id", d.ID, "org_id", d.OrgID)
 	}
+	returned = true
 }

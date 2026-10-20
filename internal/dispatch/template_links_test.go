@@ -9,7 +9,7 @@ func TestEmailLinksRejectUnsafeSchemesOnBothRenderPaths(t *testing.T) {
 	for _, kind := range []string{KindInvite, KindNewComment} {
 		for _, value := range []string{"javascript:alert(1)", "data:text/html,test", "vbscript:msgbox(1)", "//attacker.example/path", "https://user:password@example.test/path", " https://example.test/path", "https://example.test/\npath", `https:\\example.test/path`} {
 			for _, set := range []func(*TemplateContext, string){
-				func(c *TemplateContext, v string) { c.SignURL = v }, func(c *TemplateContext, v string) { c.DownloadURL = v },
+				func(c *TemplateContext, v string) { c.SignURL = v }, func(c *TemplateContext, v string) { c.DownloadURL = v }, func(c *TemplateContext, v string) { c.AuditCertURL = v }, func(c *TemplateContext, v string) { c.PackagePortalURL = v },
 				func(c *TemplateContext, v string) { c.OpenURL = v }, func(c *TemplateContext, v string) { c.ApproveURL = v },
 				func(c *TemplateContext, v string) { c.DenyURL = v }, func(c *TemplateContext, v string) { c.UpgradeURL = v },
 			} {

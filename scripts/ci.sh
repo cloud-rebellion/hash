@@ -1268,6 +1268,8 @@ secret_scan() {
 }
 
 step "Go toolchain security-release policy"    go_toolchain_policy
+step "HTTP route inventory freshness"           go run ./cmd/apidocgen -check
+step "OpenAPI contract + request boundaries"    bash scripts/check-automation-openapi.sh
 step "build"                                   go build ./...
 step "vet"                                     vet_all
 step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=120s

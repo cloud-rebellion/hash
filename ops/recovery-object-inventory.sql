@@ -108,6 +108,23 @@ branding_objects AS (
       ) AS m(parts)
 ),
 object_references(reference_class, owner_type, owner_id, org_id, object_key, expected_sha256, expected_version_id, version_pin_required, legacy_version_lookup_allowed, legal_evidence, expected_retain_until) AS (
+	-- Exact historical membership survives intent deletion; live annex state
+	-- never supplies the contractual retention deadline.
+	SELECT 'package_send_capture_pdf', 'document_package_send_attempt', a.attempt_id::text, a.org_id,
+	       c.pdf_key, encode(c.pdf_sha256, 'hex'), c.pdf_version_id, true, false,
+	       a.retention_started_at IS NOT NULL,
+	       CASE WHEN a.retention_started_at IS NOT NULL THEN a.retain_until END
+	  FROM document_package_send_attempts_v1 a JOIN document_package_capture_members_v1 c
+	    ON c.package_id=a.package_id AND c.revision=a.capture_revision AND c.org_id=a.org_id
+	UNION ALL
+	SELECT 'draft_package_capture_pdf', 'document_package_capture', c.package_id::text||':'||c.revision::text, c.org_id,
+	       c.pdf_key, encode(c.pdf_sha256, 'hex'), c.pdf_version_id, true, false, false, NULL::timestamptz
+	  FROM document_package_capture_members_v1 c
+	UNION ALL
+	SELECT 'draft_attachment_pdf', 'document_package', a.package_id::text, a.org_id,
+	       a.pdf_key, encode(a.pdf_sha256, 'hex'), a.pdf_version_id, true, false, false, NULL::timestamptz
+	  FROM document_attachment_drafts_v1 a
+	UNION ALL
 	SELECT 'html_materialization_pdf', 'html_materialization', m.id::text, m.org_id,
 	       m.pdf_key, encode(m.pdf_sha256, 'hex'), m.pdf_version_id, true, false,
 	       (history.retain_until IS NOT NULL OR (d.html_current_materialization_id = m.id AND retention.legal_evidence)),
@@ -181,6 +198,13 @@ object_references(reference_class, owner_type, owner_id, org_id, object_key, exp
 	-- only in its durable intent. Those bytes are required to resume retention
 	-- and publish completion after recovery, so a snapshot that inventories only
 	-- documents would silently omit the most crash-sensitive object set.
+	-- Pre-Stage ordinary outputs can be the only surviving provider identity.
+ -- Unbound pending outputs intentionally leave a required pin missing, so
+ -- recovery readiness cannot call an ambiguous external effect complete.
+ SELECT 'ordinary_preparation_'||o.kind,'ordinary_finalization_preparation',o.document_id::text,o.org_id,
+ o.storage_key,encode(o.sha256,'hex'),o.version_id,true,false,true,p.retain_until
+ FROM document_ordinary_finalization_outputs_v1 o JOIN document_ordinary_finalization_preparations_v1 p ON p.document_id=o.document_id AND p.org_id=o.org_id
+ UNION ALL
 	SELECT 'finalization_intent_final_pdf', 'document_finalization_intent', i.document_id::text, i.org_id,
 	       i.final_pdf_key, encode(i.final_pdf_sha256, 'hex'), i.final_pdf_version_id,
 	       i.evidence_version_pins_required,

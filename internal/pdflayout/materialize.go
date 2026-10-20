@@ -94,11 +94,7 @@ func Materialize(ctx context.Context, tx pgx.Tx, q *generated.Queries, engine *b
 		if !exists {
 			return nil, invalid("field has no fresh recipient")
 		}
-		row, err := q.CreateDraftField(ctx, generated.CreateDraftFieldParams{
-			DocumentID: doc.ID, OrgID: doc.OrgID, RecipientID: pgtype.UUID{Bytes: owner, Valid: true}, Type: "signature", Page: field.Page,
-			XPct: percent(field.XPct), YPct: percent(field.YPct), WPct: percent(field.WPct), HPct: percent(field.HPct), Required: true,
-			Label: pgtype.Text{String: field.Label, Valid: field.Label != ""}, OptionsJson: []byte(`{}`),
-		})
+		row, err := q.CreateDraftField(ctx, MaterializationFieldParamsV1(doc.ID, doc.OrgID, owner, field))
 		if err != nil {
 			return nil, fmt.Errorf("create layout field: %w", err)
 		}

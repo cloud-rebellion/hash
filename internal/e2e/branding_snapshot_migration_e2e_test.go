@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/pressly/goose/v3"
 
 	mdb "github.com/bright-interaction/hash/internal/db"
 )
@@ -27,12 +26,12 @@ func TestFrozenBrandingMigrationRefusesUnboundActiveDocumentE2E(t *testing.T) {
 	defer cleanup()
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
-	must(t, mdb.RunMigrationsUpTo(migConn, 64), "migrate branding cutover fixture to version 64")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 64), "migrate branding cutover fixture to version 64")
 
 	docID := seedDocument(t, ctx, pool, "frozen branding unbound cutover")
 	_, err := pool.Exec(ctx, `UPDATE documents SET status='voided' WHERE id=$1`, docID)
 	must(t, err, "seed legacy non-draft document without a snapshot")
-	err = mdb.RunMigrationsUpTo(migConn, 65)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 65)
 	if err == nil || !strings.Contains(err.Error(), "complete, valid, logo-free snapshot") {
 		t.Fatalf("migration 00065 with unbound active document = %v, want explicit remediation hold", err)
 	}
@@ -54,7 +53,7 @@ func TestFrozenBrandingMigrationRefusesUnboundActiveDocumentE2E(t *testing.T) {
 	} {
 		_, err = pool.Exec(ctx, invalid.query, docID)
 		must(t, err, "seed "+invalid.name)
-		err = mdb.RunMigrationsUpTo(migConn, 65)
+		err = mdb.RunMigrationsUpToContext(ctx, migConn, 65)
 		if err == nil || !strings.Contains(err.Error(), "complete, valid, logo-free snapshot") {
 			t.Fatalf("migration 00065 with %s = %v, want exact frozen predicate refusal", invalid.name, err)
 		}
@@ -66,7 +65,7 @@ func TestFrozenBrandingMigrationRefusesUnboundActiveDocumentE2E(t *testing.T) {
 	_, err = pool.Exec(ctx, `INSERT INTO org_branding (org_id, logo_url)
 		SELECT org_id, 'https://example.invalid/org-logo.png' FROM documents WHERE id=$1`, docID)
 	must(t, err, "seed unsupported organization logo")
-	err = mdb.RunMigrationsUpTo(migConn, 65)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 65)
 	if err == nil || !strings.Contains(err.Error(), "every organization and document logo to be empty") {
 		t.Fatalf("migration 00065 with organization logo = %v, want global logo refusal", err)
 	}
@@ -79,14 +78,14 @@ func TestFrozenBrandingMigrationRefusesUnboundActiveDocumentE2E(t *testing.T) {
 	must(t, err, "seed draft branding snapshot")
 	_, err = pool.Exec(ctx, `UPDATE document_branding_override SET logo_url='/branding/logo/legacy.png' WHERE document_id=$1`, draftLogoID)
 	must(t, err, "seed unsupported draft document logo")
-	err = mdb.RunMigrationsUpTo(migConn, 65)
+	err = mdb.RunMigrationsUpToContext(ctx, migConn, 65)
 	if err == nil || !strings.Contains(err.Error(), "every organization and document logo to be empty") {
 		t.Fatalf("migration 00065 with draft document logo = %v, want global logo refusal", err)
 	}
 	assertAppliedMigrationVersion(t, ctx, pool, 64)
 	_, err = pool.Exec(ctx, `UPDATE document_branding_override SET logo_url='' WHERE document_id=$1`, draftLogoID)
 	must(t, err, "clear unsupported draft document logo")
-	must(t, mdb.RunMigrationsUpTo(migConn, 65), "apply branding guard after exact-predicate remediation")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 65), "apply branding guard after exact-predicate remediation")
 	assertAppliedMigrationVersion(t, ctx, pool, 65)
 
 	// The cutover inventory is not enough: an old writer can create a new
@@ -121,7 +120,8 @@ func TestFrozenBrandingSnapshotIsImmutableAfterSendTransitionE2E(t *testing.T) {
 	defer cleanup()
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
-	must(t, mdb.RunMigrations(migConn), "migrate frozen branding fixture to latest")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 65), "migrate frozen branding fixture to version 65")
+	assertAppliedMigrationVersion(t, ctx, pool, 65)
 
 	docID := seedDocument(t, ctx, pool, "frozen branding send transition")
 	var orgID uuid.UUID
@@ -195,23 +195,19 @@ func TestFrozenBrandingSnapshotIsImmutableAfterSendTransitionE2E(t *testing.T) {
 	// Removing the guard while any ceremony is outside draft would reopen the
 	// mutation path. The down migration is therefore deliberately one-way once
 	// such state exists, but remains mechanically reversible on a draft-only DB.
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
-	err = goose.DownTo(migConn, "../db/migrations", 64)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 64)
 	if err == nil || !strings.Contains(err.Error(), "after a document has left draft") {
 		t.Fatalf("migration 00065 rollback with sealing document = %v, want refusal", err)
 	}
 	assertAppliedMigrationVersion(t, ctx, pool, 65)
 	_, err = pool.Exec(ctx, `UPDATE documents SET status='draft' WHERE id=$1`, docID)
 	must(t, err, "return fixture to draft for safe rollback")
-	must(t, goose.DownTo(migConn, "../db/migrations", 64), "roll back branding guard on draft-only database")
+	must(t, mdb.RunMigrationsDownToContext(ctx, migConn, 64), "roll back branding guard on draft-only database")
 	assertAppliedMigrationVersion(t, ctx, pool, 64)
 
 	// A clean down/re-up is mechanically safe, but a durable send marker must
 	// make the second Down one-way even when current document state is draft.
-	must(t, mdb.RunMigrationsUpTo(migConn, 65), "reapply branding guard after clean rollback")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 65), "reapply branding guard after clean rollback")
 	_, err = pool.Exec(ctx, `UPDATE documents SET status='sealing' WHERE id=$1`, docID)
 	must(t, err, "begin durable send-history fixture")
 	_, err = pool.Exec(ctx, `INSERT INTO events (
@@ -246,8 +242,7 @@ func TestFrozenBrandingSnapshotIsImmutableAfterSendTransitionE2E(t *testing.T) {
 	if !committed {
 		t.Fatal("reopened draft lost its durable Article 13 ceremony commitment")
 	}
-	goose.SetBaseFS(nil)
-	err = goose.DownTo(migConn, "../db/migrations", 64)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 64)
 	if err == nil || !strings.Contains(err.Error(), "committed a send ceremony") {
 		t.Fatalf("migration 00065 rollback after reopened send ceremony = %v, want persistent-history refusal", err)
 	}

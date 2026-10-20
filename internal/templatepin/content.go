@@ -6,6 +6,7 @@
 package templatepin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,9 +39,21 @@ type Content struct {
 // IDs here is important: assigning random IDs while calculating a pin would
 // make the advertised commitment change between otherwise identical reads.
 func Canonicalize(blocksJSON, variablesJSON []byte) (Content, error) {
-	tree, err := blocks.ParseCanonicalTree(blocksJSON)
+	return CanonicalizeWithAdmissionV1(context.Background(), blocksJSON, variablesJSON, nil, nil)
+}
+
+// CanonicalizeWithAdmissionV1 preserves the persisted-ID canonical grammar and
+// digest bytes. Concrete native callers fund the original decimal conversion
+// and the two original marshals before either can allocate scalable work.
+func CanonicalizeWithAdmissionV1(ctx context.Context, blocksJSON, variablesJSON []byte, admission blocks.ConditionalSendAdmissionV1, beforeMarshal func(*blocks.Tree) error) (Content, error) {
+	tree, err := blocks.ParseCanonicalTreeForSendV1(blocksJSON, admission)
 	if err != nil {
 		return Content{}, fmt.Errorf("canonical block tree: %w", err)
+	}
+	if beforeMarshal != nil {
+		if err := beforeMarshal(tree); err != nil {
+			return Content{}, err
+		}
 	}
 	canonicalBlocks, err := json.Marshal(tree)
 	if err != nil {

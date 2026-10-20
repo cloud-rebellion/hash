@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/timeline"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -305,7 +306,17 @@ func parseIntDefault(raw string, def, minV, maxV int) int {
 // versionDiffLookupFor returns a closure timeline.AttachDiffs uses to
 // resolve the diff between an edited-version and its predecessor.
 func (s *Server) versionDiffLookupFor(ctx context.Context, orgID uuid.UUID) timeline.VersionDiffLookup {
-	return func(docID string, eventTime time.Time) (any, bool, error) {
+	return func(docID string, eventTime time.Time) (result any, found bool, retErr error) {
+		defer func() {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				result = nil
+				found = false
+				retErr = cancelErr
+			}
+		}()
+		if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+			return nil, false, cancelErr
+		}
 		id, err := uuid.Parse(docID)
 		if err != nil {
 			return nil, false, nil
@@ -316,6 +327,9 @@ func (s *Server) versionDiffLookupFor(ctx context.Context, orgID uuid.UUID) time
 		// CreatedAt >= eventTime.
 		rows, err := s.Versions.History(ctx, id, 100)
 		if err != nil {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				return nil, false, cancelErr
+			}
 			return nil, false, err
 		}
 		// rows are newest-first; reverse-scan to find the smallest one
@@ -333,10 +347,16 @@ func (s *Server) versionDiffLookupFor(ctx context.Context, orgID uuid.UUID) time
 		}
 		prior, err := s.Versions.GetByNo(ctx, id, target.VersionNo-1)
 		if err != nil {
+			if cancelErr := blocks.TreeContextError(ctx); cancelErr != nil {
+				return nil, false, cancelErr
+			}
 			return nil, false, nil
 		}
-		changes, err := versions.Diff(prior.BlockTreeJson, target.BlockTreeJson)
+		changes, err := versions.DiffContext(ctx, prior.BlockTreeJson, target.BlockTreeJson)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, err
+			}
 			return nil, false, nil
 		}
 		return changes, true, nil

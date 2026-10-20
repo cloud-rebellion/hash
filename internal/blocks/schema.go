@@ -12,11 +12,10 @@
 package blocks
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 )
 
@@ -133,26 +132,17 @@ func (b Block) AttrBool(name string, fallback bool) bool {
 
 // ParseTree decodes JSON into a Tree and validates it.
 func ParseTree(raw []byte) (*Tree, error) {
-	if len(raw) == 0 {
-		return &Tree{Version: SchemaVersion}, nil
-	}
-	t, err := decodeTree(raw)
-	if err != nil {
-		return nil, err
-	}
-	if t.Version == 0 {
-		t.Version = SchemaVersion
-	}
-	if err := Validate(t); err != nil {
-		return nil, err
-	}
-	return t, nil
+	return ParseTreeContext(context.Background(), raw)
 }
 
 // ParseCanonicalTree is the immutable-evidence parser. Unlike the authoring
 // parser it refuses omitted IDs, because generating one while rendering a
 // sent row would make field and audit identity process-dependent.
 func ParseCanonicalTree(raw []byte) (*Tree, error) {
+	return parseCanonicalTreeForSendV1(raw, nil)
+}
+
+func parseCanonicalTreeForSendV1(raw []byte, work *conditionalSendWorkV1) (*Tree, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("decode tree: empty canonical tree")
 	}
@@ -172,23 +162,14 @@ func ParseCanonicalTree(raw []byte) (*Tree, error) {
 	if missingID {
 		return nil, ErrMissingID
 	}
-	if err := Validate(tree); err != nil {
+	if err := validateTreeForSendV1(tree, work); err != nil {
 		return nil, err
 	}
 	return tree, nil
 }
 
 func decodeTree(raw []byte) (*Tree, error) {
-	var tree Tree
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&tree); err != nil {
-		return nil, fmt.Errorf("decode tree: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("decode tree: trailing JSON content")
-	}
-	return &tree, nil
+	return decodeTreeContext(context.Background(), raw)
 }
 
 // NormalizeTreeJSON parses, validates, assigns any omitted block IDs, and
@@ -236,6 +217,10 @@ func RequiredSignerRoles(t *Tree) []string {
 // actually present in the signer/PDF artifact. Invalid conditional evaluation
 // is an error, never an implicit false branch.
 func RequiredSignerRolesForVariables(t *Tree, vars map[string]string) ([]string, error) {
+	return requiredSignerRolesForVariablesForSendV1(t, vars, nil)
+}
+
+func requiredSignerRolesForVariablesForSendV1(t *Tree, vars map[string]string, work *conditionalSendWorkV1) ([]string, error) {
 	if t == nil {
 		return nil, nil
 	}
@@ -245,7 +230,7 @@ func RequiredSignerRolesForVariables(t *Tree, vars map[string]string) ([]string,
 		for i := range items {
 			block := &items[i]
 			if block.Type == TypeConditional {
-				included, err := EvalConditionStrict(block.AttrString("expression", ""), vars)
+				included, err := evalConditionStrictForSendV1(block.AttrString("expression", ""), vars, work)
 				if err != nil {
 					return fmt.Errorf("block %q condition: %w", block.ID, err)
 				}

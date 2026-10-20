@@ -17,6 +17,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/versions"
 )
@@ -191,9 +192,15 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 			writeInternalError(w, err)
 			return
 		}
+		fromSide := diffSideFromRowContext(r.Context(), v)
+		toSide := diffSideFromRowContext(r.Context(), v)
+		if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+			writeInternalError(w, cancelErr)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"from":    diffSideFromRow(v),
-			"to":      diffSideFromRow(v),
+			"from":    fromSide,
+			"to":      toSide,
 			"changes": []any{},
 			"counts":  versions.DiffCounts{},
 		})
@@ -213,21 +220,31 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "version not found")
 		return
 	}
-	changes, err := versions.Diff(fromV.BlockTreeJson, toV.BlockTreeJson)
+	changes, err := versions.DiffContext(r.Context(), fromV.BlockTreeJson, toV.BlockTreeJson)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
+	fromSide := diffSideFromRowContext(r.Context(), fromV)
+	toSide := diffSideFromRowContext(r.Context(), toV)
+	if cancelErr := blocks.TreeContextError(r.Context()); cancelErr != nil {
+		writeInternalError(w, cancelErr)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"from":    diffSideFromRow(fromV),
-		"to":      diffSideFromRow(toV),
+		"from":    fromSide,
+		"to":      toSide,
 		"changes": changes,
 		"counts":  versions.SummarizeCounts(changes),
 	})
 }
 
 func diffSideFromRow(v *generated.DocumentVersion) versions.DiffSide {
-	tree, _ := blocksFromRaw(v.BlockTreeJson)
+	return diffSideFromRowContext(context.Background(), v)
+}
+
+func diffSideFromRowContext(ctx context.Context, v *generated.DocumentVersion) versions.DiffSide {
+	tree, _ := blocksFromRawContext(ctx, v.BlockTreeJson)
 	return versions.DiffSide{
 		VersionID:  v.ID.String(),
 		VersionNo:  v.VersionNo,
@@ -240,16 +257,11 @@ func diffSideFromRow(v *generated.DocumentVersion) versions.DiffSide {
 // blocksFromRaw counts top-level blocks in a tree's JSONB. Best-effort: a
 // malformed tree returns 0, which is safe in the diff metadata response.
 func blocksFromRaw(raw json.RawMessage) (int, error) {
-	if len(raw) == 0 {
-		return 0, nil
-	}
-	var t struct {
-		Blocks []json.RawMessage `json:"blocks"`
-	}
-	if err := json.Unmarshal(raw, &t); err != nil {
-		return 0, err
-	}
-	return len(t.Blocks), nil
+	return blocksFromRawContext(context.Background(), raw)
+}
+
+func blocksFromRawContext(ctx context.Context, raw json.RawMessage) (int, error) {
+	return blocks.CountTopLevelTreeBlocksContext(ctx, raw)
 }
 
 // POST /api/v1/documents/{id}/versions/{n}/restore

@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/telemetry"
 )
 
@@ -43,5 +44,14 @@ func (w *worker) loopTelemetryRollup(ctx context.Context) {
 }
 
 func (w *worker) runTelemetryRollupOnce(ctx context.Context) {
-	telemetry.RunRollupOnce(ctx, w.queries, telemetryRetention)
+	started := time.Now()
+	observation := telemetry.RunRollupOnceObserved(ctx, w.queries, telemetryRetention)
+	state := flarereport.InvocationReturned
+	if observation.Partial {
+		state = flarereport.InvocationPartial
+	}
+	if observation.Unavailable {
+		state = flarereport.InvocationUnavailable
+	}
+	w.reportInvocation385(ctx, flarereport.JobTelemetryRollup, started, state)
 }

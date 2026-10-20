@@ -27,6 +27,7 @@ type CertSigner struct {
 const (
 	auditCertificateDomain = "hash:audit-cert:v1:"
 	evidenceManifestDomain = "hash:evidence-manifest:v1:"
+	fitsIndexDomainV1      = "hash:manual-fit-index:v1:"
 )
 
 // NewCertSigner accepts a base64-encoded ed25519 private key (the seed,
@@ -124,6 +125,13 @@ func (s *CertSigner) SignEvidenceManifest(payload []byte) string {
 	return s.signDomain(evidenceManifestDomain, payload)
 }
 
+// SignFitsIndexV1 seals the canonical retained-source/placement/composition
+// index in its own domain. The frozen index verifier independently pins the
+// issuer key and checks Ed25519 over SHA256(domain || canonical payload).
+func (s *CertSigner) SignFitsIndexV1(payload []byte) string {
+	return s.signDomain(fitsIndexDomainV1, payload)
+}
+
 func (s *CertSigner) signDomain(domain string, payload []byte) string {
 	if s == nil {
 		return ""
@@ -180,4 +188,13 @@ func decodeKey(s string) ([]byte, error) {
 		return b, nil
 	}
 	return nil, errors.New("not valid base64 (any encoding)")
+}
+
+// Native formatter clones this fixed configured key only after its positive
+// independent output/control grant. This view never establishes source scope.
+func (s *CertSigner) nativeAuditCertificatePrivateV1() ed25519.PrivateKey {
+	if s == nil {
+		return nil
+	}
+	return s.priv
 }

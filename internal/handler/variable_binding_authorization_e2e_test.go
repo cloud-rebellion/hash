@@ -39,12 +39,16 @@ func (s *bindingAuthorizationSource) Fetch(_ context.Context, ref resolver.Ref) 
 
 type variableBindingAuthorizationFixture struct {
 	lifecycleAuthorizationFixture
-	source *bindingAuthorizationSource
+	source        *bindingAuthorizationSource
+	auditBaseline int
 }
 
 func setupVariableBindingAuthorizationE2E(t *testing.T, role string) variableBindingAuthorizationFixture {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, role, false, false)
+	f := setupNativeLifecycleAuthorization256(t, role, false, false)
+	// Keep the custom CRM probe exclusively on preview. Native Send uses the
+	// real supported first-party source and actual fixture-owned org values.
+	f.s.Send.Resolver = resolver.New(f.q, &resolver.OrgSettingSource{Q: f.q})
 	if _, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{
 		DocumentID: f.doc.ID, VariableName: "customer", SourceKind: string(resolver.SourceCRMDeal), SourceRef: "deal_original", SourcePath: "title", Fallback: "Original fallback",
 	}); err != nil {
@@ -64,7 +68,11 @@ func setupVariableBindingAuthorizationE2E(t *testing.T, role string) variableBin
 
 	source := &bindingAuthorizationSource{refs: make(chan resolver.Ref, 16)}
 	f.s.Resolver = resolver.New(f.q, source)
-	return variableBindingAuthorizationFixture{f, source}
+	events, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
+	if err != nil || len(events) == 0 {
+		t.Fatal("actual native fixture event baseline", err)
+	}
+	return variableBindingAuthorizationFixture{lifecycleAuthorizationFixture: f, source: source, auditBaseline: len(events)}
 }
 
 func (f variableBindingAuthorizationFixture) body() string {
@@ -72,15 +80,23 @@ func (f variableBindingAuthorizationFixture) body() string {
 }
 
 func (f variableBindingAuthorizationFixture) submit(operation, cookie string) *httptest.ResponseRecorder {
-	return f.submitScoped(operation, f.doc.ID, "customer", f.body(), cookie)
+	return f.submitContext(f.ctx, operation, cookie)
+}
+
+func (f variableBindingAuthorizationFixture) submitContext(ctx context.Context, operation, cookie string) *httptest.ResponseRecorder {
+	return f.submitScopedContext(ctx, operation, f.doc.ID, "customer", f.body(), cookie)
 }
 
 func (f variableBindingAuthorizationFixture) submitScoped(operation string, docID uuid.UUID, name, body, cookie string) *httptest.ResponseRecorder {
+	return f.submitScopedContext(f.ctx, operation, docID, name, body, cookie)
+}
+
+func (f variableBindingAuthorizationFixture) submitScopedContext(ctx context.Context, operation string, docID uuid.UUID, name, body, cookie string) *httptest.ResponseRecorder {
 	method := http.MethodPut
 	if operation == "delete" {
 		method, body = http.MethodDelete, ""
 	}
-	return submitSessionOperationE2E(f.s, method, "/api/v1/documents/"+docID.String()+"/variable-bindings/"+url.PathEscape(name), body, cookie)
+	return submitSessionOperationContextE2E(ctx, f.s, method, "/api/v1/documents/"+docID.String()+"/variable-bindings/"+url.PathEscape(name), body, cookie)
 }
 
 func (f variableBindingAuthorizationFixture) snapshot(t *testing.T) string {
@@ -98,6 +114,7 @@ func (f variableBindingAuthorizationFixture) snapshotDB(t *testing.T, db generat
 		'signatures',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY id),'[]'::jsonb) FROM signatures s WHERE document_id IN (SELECT id FROM owned)),
 		'privacy',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY id),'[]'::jsonb) FROM data_subject_requests r WHERE org_id=$1),
 		'events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM events e WHERE org_id=$1),
+		'measurements',(SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY event_id),'[]'::jsonb) FROM html_snapshot_event_payload_sizes_v1 m WHERE document_id IN (SELECT id FROM owned)),
 		'intents',(SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY document_id),'[]'::jsonb) FROM send_sealing_intents i WHERE org_id=$1),
 		'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(ed) ORDER BY id),'[]'::jsonb) FROM email_deliveries ed WHERE to_email IN (SELECT email FROM recipients WHERE document_id IN (SELECT id FROM owned)))
 		)::text`, f.org).Scan(&state); err != nil { //nolint:rawsql -- complete fixture-owned authoring state; admitted key use is intentionally separate
@@ -126,7 +143,7 @@ func holdBindingParentE2E(t *testing.T, f variableBindingAuthorizationFixture) p
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	t.Cleanup(func() { nativeReminderRollback255(t, tx) })
 	if _, err := f.q.WithTx(tx).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 		t.Fatal(err)
 	}
@@ -146,9 +163,11 @@ func TestVariableBindingRESTSessionRecheckedAfterDocumentWaitE2E(t *testing.T) {
 					ttl = time.Second
 				}
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(operation, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+					return f.submitContext(ctx, operation, cookie)
+				})
+				defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockVariableBindingMutationRootV1", "transactionid")
 				want := http.StatusForbidden
 				switch change {
 				case "demotion":
@@ -187,26 +206,25 @@ func TestVariableBindingRESTCancellationDuringAuditWaitRollsBackE2E(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer blocked.Rollback(context.Background())
+			defer nativeReminderRollback255(t, blocked)
 			if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			method, body := http.MethodPut, f.body()
 			if operation == "delete" {
 				method, body = http.MethodDelete, ""
 			}
-			request := httptest.NewRequest(method, f.s.PublicURL+"/api/v1/documents/"+f.doc.ID.String()+"/variable-bindings/customer", strings.NewReader(body)).WithContext(ctx)
-			request.Header.Set("Content-Type", "application/json")
-			request.Header.Set("Origin", f.s.PublicURL)
-			request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)})
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
+			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				request := httptest.NewRequest(method, f.s.PublicURL+"/api/v1/documents/"+f.doc.ID.String()+"/variable-bindings/customer", strings.NewReader(body)).WithContext(ctx)
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Origin", f.s.PublicURL)
+				request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
 				response := httptest.NewRecorder()
 				f.s.Routes().ServeHTTP(response, request)
-				result <- response
-			}()
+				return response
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 			cancel()
 			if response := receiveSessionOperationE2E(t, result); response.Code != http.StatusInternalServerError {
@@ -232,13 +250,15 @@ func TestVariableBindingRESTAuditWaitExpiryRollsBackE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer tx.Rollback(context.Background())
+			defer nativeReminderRollback255(t, tx)
 			if err := f.q.WithTx(tx).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(operation, cookie) }()
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return f.submitContext(ctx, operation, cookie)
+			})
+			defer nativeReminderCleanupHTTP255(t, tx, cancel, joined)
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 			awaitSessionCookieExpiryE2E(t, f.s, cookie)
 			if err := tx.Commit(f.ctx); err != nil {
@@ -338,12 +358,35 @@ func seedBindingAuthoringRefusalE2E(t *testing.T, f variableBindingAuthorization
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+		t.Cleanup(func() { nativeReminderRollback255(t, tx) })
 		if _, err := f.q.WithTx(tx).CreateDataSubjectRequest(f.ctx, generated.CreateDataSubjectRequestParams{OrgID: f.org, SubjectEmail: f.recipient.Email, Kind: "access", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`)}); err != nil {
 			t.Fatal(err)
 		}
 	case "sent":
-		_ = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, f.doc, f.recipient)
+		// This refusal must start from normal native Send. The original CRM
+		// callback remains preview-only; bind the actual org source publicly.
+		cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+		if response := f.submitScoped("upsert", f.doc.ID, "customer", `{"source_kind":"org.setting","source_path":"org.name"}`, cookie); response.Code != http.StatusOK {
+			t.Fatal("native refusal source setup", response.Code, response.Body.String())
+		}
+		response := nativeLifecycleSubmit256(f.ctx, f.lifecycleAuthorizationFixture, "send", cookie)
+		var sent sendDocumentResponse
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &sent) != nil || sent.Status != "sent" || len(sent.Links) != 1 || sent.Links[0].RecipientID != f.recipient.ID {
+			t.Fatal("genuine native sent-state refusal", response.Code, response.Body.String())
+		}
+		doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+		if err != nil {
+			t.Fatal(err)
+		}
+		org, err := f.q.GetOrg(f.ctx, f.org)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var values map[string]string
+		bindings, err := f.q.ListVariableBindings(f.ctx, f.doc.ID)
+		if err != nil || doc.Status != "sent" || json.Unmarshal(doc.VariablesJson, &values) != nil || values["customer"] != org.Name || len(bindings) != 1 || bindings[0].SourceKind != string(resolver.SourceOrgSetting) || bindings[0].LastValue != org.Name || !bindings[0].LastResolved.Valid || bindings[0].LastError != "" {
+			t.Fatal("native sent-state refusal lost actual resolved/frozen observation", err)
+		}
 	case "soft-deleted":
 		if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET deleted_at=now() WHERE id=$1`, f.doc.ID); err != nil {
 			t.Fatal(err)
@@ -377,9 +420,11 @@ func TestVariableBindingRESTSoftDeleteAfterParentWaitE2E(t *testing.T) {
 			f := setupVariableBindingAuthorizationE2E(t, "sender")
 			blocked := holdBindingParentE2E(t, f)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(operation, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return f.submitContext(ctx, operation, cookie)
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockVariableBindingMutationRootV1", "transactionid")
 			if _, err := blocked.Exec(f.ctx, `UPDATE documents SET deleted_at=now() WHERE id=$1`, f.doc.ID); err != nil {
 				t.Fatal(err)
 			} //nolint:rawsql
@@ -408,9 +453,11 @@ func assertBindingCanonicalAuditE2E(t *testing.T, f variableBindingAuthorization
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(rows)
-	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != count {
+	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != f.auditBaseline+count {
 		t.Fatalf("binding audit chain invalid: %+v", result)
 	}
+	// Observe every actual native birth/mutation receipt; never repair one.
+	nativeBindingMeasurement259(t, f.lifecycleAuthorizationFixture, f.doc.ID)
 }
 
 func TestVariableBindingRESTCanonicalSuccessResolverReadbackAndIdempotentDeleteE2E(t *testing.T) {

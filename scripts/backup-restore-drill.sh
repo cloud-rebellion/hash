@@ -535,6 +535,13 @@ CREATE TABLE send_sealing_intents (
     retain_until timestamptz,
     retention_started_at timestamptz
 );
+-- Minimal current inventory shapes only, not migration/restore acceptance.
+ALTER TABLE documents ADD COLUMN html_current_materialization_id uuid;
+CREATE TABLE document_attachment_drafts_v1(package_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
+CREATE TABLE document_package_capture_members_v1(package_id uuid,revision bigint,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
+CREATE TABLE document_package_send_attempts_v1(attempt_id uuid,org_id uuid,document_id uuid,package_id uuid,capture_revision bigint,retention_started_at timestamptz,retain_until timestamptz);
+CREATE TABLE html_document_materializations(id uuid,document_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
+CREATE TABLE html_document_materialization_snapshots(id uuid,document_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea,rendered_pdf_key text,rendered_pdf_version_id text,rendered_pdf_sha256 bytea,retain_until timestamptz);
 -- Match migration 00060's UTC calendar normalization and upward whole-second
 -- rounding. The recovery projection validates exact database deadlines.
 CREATE FUNCTION hash_evidence_retain_until(anchor TIMESTAMPTZ, retention_years INTEGER)
@@ -708,9 +715,10 @@ docker exec -e PGPASSWORD="$DB_PASSWORD" "$pg_source" \
 docker exec -i "$pg_source" pg_restore --list \
   < "$output_dir/snapshot/postgres.pgdump" >/dev/null
 docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$pg_source" \
-  psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  psql --no-psqlrc --quiet --single-transaction --set ON_ERROR_STOP=1 --tuples-only --no-align \
   --field-separator $'\t' --pset footer=off \
   --username "$DB_USER" --dbname "$DB_NAME" \
+  --command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' --file - \
   < "$inventory_sql" > "$output_dir/snapshot/recovery-object-inventory.tsv"
 inventory_count="$(wc -l < "$output_dir/snapshot/recovery-object-inventory.tsv" | tr -d ' ')"
 [[ "$inventory_count" == "${#seed_keys[@]}" ]] \
@@ -762,9 +770,10 @@ IFS='|' read -r restored_id restored_status <<< "$restored_row"
   || die "restored database marker is missing or corrupt"
 
 docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$pg_restore_container" \
-  psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  psql --no-psqlrc --quiet --single-transaction --set ON_ERROR_STOP=1 --tuples-only --no-align \
   --field-separator $'\t' --pset footer=off \
   --username "$DB_USER" --dbname "$DB_NAME" \
+  --command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' --file - \
   < "$inventory_sql" > "$output_dir/restored/recovery-object-inventory.tsv"
 cmp -s "$output_dir/snapshot/recovery-object-inventory.tsv" "$output_dir/restored/recovery-object-inventory.tsv" \
   || die "restored canonical object inventory differs from the source inventory"

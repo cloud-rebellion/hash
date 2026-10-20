@@ -2,6 +2,8 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/stores';
+  import { checkedPackageSendObservation, type PackageSendObservation } from '$lib/packageSend';
+  import { PackageSendStatusController } from '$lib/packageSendStatus';
   import { sameRecipientDraft, type RecipientDraft } from './senderDraft';
   import {
     listRecipients,
@@ -9,6 +11,8 @@
     updateRecipient,
     deleteRecipient,
     sendDocument,
+    getDocument,
+    inspectPackageSendAttempt,
     remindDocument,
     voidDocument,
     finalPdfURL,
@@ -47,6 +51,14 @@
     requiresSignature?: boolean;
     reviewRequired?: boolean;
     revisionBlocked?: boolean;
+    attachmentsBlocked?: boolean;
+    attachmentsMessage?: string;
+    packageSend?: PackageSendObservation;
+    packageReviewRevision?: number;
+    packageReconciliationBusy?: boolean;
+    onPackageReviewRequired?: (inspect: boolean) => void;
+    externalMutationBusy?: boolean;
+    onDraftStateChange?: (dirty: boolean) => void;
     crmBlocked?: boolean;
     crmBusy?: boolean;
     crmReviewRevision?: number;
@@ -70,6 +82,7 @@
     requiresSignature = true,
     reviewRequired = false,
     revisionBlocked = false,
+    attachmentsBlocked = false, attachmentsMessage = "", packageSend, packageReviewRevision=0, packageReconciliationBusy=false, onPackageReviewRequired, externalMutationBusy = false, onDraftStateChange,
     crmBlocked = false,
     crmBusy = false,
     crmReviewRevision = 0,
@@ -87,6 +100,7 @@
     onRecipientsChange,
   }: Props = $props();
 
+  const otherMutationBusy = $derived(crmBusy || externalMutationBusy);
   // Distinct roles that have a signature field; each needs a recipient to sign.
   const signerRoles = $derived([
     ...new Set([...intendedParties.map((party) => party.role), ...signatureFields.map((field) => field.role.trim().toLowerCase()).filter(Boolean)]),
@@ -111,7 +125,7 @@
 
   async function changeDocLocale(e: Event) {
     const scope = captureScope();
-    if (!scope || !editable || crmBusy || savingLocale || busy || saving) return;
+    if (!scope || !editable || otherMutationBusy || savingLocale || busy || saving) return;
     const next = (e.currentTarget as HTMLSelectElement).value;
     docLocale = next;
     savingLocale = true;
@@ -199,10 +213,29 @@
     return !recipientDraftChanged() || window.confirm('Discard the unsaved recipient changes?');
   }
 
+  $effect(() => { const dirty=recipientDraftChanged() || docLocale!==confirmedDocLocale; untrack(()=>onDraftStateChange?.(dirty)); });
   // Lifecycle action state.
   let busy = $state<'send' | 'remind' | 'void' | null>(null);
   $effect(() => { const active = !!busy || saving || savingLocale || !!removingID; untrack(() => onMutationStateChange?.(active)); });
   let links = $state<SignerLink[] | null>(null);
+  let pendingPackageAttempt=$state<string | null>(null), packageUncertain=$state(false), checkingPackage=$state(false);
+  let packageReviewRequired=$state(false), observedPackageReviewRevision=untrack(()=>packageReviewRevision);
+  const packageStatus = new PackageSendStatusController();
+  function adoptPackageReview(revision: number) {
+    if (revision === observedPackageReviewRevision) return;
+    observedPackageReviewRevision=revision; packageReviewRequired=false; sendErr=null;
+  }
+  $effect(() => { const revision=packageReviewRevision; untrack(()=>adoptPackageReview(revision)); });
+  $effect(() => {
+    const next=status, attempt=pendingPackageAttempt, uncertain=packageUncertain, id=documentID;
+    untrack(() => {
+      const scope=captureScope();
+      if (next!=='sealing' || uncertain || !scope || scope.id!==id) { void packageStatus.stop(); return; }
+      packageStatus.start({documentID:scope.id,...(attempt?{attemptID:attempt}:{})}, async value => {
+        if (isCurrent(scope)) await acceptPackageStatus(value,scope);
+      }, message => { if (isCurrent(scope)) error=message; });
+    });
+  });
 	let lawfulBasis = $state<LawfulBasis | ''>('');
   let remindedFlash = $state<number | null>(null);
   let copiedID = $state<string | null>(null);
@@ -262,6 +295,8 @@
     removingID = null;
     busy = null;
     links = null;
+    void packageStatus.stop();
+    pendingPackageAttempt=null;packageUncertain=false;checkingPackage=false;packageReviewRequired=false;observedPackageReviewRevision=packageReviewRevision;
     lawfulBasis = '';
     remindedFlash = null;
     copiedID = null;
@@ -270,6 +305,7 @@
     if (reminderTimer) clearTimeout(reminderTimer);
     if (copyTimer) clearTimeout(copyTimer);
     onMutationStateChange?.(false);
+    onDraftStateChange?.(false);
     initialized = true;
     observedSourceCommitment = sourceCommitment;
     void refresh();
@@ -305,6 +341,7 @@
     initializePanel(documentID);
   }
   beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (willUnload || to?.url.pathname !== from?.url.pathname) void packageStatus.stop();
     if (!willUnload && to?.url.pathname !== from?.url.pathname && hasMeaningfulDraft()
         && !window.confirm('You have unsaved recipient or sending changes. Leave this document and discard the draft? Changes already being saved may still complete.')) cancel();
   });
@@ -318,16 +355,18 @@
     return () => window.removeEventListener('beforeunload', protectDraft);
   });
   onDestroy(() => {
+    void packageStatus.dispose();
     disposed = true;
     panelRevision++;
     refreshRevision++;
     onMutationStateChange?.(false);
+    onDraftStateChange?.(false);
     if (reminderTimer) clearTimeout(reminderTimer);
     if (copyTimer) clearTimeout(copyTimer);
   });
 
   function openAdd() {
-    if (!captureScope() || !editable || crmBusy || recipientIdentityLocked || saving || busy || !confirmFormReplacement()) return;
+    if (!captureScope() || !editable || otherMutationBusy || recipientIdentityLocked || saving || busy || !confirmFormReplacement()) return;
     editingId = null;
     fName = '';
     fEmail = '';
@@ -342,7 +381,7 @@
   }
 
   function openEdit(r: Recipient) {
-    if (!captureScope() || !editable || crmBusy || saving || busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))
+    if (!captureScope() || !editable || otherMutationBusy || saving || busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))
         || !recipients.some((recipient) => recipient.id === r.id) || !confirmFormReplacement()) return;
     editingId = r.id;
     fName = r.name;
@@ -364,7 +403,7 @@
 
   async function submitForm() {
     const scope = captureScope();
-    if (!scope || !editable || crmBusy || saving || busy || savingLocale || !showForm) return;
+    if (!scope || !editable || otherMutationBusy || saving || busy || savingLocale || !showForm) return;
     if (!fName.trim() || !fEmail.trim()) {
       error = 'Name and email are required.';
       return;
@@ -412,7 +451,7 @@
 
   async function remove(r: Recipient) {
     const scope = captureScope();
-    if (!scope || !editable || crmBusy || recipientIdentityLocked || saving || busy || removingID || !recipients.some((recipient) => recipient.id === r.id)) return;
+    if (!scope || !editable || otherMutationBusy || recipientIdentityLocked || saving || busy || removingID || !recipients.some((recipient) => recipient.id === r.id)) return;
     if (!confirm(`Remove ${r.name} <${r.email}> from this document?`)) return;
     error = null;
     removingID = r.id;
@@ -430,7 +469,7 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || crmBlocked || crmBusy || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked
+    if (!scope || !editable || packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked
         || (generatedPlacementRequired && !generatedPlacementReady) || loading || recipientRefreshError || partyConflicts.length) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
@@ -439,6 +478,10 @@
     if (!hasParticipant || missingRoles.length) return;
     const basis = lawfulBasis;
     const statusChanged = onStatusChange;
+    // Capture the exact reviewed selection before any awaited request or prop
+    // callback can replace it. Omission remains the ordinary document contract.
+    let selection: PackageSendObservation | undefined;
+    try { selection=packageSend===undefined ? undefined : checkedPackageSendObservation(packageSend); } catch(e) { error=(e as Error).message; return; }
     busy = 'send';
     error = null;
     sendErr = null;
@@ -447,17 +490,27 @@
 			error = 'Select and confirm the controller\'s GDPR Article 6 lawful basis before sending.';
 			return;
 		}
-		const res = await sendDocument(scope.id, basis);
+		const res = await sendDocument(scope.id, basis, selection);
       if (!isCurrent(scope)) return;
       links = res.links;
+      pendingPackageAttempt=res.status==='sealing' ? res.package_send?.attempt_id ?? null : null;
+      packageReviewRequired=false;
+      packageUncertain=false;
       lawfulBasis = '';
       closeForm(true);
       statusChanged?.(res.status || 'sent');
       await refresh();
     } catch (e) {
       if (!isCurrent(scope)) return;
+      if (selection && (!(e instanceof SendError) || e.status>=500 || e.packageSend)) {
+        packageUncertain=true;
+        pendingPackageAttempt=e instanceof SendError ? e.packageSend?.attempt_id ?? null : null;
+      }
       if (e instanceof SendError) {
         sendErr = e;
+        if (selection && e.status===409 && !e.requiredTier && !/\bCRM\b/i.test(e.message)) {
+          packageReviewRequired=true; onPackageReviewRequired?.(false);
+        }
         if (e.status === 409 && !e.requiredTier && /\bCRM\b/i.test(e.message)) onCRMReviewRequired?.();
       } else {
         error = (e as Error).message;
@@ -465,6 +518,48 @@
     } finally {
       if (isCurrent(scope)) busy = null;
     }
+  }
+
+  function reconcilePackageSelection() {
+    if (!captureScope() || !packageReviewRequired || packageReconciliationBusy || crmBusy || busy || saving || savingLocale || removingID || checkingPackage) return;
+    onPackageReviewRequired?.(true);
+  }
+  async function acceptPackageStatus(next: string, scope: PanelScope) {
+    if (!isCurrent(scope) || next==='sealing') return;
+    if (next==='draft') {
+      packageUncertain=true;
+      error='Send stopped before completion. Inspect the saved agreement and attachments before sending again.';
+      return;
+    }
+    pendingPackageAttempt=null; packageUncertain=false; sendErr=null;
+    onStatusChange?.(next);
+    await refresh();
+  }
+  async function reconcilePackageSend() {
+    const scope=captureScope();
+    if(!scope || busy || checkingPackage) return;
+    checkingPackage=true;error=null;
+    const attempt=pendingPackageAttempt, changed=onStatusChange;
+    try {
+      await packageStatus.stop();
+      if(!isCurrent(scope)) return;
+      const observation=attempt ? await inspectPackageSendAttempt(scope.id,attempt) : null;
+      if(!isCurrent(scope)) return;
+      const current=await getDocument(scope.id);
+      if(!isCurrent(scope)) return;
+      if(current.id!==scope.id || !['draft','sealing','sent','in_progress','changes_requested','finalizing','completed','declined','voided','expired'].includes(current.status)
+        || observation==='completed' && ['draft','sealing'].includes(current.status)) throw new Error('Send state changed during inspection. Refresh the saved document.');
+      if(current.status==='draft') {
+        error=observation==='aborted' ? 'Send stopped before evidence retention. Reload and review the document and attachments before sending again.' : 'No completed Send was confirmed. Reload and inspect the saved document before sending again.';
+        packageUncertain=true;
+      } else {
+        if(current.status!=='sealing') pendingPackageAttempt=null;
+        packageUncertain=false;sendErr=null;changed?.(current.status);
+        await refresh();
+        if(current.status==='sealing' && isCurrent(scope)) packageStatus.start({documentID:scope.id,...(attempt?{attemptID:attempt}:{})}, async value => { if(isCurrent(scope)) await acceptPackageStatus(value,scope); }, message => { if(isCurrent(scope)) error=message; });
+      }
+    } catch(e) { if(isCurrent(scope)) error=(e as Error).message; }
+    finally { if(isCurrent(scope)) checkingPackage=false; }
   }
 
   async function remind() {
@@ -559,7 +654,7 @@
       <Users class="size-4" /> {modeCopy.sectionTitle}
     </h2>
     {#if editable && !recipientIdentityLocked}
-      <button class="btn btn-secondary text-xs" onclick={openAdd} disabled={crmBusy || documentChanged || saving || !!busy}>
+      <button class="btn btn-secondary text-xs" onclick={openAdd} disabled={otherMutationBusy || documentChanged || saving || !!busy}>
         <Plus class="size-3" /> Add recipient
       </button>
     {/if}
@@ -574,7 +669,7 @@
         <select
           bind:value={docLocale}
           onchange={changeDocLocale}
-          disabled={crmBusy || documentChanged || savingLocale || !!busy || saving}
+          disabled={otherMutationBusy || documentChanged || savingLocale || !!busy || saving}
           aria-label="Default email language"
           class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm"
         >
@@ -602,6 +697,19 @@
       This document is {status}. No further sending actions are available.
     {/if}
   </p>
+  {#if status==='sealing' || packageUncertain || pendingPackageAttempt}
+    <div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 text-sm space-y-2" aria-label="Package Send status">
+      <p>{packageUncertain ? 'Send needs inspection. Do not repeat the earlier action.' : status==='sealing' ? 'Hash is securing the complete contract package. Invitations will be queued when that finishes.' : 'This package has a persisted Send attempt.'}</p>
+      <button class="btn btn-secondary" disabled={checkingPackage || !!busy} onclick={reconcilePackageSend}>{checkingPackage ? 'Checking…' : 'Check Send status'}</button>
+    </div>
+  {/if}
+  {#if packageReviewRequired}
+    <div class="rounded-md border border-warning p-4 mb-4 text-sm space-y-2" role="alert">
+      <p>The saved document or attachment selection needs a fresh review before Send can be retried.</p>
+      <button class="btn btn-secondary" disabled={packageReconciliationBusy || crmBusy || !!busy || saving || savingLocale || !!removingID || checkingPackage} onclick={reconcilePackageSelection}>Inspect saved document and attachments</button>
+      <p>Inspect the current files, then choose Use inspected saved agreement and attachments in the attachment section.</p>
+    </div>
+  {/if}
   {#if intendedParties.length}<div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 space-y-3 text-sm" aria-label="Required contract parties">
     <p class="font-medium">Both declared parties must sign</p>
     <p>These representatives match the printed contract. Change identity details in document values and review the fresh PDF; this section can change their email language.</p>
@@ -653,7 +761,7 @@
     {:else if sendErr.status === 409 && !sendErr.requiredTier && /\bCRM\b/i.test(sendErr.message)}
       <div class="card p-4 mb-4 border-l-4 border-warning" role="alert">
         <p class="text-sm mb-3">CRM information or its mapping review changed. Refresh it and review the exact values before sending.</p>
-        <button type="button" class="btn btn-secondary" disabled={crmBusy || !!busy} onclick={() => onCRMReviewRequired?.()}>Refresh CRM information</button>
+        <button type="button" class="btn btn-secondary" disabled={otherMutationBusy || !!busy} onclick={() => onCRMReviewRequired?.()}>Refresh CRM information</button>
       </div>
     {:else if sendErr.status === 409 && sendErr.requiredTier}
       <div class="card p-4 mb-4 border-l-4 border-warning">
@@ -700,7 +808,7 @@
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Name</span>
           <input
             type="text"
-            disabled={crmBusy || recipientIdentityLocked}
+            disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fName}
             placeholder="Jane Andersson"
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -710,7 +818,7 @@
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Email</span>
           <input
             type="email"
-            disabled={crmBusy || recipientIdentityLocked}
+            disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fEmail}
             placeholder="jane@example.com"
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -719,7 +827,7 @@
         <label class="text-sm">
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Role</span>
           <select
-            disabled={crmBusy || recipientIdentityLocked}
+            disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fRole}
             class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
@@ -746,10 +854,10 @@
         </div>
       </div>
       <div class="flex flex-wrap gap-2">
-        <button class="btn btn-primary" onclick={submitForm} disabled={crmBusy || documentChanged || saving || !!busy || savingLocale}>
+        <button class="btn btn-primary" onclick={submitForm} disabled={otherMutationBusy || documentChanged || saving || !!busy || savingLocale}>
           {saving ? 'Saving...' : editingId ? 'Save changes' : 'Add recipient'}
         </button>
-        <button class="btn btn-secondary" onclick={() => closeForm()} disabled={crmBusy || saving}>Cancel</button>
+        <button class="btn btn-secondary" onclick={() => closeForm()} disabled={saving || !!busy}>Cancel</button>
       </div>
     </div>
   {/if}
@@ -802,10 +910,10 @@
             {#if editable}
               <td class="recipient-actions text-right whitespace-nowrap">
                 <span class="mobile-recipient-label" aria-hidden="true">Actions: </span>
-                <button class="btn btn-secondary text-xs" aria-label={recipientIdentityLocked ? `Email language for ${r.name}` : `Edit ${r.name}`} disabled={crmBusy || documentChanged || saving || !!busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))} onclick={() => openEdit(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={recipientIdentityLocked ? `Email language for ${r.name}` : `Edit ${r.name}`} disabled={otherMutationBusy || documentChanged || saving || !!busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))} onclick={() => openEdit(r)}>
                   <Pencil class="size-3" />
                 </button>
-                <button class="btn btn-secondary text-xs" aria-label={`Remove ${r.name}`} disabled={crmBusy || recipientIdentityLocked || documentChanged || saving || !!busy || !!removingID} onclick={() => remove(r)}>
+                <button class="btn btn-secondary text-xs" aria-label={`Remove ${r.name}`} disabled={otherMutationBusy || recipientIdentityLocked || documentChanged || saving || !!busy || !!removingID} onclick={() => remove(r)}>
                   <Trash2 class="size-3" />
                 </button>
               </td>
@@ -825,7 +933,7 @@
 				<select
 					id="lawful-basis"
 					bind:value={lawfulBasis}
-					disabled={crmBusy || documentChanged || !!busy}
+					disabled={otherMutationBusy || documentChanged || !!busy}
 					class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg text-sm"
 					required
 				>
@@ -842,10 +950,12 @@
 	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={crmBlocked || crmBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      <button class="btn btn-primary" onclick={send} disabled={packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
-      {#if crmBlocked || crmBusy}
+      {#if attachmentsBlocked}
+        <span class="text-xs text-warning">{attachmentsMessage || "Review and reconcile the saved attachments before sending."}</span>
+      {:else if crmBlocked || otherMutationBusy}
         <span class="text-xs text-warning">Refresh, review and apply any pending CRM information before sending.</span>
       {:else if revisionBlocked}
         <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>
@@ -861,10 +971,10 @@
         <span class="text-xs text-warning">Add a recipient for: {missingRoles.join(', ')}.</span>
       {/if}
     {:else if isLive}
-      <button class="btn btn-secondary" onclick={remind} disabled={crmBusy || documentChanged || !!busy}>
+      <button class="btn btn-secondary" onclick={remind} disabled={otherMutationBusy || documentChanged || !!busy}>
         <Bell class="size-4" /> {busy === 'remind' ? 'Sending...' : 'Send reminder'}
       </button>
-      <button class="btn btn-secondary" onclick={voidDoc} disabled={crmBusy || documentChanged || !!busy}>
+      <button class="btn btn-secondary" onclick={voidDoc} disabled={otherMutationBusy || documentChanged || !!busy}>
         <Ban class="size-4" /> {busy === 'void' ? 'Voiding...' : 'Void document'}
       </button>
       {#if remindedFlash !== null}

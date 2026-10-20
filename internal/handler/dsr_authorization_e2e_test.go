@@ -33,7 +33,11 @@ func dsrSessionCookieE2E(t *testing.T, s *Server, user uuid.UUID, generation int
 }
 
 func submitSessionOperationE2E(s *Server, method, path, body, cookie string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, s.PublicURL+path, strings.NewReader(body))
+	return submitSessionOperationContextE2E(context.Background(), s, method, path, body, cookie)
+}
+
+func submitSessionOperationContextE2E(ctx context.Context, s *Server, method, path, body, cookie string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, s.PublicURL+path, strings.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", s.PublicURL)
 	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
@@ -42,12 +46,18 @@ func submitSessionOperationE2E(s *Server, method, path, body, cookie string) *ht
 	return response
 }
 
-func awaitSessionOperationLockE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query, event string) {
+func awaitSessionOperationLockE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query, event string, expectedApplication ...string) {
 	t.Helper()
+	application := pool.Config().ConnConfig.RuntimeParams["application_name"]
+	if len(expectedApplication) > 1 || (len(expectedApplication) == 1 && expectedApplication[0] == "") {
+		t.Fatal("exactly one nonempty explicit backend application name is required")
+	}
+	if len(expectedApplication) == 1 {
+		application = expectedApplication[0]
+	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
-		application := pool.Config().ConnConfig.RuntimeParams["application_name"]
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE $1 AND wait_event=$2 AND state='active' AND ($3='' OR application_name=$3)`, "%"+query+"%", event, application).Scan(&count); err != nil {
 			t.Fatal(err)
 		}

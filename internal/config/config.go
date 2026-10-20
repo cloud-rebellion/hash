@@ -48,6 +48,9 @@ type Config struct {
 	PrivacyPolicyURL     string
 
 	DBURL string
+	// Nil preserves startup/auth behavior while bounded admission stays unavailable.
+	// A partially configured allocation is rejected rather than defaulted.
+	WorkRuntime *WorkRuntimeLimitsV1
 
 	S3Endpoint      string
 	S3Region        string
@@ -86,18 +89,23 @@ type Config struct {
 	WebhookEncryptionKeyPrevious string // optional prior 64-hex key
 
 	GotenbergURL string
+	// Empty disables private fitted-PDF preparation. This is separate from
+	// generic rendering and must match the restricted renderer's startup token.
+	GotenbergSignatureFitToken string
 
 	// Phase 8.2 variable resolver source plugins. Empty means
 	// "not configured" and the resolver returns ErrNotConfigured for
 	// any binding using that source kind, which the UI surfaces as a
 	// "configure integration" hint instead of a 500.
-	BrightCRMURL             string
-	BrightCRMToken           string
-	BrightCRMWebhookSecret   string
-	CRMEncryptionKey         string
-	CRMEncryptionKeyPrevious string
-	ScannerURL               string
-	ScannerToken             string
+	// Operator-only exact private destination host prefixes; empty keeps the default.
+	BrightCRMTrustedPrivateCIDRs string
+	BrightCRMURL                 string
+	BrightCRMToken               string
+	BrightCRMWebhookSecret       string
+	CRMEncryptionKey             string
+	CRMEncryptionKeyPrevious     string
+	ScannerURL                   string
+	ScannerToken                 string
 
 	// Phase 8.4 AI runtime. All optional; empty keys mean the
 	// corresponding provider isn't registered. ShieldKey is 64 hex
@@ -172,7 +180,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	workRuntime, err := loadWorkRuntimeLimitsV1()
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
+		WorkRuntime:                  workRuntime,
 		Port:                         port,
 		PublicURL:                    os.Getenv("HASH_PUBLIC_URL"),
 		LogLevel:                     envString("HASH_LOG_LEVEL", "info"),
@@ -213,6 +227,8 @@ func Load() (*Config, error) {
 		WebhookEncryptionKey:         os.Getenv("HASH_WEBHOOK_ENCRYPTION_KEY"),
 		WebhookEncryptionKeyPrevious: os.Getenv("HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS"),
 		GotenbergURL:                 envString("HASH_GOTENBERG_URL", "http://gotenberg:3000"),
+		GotenbergSignatureFitToken:   os.Getenv("HASH_SIGNATURE_FIT_TOKEN"),
+		BrightCRMTrustedPrivateCIDRs: os.Getenv("HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS"),
 		BrightCRMURL:                 os.Getenv("HASH_BRIGHTCRM_URL"),
 		BrightCRMToken:               os.Getenv("HASH_BRIGHTCRM_TOKEN"),
 		BrightCRMWebhookSecret:       os.Getenv("HASH_BRIGHTCRM_WEBHOOK_SECRET"),

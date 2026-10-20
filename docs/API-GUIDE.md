@@ -1,12 +1,32 @@
 
 # Hash API guide
 
-Updated 2026-10-10 for the local candidate. Browser routes require a session
+Updated 2026-10-19 for the local candidate. Staff document routes require a session
 cookie; document writes require a sender or owner, while recovery, archive and
 organization-setting writes require a current owner. Session generation, live role and expiry are checked at the operation
 boundary. Mutations use the application's same-origin protection; responses
 use `no-store`. See [route inventory](API-ROUTES.md) for middleware and the wider
 API surface. This guide is not a complete OpenAPI contract for that surface.
+
+See [draft document attachments](DOCUMENT-ATTACHMENTS-API.md) for the bounded
+staff REST/MCP selection and observation contract, outcomes and recovery.
+
+## Browser telemetry configuration
+
+`GET /api/telemetry/config` is available without a user session; the configured
+production proxy gate still applies. It returns `Cache-Control: no-store` and
+only `enabled`, plus `dsn`, `environment`, `release` and the fixed `hash-browser`
+service when valid telemetry configuration is present. An absent or invalid configuration
+returns `{"enabled":false}`. The public ingest DSN excludes any server DSN
+password; no general runtime configuration is exposed.
+
+The browser loads this configuration at runtime, then sends fixed failure
+categories directly to the matching collector with credentials omitted. Private
+contract content, identities, cookies, tokens, raw/private URLs and error messages
+are excluded; bounded same-origin compiled-code locations remain.
+Configuration/startup failures before installation need an independent frontend
+probe. See [Flare monitoring and deployment acceptance](OBSERVABILITY.md) for the
+privacy contract, implemented coverage and outstanding live checks.
 
 ## Connection and canonical save
 
@@ -314,13 +334,15 @@ proposal must belong to the same document and block. These metadata operations
 do not apply new prose to frozen contract content. Terminal or sealing documents
 and pending privacy review are refused.
 
-Paid AI operations first commit an authorized `ai.requested` receipt, then
-reacquire current document and credential authority before provider dispatch.
-Usage rows refer to that exact receipt. Provider-reported usage and `ai.completed` cost
-evidence persist independently of the result transaction, including when a
-credential expires, the caller cancels or the result audit fails. Result delivery
-requires the original credential again after provider and audit waits. A cost
-receipt is not proof that a person saw or approved the result.
+Staff AI commits an authorized `ai.requested` before dispatch. Recipient
+clarification commits `clarifier.requested` and `ai.requested` atomically. Both
+recheck the original credential before delivery and reserve a direct SQL
+accounting connection first, without an idle transaction on that connection.
+Delivery authorization uses a 35-second context. Only an opaque actual
+completion observation starts a fresh 10-second cost phase. Usage autocommits
+once before the separate cost event and result commit. Cost-event failure
+retains usage and suppresses the result. Cancellation before an HTTP response
+records 0/0 observed tokens: remote usage is unknown, not zero external billing.
 
 Public `POST /sign/{token}/clarify` retains the admitted magic link, its original
 and current deadlines, current active ceremony and the exact acknowledged
@@ -330,18 +352,27 @@ epoch changes, privacy holds and late expiry prevent dispatch or result delivery
 The corresponding request outcome and provider-reported usage remain recorded
 if dispatch occurred.
 
-Audited requests disable completion-cache reuse and resolve BYOAI settings through
-their request transaction. Provider lookup/decryption errors refuse the operation
-instead of falling back to a different provider. The existing configured Shield
-processing remains in the request path. Raw provider/database diagnostics are
-excluded from public errors and usage/audit payloads.
+Staff and recipient native execution supports constructor-owned Mistral/Anthropic clients
+and builtin literal/string-field prompts; executable custom templates refuse.
+REST body limits are 32 KiB for counter suggestions, 64 KiB for bilingual
+checks and 16 KiB for risk analysis; MCP retains 1 MiB. Owned
+capacity covers ingress, Shield, source reads and results through actual
+serialization. BYOAI lookup/decryption failure refuses without fallback;
+audited requests bypass completion caching. Errors exclude private diagnostics.
 
-Durable AI requests are conservatively serialized per actual application database
-pool. Waiting requests hold no database connection; an admitted request reserves
-an accounting connection before authorization locks. Pools with fewer than two
-connections refuse these operations before dispatch. The normal singleton worker
-lease needs its own connection as well. This bound protects cost persistence;
-production AI throughput and queue behavior still need workload acceptance.
+Both native routes retain request, source, provider and output ownership through
+serialization and create fresh measurements for their actual audit events. The
+recipient answer is `clarifier.answered`; its usage belongs to the real recipient
+with a null staff actor. Missing required evidence refuses result delivery.
+Native SQL sessions and provider streams require an explicit allocation before
+startup, separate from application-pool capacity. A one-connection application
+pool can support admitted overlap with sufficient native allocation; exhausted
+capacity refuses work. This is not a default throughput guarantee. The retained
+legacy accounting API still requires at least two pooled connections.
+
+Configured-provider delivery, production throughput and billing reconciliation
+require acceptance in the target deployment. See [completion status](COMPLETION-STATUS.md)
+for current qualification and remaining gates.
 
 ## MCP envelope authoring
 
@@ -549,7 +580,14 @@ Sealing recovery uses the committed send intent; automatic reminders use the
 locked due schedule. These worker operations do not require the original user
 credential to remain live. Manual Remind rotates pending recipients' links and
 moves an existing schedule's `next_fire_at` three days ahead without replenishing
-`fires_remaining`. Outbox commit still does not prove inbox delivery.
+`fires_remaining` or recreating a missing schedule. Both reminder paths retain
+fresh measured audit history for the mandatory report and recheck the document
+deadline before commit; manual calls also recheck the original credential after
+waits. Refusal rolls back capability, schedule, queue and audit effects together.
+Concurrent scheduled workers fire one actual due batch. Outbox commit and direct
+mail dispatch still do not prove inbox delivery. See the
+[reminder contract](API.md#reminder-scheduling-and-delivery) for schedule, authorization and
+delivery behavior.
 
 ## Document previews
 

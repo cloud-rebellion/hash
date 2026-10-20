@@ -2,8 +2,9 @@
 -- The surrounding transaction holds the root row lock and has rechecked the
 -- exact recipient readiness predicate. Capture one post-readiness timestamp,
 -- but never let database clock rollback place completion before the durable
--- send epoch or any already-committed response/signature in the envelope
--- family. PostgreSQL timestamps have microsecond precision, so advancing each
+-- send epoch or any already-committed response or retained participant-history
+-- row in the envelope family. PostgreSQL timestamps have microsecond precision,
+-- so advancing each
 -- prior high-water by one microsecond gives a strict and representable order.
 WITH finalizing_root AS MATERIALIZED (
     SELECT d.id, d.org_id, d.sent_at
@@ -40,12 +41,34 @@ WITH finalizing_root AS MATERIALIZED (
                    JOIN documents member ON member.id = e.document_id
                    WHERE e.org_id = root.org_id
                      AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(c.created_at) + interval '1 microsecond'
+                   FROM document_comments c
+                   JOIN documents member ON member.id = c.document_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(v.created_at) + interval '1 microsecond'
+                   FROM document_versions v
+                   JOIN documents member ON member.id = v.document_id AND member.org_id = v.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(p.updated_at) + interval '1 microsecond'
+                   FROM document_proposals p
+                   JOIN documents member ON member.id = p.document_id AND member.org_id = p.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
                ), '-infinity'::timestamptz)
            ) AS effective_at
     FROM finalizing_root root
 )
 UPDATE documents AS target
 SET status = 'finalizing',
+    participant_report_schema = 'hash-participant-report-v2',
     completion_effective_at_bound = TRUE,
     completion_effective_at = COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
     -- Object Lock timestamps have whole-second precision. Round upward after

@@ -7,16 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/bindingauthoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/resolver"
 )
@@ -135,8 +134,16 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		SourcePath string `json:"source_path"`
 		Fallback   string `json:"fallback"`
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	input, ok := s.newBlocksHTTPInputV1(w, r, sess.OrgID)
+	if !ok {
+		return
+	}
+	defer input.CloseConsumerV1()
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-	if err := decodeSignerJSON(r, &in); err != nil {
+	if err := decodePlainDraftInputV1(input, r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -148,17 +155,15 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	row, err := s.mutateVariableBinding(r, sess, authorize, docID, name, "upsert_variable_binding", in.SourceKind, func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
-		return q.UpsertVariableBinding(ctx, generated.UpsertVariableBindingParams{
-			DocumentID: docID, VariableName: name, SourceKind: in.SourceKind,
-			SourceRef: in.SourceRef, SourcePath: in.SourcePath, Fallback: in.Fallback,
-		})
-	})
+	result, err := s.mutateVariableBinding(r, sess, authorize, docID, "upsert_variable_binding", bindingauthoring.InputV1{Variable: name, SourceKind: in.SourceKind, SourceRef: in.SourceRef, SourcePath: in.SourcePath, Fallback: in.Fallback})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeDraftAuthoringError(w, "mutate variable binding", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, bindingToDTO(row))
+	writeJSON(w, http.StatusOK, bindingToDTO(result.Binding))
 }
 
 // DELETE /api/v1/documents/{id}/variable-bindings/{name}
@@ -185,56 +190,19 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if _, err := s.mutateVariableBinding(r, sess, authorize, docID, name, "delete_variable_binding", "", func(ctx context.Context, q *generated.Queries) (*generated.DocumentVariableBinding, error) {
-		return nil, q.DeleteVariableBinding(ctx, generated.DeleteVariableBindingParams{DocumentID: docID, VariableName: name})
-	}); err != nil {
+	result, err := s.mutateVariableBinding(r, sess, authorize, docID, "delete_variable_binding", bindingauthoring.InputV1{Variable: name, Delete: true})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
+	if err != nil {
 		s.writeDraftAuthoringError(w, "mutate variable binding", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) mutateVariableBinding(r *http.Request, sess auth.SessionUser, authorize auth.TransactionAuthorization,
-	docID uuid.UUID, name, tool, sourceKind string, mutation func(context.Context, *generated.Queries) (*generated.DocumentVariableBinding, error),
-) (*generated.DocumentVariableBinding, error) {
-	if s.Pool == nil || s.Audit == nil {
-		return nil, errors.New("atomic variable binding dependencies unavailable")
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, fmt.Errorf("begin variable binding mutation: %w", err)
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, docID)
-	if err != nil {
-		return nil, err
-	}
-	row, err := mutation(ctx, generated.New(tx))
-	if err != nil {
-		return nil, fmt.Errorf("mutate variable binding: %w", err)
-	}
-	actorID := guard.UserID()
-	payload := map[string]any{"via": "rest", "tool": tool, "variable": name}
-	if sourceKind != "" {
-		payload["source_kind"] = sourceKind
-	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &actorID, DocumentID: &docID, Kind: audit.KindDocumentUpdated,
-		IP: firstIPFromHeader(r), UserAgent: r.UserAgent(), Payload: payload,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("audit variable binding mutation: %w", err)
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit variable binding mutation: %w", err)
-	}
-	s.Audit.Publish(pending)
-	return row, nil
+func (s *Server) mutateVariableBinding(r *http.Request, sess auth.SessionUser, authorize auth.TransactionAuthorization, docID uuid.UUID, tool string, in bindingauthoring.InputV1) (*bindingauthoring.ResultV1, error) {
+	return bindingauthoring.MutateV1(r.Context(), bindingauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Audit: s.Audit}, bindingauthoring.ActorV1{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize, Via: "rest", Tool: tool, IP: firstIPFromHeader(r), UserAgent: r.UserAgent()}, docID, in)
 }
 
 // GET /api/v1/documents/{id}/resolve-preview

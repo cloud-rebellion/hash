@@ -12,6 +12,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (document_id, recipient_id) DO NOTHING
 RETURNING *;
 
+-- name: InsertFittedManualSignatureV1 :one
+-- Caller uses the actual signing transaction and must insert its immutable
+-- selection companion before COMMIT. Migration85 checks the deferred pair.
+INSERT INTO signatures (
+    document_id, recipient_id, field_id, font, typed_name,
+    image_storage_key, image_sha256, image_version_id,
+    image_version_pin_required, signature_kind, signer_ip, signer_ua
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, 'manual_pdf_fit_v1', $9, $10)
+ON CONFLICT (document_id, recipient_id) DO NOTHING
+RETURNING *;
+
 -- name: ListSignaturesByDocument :many
 SELECT * FROM signatures
 WHERE document_id = $1

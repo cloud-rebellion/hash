@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
@@ -69,7 +70,9 @@ func (o *OIDC) resolve(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifi
 	if o.oauth2 != nil {
 		return o.oauth2, o.verifier, nil
 	}
+	started := time.Now()
 	provider, err := oidc.NewProvider(discoveryCtx, o.cfg.IssuerURL)
+	observeOIDCProvider409(discoveryCtx, flarereport.OperationOIDCDiscovery, err, time.Since(started))
 	if err != nil {
 		return nil, nil, fmt.Errorf("oidc discovery: %w", err)
 	}
@@ -228,7 +231,9 @@ func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name 
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("oidc unavailable: %w", err)
 	}
+	started := time.Now()
 	tok, err := conf.Exchange(ctx, code, oauth2.VerifierOption(verifierCookie.Value))
+	observeOIDCProvider409(ctx, flarereport.OperationOIDCTokenExchange, err, time.Since(started))
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("token exchange: %w", err)
 	}

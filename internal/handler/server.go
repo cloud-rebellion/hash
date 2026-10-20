@@ -42,6 +42,7 @@ import (
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
@@ -86,7 +87,10 @@ const (
 
 // Server holds shared deps for HTTP handlers.
 type Server struct {
-	Pool                   *pgxpool.Pool
+	Pool *pgxpool.Pool
+	// Must be constructed from the one actual configured process coordinator.
+	// Missing configuration refuses HTML creation, never adopts a Pool Tx.
+	HTMLCreationSessions   *pdfadmission.ApplicationSessionFactoryV1
 	Queries                *generated.Queries
 	Storage                *storage.Client
 	Audit                  *audit.Logger
@@ -271,15 +275,16 @@ func (s *Server) Routes() http.Handler {
 	r.Use(safeAccessLogger)
 	// Recovery order is intentional (first registered = outermost): Flare sees
 	// and re-panics first, panicMiddleware records the scrubbed local stack and
-	// re-panics second, and chi's outer Recoverer finally writes the 500. Putting
+	// re-panics second, and Hash's sanitized outer Recoverer finally writes the 500. Putting
 	// Recoverer inside either observer swallows the panic before it reaches it.
-	r.Use(middleware.Recoverer)
+	r.Use(hashRecoverer)
 	r.Use(panicMiddleware)
 	r.Use(flarereport.FlareRecoverer)
 	r.Use(middleware.StripSlashes)
 	r.Use(s.securityHeaders)
 	r.Use(middleware.Timeout(60 * 1000 * 1000 * 1000)) // 60s
 
+	r.Get("/api/telemetry/config", s.handleFlareConfiguration)
 	r.Get("/health", s.handleHealth) // never rate-limited: liveness probes
 
 	// Auth endpoints: tight per-IP cap against credential/callback abuse.
@@ -544,6 +549,11 @@ func (s *Server) Routes() http.Handler {
 			// document straight into the field designer (no template detour).
 			r.Post("/import", s.handleImportDocument)
 			r.Get("/{id}", s.handleGetDocument)
+			r.With(crmDocumentRateLimit(10)).Post("/{id}/attachments", s.handleSelectDocumentAttachmentV1)
+			r.With(crmDocumentRateLimit(10)).Patch("/{id}/attachments", s.handleSaveDocumentAttachmentLayoutV1)
+			r.With(crmDocumentRateLimit(60)).Get("/{id}/attachments", s.handleDocumentAttachmentsV1)
+			r.With(crmDocumentRateLimit(30)).Get("/{id}/send-attempts/{attempt_id}", s.handlePackageSendAttemptInspectionV1)
+			r.With(crmDocumentRateLimit(30)).Get("/{id}/attachments/{member_id}/pdf", s.handleDocumentAttachmentPreviewV1)
 			r.Patch("/{id}", s.handleUpdateDocument)
 			r.Delete("/{id}", s.handleDeleteDocument)
 			r.Get("/{id}/events", s.handleListEvents)
@@ -740,6 +750,8 @@ func (s *Server) mountSignerRoutes(r chi.Router) {
 			r.Get("/document", s.handleSignerDocument)
 			r.Get("/comments", s.handleSignerListComments)
 			r.Get("/fields", s.handleSignerListFields)
+			r.Get("/package", s.handleSignerPackageReadV1)
+			r.Get("/completed-package", s.handleCompletedSignerPackageV1)
 			r.Get("/qes/status", s.handleQESStatus)
 		})
 
@@ -749,7 +761,10 @@ func (s *Server) mountSignerRoutes(r chi.Router) {
 			r.Use(httprate.LimitByIP(signerDownloadIPRequestsPerMinute, time.Minute))
 			r.Use(signerTokenRateLimit(signerDownloadRequestsPerMinute))
 			r.Get("/pdf", s.handleSignerPDF)
+			r.Get("/package/members/{position}/pdf", s.handleSignerPackageMemberPDFReadV1)
+			r.Get("/completed-package/members/{position}/pdf", s.handleCompletedSignerPackageMemberV1)
 			r.Get("/final-pdf", s.handleSignerFinalPDF)
+			r.Get("/audit-cert", s.handleSignerAuditCert)
 		})
 
 		r.Group(func(r chi.Router) {
@@ -788,27 +803,24 @@ func (s *Server) mountSignerRoutes(r chi.Router) {
 func safeAccessLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		r, finish := flarereport.BeginHTTPRequest(r)
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		defer func() {
+			status := ww.Status()
+			if status == 0 {
+				status = http.StatusOK
+			}
+			finish(status, chi.RouteContext(r.Context()).RoutePattern())
+			slog.InfoContext(r.Context(), "http request", "request_id", middleware.GetReqID(r.Context()), "method", r.Method, "path", safeAccessPath(r.URL.Path), "status", status, "bytes", ww.BytesWritten(), "duration_ms", time.Since(started).Milliseconds())
+		}()
 		next.ServeHTTP(ww, r)
-		status := ww.Status()
-		if status == 0 {
-			status = http.StatusOK
-		}
-		slog.Info("http request",
-			"request_id", middleware.GetReqID(r.Context()),
-			"method", r.Method,
-			"path", safeAccessPath(r.URL.Path),
-			"status", status,
-			"bytes", ww.BytesWritten(),
-			"duration_ms", time.Since(started).Milliseconds(),
-		)
 	})
 }
 
 func safeAccessPath(path string) string {
 	segments := strings.Split(path, "/")
 	// Leading slash produces segments[0] == "".
-	if len(segments) >= 3 && segments[1] == "sign" {
+	if len(segments) >= 3 && (segments[1] == "sign" || segments[1] == "completed") {
 		segments[2] = ":token"
 	}
 	if len(segments) >= 4 && segments[1] == "e" && segments[2] == "o" {
@@ -832,12 +844,16 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	// from one inline <script>, so a bare script-src 'self' blocks it and every page
 	// renders blank. No 'unsafe-inline', so the stored-XSS protection still holds.
 	scriptSrc := "script-src 'self'" + s.CSPScriptSrc
+	connectSrc := "connect-src 'self'"
+	if origin := flarereport.BrowserIngestOrigin(s.Release, s.Environment); origin != "" {
+		connectSrc += " " + origin
+	}
 	csp := "default-src 'self'; " +
 		"img-src 'self' data: blob:; " +
 		"style-src 'self' 'unsafe-inline'; " +
 		"font-src 'self'; " +
 		scriptSrc + "; " +
-		"connect-src 'self' https://flare.brightinteraction.com; " +
+		connectSrc + "; " +
 		"frame-ancestors 'none'; " +
 		"base-uri 'self'; " +
 		"form-action 'self'"
@@ -855,7 +871,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// Credential routes and APIs contain private document/user data or
 		// authentication redirects. Apply no-store even to error responses.
 		// Public branding and static assets retain their own caching policy.
-		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
+		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/completed/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
 			h.Set("Cache-Control", "no-store")
 			h.Set("Pragma", "no-cache")
 		}
@@ -885,9 +901,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	checks := make([]depCheck, 0, 5)
 	overall := true
 	check := func(name string, fn func(context.Context) error) {
-		ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
-		defer cancel()
-		err := fn(ctx)
+		err := observeHealthProbe409(r.Context(), flarereport.HealthDependency(name), fn)
 		dc := depCheck{Name: name, OK: err == nil}
 		if err != nil {
 			// /health is unauthenticated; a pgx/minio ping error string leaks

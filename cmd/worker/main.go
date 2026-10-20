@@ -19,10 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/branding"
@@ -34,12 +30,16 @@ import (
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Invites and other transactional mail are user-facing, synchronous workflow
@@ -91,15 +91,15 @@ func superviseWorker(ctx context.Context, name string, fn func(), reportFatal fu
 	terminate(1)
 }
 
-func initWorkerObservability(release, environment string) bool {
-	return flarereport.InitFlare("hash-worker", release, environment)
+func initWorkerObservability(ctx context.Context, ready <-chan struct{}, release, environment string) *flarereport.Lifecycle {
+	return flarereport.InitFlareWithContext(ctx, ready, "hash-worker", release, environment)
 }
-
-func main() {
+func main() { os.Exit(runWorkerMain()) }
+func runWorkerMain() (exitCode int) {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config load", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: parseLevel(cfg.LogLevel),
@@ -108,27 +108,55 @@ func main() {
 	// loop. Give it a distinct heartbeat/log identity so silence or a crash loop
 	// cannot be mistaken for a healthy HTTP server. An absent/invalid DSN remains
 	// a fail-safe no-op and never blocks local or self-hosted startup.
-	initWorkerObservability(cfg.Release, cfg.Environment)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := sanitize.ConfigurePDFWorker(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment); err != nil {
+	telemetryReady := make(chan struct{})
+	telemetry := initWorkerObservability(ctx, telemetryReady, cfg.Release, cfg.Environment)
+	defer func() {
+		if exitCode != 0 {
+			flarereport.CaptureOperationFailure(context.Background(), flarereport.OperationWorker, flarereport.FailureUnavailable)
+		}
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := telemetry.Close(cleanup); err != nil {
+			slog.Warn("telemetry shutdown incomplete", "category", "deadline")
+		}
+	}()
+	if err := sanitize.ConfigurePDFWorkerWithObserverV1(ctx, os.Getenv("HASH_PDF_WORKER"), cfg.Environment, flarereport.PDFWorkerObserverV1(ctx)); err != nil {
 		slog.Error("PDF worker unavailable")
-		os.Exit(1)
+		return 1
 	}
 
 	pool, err := pgxpool.New(ctx, cfg.DBURL)
 	if err != nil {
 		slog.Error("pool", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	defer pool.Close()
 
 	// Run migrations from the worker too so a fresh deploy boots cleanly
 	// even if the server hasn't started yet.
-	if err := runMigrations(cfg.DBURL); err != nil {
+	if err := runMigrations(ctx, cfg.DBURL); err != nil {
 		slog.Error("migrations", "err", err)
-		os.Exit(1)
+		return 1
+	}
+	// This worker has one separately assigned process allocation. Reuse its
+	// exact runtime for every sign engine; never borrow the HTTP process budget.
+	var workRuntime *pdfadmission.WorkRuntimeV1
+	if cfg.WorkRuntime != nil {
+		workRuntime, err = pdfadmission.NewWorkRuntimeV1(pool, cfg.WorkRuntime.Limits, cfg.WorkRuntime.TotalDBConnections)
+		if err != nil {
+			slog.Error("configured process work runtime unavailable")
+			return 1
+		}
+		defer func() {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelCleanup()
+			if err := workRuntime.CloseV1(cleanupCtx); err != nil {
+				// Cancellation of loops is not whole-process/controller retirement.
+				slog.Warn("process work cleanup remains unresolved")
+			}
+		}()
 	}
 	queries := generated.New(pool)
 	webhookKeys, err := webhooksecret.NewKeyringHex(
@@ -136,17 +164,17 @@ func main() {
 	)
 	if err != nil {
 		slog.Error("webhook encryption keyring", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	webhookSecrets, err := webhooksecret.NewManager(pool, webhookKeys, cfg.WebhookSecret)
 	if err != nil {
 		slog.Error("webhook secret manager", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	webhookBackfill, err := webhookSecrets.Backfill(ctx)
 	if err != nil {
 		slog.Error("webhook secret backfill", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	slog.Info("webhook secrets verified at rest",
 		"rows", webhookBackfill.Rows,
@@ -166,7 +194,7 @@ func main() {
 	})
 	if err != nil {
 		slog.Error("smtp init", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Engines + direct sends enqueue into email_deliveries (durable); only the
@@ -213,25 +241,31 @@ func main() {
 	})
 	if serr != nil {
 		slog.Error("worker: storage init failed", "err", serr)
-		os.Exit(1)
+		return 1
 	}
 	signer, kerr := sign.NewCertSigner(cfg.AuditPrivateKey)
 	if kerr != nil || signer == nil {
 		slog.Error("worker: audit cert signer init failed", "err", kerr)
-		os.Exit(1)
+		return 1
 	}
 	brandingResolver := branding.NewResolver(queries)
+	pdfClient, pdfConfigErr := render.NewGotenbergWithSignatureFitToken(cfg.GotenbergURL, cfg.GotenbergSignatureFitToken)
+	if pdfConfigErr != nil {
+		slog.Error("worker: private signature renderer configuration invalid")
+		return 1
+	}
 	envelopesEngine := envelopes.New(queries)
 	signEngine = &sign.Engine{
-		Pool:    pool,
-		Queries: queries,
-		Storage: store,
-		PDF:     render.NewGotenberg(cfg.GotenbergURL),
-		Audit:   auditLog,
-		Mailer:  queueMailer,
-		Signer:  signer,
-		OrgName: cfg.OperatorName,
-		BaseURL: cfg.PublicURL,
+		Pool:        pool,
+		WorkRuntime: workRuntime,
+		Queries:     queries,
+		Storage:     store,
+		PDF:         pdfClient,
+		Audit:       auditLog,
+		Mailer:      queueMailer,
+		Signer:      signer,
+		OrgName:     cfg.OperatorName,
+		BaseURL:     cfg.PublicURL,
 		BrandingCSS: func(ctx context.Context, doc *generated.Document) (string, error) {
 			if doc == nil {
 				return branding.DefaultBranding().CSSVariables(), nil
@@ -260,13 +294,27 @@ func main() {
 		},
 	}
 
+	if workRuntime != nil {
+		if err := signEngine.InitializeWorkRuntimeV1(); err != nil {
+			slog.Error("configured signing work runtime unavailable")
+			return 1
+		}
+		defer func() {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelCleanup()
+			if err := signEngine.CloseWorkRuntimeRequestsV1(cleanupCtx); err != nil {
+				slog.Warn("signing request cleanup remains unresolved")
+			}
+		}()
+	}
+
 	var billingEngine *billing.Engine
 	switch {
 	case cfg.BillingProvider == "operator":
 		billingEngine = billing.NewOperator(queries, cfg.OperatorEntitlements)
 		if err := billingEngine.ValidateOperatorPlans(ctx); err != nil {
 			slog.Error("operator entitlement validation", "err", err)
-			os.Exit(1)
+			return 1
 		}
 	case cfg.BillingProvider == "mollie":
 		billingEngine = billing.New(queries, billing.NewMollieProvider(cfg.MollieAPIKey, cfg.MollieBaseURL, cfg.MollieWebhookPathSecret), cfg.PublicURL, cfg.PublicURL+"/webhooks/billing/"+cfg.MollieWebhookPathSecret)
@@ -275,7 +323,7 @@ func main() {
 	}
 	if billingEngine == nil {
 		slog.Error("billing: worker entitlement engine unavailable")
-		os.Exit(1)
+		return 1
 	}
 
 	// Lifecycle engine for reminders and durable send-sealing recovery. Draft
@@ -283,6 +331,7 @@ func main() {
 	// intent commits; recovery rechecks the frozen envelope/eIDAS/source state,
 	// applies retention idempotently, then atomically mints links/outbox/audit.
 	sendEngine := &send.Engine{
+		WorkRuntime: workRuntime,
 		Billing:     billingEngine,
 		Pool:        pool,
 		Queries:     queries,
@@ -297,6 +346,7 @@ func main() {
 	}
 
 	w := &worker{
+		telemetry:         telemetry,
 		billing:           billingEngine,
 		pool:              pool,
 		queries:           queries,
@@ -332,6 +382,7 @@ func main() {
 	go runWorker(ctx, "finalize_retry", func() { w.loopFinalizeRetry(ctx) })
 	go runWorker(ctx, "send_sealing", func() { w.loopSendSealing(ctx) })
 
+	close(telemetryReady)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	slog.Info("hash worker started")
@@ -341,6 +392,7 @@ func main() {
 	// In particular, pool.Close must not race a still-live supervision context
 	// and turn a graceful SIGTERM into exit status 1.
 	cancel()
+	return 0
 }
 
 // loopSendSealing closes the S3/SQL crash window in Send. Any process exit or
@@ -351,48 +403,77 @@ func (w *worker) loopSendSealing(ctx context.Context) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	w.runSendSealingOnce(ctx)
+	w.runPackageSendRecoveryOnceV1(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 			w.runSendSealingOnce(ctx)
+			w.runPackageSendRecoveryOnceV1(ctx)
 		}
 	}
 }
 
 func (w *worker) runSendSealingOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runSendSealingOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobSendSealing, started, state)
+}
+func (w *worker) runSendSealingOnceObserved(ctx context.Context) flarereport.JobInvocationState {
 	if w.sendEngine == nil {
 		slog.Warn("send_sealing: lifecycle engine unavailable")
-		return
+		return flarereport.InvocationUnavailable
 	}
-	intents, err := w.queries.ListPendingSendSealingIntents(ctx, 50)
+	if w.sendEngine.WorkRuntime == nil || !w.sendEngine.WorkRuntime.MatchesPoolV1(w.pool) {
+		slog.Warn("send_sealing: configured native runtime unavailable")
+		return flarereport.InvocationUnavailable
+	}
+	scanCtx, scanCancel := context.WithTimeout(ctx, 2*time.Minute)
+	scan, err := w.sendEngine.WorkRuntime.SessionsV1().ScanPendingHTMLSendRecoveryScopesV1(scanCtx)
+	scanCancel()
+	if scan != nil {
+		defer scan.CloseConsumerV1()
+	}
 	if err != nil {
 		slog.Warn("send_sealing: list intents", "err", err)
-		return
+		return flarereport.InvocationUnavailable
 	}
+	intents, err := scan.ScopesV1()
+	if err != nil {
+		slog.Warn("send_sealing: list intents", "err", err)
+		return flarereport.InvocationUnavailable
+	}
+	state := flarereport.InvocationReturned
 	for _, intent := range intents {
-		if intent == nil {
-			continue
-		}
 		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		_, err := w.sendEngine.ResumeSendSealing(rctx, intent.DocumentID, intent.OrgID)
-		cancel()
+		result, err := w.sendEngine.ResumeSendSealing(rctx, intent.DocumentID, intent.OrgID)
 		if err != nil {
+			state = flarereport.InvocationPartial
 			slog.Warn("send_sealing: resume failed", "document_id", intent.DocumentID, "err", err)
 		}
+		if err == nil && result.Status == "sealing" {
+			state = mergeWorkerInvocation385(state, flarereport.InvocationPending)
+		}
+		result.CloseConsumerV1()
+		cancel()
 	}
+	return state
 }
 
 type worker struct {
-	pool             *pgxpool.Pool
-	queries          *generated.Queries
-	audit            *audit.Logger
-	mailer           dispatch.Mailer // queue-backed: enqueues into email_deliveries
-	emailSender      dispatch.Mailer // real SMTP, used only by loopEmailDispatch
-	emailDrainFailed bool            // owned exclusively by the email dispatch loop
-	dispatcher       *dispatch.Dispatcher
-	webhookSecrets   *webhooksecret.Manager
+	telemetry *flarereport.Lifecycle // existing joined process owner; job calls never perform network I/O
+	// Position only, owned by the same serial Send-recovery loop. A restart
+	// starts a new pass; no cursor grants replay or claims a job completed.
+	packageSendRecoveryCursor pdfadmission.PackageSendRecoveryCursorV1
+	pool                      *pgxpool.Pool
+	queries                   *generated.Queries
+	audit                     *audit.Logger
+	mailer                    dispatch.Mailer // queue-backed: enqueues into email_deliveries
+	emailSender               dispatch.Mailer // real SMTP, used only by loopEmailDispatch
+	emailDrainFailed          bool            // owned exclusively by the email dispatch loop
+	dispatcher                *dispatch.Dispatcher
+	webhookSecrets            *webhooksecret.Manager
 	// signEngine drives the finalize-retry loop. nil when storage init failed
 	// at boot, in which case the loop short-circuits.
 	signEngine *sign.Engine
@@ -430,31 +511,42 @@ func (w *worker) loopReminders(ctx context.Context) {
 }
 
 func (w *worker) runRemindersOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runRemindersOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobReminders, started, state)
+}
+func (w *worker) runRemindersOnceObserved(ctx context.Context) flarereport.JobInvocationState {
 	due, err := w.queries.GetDueReminders(ctx, 100)
 	if err != nil {
 		slog.Warn("reminders: get due", "err", err)
-		return
+		return flarereport.InvocationUnavailable
 	}
+	state := flarereport.InvocationReturned
 	for _, rem := range due {
-		w.fireReminder(ctx, rem)
+		state = mergeWorkerInvocation385(state, w.fireReminderObserved(ctx, rem))
 	}
+	return state
 }
-
 func (w *worker) fireReminder(ctx context.Context, rem *generated.Reminder) {
+	w.fireReminderObserved(ctx, rem)
+}
+func (w *worker) fireReminderObserved(ctx context.Context, rem *generated.Reminder) flarereport.JobInvocationState {
 	doc, err := w.queries.GetDocumentByID(ctx, rem.DocumentID)
 	if err != nil {
 		slog.Warn("reminders: load document", "doc_id", rem.DocumentID, "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	if doc.Status != "sent" && doc.Status != "in_progress" {
 		// Cancel: doc moved out of the remindable window.
-		_ = w.queries.CancelReminder(ctx, rem.DocumentID)
-		return
+		if err := w.queries.CancelReminder(ctx, rem.DocumentID); err != nil {
+			return flarereport.InvocationPartial
+		}
+		return flarereport.InvocationReturned
 	}
 
 	if !doc.SentAt.Valid {
 		slog.Warn("reminders: sent document has no send timestamp", "document_id", doc.ID)
-		return
+		return flarereport.InvocationPartial
 	}
 
 	// Route the mint + email + audit through the shared lifecycle engine so the
@@ -464,15 +556,15 @@ func (w *worker) fireReminder(ctx context.Context, rem *generated.Reminder) {
 	sender, err := w.queries.GetUser(ctx, doc.SenderID)
 	if err != nil {
 		slog.Warn("reminders: load negotiation owner failed", "document_id", doc.ID, "err", err)
-		return
+		return flarereport.InvocationPartial
 	}
 	if sender == nil || sender.ID != doc.SenderID || sender.OrgID != doc.OrgID || sender.Email == "" {
 		slog.Warn("reminders: negotiation owner identity unavailable", "document_id", doc.ID)
-		return
+		return flarereport.InvocationPartial
 	}
 	if w.sendEngine == nil {
 		slog.Warn("reminders: lifecycle engine unavailable", "document_id", doc.ID)
-		return
+		return flarereport.InvocationPartial
 	}
 	if _, rerr := w.sendEngine.Remind(ctx, send.Actor{
 		OrgID: doc.OrgID, Email: sender.Email, Via: "worker",
@@ -480,9 +572,10 @@ func (w *worker) fireReminder(ctx context.Context, rem *generated.Reminder) {
 		slog.Warn("reminders: engine remind failed", "document_id", doc.ID, "err", rerr)
 		// Leave the schedule due. A later worker tick retries token rotation,
 		// outbox persistence, and audit as one transaction.
-		return
+		return flarereport.InvocationPartial
 	}
 
+	return flarereport.InvocationReturned
 }
 
 // loopExpirations transitions sent / in_progress documents past expires_at.
@@ -501,14 +594,21 @@ func (w *worker) loopExpirations(ctx context.Context) {
 }
 
 func (w *worker) runExpirationsOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runExpirationsOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobExpirations, started, state)
+}
+func (w *worker) runExpirationsOnceObserved(ctx context.Context) flarereport.JobInvocationState {
 	docs, err := w.queries.GetExpirableDocuments(ctx, 100)
 	if err != nil {
 		slog.Warn("expirations: list", "err", err)
-		return
+		return flarereport.InvocationUnavailable
 	}
+	state := flarereport.InvocationReturned
 	for _, d := range docs {
 		transitioned, err := w.expireDocument(ctx, d)
 		if err != nil {
+			state = flarereport.InvocationPartial
 			slog.Warn("expirations: transition failed", "document_id", d.ID, "err", err)
 			continue
 		}
@@ -516,6 +616,7 @@ func (w *worker) runExpirationsOnce(ctx context.Context) {
 			continue
 		}
 	}
+	return state
 }
 
 // expireDocument delegates to the shared lifecycle engine so envelope wrappers
@@ -549,6 +650,12 @@ func (w *worker) loopWebhookRedrive(ctx context.Context) {
 }
 
 func (w *worker) runWebhookRedriveOnce(ctx context.Context) {
+	started := time.Now()
+	state := w.runWebhookRedriveOnceObserved(ctx)
+	w.reportInvocation385(ctx, flarereport.JobWebhookRedrive, started, state)
+}
+func (w *worker) runWebhookRedriveOnceObserved(ctx context.Context) flarereport.JobInvocationState {
+	state := flarereport.InvocationReturned
 	drainCtx, cancel := context.WithTimeout(ctx, webhookDrainTimeout)
 	defer cancel()
 	// The event ledger is the durable webhook outbox boundary. Reconstruct any
@@ -558,15 +665,25 @@ func (w *worker) runWebhookRedriveOnce(ctx context.Context) {
 	_, reconcileErr := w.queries.ReconcileMissingWebhookDeliveries(reconcileCtx, 500)
 	cancelReconcile()
 	if reconcileErr != nil {
+		state = flarereport.InvocationPartial
 		slog.Warn("webhooks: reconcile missing deliveries", "code", "reconciliation_unavailable", "error_type", fmt.Sprintf("%T", reconcileErr))
 		// Existing deliveries can still make progress while reconciliation is
 		// temporarily unavailable, so continue to the claim step.
 	}
 
 	deps := w.webhookDeliveryDependencies()
+	originalMark := deps.mark
+	deps.mark = func(markCtx context.Context, claim *generated.WebhookDelivery, outcome webhookDeliveryOutcome) (int64, error) {
+		rows, err := originalMark(markCtx, claim, outcome)
+		if err != nil || rows == 1 && (outcome.status == "retrying" || outcome.status == "failed") {
+			state = flarereport.InvocationPartial
+		}
+		return rows, err
+	}
 	err := drainWebhookDeliveries(drainCtx, webhookDrainLimit, w.queries.ClaimNextDueWebhookDelivery, func(attemptCtx context.Context, d *generated.WebhookDelivery) error {
 		applied, err := processClaimedWebhookDelivery(attemptCtx, d, deps)
 		if err != nil {
+			state = flarereport.InvocationPartial
 			slog.Warn("webhooks: delivery checkpoint unavailable", "code", "checkpoint_unavailable", "delivery_id", d.ID, "error_type", fmt.Sprintf("%T", err))
 		} else if !applied {
 			slog.Info("webhooks: stale delivery claim", "code", "claim_superseded", "delivery_id", d.ID)
@@ -576,6 +693,10 @@ func (w *worker) runWebhookRedriveOnce(ctx context.Context) {
 	if err != nil && drainCtx.Err() == nil {
 		slog.Warn("webhooks: claim drain unavailable", "code", "claim_unavailable", "error_type", fmt.Sprintf("%T", err))
 	}
+	if err != nil || drainCtx.Err() != nil {
+		state = flarereport.InvocationPartial
+	}
+	return state
 }
 
 // loopEmailDispatch drains the durable email queue, sending each message over
@@ -596,7 +717,32 @@ func (w *worker) loopEmailDispatch(ctx context.Context) {
 }
 
 func (w *worker) runEmailDispatchOnce(ctx context.Context) {
-	err := dispatchClaimedEmails(ctx, w.queries.ClaimDueEmailDeliveries, w.attemptEmail)
+	started := time.Now()
+	tick := flarereport.JobTick{Job: flarereport.JobEmailDispatch}
+	err := dispatchClaimedEmails(ctx, w.queries.ClaimDueEmailDeliveries, func(ctx context.Context, d *generated.EmailDelivery) error {
+		tick.Selected++
+		tick.Attempted++
+		observeJobAge(&tick, d.CreatedAt)
+		outcome, err := w.attemptEmailObserved(ctx, d)
+		switch outcome {
+		case emailSentAcknowledged:
+			tick.SentAcknowledged++
+		case emailRetryAcknowledged:
+			tick.RetryScheduled++
+		case emailFailureAcknowledged:
+			tick.TerminalFailed++
+		}
+		if err != nil {
+			tick.Failed++
+		} else {
+			tick.Returned++
+		}
+		return err
+	})
+	tick.Unavailable = err != nil
+	tick.BatchLimitReached = tick.Selected == 50
+	tick.Duration = time.Since(started)
+	w.telemetry.RecordJobTick(ctx, tick)
 	if ctx.Err() != nil {
 		return
 	}
@@ -637,6 +783,13 @@ func dispatchClaimedEmails(ctx context.Context, claim func(context.Context, int3
 }
 
 func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) error {
+	_, err := w.attemptEmailObserved(ctx, d)
+	return err
+}
+
+// The result describes an actual SMTP attempt plus its existing durable queue
+// acknowledgement. It never claims a recipient mailbox receipt.
+func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDelivery) (emailAttemptOutcome, error) {
 	var headers map[string]string
 	if len(d.HeadersJson) > 0 {
 		_ = json.Unmarshal(d.HeadersJson, &headers)
@@ -649,9 +802,9 @@ func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) e
 	cancel()
 	if err == nil {
 		if err := w.queries.MarkEmailDeliverySent(ctx, d.ID); err != nil {
-			return fmt.Errorf("email delivery %s sent acknowledgement failed: %w", d.ID, err)
+			return emailCheckpointFailed, fmt.Errorf("email delivery %s sent acknowledgement failed: %w", d.ID, err)
 		}
-		return nil
+		return emailSentAcknowledged, nil
 	}
 	// The claimed row has not recorded this failure yet; use the number of prior
 	// failures so a first SMTP outage retries after one minute.
@@ -660,18 +813,18 @@ func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) e
 		if markErr := w.queries.MarkEmailDeliveryFailed(ctx, generated.MarkEmailDeliveryFailedParams{
 			ID: d.ID, LastError: truncate(err.Error(), 500),
 		}); markErr != nil {
-			return fmt.Errorf("email delivery %s failure acknowledgement failed: %w", d.ID, markErr)
+			return emailCheckpointFailed, fmt.Errorf("email delivery %s failure acknowledgement failed: %w", d.ID, markErr)
 		}
-		return nil
+		return emailFailureAcknowledged, nil
 	}
 	if markErr := w.queries.MarkEmailDeliveryRetrying(ctx, generated.MarkEmailDeliveryRetryingParams{
 		ID:            d.ID,
 		LastError:     truncate(err.Error(), 500),
 		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(next), Valid: true},
 	}); markErr != nil {
-		return fmt.Errorf("email delivery %s retry acknowledgement failed: %w", d.ID, markErr)
+		return emailCheckpointFailed, fmt.Errorf("email delivery %s retry acknowledgement failed: %w", d.ID, markErr)
 	}
-	return nil
+	return emailRetryAcknowledged, nil
 }
 
 func truncate(s string, n int) string {
@@ -681,14 +834,18 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func runMigrations(dsn string) error {
+func runMigrations(ctx context.Context, dsn string) error {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return err
 	}
+	migrationCtx, stopMigration := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopMigration()
 	db := stdlib.OpenDB(*cfg.ConnConfig)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	defer db.Close()
-	return mdb.RunMigrations(db)
+	return mdb.RunMigrationsContext(migrationCtx, db)
 }
 
 func parseLevel(s string) slog.Level {

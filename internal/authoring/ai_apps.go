@@ -199,46 +199,6 @@ func AIAppBlock(doc *generated.Document, id string) (*blocks.Block, error) {
 	return nil, ErrAIBlockNotFound
 }
 
-func CommitNegotiationMutation[T any](parent context.Context, deps AIAppDeps, actor Actor, id uuid.UUID,
-	mutate func(context.Context, *generated.Queries, *generated.Document) (T, error), event func(T) audit.Entry,
-) (T, error) {
-	var zero T
-	if deps.Pool == nil || deps.Audit == nil || mutate == nil || event == nil {
-		return zero, errors.New("AI mutation dependencies unavailable")
-	}
-	ctx, cancel := context.WithTimeout(parent, MutationTimeout)
-	defer cancel()
-	tx, err := deps.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return zero, err
-	}
-	defer func() { _ = Rollback(ctx, tx) }()
-	guard, err := lockAIApp(ctx, tx, actor, id, false)
-	if err != nil {
-		return zero, err
-	}
-	value, err := mutate(ctx, generated.New(tx), guard.doc)
-	if err != nil {
-		return zero, err
-	}
-	entry := event(value)
-	if entry.OrgID != actor.OrgID || entry.DocumentID == nil || *entry.DocumentID != id || entry.ActorUserID == nil || *entry.ActorUserID != actor.UserID {
-		return zero, auth.ErrMutationPermissionRevoked
-	}
-	pending, err := deps.Audit.LogTx(ctx, tx, entry)
-	if err != nil {
-		return zero, err
-	}
-	if err := guard.member.Recheck(ctx); err != nil {
-		return zero, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return zero, err
-	}
-	deps.Audit.Publish(pending)
-	return value, nil
-}
-
 // Provider cost is a server observation of an already-authorized dispatch,
 // rather than a user result mutation. Its receipt-bound insert survives expiry,
 // cancellation and result-audit rollback. No generated provider text is logged.

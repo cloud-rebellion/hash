@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"html"
 	"strings"
+
+	"github.com/bright-interaction/hash/internal/render"
 )
 
 // RenderHTML produces a deterministic HTML document body from a block tree.
@@ -18,11 +20,24 @@ import (
 // element with data-attributes the post-render pass uses to compute PDF
 // coordinates.
 func RenderHTML(t *Tree, vars map[string]string) string {
+	return renderHTML(t, &htmlRenderer{vars: vars})
+}
+
+// RenderHTMLWithSignatures substitutes only signature-field slots. Values are
+// opaque, validated archive spans; authored raw_html retains its sanitizer.
+// The tree is not mutated and conditional fields still follow normal rendering.
+func RenderHTMLWithSignatures(t *Tree, vars map[string]string, signatures map[string]render.ArchivedSignatureSpan, pendingLabel string) string {
+	if signatures == nil {
+		signatures = map[string]render.ArchivedSignatureSpan{}
+	}
+	return renderHTML(t, &htmlRenderer{vars: vars, signatures: signatures, pendingLabel: pendingLabel})
+}
+
+func renderHTML(t *Tree, r *htmlRenderer) string {
 	if t == nil {
 		return ""
 	}
 	var sb strings.Builder
-	r := &htmlRenderer{vars: vars}
 	// Group top-level blocks into <section> units, one per top-level heading
 	// (h1/h2), so the print stylesheet can keep each section whole with
 	// break-inside: avoid. A section that would be cut by a page boundary moves
@@ -59,7 +74,10 @@ func RenderHTML(t *Tree, vars map[string]string) string {
 }
 
 type htmlRenderer struct {
-	vars map[string]string
+	vars         map[string]string
+	signatures   map[string]render.ArchivedSignatureSpan
+	pendingLabel string
+	work         *conditionalSendWorkV1
 }
 
 func (r *htmlRenderer) render(sb *strings.Builder, b *Block) {
@@ -121,7 +139,17 @@ func (r *htmlRenderer) render(sb *strings.Builder, b *Block) {
 		fmt.Fprintf(sb, `<hr data-block-id="%s" />`, html.EscapeString(b.ID))
 	case TypePageBreak:
 		fmt.Fprintf(sb, `<div data-block-id="%s" style="page-break-after: always;"></div>`, html.EscapeString(b.ID))
-	case TypeSignatureField, TypeInitialField, TypeTextField, TypeDateField, TypeCheckbox:
+	case TypeSignatureField:
+		if r.signatures != nil {
+			if span := r.signatures[b.ID].HTML(); span != "" {
+				sb.WriteString(`<span class="hash-field--signed">` + span + `</span>`)
+			} else {
+				sb.WriteString(`<span class="hash-field--unsigned">` + html.EscapeString(r.pendingLabel) + `</span>`)
+			}
+			return
+		}
+		fallthrough
+	case TypeInitialField, TypeTextField, TypeDateField, TypeCheckbox:
 		role := html.EscapeString(b.AttrString("recipient_role", ""))
 		label := html.EscapeString(b.AttrString("label", ""))
 		required := "false"
@@ -143,7 +171,7 @@ func (r *htmlRenderer) render(sb *strings.Builder, b *Block) {
 			html.EscapeString(b.ID), html.EscapeString(name), html.EscapeString(val))
 	case TypeConditional:
 		expr := b.AttrString("expression", "")
-		if EvalCondition(expr, r.vars) {
+		if r.conditionV1(expr) {
 			for _, c := range b.Content {
 				r.render(sb, &c)
 			}
@@ -237,4 +265,27 @@ func stringSlice(v any) []string {
 		}
 	}
 	return out
+}
+
+// This pure formatter hook carries no SQL/source/resource authority. The
+// genuine native caller owns tree/map/output staging and derives its decimal
+// allowance at the original SetString/Cmp sites. Legacy formatters stay exact.
+func RenderHTMLWithSignaturesForSendV1(t *Tree, vars map[string]string, signatures map[string]render.ArchivedSignatureSpan, pendingLabel string, admission ConditionalSendAdmissionV1) (string, error) {
+	work := newConditionalSendWorkV1(admission)
+	r := &htmlRenderer{vars: vars, signatures: signatures, pendingLabel: pendingLabel, work: work}
+	if r.signatures == nil {
+		r.signatures = map[string]render.ArchivedSignatureSpan{}
+	}
+	result := renderHTML(t, r)
+	if err := work.resultV1(nil); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+func (r *htmlRenderer) conditionV1(expression string) bool {
+	if r.work == nil {
+		return EvalCondition(expression, r.vars)
+	}
+	value, err := evalConditionStrictForSendV1(expression, r.vars, r.work)
+	return err == nil && value
 }

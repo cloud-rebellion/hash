@@ -77,6 +77,16 @@ type SnapshotInput struct {
 
 // Snapshot persists a new version. Returns the inserted row.
 func (e *Engine) Snapshot(ctx context.Context, in SnapshotInput) (*generated.DocumentVersion, error) {
+	return e.snapshotV1(ctx, in, false)
+}
+
+// SnapshotWithParentIdentityV1 preserves Snapshot policy/output while reading only
+// the previous version ID. Native block authoring retains its actual parent lock;
+// no old JSON/version body is needed to establish the unchanged linear parent.
+func (e *Engine) SnapshotWithParentIdentityV1(ctx context.Context, in SnapshotInput) (*generated.DocumentVersion, error) {
+	return e.snapshotV1(ctx, in, true)
+}
+func (e *Engine) snapshotV1(ctx context.Context, in SnapshotInput, identityOnly bool) (*generated.DocumentVersion, error) {
 	if in.DocumentID == uuid.Nil {
 		return nil, errors.New("snapshot: document_id required")
 	}
@@ -104,12 +114,21 @@ func (e *Engine) Snapshot(ctx context.Context, in SnapshotInput) (*generated.Doc
 	}
 	var parentID pgtype.UUID
 	if maxNo > 0 {
-		latest, err := e.Q.GetLatestDocumentVersion(ctx, in.DocumentID)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: get latest: %w", err)
+		if identityOnly {
+			id, err := e.Q.GetLatestDocumentVersionIdentityV1(ctx, in.DocumentID)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot: get latest: %w", err)
+			}
+			parentID = pgtype.UUID{Bytes: id, Valid: true}
+		} else {
+			latest, err := e.Q.GetLatestDocumentVersion(ctx, in.DocumentID)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot: get latest: %w", err)
+			}
+			parentID = pgtype.UUID{Bytes: latest.ID, Valid: true}
 		}
-		parentID = pgtype.UUID{Bytes: latest.ID, Valid: true}
 	}
+
 	var createdBy pgtype.UUID
 	if in.CreatedBy != nil {
 		createdBy = pgtype.UUID{Bytes: *in.CreatedBy, Valid: true}

@@ -1,0 +1,74 @@
+{
+  "upstream_module": "github.com/gotenberg/gotenberg/v8",
+  "upstream_version": "v8.36.0",
+  "upstream_h1": "h1:K4VDxqHRBIh/yKJbEStzQlaWOl286AnNjFwRFDtoKYc=",
+  "files": [
+    {
+      "file": "api.go",
+      "bytes": 23902,
+      "sha256": "506d936970a760c45e30be03970df0433ee6b8c59135662015b4e0a995e511ed"
+    },
+    {
+      "file": "api_test.go",
+      "bytes": 1525,
+      "sha256": "24ce81fe663031bb9d5f0f41f53bfd7685e4a5c883201bc042827e7af68e134d"
+    },
+    {
+      "file": "context.go",
+      "bytes": 22737,
+      "sha256": "c186d8958daaa4a0f6029b38ac9413db050d28ad9a7a55d6c461ecb623f78cf8"
+    },
+    {
+      "file": "context_test.go",
+      "bytes": 7649,
+      "sha256": "e3b23a91b4fc504c3ad700b9fa05bd7f17c211d862212b4cef33ad0025cc1993"
+    },
+    {
+      "file": "doc.go",
+      "bytes": 159,
+      "sha256": "60900f64bdca340563fead751ed8a89665c669628ba4cc3a783319612a7baaeb"
+    },
+    {
+      "file": "errors.go",
+      "bytes": 2046,
+      "sha256": "eb97696df39d4972076fd30a275c3682576b92f194c1101ce7c909bd0a3a341c"
+    },
+    {
+      "file": "errors_test.go",
+      "bytes": 2344,
+      "sha256": "a836163278dc5287e70b1f4cdf4e426416e7524d5fc612adc84d737e297872c1"
+    },
+    {
+      "file": "formdata.go",
+      "bytes": 19394,
+      "sha256": "47b522503432e887cc10734921f8a62293d353ad62e32ecbcb25f4d7be59e5dd"
+    },
+    {
+      "file": "formdata_test.go",
+      "bytes": 38878,
+      "sha256": "084af95ecc5166d0f5007354bceaa566775796e74287f118673433086a477904"
+    },
+    {
+      "file": "middlewares.go",
+      "bytes": 18377,
+      "sha256": "deb5fe4b07590d49684dc7a704ddae28e7390923251c401facdfd1e732397a13"
+    },
+    {
+      "file": "middlewares_test.go",
+      "bytes": 7933,
+      "sha256": "dd05cc94c223305e1d39faca10c21e6741180be12bdcf38cd369192606543217"
+    },
+    {
+      "file": "mocks.go",
+      "bytes": 3514,
+      "sha256": "5d2b7fab9a91a9eb97996ee74e510f9e700de1c0b25034b6caef3f255072dcde"
+    },
+    {
+      "file": "testdata/sample.txt",
+      "bytes": 32,
+      "sha256": "d5e444e2aa5d3a6844a595d2e7e69d65920c3507853ace7e82800742fae9eb0a"
+    }
+  ],
+  "license_sha256": "24b9edd14f44d08af320e1d4fc63535636cb71f7c8e7d3827dc831692f27e1aa",
+  "adaptations": "Hash-owned listener and complete Echo request lifecycle; synchronous HTTP/TLS bind, pre-buffer h2c-upgrade refusal, real worker/context/workspace/admission ownership, gated response and deadline control, two multipart leases, complete encoded entity cap24MiB before parsing under the original processing deadline, checked staging/form/workspace/file/archive cleanup, confined output opens and delivered-byte verification. Failed cleanup quarantines leases/health; ordinary source-bound HTTP1 input-drain errors remain separate from uncertain cleanup. See OWNERSHIP.md for compatibility and pending qualification boundaries. Original upstream file digests above remain provenance, not current modified-file identities. Generated attachments refuse Range requests before output open to avoid the inherited unjoined multi-range producer. Optional downloadFrom remains disabled and its transport retirement is unqualified."
+}

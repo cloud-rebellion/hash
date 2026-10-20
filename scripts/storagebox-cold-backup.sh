@@ -2126,9 +2126,12 @@ run_backup() {
   stop_container "$app_container_id" 'Hash app'
 
   log 'capturing canonical inventory and PostgreSQL dump while Hash writers are stopped'
-  "$DOCKER" exec -i "$postgres_container_id" psql --no-psqlrc --no-password \
+  # One quiet psql transaction per capture: preserve canonical stdin and inherit
+  # existing connection/timeout settings while keeping JIT local to this read.
+  "$DOCKER" exec -i "$postgres_container_id" psql --no-psqlrc --no-password --quiet --single-transaction \
     --username "$postgres_user" --dbname "$postgres_database" --set ON_ERROR_STOP=1 \
     --tuples-only --no-align --field-separator $'\t' --pset footer=off \
+    --command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' --file - \
     < "$inventory_sql" > "$stage_dir/postgresql/recovery-object-inventory.before.tsv" \
     || die 'failed to capture pre-dump canonical object inventory'
   "$DOCKER" exec "$postgres_container_id" pg_dump --no-password \
@@ -2137,9 +2140,10 @@ run_backup() {
     > "$stage_dir/postgresql/hash.pgdump" \
     || die 'PostgreSQL dump failed'
   [[ -s "$stage_dir/postgresql/hash.pgdump" ]] || die 'PostgreSQL dump is empty'
-  "$DOCKER" exec -i "$postgres_container_id" psql --no-psqlrc --no-password \
+  "$DOCKER" exec -i "$postgres_container_id" psql --no-psqlrc --no-password --quiet --single-transaction \
     --username "$postgres_user" --dbname "$postgres_database" --set ON_ERROR_STOP=1 \
     --tuples-only --no-align --field-separator $'\t' --pset footer=off \
+    --command 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL jit = off;' --file - \
     < "$inventory_sql" > "$stage_dir/postgresql/recovery-object-inventory.tsv" \
     || die 'failed to capture post-dump canonical object inventory'
   cmp -s "$stage_dir/postgresql/recovery-object-inventory.before.tsv" \

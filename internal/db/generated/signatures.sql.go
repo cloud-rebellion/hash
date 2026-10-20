@@ -16,6 +16,66 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const insertFittedManualSignatureV1 = `-- name: InsertFittedManualSignatureV1 :one
+INSERT INTO signatures (
+    document_id, recipient_id, field_id, font, typed_name,
+    image_storage_key, image_sha256, image_version_id,
+    image_version_pin_required, signature_kind, signer_ip, signer_ua
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, 'manual_pdf_fit_v1', $9, $10)
+ON CONFLICT (document_id, recipient_id) DO NOTHING
+RETURNING id, document_id, recipient_id, field_id, font, typed_name, image_storage_key, image_sha256, signer_ip, signer_ua, signed_at, image_version_id, image_version_pin_required, signature_kind, presign_execution_id
+`
+
+type InsertFittedManualSignatureV1Params struct {
+	DocumentID      uuid.UUID   `json:"document_id"`
+	RecipientID     uuid.UUID   `json:"recipient_id"`
+	FieldID         uuid.UUID   `json:"field_id"`
+	Font            string      `json:"font"`
+	TypedName       string      `json:"typed_name"`
+	ImageStorageKey string      `json:"image_storage_key"`
+	ImageSha256     []byte      `json:"image_sha256"`
+	ImageVersionID  pgtype.Text `json:"image_version_id"`
+	SignerIp        *netip.Addr `json:"signer_ip"`
+	SignerUa        pgtype.Text `json:"signer_ua"`
+}
+
+// Caller uses the actual signing transaction and must insert its immutable
+// selection companion before COMMIT. Migration85 checks the deferred pair.
+func (q *Queries) InsertFittedManualSignatureV1(ctx context.Context, arg InsertFittedManualSignatureV1Params) (*Signature, error) {
+	row := q.db.QueryRow(ctx, insertFittedManualSignatureV1,
+		arg.DocumentID,
+		arg.RecipientID,
+		arg.FieldID,
+		arg.Font,
+		arg.TypedName,
+		arg.ImageStorageKey,
+		arg.ImageSha256,
+		arg.ImageVersionID,
+		arg.SignerIp,
+		arg.SignerUa,
+	)
+	var i Signature
+	err := row.Scan(
+		&i.ID,
+		&i.DocumentID,
+		&i.RecipientID,
+		&i.FieldID,
+		&i.Font,
+		&i.TypedName,
+		&i.ImageStorageKey,
+		&i.ImageSha256,
+		&i.SignerIp,
+		&i.SignerUa,
+		&i.SignedAt,
+		&i.ImageVersionID,
+		&i.ImageVersionPinRequired,
+		&i.SignatureKind,
+		&i.PresignExecutionID,
+	)
+	return &i, err
+}
+
 const insertSignature = `-- name: InsertSignature :one
 INSERT INTO signatures (
     document_id, recipient_id, field_id, font, typed_name,

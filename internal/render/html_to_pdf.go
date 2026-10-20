@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -33,6 +34,9 @@ const maxRenderedPDF = 60 << 20
 type Gotenberg struct {
 	BaseURL string
 	HTTP    *http.Client
+	// fitToken belongs only to the closed private fitting route. Generic HTML
+	// conversions and readiness never receive this credential.
+	fitToken string
 	// sem bounds concurrent renders so an authenticated caller cannot fan out
 	// unbounded Chromium conversions (each holding a large PDF + working set)
 	// and exhaust process memory. middleware.Timeout cannot stop the ctx-less
@@ -89,6 +93,20 @@ func (g *Gotenberg) Ping(ctx context.Context) error {
 // and returns the rendered PDF bytes. Reference:
 // https://gotenberg.dev/docs/routes#convert-with-chromium-html
 func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions) ([]byte, error) {
+	if opts.MaxResponseBytes < 0 || opts.MaxResponseBytes > maxRenderedPDF {
+		return nil, fmt.Errorf("invalid PDF response byte limit")
+	}
+	responseLimit := maxRenderedPDF
+	if opts.MaxResponseBytes > 0 {
+		responseLimit = opts.MaxResponseBytes
+	}
+	if opts.ExactPaperPoints != [2]float64{} {
+		for _, n := range opts.ExactPaperPoints {
+			if n <= 0 || n > 14400 || math.IsNaN(n) || math.IsInf(n, 0) {
+				return nil, fmt.Errorf("invalid exact PDF page size")
+			}
+		}
+	}
 	// One budget covers admission, all HTTP attempts, and retry backoff.
 	// A per-request client timeout alone would allow three full budgets.
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -106,7 +124,10 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 			return nil, ctx.Err()
 		}
 	}
-	body := &bytes.Buffer{}
+	if err := validateHTMLMultipartSize(ctx, html, opts); err != nil {
+		return nil, err
+	}
+	body := &htmlMultipartBuffer{}
 	mw := multipart.NewWriter(body)
 
 	// index.html is the file Gotenberg renders.
@@ -147,24 +168,59 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 		// proposals), so we don't force 1-inch margins onto a full-bleed layout.
 		opts.Margins = [4]float32{1.0, 1.0, 1.0, 1.0}
 	}
-	_ = mw.WriteField("paperWidth", fmt.Sprintf("%.2f", opts.PaperWidth))
-	_ = mw.WriteField("paperHeight", fmt.Sprintf("%.2f", opts.PaperHeight))
-	_ = mw.WriteField("marginTop", fmt.Sprintf("%.2f", opts.Margins[0]))
-	_ = mw.WriteField("marginRight", fmt.Sprintf("%.2f", opts.Margins[1]))
-	_ = mw.WriteField("marginBottom", fmt.Sprintf("%.2f", opts.Margins[2]))
-	_ = mw.WriteField("marginLeft", fmt.Sprintf("%.2f", opts.Margins[3]))
-	_ = mw.WriteField("printBackground", "true")
+	if opts.ExactPaperPoints != [2]float64{} {
+		if err := mw.WriteField("paperWidth", fmt.Sprintf("%.9f", opts.ExactPaperPoints[0]/72)); err != nil {
+			return nil, err
+		}
+		if err := mw.WriteField("paperHeight", fmt.Sprintf("%.9f", opts.ExactPaperPoints[1]/72)); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := mw.WriteField("paperWidth", fmt.Sprintf("%.2f", opts.PaperWidth)); err != nil {
+			return nil, err
+		}
+		if err := mw.WriteField("paperHeight", fmt.Sprintf("%.2f", opts.PaperHeight)); err != nil {
+			return nil, err
+		}
+	}
+	if err := mw.WriteField("marginTop", fmt.Sprintf("%.2f", opts.Margins[0])); err != nil {
+		return nil, err
+	}
+	if err := mw.WriteField("marginRight", fmt.Sprintf("%.2f", opts.Margins[1])); err != nil {
+		return nil, err
+	}
+	if err := mw.WriteField("marginBottom", fmt.Sprintf("%.2f", opts.Margins[2])); err != nil {
+		return nil, err
+	}
+	if err := mw.WriteField("marginLeft", fmt.Sprintf("%.2f", opts.Margins[3])); err != nil {
+		return nil, err
+	}
+	if err := mw.WriteField("printBackground", "true"); err != nil {
+		return nil, err
+	}
+	// A contractual PDF must not silently omit an unavailable image, font or
+	// stylesheet. Keep this policy mandatory for every render, including the
+	// owned adapter and all replay attempts of the frozen multipart body.
+	if err := mw.WriteField("failOnResourceLoadingFailed", "true"); err != nil {
+		return nil, fmt.Errorf("write strict resource loading policy: %w", err)
+	}
 	if opts.PreferCSSPageSize {
 		// Honour the document's own `@page { size: ... }` rule so a designed
 		// proposal (e.g. a landscape deck) renders at its intended geometry
 		// instead of being squeezed into the paperWidth/Height fallback.
-		_ = mw.WriteField("preferCssPageSize", "true")
+		if err := mw.WriteField("preferCssPageSize", "true"); err != nil {
+			return nil, err
+		}
 	}
 	if opts.WaitForExpression != "" {
-		_ = mw.WriteField("waitForExpression", opts.WaitForExpression)
+		if err := mw.WriteField("waitForExpression", opts.WaitForExpression); err != nil {
+			return nil, err
+		}
 	}
 	if opts.WaitDelay != "" {
-		_ = mw.WriteField("waitDelay", opts.WaitDelay)
+		if err := mw.WriteField("waitDelay", opts.WaitDelay); err != nil {
+			return nil, err
+		}
 	}
 	if err := mw.Close(); err != nil {
 		return nil, err
@@ -177,7 +233,7 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 	// Gotenberg + Chromium restart cleanly under load but the convert
 	// route occasionally answers 503 / closes the connection mid-flight
 	// (Chromium worker pool exhaustion). Three attempts with 200ms +
-	// 600ms backoff turns a flaky deploy into a stable render without
+	// 800ms backoff turns a flaky deploy into a stable render without
 	// pushing the latency budget past the 60s client timeout.
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -200,12 +256,12 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 		}
 		if resp.StatusCode == http.StatusOK {
 			defer resp.Body.Close()
-			out, err := io.ReadAll(io.LimitReader(resp.Body, maxRenderedPDF+1))
+			out, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 			if err != nil {
 				return nil, err
 			}
-			if len(out) > maxRenderedPDF {
-				return nil, fmt.Errorf("gotenberg render exceeded the %d-byte limit", maxRenderedPDF)
+			if len(out) > responseLimit {
+				return nil, fmt.Errorf("gotenberg render exceeded the %d-byte limit", responseLimit)
 			}
 			return out, nil
 		}
@@ -223,6 +279,12 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 
 // PDFOptions configures the Chromium-rendered PDF.
 type PDFOptions struct {
+	// MaxResponseBytes narrows the existing response cap for a bounded batch.
+	// Zero preserves the historical cap; a larger value is never permitted.
+	MaxResponseBytes int
+	// ExactPaperPoints is opt-in for page-relative manual overlays. Zero keeps
+	// the historical two-decimal inch encoding used by existing recipes.
+	ExactPaperPoints  [2]float64
 	PaperWidth        float32     // inches; A4 width = 8.27
 	PaperHeight       float32     // inches; A4 height = 11.69
 	Margins           [4]float32  // top, right, bottom, left in inches

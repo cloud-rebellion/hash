@@ -28,6 +28,7 @@ import (
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/malwarescan"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -148,8 +149,16 @@ func (s *Server) handleReviseHTMLDocument(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	r, closeInput, ok := s.beginHTMLAuthoringInputV1(w, r, u.OrgID, pdfadmission.HTMLDocumentRevisionInputV1)
+	if !ok {
+		return
+	}
+	defer closeInput()
 	var in htmlDocumentRevisionInput
 	if err := decodeSignerJSON(r, &in); err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -178,15 +187,26 @@ func (s *Server) handleReviseHTMLDocument(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer release()
-	doc, revision, pages, err := s.reviseHTMLDocument(r.Context(), authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id, in, expected)
+	inputOwner, _ := r.Context().Value(htmlAuthoringInputContextKeyV1{}).(*pdfadmission.ApplicationHTMLAuthoringInputV1)
+	result, finishResult, err := s.reviseHTMLDocumentOwnedV1(r.Context(), authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id, in, expected, inputOwner)
 	if err != nil {
 		s.writeHTMLDocumentRevisionError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"document": toDocumentResponse(doc), "materialization_revision": revision, "page_count": pages, "review_required": true, "placement_reset": true})
+	defer finishResult()
+	writeJSON(w, http.StatusCreated, map[string]any{"document": toDocumentResponse(result.Document), "materialization_revision": result.MaterializationRevision, "page_count": result.PageCount, "review_required": true, "placement_reset": true})
 }
 
 func (s *Server) writeHTMLDocumentRevisionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pdfadmission.ErrHTMLRevisionNoChangeV1) {
+		err = errHTMLDocumentRevisionConflict
+	}
+	if errors.Is(err, pdfadmission.ErrHTMLRevisionOperationV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionCollectionsV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionWriterV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionSourceV1) || errors.Is(err, pdfadmission.ErrHTMLAuditEventV1) {
+		if !errors.Is(err, htmlsource.ErrInvalid) && !errors.Is(err, htmlmaterialization.ErrInvalid) && !errors.Is(err, htmlmaster.ErrInvalid) && !errors.Is(err, htmlmaster.ErrLimit) && !errors.Is(err, htmlmaster.ErrMissingValues) && !errors.Is(err, htmlmaster.ErrContractIncomplete) {
+			writeOwnedHTMLRevisionUnavailableV1(w)
+			return
+		}
+	}
 	if errors.Is(err, errHTMLDocumentRevisionRenderUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, errHTMLDocumentRevisionRenderUnavailable.Error())
 		return

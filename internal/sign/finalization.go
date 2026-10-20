@@ -21,9 +21,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/hash/internal/article13"
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/storage"
 )
@@ -115,6 +115,9 @@ func (e *Engine) claimDocumentFinalizing(ctx context.Context, conn *pgxpool.Conn
 	locked, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
 	if err != nil {
 		return nil, fmt.Errorf("claim finalization: lock document: %w", err)
+	}
+	if err := requireHistoricalSigningAdmissionV1(locked); err != nil {
+		return nil, err
 	}
 	if err := htmlsource.ValidateSigningPageState(ctx, q, locked, 0); err != nil {
 		return nil, err
@@ -458,7 +461,18 @@ func (e *Engine) retainFinalizationSignatureEvidence(ctx context.Context, docume
 		if err != nil {
 			return fmt.Errorf("resume finalization: list signature evidence for %s: %w", document.ID, err)
 		}
-		if err := retainPinnedSignatureEvidence(ctx, e.Storage, document.ID, signatures, retainUntil); err != nil {
+		// A fitted signature owns span, every occupied page package and manifest.
+		// A bare-span extension is insufficient for the completion commitment.
+		if err := e.retainFittedDocumentEvidenceV1(ctx, e.Queries, document); err != nil {
+			return err
+		}
+		legacy := make([]*generated.Signature, 0, len(signatures))
+		for _, signature := range signatures {
+			if signature == nil || signature.SignatureKind != "manual_pdf_fit_v1" {
+				legacy = append(legacy, signature)
+			}
+		}
+		if err := retainPinnedSignatureEvidence(ctx, e.Storage, document.ID, legacy, retainUntil); err != nil {
 			return err
 		}
 	}
@@ -468,6 +482,11 @@ func (e *Engine) retainFinalizationSignatureEvidence(ctx context.Context, docume
 func retainPinnedSignatureEvidence(ctx context.Context, store EvidenceStorage, documentID uuid.UUID, signatures []*generated.Signature, retainUntil time.Time) error {
 	if store == nil || documentID == uuid.Nil || retainUntil.IsZero() || retainUntil.Nanosecond() != 0 {
 		return errors.New("resume finalization: signature evidence retention input is invalid")
+	}
+	for _, signature := range signatures {
+		if signature != nil && signature.SignatureKind == "manual_pdf_fit_v1" {
+			return ErrFittedCompositionRequiredV1
+		}
 	}
 	for _, signature := range signatures {
 		if signature == nil || signature.DocumentID != documentID ||
@@ -568,67 +587,11 @@ func (e *Engine) requiredRolesForFinalization(ctx context.Context, q *generated.
 // is already non-interactive. A crash before this transaction is recoverable by
 // rebuilding from finalizing; a crash after it is recoverable by resuming the
 // immutable tuple without rendering a second legal artifact.
-func (e *Engine) beginDocumentFinalization(ctx context.Context, conn *pgxpool.Conn, doc *generated.Document, staged stagedDocumentFinalization) error {
+func (e *Engine) beginDocumentFinalization(ctx context.Context, conn *pgxpool.Conn, reference *pdfadmission.ApplicationHistoricalFinalizationStageReferenceV1, staged stagedDocumentFinalization) error {
 	if conn == nil || e.Queries == nil {
 		return errors.New("stage finalization: lifecycle store unavailable")
 	}
-	if err := staged.validate(doc); err != nil {
-		return err
-	}
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("stage finalization: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := e.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
-	if err != nil {
-		return fmt.Errorf("stage finalization: lock document: %w", err)
-	}
-	if locked.Status != "finalizing" {
-		return ErrDocumentRevisedDuringFinalize
-	}
-	if err := validateFinalizationMode(locked, staged.Mode); err != nil {
-		return err
-	}
-	if !completionEffectiveTimesEqual(locked.CompletionEffectiveAt, doc.CompletionEffectiveAt) ||
-		!retentionTimesEqual(locked.FinalizationRetainUntil, doc.FinalizationRetainUntil) {
-		return errors.New("stage finalization: document commitments changed before intent persistence")
-	}
-	if _, err := finalizationRetentionDeadline(locked); err != nil {
-		return fmt.Errorf("stage finalization: %w", err)
-	}
-	params := generated.CreateDocumentFinalizationIntentParams{
-		DocumentID: locked.ID, OrgID: locked.OrgID, Mode: staged.Mode,
-		CompletionEffectiveAt: locked.CompletionEffectiveAt,
-		RetainUntil:           locked.FinalizationRetainUntil,
-		FinalPdfKey:           staged.FinalKey, FinalPdfSha256: staged.FinalSHA256[:],
-		FinalPdfVersionID: pgtype.Text{String: staged.FinalVersionID, Valid: true},
-		AuditCertKey:      staged.Certificate.CertKey, AuditCertSha256: staged.Certificate.CertSHA256[:],
-		AuditCertVersionID: pgtype.Text{String: staged.Certificate.CertVersionID, Valid: true},
-		AuditPayloadKey:    staged.Certificate.PayloadKey, AuditPayloadSha256: staged.Certificate.PayloadSHA256[:],
-		AuditPayloadVersionID: pgtype.Text{String: staged.Certificate.PayloadVersionID, Valid: true},
-		AuditSignatureKey:     staged.Certificate.SignatureKey, AuditSignatureSha256: staged.Certificate.SignatureSHA256[:],
-		AuditSignatureVersionID: pgtype.Text{String: staged.Certificate.SignatureVersionID, Valid: true},
-	}
-	existing, getErr := q.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID,
-	})
-	if getErr == nil {
-		if err := finalizationIntentMatchesParams(existing, params); err != nil {
-			return err
-		}
-	} else if errors.Is(getErr, pgx.ErrNoRows) {
-		if _, err := q.CreateDocumentFinalizationIntent(ctx, params); err != nil {
-			return fmt.Errorf("stage finalization: persist intent: %w", err)
-		}
-	} else {
-		return fmt.Errorf("stage finalization: load intent: %w", getErr)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("stage finalization: commit intent: %w", err)
-	}
-	return nil
+	return e.stageHistoricalFinalizationOwnedV1(ctx, reference, staged)
 }
 
 func finalizationIntentMatchesParams(intent *generated.DocumentFinalizationIntent, params generated.CreateDocumentFinalizationIntentParams) error {
@@ -722,82 +685,134 @@ func finalizationIntentHasPins(intent *generated.DocumentFinalizationIntent) boo
 // retention, after any individual retain call, after the retention-complete
 // checkpoint, and before/after the terminal SQL transaction.
 func (e *Engine) resumeDocumentFinalization(ctx context.Context, conn *pgxpool.Conn, doc *generated.Document, capture *completionCredentialCapture) (*generated.Document, bool, error) {
+	return e.resumeDocumentFinalizationAfterClaimOwnedV1(ctx, conn, doc, capture, nil)
+}
+
+func (e *Engine) resumeDocumentFinalizationAfterClaimOwnedV1(ctx context.Context, conn *pgxpool.Conn, doc *generated.Document, capture *completionCredentialCapture, prior *ownedHistoricalFinalizationClaimV1) (*generated.Document, bool, error) {
 	if conn == nil || e.Queries == nil || e.Storage == nil || e.Audit == nil {
 		return nil, false, errors.New("resume finalization: dependencies unavailable")
 	}
 	if doc == nil || doc.Status != "finalizing" {
 		return nil, false, ErrDocumentRevisedDuringFinalize
 	}
-	q := generated.New(conn)
-	intent, err := q.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("resume finalization: load intent: %w", err)
+	return e.resumeDocumentFinalizationScopeOwnedV1(ctx, conn, doc.OrgID, doc.ID, capture, prior, nil)
+}
+
+func (e *Engine) resumeDocumentFinalizationScopeOwnedV1(ctx context.Context, conn *pgxpool.Conn, org, document uuid.UUID, capture *completionCredentialCapture, prior *ownedHistoricalFinalizationClaimV1, reference *pdfadmission.ApplicationHistoricalFinalizationStageReferenceV1) (*generated.Document, bool, error) {
+	if conn == nil || e.Queries == nil || e.Storage == nil || e.Audit == nil {
+		return nil, false, errors.New("resume finalization: dependencies unavailable")
 	}
-	// Every caller, including a direct recovery invocation, must recheck the
-	// current named parties, ceremony mode and captured signatures under the
-	// parent lock before version compatibility work or object retention. The
-	// finalizing claim keeps legacy readiness semantics while validating both
-	// independently bound parties for reviewed contracts.
-	doc, err = e.claimDocumentFinalizing(ctx, conn, doc.OrgID, doc.ID, intent.Mode)
+	next, intent, resumeOwner, err := e.loadHistoricalFinalizationResumeOwnedV1(ctx, org, document, reference)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := e.validateFrozenDocumentFamily(ctx, doc); err != nil {
-		return nil, false, fmt.Errorf("resume finalization: %w", err)
-	}
-	doc, err = e.ensureDocumentSourceVersions(ctx, doc)
-	if err != nil {
-		return nil, false, err
-	}
-	if doc.RequiresSignature {
-		if err := e.ensureSignatureVersions(ctx, doc.ID); err != nil {
+	defer resumeOwner.closeV1()
+	doc := next
+	if prior != nil {
+		if err = prior.retireAtResumeV1(e, doc, resumeOwner); err != nil {
 			return nil, false, err
 		}
 	}
-	signatureDocuments := []*generated.Document{doc}
+	if resumeOwner.frozenFailure != nil {
+		return nil, false, fmt.Errorf("resume finalization: %w", resumeOwner.frozenFailure)
+	}
+	// Keep the one exact independently funded advisory witness. Every old real
+	// source/CPU/intent consumer is dropped and retired before fresh Source24.
+	publication := resumeOwner.publication
+	if resumeOwner.publicationFailure != nil {
+		return nil, false, blockSignatureFailureV1(resumeOwner.publicationFailure)
+	}
+	if publication == nil || !publication.MatchesOriginalIntentV1(resumeOwner.operation.native, intent) {
+		return nil, false, errors.New("publish finalization: intent changed during resume")
+	}
+	originalEvidenceFailure := resumeOwner.evidenceFailure
+	requiresSignature := doc.RequiresSignature
+	next = nil
+	doc = nil
+	intent = nil
+	resumeOwner.document = nil
+	if resumeOwner.evidence != nil {
+		resumeOwner.evidence.CloseConsumerV1()
+		resumeOwner.evidence = nil
+	}
+	if err = resumeOwner.operation.closeV1(); err != nil {
+		return nil, false, err
+	}
+	var sourceOwner *ownedHistoricalFinalizationSourceV1
+	defer func() { retainHistoricalFinalizationInputV1(capture, sourceOwner) }()
+	doc, sourceOwner, err = e.loadHistoricalFinalizationRootSourceOwnedV1(ctx, reference, requiresSignature)
+	if err != nil {
+		return nil, false, err
+	}
 	if doc.IsEnvelope {
-		children, err := e.ensureEnvelopeChildrenEvidenceVersions(ctx, doc)
-		if err != nil {
+		children, childErr := sourceOwner.ensureEnvelopeChildrenEvidenceVersionsV1(e)
+		if childErr != nil {
+			return nil, false, childErr
+		}
+		// Compatibility children have no remaining view/body consumer in Resume.
+		children = nil
+		_ = children
+		if err = sourceOwner.retireResumeVersionFamilyV1(); err != nil {
 			return nil, false, err
 		}
-		signatureDocuments = append(signatureDocuments, children...)
 	}
-	intent, err = ensureFinalizationIntentVersions(ctx, q, e.Storage, intent)
+	doc, intent, publication, err = sourceOwner.resumeIntentVersionsV1(e)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := validateFinalizationIntent(doc, intent); err != nil {
+	if sourceOwner.resumeIntentPolicyFailure != nil {
+		return nil, false, sourceOwner.resumeIntentPolicyFailure
+	}
+	if err = validateFinalizationIntentAfterModeV1(doc, intent); err != nil {
 		return nil, false, err
 	}
-	if err := verifyFinalizationArtifacts(ctx, e.Storage, intent); err != nil {
+	// Failures prepared under the original Resume callback retain their original
+	// evidence-policy point; a fresh source cannot erase that refusal.
+	if originalEvidenceFailure != nil {
+		return nil, false, blockSignatureFailureV1(originalEvidenceFailure)
+	}
+	if sourceOwner.resumeEvidenceFailure != nil {
+		return nil, false, blockSignatureFailureV1(sourceOwner.resumeEvidenceFailure)
+	}
+	artifacts := sourceOwner.resumeEvidence
+	if artifacts == nil || !artifacts.MatchesIntentV1(intent) {
+		return nil, false, errors.New("resume finalization: actual intent changed before artifact verification")
+	}
+	if err = artifacts.VerifyIntentArtifactsV1(); err != nil {
 		e.markDocumentFinalizationFailed(intent, err)
 		return nil, false, err
 	}
 	if !intent.RetentionCompletedAt.Valid {
-		rows, err := q.MarkDocumentFinalizationRetentionStarted(ctx, generated.MarkDocumentFinalizationRetentionStartedParams{
-			DocumentID: intent.DocumentID, OrgID: intent.OrgID,
-		})
-		if err != nil || rows != 1 {
-			return nil, false, fmt.Errorf("resume finalization: checkpoint retention start: rows=%d err=%w", rows, err)
+		rows, checkpointErr := e.markHistoricalFinalizationCheckpointOwnedV1(ctx, intent, historicalRetentionStartedV1, "")
+		if checkpointErr != nil || rows != 1 {
+			return nil, false, fmt.Errorf("resume finalization: checkpoint retention start: rows=%d err=%w", rows, checkpointErr)
 		}
-		if err := e.retainFinalizationSignatureEvidence(ctx, signatureDocuments, intent); err != nil {
+		if err = sourceOwner.retainResumeSignatureInputsV1(e, publication); err != nil {
 			e.markDocumentFinalizationFailed(intent, err)
 			return nil, false, err
 		}
-		if err := retainFinalizationArtifacts(ctx, e.Storage, intent); err != nil {
+		if err = artifacts.RetainIntentArtifactsV1(); err != nil {
 			e.markDocumentFinalizationFailed(intent, err)
 			return nil, false, err
 		}
-		rows, err = q.MarkDocumentFinalizationRetentionComplete(ctx, generated.MarkDocumentFinalizationRetentionCompleteParams{
-			DocumentID: intent.DocumentID, OrgID: intent.OrgID,
-		})
-		if err != nil || rows != 1 {
-			return nil, false, fmt.Errorf("resume finalization: checkpoint retention completion: rows=%d err=%w", rows, err)
+		rows, checkpointErr = e.markHistoricalFinalizationCheckpointOwnedV1(ctx, intent, historicalRetentionCompletedV1, "")
+		if checkpointErr != nil || rows != 1 {
+			return nil, false, fmt.Errorf("resume finalization: checkpoint retention completion: rows=%d err=%w", rows, checkpointErr)
 		}
 	}
-	return e.publishDocumentFinalization(ctx, conn, doc, intent, capture)
+	if !publication.MatchesIntentV1(intent) {
+		return nil, false, errors.New("publish finalization: intent changed during resume")
+	}
+	// Only the independently funded exact witness crosses the real source last
+	// use into fresh publication. Error paths retain Source24 to response lastuse.
+	doc = nil
+	intent = nil
+	artifacts = nil
+	if err = sourceOwner.closeV1(); err != nil {
+		return nil, false, err
+	}
+	sourceOwner = nil
+	return e.publishDocumentFinalizationFromReferenceV1(ctx, conn, publication, capture)
 }
 
 func validateFinalizationIntent(doc *generated.Document, intent *generated.DocumentFinalizationIntent) error {
@@ -806,6 +821,15 @@ func validateFinalizationIntent(doc *generated.Document, intent *generated.Docum
 	}
 	if err := validateFinalizationMode(doc, intent.Mode); err != nil {
 		return err
+	}
+	return validateFinalizationIntentAfterModeV1(doc, intent)
+}
+
+// Native publication has already run the SAME original mode/party policy
+// through its genuine source owner; do not decode that full JSON a second time.
+func validateFinalizationIntentAfterModeV1(doc *generated.Document, intent *generated.DocumentFinalizationIntent) error {
+	if doc == nil || intent == nil || doc.ID != intent.DocumentID || doc.OrgID != intent.OrgID || doc.Status != "finalizing" {
+		return errors.New("resume finalization: intent/document identity or state mismatch")
 	}
 	if !doc.CompletionEffectiveAtBound {
 		return errors.New("resume finalization: completion-effective timestamp is not bound")
@@ -899,187 +923,25 @@ func (e *Engine) markDocumentFinalizationFailed(intent *generated.DocumentFinali
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = e.Queries.MarkDocumentFinalizationAttemptFailed(ctx, generated.MarkDocumentFinalizationAttemptFailedParams{
-		DocumentID: intent.DocumentID, OrgID: intent.OrgID,
-		LastError: pgtype.Text{String: message, Valid: true},
-	})
+	_, _ = e.markHistoricalFinalizationCheckpointOwnedV1(ctx, intent, historicalRetentionFailedV1, message)
 }
 
 func (e *Engine) publishDocumentFinalization(ctx context.Context, conn *pgxpool.Conn, prepared *generated.Document, stagedIntent *generated.DocumentFinalizationIntent, capture *completionCredentialCapture) (*generated.Document, bool, error) {
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: begin: %w", err)
+	if conn == nil || capture == nil || capture.publication != nil {
+		return nil, false, ErrSigningAdmissionUnavailableV1
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := e.Queries.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: prepared.ID, OrgID: prepared.OrgID})
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: lock document: %w", err)
-	}
-	if locked.Status == "completed" && locked.FinalPdfKey.Valid && locked.AuditCertKey.Valid {
-		return locked, false, nil
-	}
-	if locked.Status != "finalizing" {
-		return nil, false, ErrDocumentRevisedDuringFinalize
-	}
-	intent, err := q.GetDocumentFinalizationIntentForUpdate(ctx, generated.GetDocumentFinalizationIntentForUpdateParams{
-		DocumentID: locked.ID, OrgID: locked.OrgID,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: lock intent: %w", err)
-	}
-	if err := validateFinalizationIntent(locked, intent); err != nil {
-		return nil, false, err
-	}
-	if !intent.RetentionStartedAt.Valid || !intent.RetentionCompletedAt.Valid {
-		return nil, false, errors.New("publish finalization: immutable retention is incomplete")
-	}
-	if stagedIntent != nil && !finalizationIntentsEqual(stagedIntent, intent) {
-		return nil, false, errors.New("publish finalization: intent changed during resume")
-	}
-	// Re-read all four exact persisted versions while the intent row is locked,
-	// as close as the PostgreSQL/S3 boundary permits, before the terminal UPDATE.
-	// A newer logical-key shadow is irrelevant to these pinned reads.
-	if err := verifyFinalizationArtifacts(ctx, e.Storage, intent); err != nil {
-		return nil, false, err
-	}
-	requiredRoles, err := e.requiredRolesForFinalization(ctx, q, locked, intent.Mode)
-	if err != nil {
-		return nil, false, err
-	}
+	completed, did, owner, err := e.publishHistoricalFinalizationOwnedV1(ctx, prepared, stagedIntent, capture)
+	capture.publication = owner
+	return completed, did, err
+}
 
-	var envelopeChildren []*generated.Document
-	if locked.IsEnvelope {
-		listed, err := q.ListEnvelopeChildren(ctx, generated.ListEnvelopeChildrenParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: locked.ID, Valid: true}, OrgID: locked.OrgID,
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("publish finalization: list envelope children: %w", err)
-		}
-		if len(listed) == 0 {
-			return nil, false, errors.New("publish finalization: envelope has no children")
-		}
-		for _, candidate := range listed {
-			child, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: candidate.ID, OrgID: locked.OrgID})
-			if err != nil {
-				return nil, false, fmt.Errorf("publish finalization: lock child %s: %w", candidate.ID, err)
-			}
-			if !envelopeChildStatusMatchesParent(locked.Status, child.Status) ||
-				!child.CompletionEffectiveAtBound ||
-				!completionEffectiveTimesEqual(child.CompletionEffectiveAt, locked.CompletionEffectiveAt) ||
-				!retentionTimesEqual(child.FinalizationRetainUntil, locked.FinalizationRetainUntil) {
-				return nil, false, fmt.Errorf("publish finalization: child %s is not frozen to the envelope commitment", child.ID)
-			}
-			envelopeChildren = append(envelopeChildren, child)
-		}
+func (e *Engine) publishDocumentFinalizationFromReferenceV1(ctx context.Context, conn *pgxpool.Conn, reference *pdfadmission.ApplicationHistoricalFinalizationPublicationReferenceV1, capture *completionCredentialCapture) (*generated.Document, bool, error) {
+	if conn == nil || capture == nil || capture.publication != nil {
+		return nil, false, ErrSigningAdmissionUnavailableV1
 	}
-
-	completed, err := q.CompleteDocumentFinalization(ctx, generated.CompleteDocumentFinalizationParams{
-		FinalPdfKey: pgtype.Text{String: intent.FinalPdfKey, Valid: true}, FinalPdfSha256: intent.FinalPdfSha256,
-		FinalPdfVersionID: intent.FinalPdfVersionID,
-		AuditCertKey:      pgtype.Text{String: intent.AuditCertKey, Valid: true}, AuditCertSha256: intent.AuditCertSha256,
-		AuditCertVersionID: intent.AuditCertVersionID,
-		AuditPayloadKey:    pgtype.Text{String: intent.AuditPayloadKey, Valid: true}, AuditPayloadSha256: intent.AuditPayloadSha256,
-		AuditPayloadVersionID: intent.AuditPayloadVersionID,
-		AuditSignatureKey:     pgtype.Text{String: intent.AuditSignatureKey, Valid: true}, AuditSignatureSha256: intent.AuditSignatureSha256,
-		AuditSignatureVersionID: intent.AuditSignatureVersionID,
-		ID:                      locked.ID, OrgID: locked.OrgID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, errors.New("publish finalization: terminal SQL guard rejected the retained intent")
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: complete document: %w", err)
-	}
-	if completed == nil || completed.Status != "completed" {
-		return nil, false, errors.New("publish finalization: terminal transition returned invalid state")
-	}
-
-	completedChildIDs := make([]uuid.UUID, 0, len(envelopeChildren))
-	if completed.IsEnvelope {
-		cert := storedAuditCertificate{
-			CertKey: intent.AuditCertKey, CertVersionID: intent.AuditCertVersionID.String,
-			PayloadKey: intent.AuditPayloadKey, PayloadVersionID: intent.AuditPayloadVersionID.String,
-			SignatureKey: intent.AuditSignatureKey, SignatureVersionID: intent.AuditSignatureVersionID.String,
-		}
-		copy(cert.CertSHA256[:], intent.AuditCertSha256)
-		copy(cert.PayloadSHA256[:], intent.AuditPayloadSha256)
-		copy(cert.SignatureSHA256[:], intent.AuditSignatureSha256)
-		children, err := q.CompleteEnvelopeChildren(ctx, generated.CompleteEnvelopeChildrenParams{
-			ParentEnvelopeID: pgtype.UUID{Bytes: completed.ID, Valid: true}, OrgID: completed.OrgID,
-			FinalPdfKey: completed.FinalPdfKey, FinalPdfSha: completed.FinalPdfSha, FinalPdfVersionID: completed.FinalPdfVersionID,
-			AuditCertKey: completed.AuditCertKey, AuditCertSha256: completed.AuditCertSha256, AuditCertVersionID: completed.AuditCertVersionID,
-			AuditPayloadKey: completed.AuditPayloadKey, AuditPayloadSha256: completed.AuditPayloadSha256,
-			AuditPayloadVersionID: completed.AuditPayloadVersionID,
-			AuditSignatureKey:     completed.AuditSignatureKey, AuditSignatureSha256: completed.AuditSignatureSha256,
-			AuditSignatureVersionID: completed.AuditSignatureVersionID,
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("publish finalization: complete envelope children: %w", err)
-		}
-		if err := verifyCompletedEnvelopeChildren(envelopeChildren, children, completed.CompletionEffectiveAt, completed.FinalizationRetainUntil, intent.FinalPdfKey, intent.FinalPdfSha256, intent.FinalPdfVersionID.String, cert); err != nil {
-			return nil, false, err
-		}
-		for _, child := range children {
-			completedChildIDs = append(completedChildIDs, child.ID)
-		}
-	}
-
-	if err := q.CancelReminder(ctx, completed.ID); err != nil {
-		return nil, false, fmt.Errorf("publish finalization: cancel reminder: %w", err)
-	}
-	if err := q.InvalidateRecipientTokens(ctx, completed.ID); err != nil {
-		return nil, false, fmt.Errorf("publish finalization: invalidate ceremony credentials: %w", err)
-	}
-	notifications, err := e.prepareCompletionNotificationsTx(ctx, q, completed, requiredRoles, capture)
-	if err != nil {
-		return nil, false, err
-	}
-
-	pending := make([]audit.PendingEvent, 0, len(completedChildIDs)+1)
-	for i := range completedChildIDs {
-		childID := completedChildIDs[i]
-		payload, err := documentCompletionAuditPayload(intent)
-		if err != nil {
-			return nil, false, fmt.Errorf("publish finalization: completion audit payload: %w", err)
-		}
-		payload["envelope_id"] = completed.ID.String()
-		payload["propagated"] = true
-		event, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-			OrgID: completed.OrgID, DocumentID: &childID, Kind: audit.KindDocumentCompleted,
-			Payload: payload,
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("publish finalization: audit envelope child completion: %w", err)
-		}
-		pending = append(pending, event)
-	}
-	completionPayload, err := documentCompletionAuditPayload(intent)
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: completion audit payload: %w", err)
-	}
-	event, err := e.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: completed.OrgID, DocumentID: &completed.ID, Kind: audit.KindDocumentCompleted,
-		Payload: completionPayload,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("publish finalization: audit completion: %w", err)
-	}
-	pending = append(pending, event)
-	rows, err := q.DeleteDocumentFinalizationIntent(ctx, generated.DeleteDocumentFinalizationIntentParams{
-		DocumentID: completed.ID, OrgID: completed.OrgID,
-	})
-	if err != nil || rows != 1 {
-		return nil, false, fmt.Errorf("publish finalization: delete intent: rows=%d err=%w", rows, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("publish finalization: commit: %w", err)
-	}
-	for _, auditEvent := range pending {
-		e.Audit.Publish(auditEvent)
-	}
-	e.deliverPostCommitEmails(notifications)
-	return completed, true, nil
+	completed, did, owner, err := e.publishHistoricalFinalizationFromReferenceOwnedV1(ctx, reference, capture)
+	capture.publication = owner
+	return completed, did, err
 }
 
 // documentCompletionAuditPayload is the immutable ledger commitment for the

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
 import { htmlProfileIssues, htmlProfileSectionValues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate } from '../htmlTemplate';
-import { contractTemplateFixture } from '../htmlTemplate.test';
+import { contractTemplateFixture } from '../htmlTemplateFixtures';
 
 function callback(source: string, name: string) {
   let start = source.indexOf(`function ${name}(`);

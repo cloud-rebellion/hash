@@ -197,11 +197,18 @@ func (q *Queries) ListChangeRequests(ctx context.Context, documentID uuid.UUID) 
 }
 
 const resetRecipientsForRevision = `-- name: ResetRecipientsForRevision :exec
-UPDATE recipients
+WITH locked_document AS MATERIALIZED (
+  SELECT d.id
+  FROM documents d
+  WHERE d.id = $1
+  FOR UPDATE OF d
+)
+UPDATE recipients r
 SET status = 'pending', signed_at = NULL
-WHERE document_id = $1
-  AND status NOT IN ('declined','signed','accepted')
-  AND signed_at IS NULL
+FROM locked_document d
+WHERE r.document_id = $1 AND d.id = r.document_id
+  AND r.status NOT IN ('declined','signed','accepted')
+  AND r.signed_at IS NULL
 `
 
 // Reset only recipients who have never produced legal evidence. Revise checks

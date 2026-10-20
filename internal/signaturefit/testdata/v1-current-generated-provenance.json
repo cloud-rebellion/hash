@@ -1,0 +1,418 @@
+{
+  "schema": 1,
+  "provenance": "Fresh current-generated genuine Chromium archives; original historical binary files are absent and no historical hashes are reused",
+  "source_git_base": "8a0ee720753ce0e3fba629e43f233125c01644a4",
+  "source_uncommitted": true,
+  "renderer_source_inputs": {
+    "gotenberg/go.mod": {
+      "bytes": 5727,
+      "sha256": "628f4c870604413445628c378d89f9d27bed318633018aab885795f0a47f20ea"
+    },
+    "gotenberg/go.sum": {
+      "bytes": 45443,
+      "sha256": "c2bbb3de679afb94c8a538b5eab50a7af6fdd1440385200ccd57a64e57c324ce"
+    },
+    "gotenberg/internal/chromium/attrs_test.go": {
+      "bytes": 2605,
+      "sha256": "2c44d02dec07a075c70691b106940e68d5fedf6f7cf8fa0a102024afb1cd620e"
+    },
+    "gotenberg/internal/chromium/browser.go": {
+      "bytes": 28540,
+      "sha256": "fd656cf8cac9f8041291c66e0d9972b785ced2699a4beb01f458f3da5eeee5da"
+    },
+    "gotenberg/internal/chromium/browser_test.go": {
+      "bytes": 1345,
+      "sha256": "be154aa0c066e594f1d4608331cbea6fcae82966359774a347b1b9d1d06ae2ac"
+    },
+    "gotenberg/internal/chromium/chromium.go": {
+      "bytes": 39571,
+      "sha256": "162f8f31c809c71b74ec694e78525eed48a5a8ee72b440c2d47255b9fbcfb922"
+    },
+    "gotenberg/internal/chromium/debug.go": {
+      "bytes": 632,
+      "sha256": "85ef445fd58b5f482e3252ad4334b1cd19c4c992869271e54f78767a6413af2c"
+    },
+    "gotenberg/internal/chromium/doc.go": {
+      "bytes": 126,
+      "sha256": "0a70c46a32612512ebfab098771729173016584ee97838413f259818122376a2"
+    },
+    "gotenberg/internal/chromium/errortype_test.go": {
+      "bytes": 1684,
+      "sha256": "311239f8b35c4706e95178603943df07968cbb6ef357126c31c0960cfd4a7c50"
+    },
+    "gotenberg/internal/chromium/events.go": {
+      "bytes": 18152,
+      "sha256": "a2ca551eca2c75f173647259f9b01d57274cf0f87b5f997d9e346967237778c0"
+    },
+    "gotenberg/internal/chromium/events_test.go": {
+      "bytes": 3379,
+      "sha256": "61672dbcf7e2fddf4f2f53da391413e0942b4aad72545155d8218e8cd3309d5b"
+    },
+    "gotenberg/internal/chromium/hash_browser_recovery_renderer_test.go": {
+      "bytes": 6999,
+      "sha256": "32a66b8be025f865579217adbff8d971448d518a10b71b17fd9e01a8f6b6b417"
+    },
+    "gotenberg/internal/chromium/hash_browser_recovery_test.go": {
+      "bytes": 5327,
+      "sha256": "630da8c875dfa66f006e8c33b5886f29cb54244fff4ad03b28444d6ee8493a4e"
+    },
+    "gotenberg/internal/chromium/hash_browser_startup.go": {
+      "bytes": 4921,
+      "sha256": "5a032a44ad695d01c98e2d2a2ceb976922fbfc641e7b3267898584fd4a82dbf3"
+    },
+    "gotenberg/internal/chromium/hash_browser_startup_renderer_test.go": {
+      "bytes": 9125,
+      "sha256": "00562226e9b1943c11149c1ebafea07557728176022d66b27a4ae1c989a05eff"
+    },
+    "gotenberg/internal/chromium/hash_browser_startup_test.go": {
+      "bytes": 10197,
+      "sha256": "5ba3eb503eb0b63bf0a6b47c05c091eef9e4aa340168bfeb04b79dcb98435324"
+    },
+    "gotenberg/internal/chromium/hash_cmd_linux.go": {
+      "bytes": 465,
+      "sha256": "53f9d0d70cf9addcc8a13c0c7d296fcb3c0ae104dc146b8ab0bf8e8b4518d961"
+    },
+    "gotenberg/internal/chromium/hash_cmd_linux_test.go": {
+      "bytes": 1124,
+      "sha256": "7386a3afbc86047fd50f06d3dedae5fb74f45b96cc3046eb34c0794e5ca93a8e"
+    },
+    "gotenberg/internal/chromium/hash_manual_fit.go": {
+      "bytes": 8189,
+      "sha256": "31de9b35e5fba1404b2c94175923874d20b322004d14c152daa61f5baf1da9b2"
+    },
+    "gotenberg/internal/chromium/hash_manual_fit_renderer_test.go": {
+      "bytes": 10725,
+      "sha256": "ec26cf7429e79f842aaa7e071804cce2709c9595e136466c72f0b68eea4a0c37"
+    },
+    "gotenberg/internal/chromium/hash_manual_fit_test.go": {
+      "bytes": 4421,
+      "sha256": "e8b0d397334a801c8616a95e3654c66116a66d8507f3dbb9f997378b1794f2c6"
+    },
+    "gotenberg/internal/chromium/hash_navigation.go": {
+      "bytes": 9434,
+      "sha256": "8e0c53632597d5328115a1bc14dae7aa46e3c4ae0e02f0f2c010dbff4b10034d"
+    },
+    "gotenberg/internal/chromium/hash_navigation_renderer_test.go": {
+      "bytes": 10402,
+      "sha256": "1277fa0007cfc138d00b077e2e6955eb7450d046cf404941ea712d9734f46c8e"
+    },
+    "gotenberg/internal/chromium/hash_navigation_test.go": {
+      "bytes": 11299,
+      "sha256": "2418f2a83a5fae160ec29e288aaf29378239d2ca46bd6d0e58600dc37f7f62eb"
+    },
+    "gotenberg/internal/chromium/hash_ordinary_pdf.go": {
+      "bytes": 5906,
+      "sha256": "9a8aa0ec2051f98c1680fa2f91e8c7226e3d6eca6103cf3d8c53f1e69c54db41"
+    },
+    "gotenberg/internal/chromium/hash_ordinary_pdf_renderer_test.go": {
+      "bytes": 21624,
+      "sha256": "29d23a709a542f4d420d1e360f05429b64a1e59a65fe58e7c3727b2e41016578"
+    },
+    "gotenberg/internal/chromium/hash_proxy_connect.go": {
+      "bytes": 4338,
+      "sha256": "923e421464afb4b386d8bfe603079e374198e57af6693e44a4809a4009200519"
+    },
+    "gotenberg/internal/chromium/hash_proxy_connect_test.go": {
+      "bytes": 3745,
+      "sha256": "57c9433d996d73b1e4f16e6a8acd11229017316114aff424a19d625ca03c4252"
+    },
+    "gotenberg/internal/chromium/hash_proxy_deadline_test.go": {
+      "bytes": 1307,
+      "sha256": "fd5bbe309bc32a0903358b4fb36e667c442079ed7fd98e22973dfcc40d63aabf"
+    },
+    "gotenberg/internal/chromium/hash_proxy_retirement.go": {
+      "bytes": 6747,
+      "sha256": "239fff3b0183c756484ce4ae1fe4f93f5581188c442d997bef3e93970b923789"
+    },
+    "gotenberg/internal/chromium/hash_proxy_retirement_renderer_test.go": {
+      "bytes": 14740,
+      "sha256": "085cfb18cc9ad7af72407fadd0691349d8bc997c1ee2896c79813167865a3b77"
+    },
+    "gotenberg/internal/chromium/hash_proxy_retirement_test.go": {
+      "bytes": 21288,
+      "sha256": "8f41b36347e5e33a08612728a20b408af763f5945e9686b829996e072ebb3de2"
+    },
+    "gotenberg/internal/chromium/hash_signature_measurement.go": {
+      "bytes": 24623,
+      "sha256": "91e9d36c08541964b5885f7c9c9224f3223ddf6f2d62b848e0596f818dd06f09"
+    },
+    "gotenberg/internal/chromium/hash_signature_measurement_renderer_test.go": {
+      "bytes": 6390,
+      "sha256": "c039f683dcde018f810fc9eebd2d64e944bb7d329d3133936164eb25fa9a619a"
+    },
+    "gotenberg/internal/chromium/hash_signature_measurement_test.go": {
+      "bytes": 8838,
+      "sha256": "95fefd35c085b34d37cadc7be8c4c7bc4f7815759120c1390e93da18bfdcd90d"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_route.go": {
+      "bytes": 7861,
+      "sha256": "2db2483adef1eb742d1a5f555d706abbcf177a30b8a19be5d3f1e557e59e54ee"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_route_renderer_test.go": {
+      "bytes": 4332,
+      "sha256": "e3acb8521473171ec2f37e107bed622779ec63fa15027d680118ad8739df4847"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_route_test.go": {
+      "bytes": 17054,
+      "sha256": "f332c16e5f0056e8f11b48d6c444e3f4b25bfe1d60fa112a9a762da47fa3b615"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_seal.go": {
+      "bytes": 21416,
+      "sha256": "036a95b33d89ae08d58415ca0cb3b79549de83ac76427459a569404ccd3eea68"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_seal_renderer_test.go": {
+      "bytes": 7987,
+      "sha256": "21755902da8392c16707475a12d59fa8e3e2d1b209d19c46960a65e817a01281"
+    },
+    "gotenberg/internal/chromium/hash_signature_pdf_seal_test.go": {
+      "bytes": 12141,
+      "sha256": "8c36fa8ffbf83cbe121475e62a5ea2cd63db0bb04c45fc17f20034b0df7563e5"
+    },
+    "gotenberg/internal/chromium/hash_supervisor.go": {
+      "bytes": 18018,
+      "sha256": "4cb590c4bec408e9a8e4047a0e5c8741241bcc02d94de7e2a513b1423374d8f1"
+    },
+    "gotenberg/internal/chromium/hash_supervisor_renderer_test.go": {
+      "bytes": 11997,
+      "sha256": "e113ba7dad72ca944b62e8ccfee2d3fa7ce237f3fa4a7e076789ef56c1ca96d4"
+    },
+    "gotenberg/internal/chromium/hash_supervisor_test.go": {
+      "bytes": 7763,
+      "sha256": "2dce2f36f4a3c2695a2fbb5e262ff4784f8f7643cfa630d9013a6e5350254447"
+    },
+    "gotenberg/internal/chromium/hash_supervisor_upstream_test.go": {
+      "bytes": 30158,
+      "sha256": "60be8c879b1c77b0dbee2b4735c8506da236c240e7d7e26a14529a2b26c73fce"
+    },
+    "gotenberg/internal/chromium/mocks.go": {
+      "bytes": 1739,
+      "sha256": "652cee3617484688101249baf733fdd93354e9e1c9386a6214d57f265e02cd18"
+    },
+    "gotenberg/internal/chromium/network_aggregate.go": {
+      "bytes": 2980,
+      "sha256": "15dadc1e66f91b46ba7d15adf541bc599f4ab4e34d8bd7393437551b4335f871"
+    },
+    "gotenberg/internal/chromium/network_aggregate_test.go": {
+      "bytes": 3020,
+      "sha256": "6c8dfbfbb76e9b82ba32fc6a534641bcd63a2617839aabeb9ed0f6e95a7b8189"
+    },
+    "gotenberg/internal/chromium/pinning_proxy.go": {
+      "bytes": 16911,
+      "sha256": "1704ee64bbc0cee7316720c5d9012a21303a8858ebb3bd35a8efb73000777c0d"
+    },
+    "gotenberg/internal/chromium/pinning_proxy_test.go": {
+      "bytes": 28671,
+      "sha256": "3164149fa9622175daea302f1a708592d6389735a56e55c2070d07c24c2159f1"
+    },
+    "gotenberg/internal/chromium/pinning_proxy_upstream_test.go": {
+      "bytes": 2478,
+      "sha256": "2e963f75a9e16c1e79c552a3269dc214409e2fbaecdf88b946451dbdb9452cfd"
+    },
+    "gotenberg/internal/chromium/routes.go": {
+      "bytes": 35428,
+      "sha256": "ab6e6fb3a2eec132951f96cd1bbb4a5b41f819004d5c6a6f5756c086be542f2f"
+    },
+    "gotenberg/internal/chromium/scopebudget.go": {
+      "bytes": 1529,
+      "sha256": "e3d668141b8ed00cb07bded8c812f929d4c844872686590af4170c6f0fbac209"
+    },
+    "gotenberg/internal/chromium/scopebudget_test.go": {
+      "bytes": 3306,
+      "sha256": "2757d4a26d3560c5021442165b8977733a701f79b1ab2d1ab16ea07b70cca904"
+    },
+    "gotenberg/internal/chromium/stream.go": {
+      "bytes": 2398,
+      "sha256": "35b1902975884a2021956f989657e26baf6e7dbd5ff2ca199e4678dd96873128"
+    },
+    "gotenberg/internal/chromium/tasks.go": {
+      "bytes": 24594,
+      "sha256": "4327f01f6d0dbe894f6150affe81a4c723d11c525df21a6820eba3457666cd62"
+    },
+    "gotenberg/internal/chromium/tasks_test.go": {
+      "bytes": 1420,
+      "sha256": "f6f226f239579e6cb4636ce8bed3f4e73854a3ce51155e2d6057ed7bec050aad"
+    },
+    "gotenberg/internal/chromium/version_test.go": {
+      "bytes": 1353,
+      "sha256": "284ca49a32ac89473a63ff9e9f26dcd04dfaa075826e061ca10c5e7aa2b75273"
+    },
+    "gotenberg/internal/ordinarypage/cdp_v1.go": {
+      "bytes": 10677,
+      "sha256": "ca1d7a83a18bd94c2f4486ca6b23dff2772e6a6b5ff1db26dbdce3ff46499b8f"
+    },
+    "gotenberg/internal/ordinarypage/model_v1.go": {
+      "bytes": 13580,
+      "sha256": "bfa4df2cebdd4d4168daa6a597037fdae98b82b2ac209cc3efe3a97f9b3684ba"
+    },
+    "gotenberg/internal/ordinarypage/package_v1.go": {
+      "bytes": 15992,
+      "sha256": "10e8304441b6b02938233c6a1ef87cc8507a7fb2d4210ca2968628053063cbc7"
+    },
+    "gotenberg/internal/ordinarypage/recipe_v1.go": {
+      "bytes": 15584,
+      "sha256": "18be2c32d72d7bb44fb54aefa17575f5060a97ca08b11b229d48ab90b880fe9e"
+    },
+    "gotenberg/internal/ordinarypage/route_v1.go": {
+      "bytes": 6103,
+      "sha256": "4b841b9c9e91ee1360741e0a81aa71a94e9248999d999953c46c6b89f3358062"
+    },
+    "internal/render/assets/Caveat.woff2": {
+      "bytes": 48836,
+      "sha256": "d0b7b931b8980049327e8f8f9ac264617c8200b8422d62e886473d3d9527bad3"
+    },
+    "internal/render/assets/DancingScript.woff2": {
+      "bytes": 23816,
+      "sha256": "570e4265bbcb453353ce2fdf63d179332d8daa92691d567547b8a383f3b46c3b"
+    },
+    "internal/render/assets/Geist.woff2": {
+      "bytes": 16512,
+      "sha256": "824f485b5d26e2f2da3c2b236132ece1bc8e4e43373452950bb0e40548b4313f"
+    },
+    "internal/render/assets/GreatVibes.woff2": {
+      "bytes": 42800,
+      "sha256": "c59dc73d29daf142ef2431f455d21464172374aa750d793a79d608735db2d856"
+    },
+    "internal/render/assets/HomemadeApple.woff2": {
+      "bytes": 48344,
+      "sha256": "bbaa96c741caa479d4647fc567f64e5ddc71eec58ee9849cb9e8a14bee65bc30"
+    },
+    "internal/render/assets/Inter.woff2": {
+      "bytes": 48256,
+      "sha256": "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62"
+    },
+    "internal/render/assets/Sacramento.woff2": {
+      "bytes": 23708,
+      "sha256": "2fcd867d2812578d001b0eca921848e24de91d01986f26e038be374ec7c5cfd2"
+    }
+  },
+  "go_version": "go version go1.26.9 darwin/arm64",
+  "target": "linux/arm64 CGO0",
+  "binary": {
+    "bytes": 38696215,
+    "sha256": "57f2e7b3cd9c2a803c47429bf1660916b033dcd1da37fc13b808948438e679fa"
+  },
+  "runtime_image": {
+    "id": "sha256:12120bd9be57411dd75e09662ef8dd3cad0a7e42e3a399854313a6b3e1857a93",
+    "architecture": "arm64",
+    "os": "linux",
+    "inspection": {
+      "bytes": 5744,
+      "sha256": "4bc53a68ab894f031f34eea6bff27851c3f1e26896d343cf755f2b13afaf876c"
+    }
+  },
+  "runtime_chromium_version": "Chromium 152.0.7977.82 Alpine Linux",
+  "runtime_fingerprint": {
+    "bytes": 9041,
+    "sha256": "56804a45c497113c4a12995eb5bb095e95c7ff79320a8264005b44d1e4fa218c"
+  },
+  "producer_terminal": {
+    "bytes": 22381,
+    "sha256": "b9ece4f809ce2e421cc23c591c78a6f40fc50836c7560ad4898ccc7912017d4f"
+  },
+  "frozen_reader_acceptance": {
+    "bytes": 11353,
+    "sha256": "7e1f2bb02ef17abb4c2b9f0937e633b97d47688ecb0e6b78e783fc0acd3f87bb"
+  },
+  "producer_test_log": {
+    "bytes": 5601,
+    "sha256": "e107539d9ce957a27329596a9a4a46766c2b5f2f97bfc170e7eb6c8b715d6218"
+  },
+  "producer_tests": {
+    "top": 1,
+    "subtests": 18,
+    "individual_skips": 0
+  },
+  "recipe_sha256": "ed5a53b65dfe42099002721a6453fe2a2b9aef26fd97a8ae0dcc7fd6cad2c6da",
+  "resources": {
+    "cpus": 2,
+    "pids_limit": 256,
+    "memory": 1073741824,
+    "readonly": true,
+    "network": "none",
+    "init": true
+  },
+  "fixtures": [
+    {
+      "case": 1,
+      "font": "Caveat",
+      "path": "internal/signaturefit/testdata/v1-case-1.fit",
+      "bytes": 210802,
+      "sha256": "ccf666dedaf9a8c647a3fb78da592addc28b9ac08f1e8566e1fa8a9857c1ae9e",
+      "pdf": {
+        "bytes": 7892,
+        "sha256": "8b67c9445b45c31bcadb1802d7dbc96544ecde54c5a7588b60c618ca5ccfb862"
+      },
+      "report": {
+        "bytes": 6061,
+        "sha256": "8e62f65e76bb39efce51a6d83ef713248fb534315956fb24eca6b6bf270cb0e7"
+      }
+    },
+    {
+      "case": 3,
+      "font": "Dancing Script",
+      "path": "internal/signaturefit/testdata/v1-case-3.fit",
+      "bytes": 116978,
+      "sha256": "e169a9427d0f042cbc3272b40a0b87a308472e1b083a51cfeae6b35701f472c5",
+      "pdf": {
+        "bytes": 5540,
+        "sha256": "047a4d71fbaa9dca8fbb190fb3ed457fe61127e0322670748a6384950b6ffdf1"
+      },
+      "report": {
+        "bytes": 6169,
+        "sha256": "a7ae25d89a863a1eb24a102c37816dcc0004d48f1d6cebb24e8a8706f4d2fcb8"
+      }
+    },
+    {
+      "case": 5,
+      "font": "Great Vibes",
+      "path": "internal/signaturefit/testdata/v1-case-5.fit",
+      "bytes": 190276,
+      "sha256": "e9435596d353b2387c3aa8c3dd159e544718a965950e133889780a6805fe67f6",
+      "pdf": {
+        "bytes": 9236,
+        "sha256": "d6f0380b313e191b7929571fa9bb7537574d5c8daa5d4d1c38c0691acf353b29"
+      },
+      "report": {
+        "bytes": 6109,
+        "sha256": "65a48fe6f6de79a63923dcd08473092a4a0c6fcdf80a9b3ad2bd80f506901cd4"
+      }
+    },
+    {
+      "case": 7,
+      "font": "Sacramento",
+      "path": "internal/signaturefit/testdata/v1-case-7.fit",
+      "bytes": 116631,
+      "sha256": "00749ff1453790b053ec36b7dfd303ca90a252a1b3351fdd5a1b0bbd908641b9",
+      "pdf": {
+        "bytes": 5898,
+        "sha256": "0fffab4f00618a10463d79f224e4be32a12b94cf7957f2f08ac06e6fd49aed34"
+      },
+      "report": {
+        "bytes": 6027,
+        "sha256": "3a625a6e86e355ad9abdcfb84460f3d7bb29a16178f0edcd5ebb3afbbfffd738"
+      }
+    },
+    {
+      "case": 9,
+      "font": "Homemade Apple",
+      "path": "internal/signaturefit/testdata/v1-case-9.fit",
+      "bytes": 209448,
+      "sha256": "0addca15361d24594b1b157edc625d23d48eb2bd24524a2c1956dbfacf998f1f",
+      "pdf": {
+        "bytes": 8036,
+        "sha256": "dd4cdd6c0cf2f277efd5522ba2d3c40fd0072338a9bc497b79b0bf0aebce53ba"
+      },
+      "report": {
+        "bytes": 6158,
+        "sha256": "d89c55a51df9c4625020a365f8e68f5b0aad709c7df6383e86d6f7fcadefc86d"
+      }
+    }
+  ],
+  "scope_limits": [
+    "Synthetic source/geometry/span declarations; no original credential or real document authority",
+    "Native consumers rebind report/HTML/input IDs; PDF/font/snapshot and observed geometry preserved; complete report bytes are not preserved after rebinding",
+    "No independent PDF glyph/paint admission, application signing, WORM/restore, production capacity or legal acceptance from this fixture",
+    "Two fixture controls changed together: process reaper and process/thread limit; causal contribution not independently isolated; original budgets/assertions unchanged",
+    "Earlier failed071/073/075/077 and single-case076 receipts remain outside candidate; no failed output imported"
+  ]
+}

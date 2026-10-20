@@ -3,20 +3,21 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { checkedCanvasSize } from './pdfViewport';
+import { PdfLoad } from './pdfLoad';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 export type PdfDoc = Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
 
-// loadPdf fetches + parses a PDF. withCredentials so the session/magic-token
+// startPdf owns fetching/parsing immediately. withCredentials sends the session/magic-token
 // cookie reaches the authed PDF endpoints.
-export async function loadPdf(url: string): Promise<PdfDoc> {
-  return pdfjsLib.getDocument({ url, withCredentials: true }).promise;
+export function startPdf(url: string): PdfLoad<PdfDoc> {
+  return new PdfLoad(pdfjsLib.getDocument({ url, withCredentials: true }));
 }
 
 // Caller verifies these bytes against the observed server PDF commitment first.
-export async function loadPdfData(data: Uint8Array): Promise<PdfDoc> {
-  return pdfjsLib.getDocument({ data }).promise;
+export function startPdfData(data: Uint8Array): PdfLoad<PdfDoc> {
+  return new PdfLoad(pdfjsLib.getDocument({ data }));
 }
 
 // renderPage paints page `pageNumber` into `canvas` at `scale` and returns the

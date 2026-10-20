@@ -53,8 +53,12 @@ func setupLifecycleAuthorizationE2E(t *testing.T, role string, sent, family bool
 		t.Fatal(err)
 	}
 	blocks := json.RawMessage(`{"version":1,"blocks":[{"id":"agreement","type":"paragraph","text":"Agreement for {{customer}}"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`)
+	rootBlocks := blocks
+	if family {
+		rootBlocks = json.RawMessage(`{"version":1,"blocks":[]}`)
+	}
 	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-		OrgID: org, SenderID: userID, Name: "Lifecycle authorization " + uuid.NewString(), BlocksJson: blocks,
+		OrgID: org, SenderID: userID, Name: "Lifecycle authorization " + uuid.NewString(), BlocksJson: rootBlocks,
 		VariablesJson: json.RawMessage(`{}`),
 	})
 	if err != nil {
@@ -184,14 +188,14 @@ func TestLifecycleSessionRechecksAuthorizationAfterDocumentWaitE2E(t *testing.T)
 	for _, operation := range []string{"send", "void", "remind"} {
 		for _, change := range []string{"demotion", "revocation", "expiry"} {
 			t.Run(operation+"/"+change, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "sender", operation != "send", false)
+				f := setupNativeLifecycleAuthorization256(t, "sender", operation != "send", false)
 				owner := seedSessionOwnerE2E(t, f.ctx, f.q, f.org)
 				before := f.snapshot(t)
 				blocked, err := f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer blocked.Rollback(context.Background())
+				defer nativeReminderRollback255(t, blocked)
 				if _, err := f.q.WithTx(blocked).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 					t.Fatal(err)
 				}
@@ -200,9 +204,11 @@ func TestLifecycleSessionRechecksAuthorizationAfterDocumentWaitE2E(t *testing.T)
 					ttl = time.Second
 				}
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(operation, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+					return nativeLifecycleSubmit256(ctx, f, operation, cookie)
+				})
+				defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+				awaitSessionOperationLockE2E(t, f.ctx, f.pool, nativeLifecycleLockQuery256(operation), "transactionid")
 				want := http.StatusForbidden
 				switch change {
 				case "demotion":
@@ -232,19 +238,21 @@ func TestLifecycleSessionRechecksAuthorizationAfterDocumentWaitE2E(t *testing.T)
 }
 
 func TestLifecycleVoidExpiryDuringAuditWaitRollsBackFamilyE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "sender", true, true)
+	f := setupNativeLifecycleAuthorization256(t, "sender", true, true)
 	before := f.snapshot(t)
 	blocked, err := f.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blocked.Rollback(context.Background())
+	defer nativeReminderRollback255(t, blocked)
 	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- f.submit("void", cookie) }()
+	result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+		return nativeLifecycleSubmit256(ctx, f, "void", cookie)
+	})
+	defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
@@ -260,7 +268,7 @@ func TestLifecycleVoidExpiryDuringAuditWaitRollsBackFamilyE2E(t *testing.T) {
 func TestLifecycleVoidSenderAndOwnerCommitFamilyAtomicallyE2E(t *testing.T) {
 	for _, role := range []string{"sender", "owner"} {
 		t.Run(role, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, role, true, true)
+			f := setupNativeLifecycleAuthorization256(t, role, true, true)
 			response := f.submit("void", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
 			if response.Code != http.StatusOK {
 				t.Fatalf("valid family void=%d %s", response.Code, response.Body.String())
@@ -332,7 +340,7 @@ func TestLifecycleMCPRemindRechecksCredentialAfterDocumentWaitE2E(t *testing.T) 
 func lifecycleMCPCredentialWaitE2E(t *testing.T, tool string) {
 	for _, change := range []string{"key-delete", "scope-reduction", "key-expiry", "document-token-revocation"} {
 		t.Run(change, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "owner", true, false)
+			f := setupNativeLifecycleAuthorization256(t, "owner", true, false)
 			f.enableMCP()
 			before := f.snapshot(t)
 			mint, err := auth.MintAPIKey()
@@ -363,13 +371,15 @@ func lifecycleMCPCredentialWaitE2E(t *testing.T, tool string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer blocked.Rollback(context.Background())
+			defer nativeReminderRollback255(t, blocked)
 			if _, err := f.q.WithTx(blocked).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 				t.Fatal(err)
 			}
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submitMCPLifecycle(tool, mint.Plaintext) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+				return nativeLifecycleMCP256(ctx, f, tool, mint.Plaintext)
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
+			awaitSessionOperationLockE2E(t, f.ctx, f.pool, nativeLifecycleLockQuery256(tool), "transactionid")
 			switch change {
 			case "key-delete":
 				response := submitSessionOperationE2E(f.s, http.MethodDelete, "/api/v1/api-keys/"+keyID.String(), "", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
@@ -407,7 +417,7 @@ func lifecycleMCPCredentialWaitE2E(t *testing.T, tool string) {
 }
 
 func TestLifecycleMCPVoidConsumesOneDocumentTokenUseE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "owner", true, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", true, false)
 	f.enableMCP()
 	mint, err := auth.MintDocumentAgentKey()
 	if err != nil {
@@ -437,19 +447,21 @@ func TestLifecycleMCPVoidConsumesOneDocumentTokenUseE2E(t *testing.T) {
 }
 
 func TestLifecycleRemindExpiryDuringAuditWaitRollsBackE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "sender", true, false)
+	f := setupNativeLifecycleAuthorization256(t, "sender", true, false)
 	before := f.snapshot(t)
 	blocked, err := f.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blocked.Rollback(context.Background())
+	defer nativeReminderRollback255(t, blocked)
 	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- f.submit("remind", cookie) }()
+	result, cancel, joined := nativeReminderAsyncHTTP255(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder {
+		return nativeLifecycleSubmit256(ctx, f, "remind", cookie)
+	})
+	defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
@@ -472,7 +484,7 @@ func TestLifecycleRemindExpiryDuringAuditWaitRollsBackE2E(t *testing.T) {
 }
 
 func TestLifecycleMCPRemindConsumesOneDocumentTokenUseE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "owner", true, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", true, false)
 	f.enableMCP()
 	mint, err := auth.MintDocumentAgentKey()
 	if err != nil {
@@ -524,7 +536,7 @@ func TestLifecycleMCPRemindConsumesOneDocumentTokenUseE2E(t *testing.T) {
 }
 
 func TestLifecycleMCPVoidRefusesForgedIdentityWithoutReceiptE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "owner", true, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", true, false)
 	f.enableMCP()
 	before := f.snapshot(t)
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "void_document", "arguments": map[string]any{"document_id": f.doc.ID}}})

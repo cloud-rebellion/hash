@@ -131,6 +131,14 @@ func (r *Resolver) ResolveFrozen(ctx context.Context, docID uuid.UUID) (Branding
 		}
 		return Branding{}, fmt.Errorf("resolve frozen document branding: %w", err)
 	}
+	return ResolveFrozenRowV1(docID, row)
+}
+
+// ResolveFrozenRowV1 is the canonical frozen resolver after an actual native
+// reader has admitted and loaded its locked per-document row. It shares every
+// validation/default/normalization decision with ResolveFrozen; it never reads
+// mutable organization branding or invents a missing frozen snapshot.
+func ResolveFrozenRowV1(docID uuid.UUID, row *generated.DocumentBrandingOverride) (Branding, error) {
 	if err := ValidateFrozenSnapshot(docID, row); err != nil {
 		return Branding{}, err
 	}

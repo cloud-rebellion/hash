@@ -13,6 +13,8 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
 	"github.com/bright-interaction/hash/internal/recipients"
 )
 
@@ -105,15 +107,18 @@ func (s *Server) handleCreateRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
-	rec, err := engine.Create(r.Context(), actor, docID, recipients.Values{
+	engine := recipientauthoring.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	owned, err := engine.CreateOwnedV1(r.Context(), s.HTMLCreationSessions, s.Queries, actor, docID, recipients.Values{
 		Email: in.Email, Name: in.Name, Role: in.Role, OrderIndex: in.OrderIndex, Locale: in.Locale,
 	})
+	if owned != nil {
+		defer owned.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeRecipientMutationError(w, "create recipient", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toRecipientResponse(rec))
+	writeJSON(w, http.StatusCreated, toRecipientResponse(owned.Recipient))
 }
 
 type updateRecipientInput struct {
@@ -146,15 +151,18 @@ func (s *Server) handleUpdateRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
-	rec, err := engine.Update(r.Context(), actor, docID, rid, recipients.Patch{
+	engine := recipientauthoring.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	owned, err := engine.UpdateOwnedV1(r.Context(), s.HTMLCreationSessions, s.Queries, actor, docID, rid, recipients.Patch{
 		Email: in.Email, Name: in.Name, Role: in.Role, OrderIndex: in.OrderIndex, Locale: in.Locale,
 	})
+	if owned != nil {
+		defer owned.CloseConsumerV1()
+	}
 	if err != nil {
 		s.writeRecipientMutationError(w, "update recipient", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toRecipientResponse(rec))
+	writeJSON(w, http.StatusOK, toRecipientResponse(owned.Recipient))
 }
 
 func (s *Server) handleDeleteRecipient(w http.ResponseWriter, r *http.Request) {
@@ -174,8 +182,12 @@ func (s *Server) handleDeleteRecipient(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	engine := recipients.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
-	if _, err := engine.Delete(r.Context(), actor, docID, rid); err != nil {
+	engine := recipientauthoring.MutationEngine{Pool: s.Pool, Audit: s.Audit, Billing: s.Billing}
+	owned, err := engine.DeleteOwnedV1(r.Context(), s.HTMLCreationSessions, s.Queries, actor, docID, rid)
+	if owned != nil {
+		defer owned.CloseConsumerV1()
+	}
+	if err != nil {
 		s.writeRecipientMutationError(w, "delete recipient", err)
 		return
 	}
@@ -214,6 +226,8 @@ func (s *Server) writeRecipientMutationError(w http.ResponseWriter, operation st
 		writeError(w, http.StatusConflict, "recipient changes await the open privacy request review")
 	case errors.As(err, &validationErr):
 		writeError(w, http.StatusBadRequest, validationErr.Error())
+	case errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1) || errors.Is(err, pdfadmission.ErrPlainRecipientWriterV1):
+		writeError(w, http.StatusServiceUnavailable, "recipient authoring temporarily unavailable")
 	default:
 		if !s.writeAuthoringQuotaError(w, err) {
 			writeInternalErrorMsg(w, operation, err)

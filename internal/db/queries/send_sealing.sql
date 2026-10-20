@@ -69,7 +69,7 @@ WHERE id = $1 AND org_id = $2 AND status = 'sealing';
 SELECT i.* FROM send_sealing_intents i
 JOIN documents d ON d.id = i.document_id AND d.org_id = i.org_id
 WHERE d.status = 'sealing' AND d.deleted_at IS NULL
-  AND i.presign_execution_id IS NULL
+  AND i.presign_execution_id IS NULL AND i.package_send_attempt_id IS NULL
 ORDER BY i.updated_at, i.document_id
 LIMIT $1;
 
@@ -118,7 +118,7 @@ SET retention_completed_at = COALESCE(retention_completed_at, now()),
     attempts = attempts + 1,
     last_error = NULL,
     updated_at = now()
-WHERE document_id = $1 AND org_id = $2
+WHERE document_id = $1 AND org_id = $2 AND package_send_attempt_id IS NULL
   AND retention_started_at IS NOT NULL
   AND retain_until = hash_evidence_retain_until(article13_notice_epoch_at, 7);
 
@@ -126,7 +126,7 @@ WHERE document_id = $1 AND org_id = $2
 UPDATE send_sealing_intents
 SET retention_started_at = COALESCE(retention_started_at, now()),
     updated_at = now()
-WHERE document_id = $1 AND org_id = $2
+WHERE document_id = $1 AND org_id = $2 AND package_send_attempt_id IS NULL
   AND retention_completed_at IS NULL
   AND retain_until = hash_evidence_retain_until(article13_notice_epoch_at, 7);
 
@@ -135,14 +135,14 @@ UPDATE send_sealing_intents
 SET attempts = attempts + 1,
     last_error = $3,
     updated_at = now()
-WHERE document_id = $1 AND org_id = $2;
+WHERE document_id = $1 AND org_id = $2 AND package_send_attempt_id IS NULL;
 
 -- name: CompleteDocumentSendSealing :one
 -- Consume the epoch pinned before retention. Completion never samples a clock.
 WITH ceremony_epoch AS MATERIALIZED (
     SELECT intent.article13_notice_epoch_at AS value
     FROM send_sealing_intents intent
-    WHERE intent.document_id = $1
+    WHERE intent.package_send_attempt_id IS NULL AND intent.document_id = $1
       AND intent.org_id = $2
       AND intent.retention_started_at IS NOT NULL
       AND intent.retention_completed_at IS NOT NULL
@@ -194,7 +194,7 @@ WHERE documents.parent_envelope_id = $1
   AND EXISTS (
       SELECT 1
       FROM send_sealing_intents i
-      WHERE i.document_id = documents.parent_envelope_id
+      WHERE i.package_send_attempt_id IS NULL AND i.document_id = documents.parent_envelope_id
         AND i.org_id = documents.org_id
         AND i.article13_notice_epoch_at = parent.article13_notice_epoch_at
         AND i.retention_started_at IS NOT NULL
@@ -204,15 +204,17 @@ WHERE documents.parent_envelope_id = $1
 RETURNING documents.*;
 
 -- name: AbortDocumentSendSealing :execrows
-UPDATE documents
+UPDATE documents d
 SET status = 'draft', updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'sealing' AND deleted_at IS NULL;
+WHERE d.id = $1 AND d.org_id = $2 AND d.status = 'sealing' AND d.deleted_at IS NULL
+ AND NOT EXISTS(SELECT 1 FROM send_sealing_intents i WHERE i.document_id=d.id AND i.package_send_attempt_id IS NOT NULL);
 
 -- name: AbortEnvelopeChildrenSendSealing :execrows
-UPDATE documents
+UPDATE documents d
 SET status = 'draft', updated_at = now()
-WHERE parent_envelope_id = $1 AND org_id = $2 AND status = 'sealing' AND deleted_at IS NULL;
+WHERE d.parent_envelope_id = $1 AND d.org_id = $2 AND d.status = 'sealing' AND d.deleted_at IS NULL
+ AND NOT EXISTS(SELECT 1 FROM send_sealing_intents i WHERE i.document_id=d.parent_envelope_id AND i.package_send_attempt_id IS NOT NULL);
 
 -- name: DeleteSendSealingIntent :execrows
 DELETE FROM send_sealing_intents
-WHERE document_id = $1 AND org_id = $2;
+WHERE document_id = $1 AND org_id = $2 AND package_send_attempt_id IS NULL;

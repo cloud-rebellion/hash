@@ -39,6 +39,8 @@ var mcpToolRequiredScopes = map[string]string{
 	"export_evidence_package":       mcpScopeRead,
 	"get_compliance_baseline":       mcpScopeRead,
 	"get_document":                  mcpScopeRead,
+	"get_document_attachments":      mcpScopeRead,
+	"get_document_send_attempt":     mcpScopeRead,
 	"get_document_engagement":       mcpScopeRead,
 	"get_document_events":           mcpScopeRead,
 	"get_document_telemetry_stream": mcpScopeRead,
@@ -78,6 +80,8 @@ var mcpToolRequiredScopes = map[string]string{
 	"append_block":                     mcpScopeWriteAuthoring,
 	"attach_metadata":                  mcpScopeWriteAuthoring,
 	"attach_to_envelope":               mcpScopeWriteAuthoring,
+	"add_document_attachment":          mcpScopeWriteAuthoring,
+	"save_document_attachments":        mcpScopeWriteAuthoring,
 	"bind_variable_to_crm_contact":     mcpScopeWriteAuthoring,
 	"bind_variable_to_crm_company":     mcpScopeWriteAuthoring,
 	"bind_variable_to_crm_deal":        mcpScopeWriteAuthoring,
@@ -216,7 +220,9 @@ var docScopeSafeTools = map[string]bool{
 	// read (get_document/list_recipients/get_document_events call EnforceDocScope;
 	// list_documents + search_documents self-confine to the scoped doc)
 	"get_document": true, "list_recipients": true, "get_document_events": true,
-	"list_documents": true, "search_documents": true,
+	"get_document_attachments":  true,
+	"get_document_send_attempt": true,
+	"list_documents":            true, "search_documents": true,
 	// authoring (all EnforceDocScope on the target doc)
 	"set_document_blocks": true, "import_html": true, "import_markdown": true,
 	"update_block": true,

@@ -201,27 +201,53 @@ func (e *Engine) BuildManifest(ctx context.Context, envelope *generated.Document
 // completed state written in the terminal transaction. The snapshot digest
 // itself is calculated solely from already-frozen persisted child content.
 func BuildTerminalManifest(envelope *generated.Document, children []*generated.Document) (Manifest, error) {
-	if envelope == nil {
-		return Manifest{}, errors.New("manifest: nil envelope")
-	}
-	for i, child := range children {
-		if child == nil {
-			return Manifest{}, fmt.Errorf("manifest: child %d is nil", i+1)
-		}
-		if !child.ParentEnvelopeID.Valid || uuid.UUID(child.ParentEnvelopeID.Bytes) != envelope.ID {
-			return Manifest{}, fmt.Errorf("manifest: child %s is not attached to envelope", child.ID)
-		}
-		if child.IsEnvelope {
-			return Manifest{}, fmt.Errorf("manifest: child %s is itself an envelope", child.ID)
-		}
-		if child.Status != "finalizing" {
-			return Manifest{}, fmt.Errorf("manifest: child %s is not frozen for finalization", child.ID)
-		}
+	if err := ValidateTerminalManifestFamilyV1(envelope, children); err != nil {
+		return Manifest{}, err
 	}
 	return buildManifest(envelope, children, true)
 }
 
+// ValidateTerminalManifestFamilyV1 is the original ordered pure topology/status
+// validation. It confers no native source or SQL/retirement authority.
+func ValidateTerminalManifestFamilyV1(envelope *generated.Document, children []*generated.Document) error {
+	if envelope == nil {
+		return errors.New("manifest: nil envelope")
+	}
+	for i, child := range children {
+		if child == nil {
+			return fmt.Errorf("manifest: child %d is nil", i+1)
+		}
+		if !child.ParentEnvelopeID.Valid || uuid.UUID(child.ParentEnvelopeID.Bytes) != envelope.ID {
+			return fmt.Errorf("manifest: child %s is not attached to envelope", child.ID)
+		}
+		if child.IsEnvelope {
+			return fmt.Errorf("manifest: child %s is itself an envelope", child.ID)
+		}
+		if child.Status != "finalizing" {
+			return fmt.Errorf("manifest: child %s is not frozen for finalization", child.ID)
+		}
+	}
+	return nil
+}
+
+// BuildTerminalManifestFromSnapshotsV1 is a pure formatter for already computed
+// content digests. It grants no source/SQL/publication authority; the native
+// adapter alone selects private source rows and computes every supplied hash
+// while actual same-scope source/typed-tree consumers remain owned.
+func BuildTerminalManifestFromSnapshotsV1(envelope *generated.Document, children []*generated.Document, snapshots []string) (Manifest, error) {
+	if err := ValidateTerminalManifestFamilyV1(envelope, children); err != nil {
+		return Manifest{}, err
+	}
+	if len(snapshots) != len(children) {
+		return Manifest{}, errors.New("manifest: content snapshot count differs from children")
+	}
+	return buildManifestWithSnapshotsV1(envelope, children, true, snapshots)
+}
+
 func buildManifest(envelope *generated.Document, children []*generated.Document, terminal bool) (Manifest, error) {
+	return buildManifestWithSnapshotsV1(envelope, children, terminal, nil)
+}
+func buildManifestWithSnapshotsV1(envelope *generated.Document, children []*generated.Document, terminal bool, snapshots []string) (Manifest, error) {
 	if envelope == nil {
 		return Manifest{}, errors.New("manifest: nil envelope")
 	}
@@ -236,9 +262,15 @@ func buildManifest(envelope *generated.Document, children []*generated.Document,
 		if c == nil {
 			return Manifest{}, fmt.Errorf("manifest: child %d is nil", i+1)
 		}
-		snapshotSHA, err := contentSnapshotSHA(c)
-		if err != nil {
-			return Manifest{}, fmt.Errorf("manifest: child %s: %w", c.ID, err)
+		var snapshotSHA string
+		if snapshots == nil {
+			var err error
+			snapshotSHA, err = contentSnapshotSHA(c)
+			if err != nil {
+				return Manifest{}, fmt.Errorf("manifest: child %s: %w", c.ID, err)
+			}
+		} else {
+			snapshotSHA = snapshots[i]
 		}
 		pos := i + 1
 		if c.EnvelopePosition.Valid {
@@ -279,13 +311,20 @@ func contentSnapshotSHA(child *generated.Document) (string, error) {
 	if _, err := blocks.ParseTree(child.BlocksJson); err != nil {
 		return "", fmt.Errorf("parse blocks: %w", err)
 	}
+	return FrozenContentSnapshotDigestV1(child), nil
+}
+
+// FrozenContentSnapshotDigestV1 is the original fixed domain-separated digest,
+// with no parser/permission claim. The native caller uses its actual owned
+// private canonical tree at the original manifest gate before entering here.
+func FrozenContentSnapshotDigestV1(child *generated.Document) string {
 	h := sha256.New()
 	h.Write([]byte("hash:envelope-child-content-snapshot:v1\x00"))
 	fmt.Fprintf(h, "child_id=%s\nsource_kind=%s\nblocks_length=%d\n", child.ID, child.SourceKind, len(child.BlocksJson))
 	h.Write(child.BlocksJson)
 	fmt.Fprintf(h, "\nvariables_length=%d\n", len(child.VariablesJson))
 	h.Write(child.VariablesJson)
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // canonicalBytes returns a stable byte representation of the manifest

@@ -7,6 +7,7 @@
     type SignerPDFField as Field, type SignerPDFObservation, type SignerPDFScope
   } from '$lib/signerPDF';
   import { t } from '$lib/i18n';
+  import { captureFlarePDFViewError } from '$lib/flare-client';
 
   type Props = {
     token: string;
@@ -14,10 +15,11 @@
     observation: SignerPDFObservation;
     signed?: boolean;
     readOnly?: boolean;
+    onReadyChange?: (ready: boolean, scope: SignerPDFScope) => void;
     onFilledChange?: (filled: boolean, scope: SignerPDFScope) => void;
     onSignatureClick?: (scope: SignerPDFScope) => void;
   };
-  let { token, noticeDigest, observation, signed = false, readOnly = false, onFilledChange, onSignatureClick }: Props = $props();
+  let { token, noticeDigest, observation, signed = false, readOnly = false, onReadyChange, onFilledChange, onSignatureClick }: Props = $props();
 
   type PageInfo = { num: number; w: number; h: number };
 
@@ -85,6 +87,7 @@
     if (!mounted) return;
     const scope: SignerPDFScope = { token, noticeDigest, observation: { ...observation } };
     const active = new SignerPDFSession(scope, () => signerPDFScopeKey(token, noticeDigest, observation));
+    const ownedCanvases = new Set<HTMLCanvasElement>();
     untrack(() => {
       session = active;
       pages = [];
@@ -98,38 +101,47 @@
         for (const name of Object.keys(record)) delete record[name];
       }
       onFilledChange?.(false, scope);
-      void loadDocument(active);
+      onReadyChange?.(false, scope);
+      void loadDocument(active, ownedCanvases);
     });
     return () => {
-      active.destroy();
+      retireDocument(active, ownedCanvases);
       // A disposed viewer must never publish a positive callback.
       onFilledChange?.(false, scope);
+      onReadyChange?.(false, scope);
     };
   });
 
-  async function loadDocument(active: SignerPDFSession) {
+  async function loadDocument(active: SignerPDFSession, ownedCanvases = new Set<HTMLCanvasElement>()) {
+    let pendingPDF: Uint8Array<ArrayBuffer> | undefined;
     try {
       const scope = active.scope;
       validateSignerPDFObservation(scope.observation, scope.observation.document_id, scope.observation.recipient_id);
       if (!scope.token || !scope.noticeDigest) throw new Error('The signing context is unavailable. Please reopen your signing link.');
       const signal = active.controller.signal;
-      const [bytes, data] = await Promise.all([
-        fetchSignerPDF(scope, signal),
-        fetch(`/sign/${scope.token}/fields`, { signal, cache: 'no-store', credentials: 'same-origin' })
-          .then(response => readSignerFieldResponse(response, scope.observation, signal))
-      ]);
+      pendingPDF = await fetchSignerPDF(scope, signal);
+      active.assertCurrent();
+      const data = await fetch(`/sign/${scope.token}/fields`, { signal, cache: 'no-store', credentials: 'same-origin' })
+        .then(response => readSignerFieldResponse(response, scope.observation, signal));
       active.assertCurrent();
       const pdf = await import('$lib/pdf');
       active.assertCurrent();
-      const doc = await pdf.loadPdfData(bytes);
-      active.attach(doc);
+      const load = pdf.startPdfData(pendingPDF);
+      pendingPDF = undefined; // PDF.js now owns the data and its original retirement.
+      active.attach(load);
+      const doc = await load.promise;
+      active.assertCurrent();
       const loadedFields = validateSignerPDFFields(data.fields, scope.observation, doc.numPages);
       if (data.count !== undefined && data.count !== loadedFields.length) throw new Error('The document field list is incomplete.');
       const rendered = await renderSignerPDFPages(doc, scope.observation, {
         current: () => active.assertCurrent(),
         width: pdf.unscaledWidth,
         mount: async infos => { pages = infos; await tick(); },
-        canvas: num => canvasEls[num],
+        canvas: num => {
+          const canvas = canvasEls[num];
+          if (canvas) ownedCanvases.add(canvas);
+          return canvas;
+        },
         render: pdf.renderPage
       });
       active.assertCurrent();
@@ -143,16 +155,36 @@
       fieldsLoaded = true;
       documentReady = true;
       loading = false;
+      onReadyChange?.(true, scope);
     } catch (e) {
       if (active.current()) {
+        captureFlarePDFViewError();
         error = `Unable to load document: ${errorMessage(e)}`;
         loading = false;
         documentReady = false;
         fieldsLoaded = false;
+        pages = [];
+        fields = [];
         onFilledChange?.(false, active.scope);
+        onReadyChange?.(false, active.scope);
       }
-      active.destroy();
+      retireDocument(active, ownedCanvases);
+    } finally {
+      // Only the pre-transfer buffer belongs here; never touch PDF.js-owned data.
+      if (pendingPDF?.byteLength) pendingPDF.fill(0);
     }
+  }
+
+  function retireDocument(active: SignerPDFSession, ownedCanvases: Set<HTMLCanvasElement>): Promise<void> {
+    const retirement = active.destroy();
+    // PDF.js may still be painting when disposal starts. Release only this
+    // session's backing stores after its real destruction has joined all work.
+    // A stale session never touches canvases mounted by a replacement viewer.
+    void retirement.then(() => {
+      for (const canvas of ownedCanvases) { canvas.width = 0; canvas.height = 0; }
+      ownedCanvases.clear();
+    }, () => {}).catch(() => {});
+    return retirement;
   }
 
   function errorMessage(value: unknown): string {

@@ -87,6 +87,18 @@ func (c *CRMRecords) observe(ctx context.Context, doc *generated.Document, bindi
 		return nil, ErrNotConfigured
 	}
 	id := connectionIdentity(row)
+	// The native Send store holds the actual shared provider dimension across
+	// this concrete synchronous account/record/body/decode call. Existing stores
+	// retain their original behavior; this is no caller callback or byte grant.
+	if native, ok := c.Store.(interface {
+		HoldCRMRecordReadV1(context.Context, uuid.UUID) (func(), error)
+	}); ok {
+		release, holdErr := native.HoldCRMRecordReadV1(ctx, doc.OrgID)
+		if holdErr != nil {
+			return nil, ErrSourceFreshness
+		}
+		defer release()
+	}
 	snapshot, err := c.Client.ReadRecords(ctx, crmconnection.Connection{Identity: id, Enabled: true, VerifiedAt: row.VerifiedAt.Time, Ciphertext: row.CredentialCiphertext}, c.Keys, refs)
 	if err != nil {
 		return nil, ErrSourceFreshness

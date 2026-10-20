@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,16 +23,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/send"
-	"github.com/bright-interaction/hash/internal/templatepin"
-	"github.com/bright-interaction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/workguard"
 )
 
 const (
@@ -170,14 +168,33 @@ func (s *Server) handleAutomationSignatureRequest(w http.ResponseWriter, r *http
 		return
 	}
 
-	var in automationSignatureRequestInput
-	if err := decodeAutomationSignatureRequestJSON(w, r, &in); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	inputOwner, err := s.HTMLCreationSessions.NewBlocksHTTPInputV1(r.Context(), u.OrgID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "signature request resources are temporarily unavailable")
 		return
 	}
-	prepared, requestHash, err := prepareAutomationSignatureRequest(in)
+	defer inputOwner.CloseConsumerV1()
+	var in automationSignatureRequestInput
+	var prepared preparedAutomationSignatureRequest
+	var requestHash [sha256.Size]byte
+	var decodeErr, prepareErr error
+	err = inputOwner.WithAutomationHTTPBodyV1(r.Context(), w, r.Body, func(raw []byte) error {
+		if decodeErr = decodeAutomationSignatureRequestRawV1(raw, &in); decodeErr != nil {
+			return decodeErr
+		}
+		prepared, requestHash, prepareErr = prepareAutomationSignatureRequest(in)
+		return prepareErr
+	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, workguard.ErrUnavailableV1) {
+			writeError(w, http.StatusServiceUnavailable, "signature request resources are temporarily unavailable")
+			return
+		}
+		if prepareErr != nil {
+			writeError(w, http.StatusBadRequest, prepareErr.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	processor := s.automationSignatureRequestProcessor()
@@ -186,7 +203,9 @@ func (s *Server) handleAutomationSignatureRequest(w http.ResponseWriter, r *http
 		return
 	}
 
-	response, err := processor.processAutomationSignatureRequest(r.Context(), automationSignatureRequestProcessInput{
+	responseCtx, responseOwner := newAutomationSendResponseV1(r.Context())
+	defer responseOwner.closeV1()
+	response, err := processor.processAutomationSignatureRequest(responseCtx, automationSignatureRequestProcessInput{
 		User:               u,
 		Request:            prepared,
 		IdempotencyKeyHash: automationIdempotencyKeyHash(key),
@@ -196,6 +215,8 @@ func (s *Server) handleAutomationSignatureRequest(w http.ResponseWriter, r *http
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, pdfadmission.ErrAutomationMaterializationV1), errors.Is(err, pdfadmission.ErrBlocksTemplateSourceV1), errors.Is(err, pdfadmission.ErrBlocksWriterV1), errors.Is(err, pdfadmission.ErrHTMLAuditEventV1), errors.Is(err, workguard.ErrUnavailableV1):
+			writeError(w, http.StatusServiceUnavailable, "signature request resources are temporarily unavailable")
 		case errors.Is(err, errAutomationIdempotencyConflict):
 			writeError(w, http.StatusConflict, errAutomationIdempotencyConflict.Error())
 		case errors.Is(err, errAutomationCeremonySuperseded):
@@ -299,208 +320,53 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 	if err != nil {
 		return nil, false, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, sessionTransactionTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, false, fmt.Errorf("begin automation signature request: %w", err)
+	responseOwner := automationSendResponseFromV1(ctx)
+	if responseOwner == nil {
+		return nil, false, errors.New("automation materialization response ownership unavailable")
 	}
-	defer rollbackSessionTransaction(ctx, tx)
-	q := generated.New(tx)
-	billingEngine := s.automationBillingEngine()
-	if billingEngine != nil {
-		if err := q.LockAutomationSignatureRequestQuota(ctx, input.User.OrgID.String()); err != nil {
-			return nil, false, fmt.Errorf("lock automation signature request quota: %w", err)
-		}
+	if len(input.Request.Recipients) < 1 || len(input.Request.Recipients) > automationMaxRecipients {
+		return nil, false, errors.New("canonical automation recipients became invalid")
 	}
-
-	user, err := q.GetUserForShare(ctx, generated.GetUserForShareParams{ID: input.User.UserID, OrgID: input.User.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && user.Role != string(auth.RoleSender) && user.Role != string(auth.RoleOwner)) {
-		return nil, false, auth.ErrMutationPermissionRevoked
+	values := make([]recipients.Values, len(input.Request.Recipients))
+	for i, v := range input.Request.Recipients {
+		values[i] = recipients.Values{Role: v.Role, Email: v.Email, Name: v.Name, OrderIndex: v.OrderIndex, Locale: v.Locale}
+	}
+	result, err := blockauthoring.MaterializeAutomationV1(ctx, blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.automationBillingEngine(), Audit: s.Audit}, blockauthoring.ActorV1{OrgID: input.User.OrgID, UserID: input.User.UserID, Authorize: authorize, IP: input.IP, UserAgent: input.UserAgent}, blockauthoring.AutomationInputV1{TemplateID: input.Request.TemplateID, TemplateVersion: input.Request.TemplateVersion, TemplateContentSHA256: input.Request.TemplateContentSHA256, Name: input.Request.Name, Variables: input.Request.Variables, Recipients: values, ExpiresAt: input.Request.ExpiresAt, IdempotencyKeyHash: input.IdempotencyKeyHash, RequestHash: input.RequestHash, TemplateSnapshotHook: s.automationTemplateSnapshotHook})
+	if result != nil && !responseOwner.retainMaterializationV1(result) {
+		result.CloseConsumerV1()
+		return nil, false, errors.New("automation materialization response ownership unavailable")
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("load automation transaction authorization: %w", err)
-	}
-	if err := authorize(ctx, tx, user); err != nil {
-		return nil, false, err
-	}
-
-	request, err := q.ClaimAutomationSignatureRequest(ctx, generated.ClaimAutomationSignatureRequestParams{
-		OrgID: input.User.OrgID, IdempotencyKeyHash: input.IdempotencyKeyHash[:], RequestHash: input.RequestHash[:],
-	})
-	replayed := false
-	if errors.Is(err, pgx.ErrNoRows) {
-		replayed = true
-		request, err = q.GetAutomationSignatureRequestForUpdate(ctx, generated.GetAutomationSignatureRequestForUpdateParams{
-			OrgID: input.User.OrgID, IdempotencyKeyHash: input.IdempotencyKeyHash[:],
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("load automation signature request replay: %w", err)
-		}
-		if len(request.RequestHash) != sha256.Size || subtle.ConstantTimeCompare(request.RequestHash, input.RequestHash[:]) != 1 {
+		var precondition *blockauthoring.AutomationTemplatePreconditionErrorV1
+		switch {
+		case errors.Is(err, pdfadmission.ErrAutomationRequestHashConflictV1):
 			return nil, false, errAutomationIdempotencyConflict
+		case errors.Is(err, blockauthoring.ErrAutomationTemplateNotFoundV1):
+			return nil, false, errAutomationTemplateNotFound
+		case errors.Is(err, blockauthoring.ErrAutomationTemplateInvalidV1):
+			return nil, false, errors.Join(errAutomationTemplateInvalid, err)
+		case errors.Is(err, blockauthoring.ErrAutomationExpiryTooSoonV1):
+			return nil, false, errAutomationExpiryTooSoon
+		case errors.As(err, &precondition):
+			return nil, false, &automationTemplatePreconditionError{ExpectedVersion: precondition.ExpectedVersion, ActualVersion: precondition.ActualVersion, ContentDigestMismatch: precondition.ContentDigestMismatch}
 		}
-		if err := authorize(ctx, tx, user); err != nil {
-			return nil, false, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, false, fmt.Errorf("commit automation signature request replay: %w", err)
-		}
-		return request, true, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("claim automation signature request: %w", err)
-	}
-	if err := validateFreshAutomationExpiry(input.Request.ExpiresAt, time.Now().UTC()); err != nil {
 		return nil, false, err
 	}
-
-	template, err := q.GetTemplateForShare(ctx, generated.GetTemplateForShareParams{ID: input.Request.TemplateID, OrgID: input.User.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, errAutomationTemplateNotFound
+	if result == nil {
+		return nil, false, errors.New("automation materialization result unavailable")
 	}
-	if err != nil {
-		return nil, false, fmt.Errorf("load automation signature request template: %w", err)
-	}
-	if template.SourceKind != "blocks" {
-		return nil, false, fmt.Errorf("%w: template is not blocks-source", errAutomationTemplateInvalid)
-	}
-	templateContent, err := templatepin.Canonicalize(template.BlocksJson, template.VariablesJson)
-	if err != nil {
-		return nil, false, fmt.Errorf("%w: invalid canonical content: %v", errAutomationTemplateInvalid, err)
-	}
-	contentDigest := templateContent.SHA256Hex()
-	if template.Version != input.Request.TemplateVersion || contentDigest != input.Request.TemplateContentSHA256 {
-		return nil, false, &automationTemplatePreconditionError{
-			ExpectedVersion:       input.Request.TemplateVersion,
-			ActualVersion:         template.Version,
-			ContentDigestMismatch: contentDigest != input.Request.TemplateContentSHA256,
-		}
-	}
-	if s.automationTemplateSnapshotHook != nil {
-		s.automationTemplateSnapshotHook()
-	}
-	blockTree := templateContent.BlocksJSON
-	variables := templateContent.DefaultVariables
-	for name, value := range input.Request.Variables {
-		variables[name] = value
-	}
-	variablesJSON, err := json.Marshal(variables)
-	if err != nil {
-		return nil, false, fmt.Errorf("encode automation variables: %w", err)
-	}
-	preflightRecipients := make([]recipients.Values, 0, len(input.Request.Recipients))
-	for _, recipient := range input.Request.Recipients {
-		preflightRecipients = append(preflightRecipients, recipients.Values{
-			Role: recipient.Role, Email: recipient.Email, Name: recipient.Name,
-			OrderIndex: recipient.OrderIndex, Locale: recipient.Locale,
-		})
-	}
-	if err := send.ValidateAutomationBlockRequest(blockTree, variablesJSON, preflightRecipients); err != nil {
-		return nil, false, err
-	}
-	var expiresAt pgtype.Timestamptz
-	if input.Request.ExpiresAt != "" {
-		expires, parseErr := time.Parse(time.RFC3339Nano, input.Request.ExpiresAt)
-		if parseErr != nil {
-			return nil, false, errors.New("canonical automation expiry became invalid")
-		}
-		expiresAt = pgtype.Timestamptz{Time: expires, Valid: true}
-	}
-	document, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-		OrgID:      input.User.OrgID,
-		TemplateID: pgtype.UUID{Bytes: input.Request.TemplateID, Valid: true},
-		Name:       input.Request.Name, BlocksJson: blockTree, VariablesJson: variablesJSON,
-		SenderID: input.User.UserID, ExpiresAt: expiresAt,
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("create automation signature document: %w", err)
-	}
-
-	pendingAudits := make([]audit.PendingEvent, 0, len(input.Request.Recipients)+1)
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID: input.User.OrgID, ActorUserID: &input.User.UserID, DocumentID: &document.ID,
-		Kind: audit.KindDocumentCreated, IP: input.IP, UserAgent: input.UserAgent,
-		Payload: map[string]any{
-			"name": document.Name, "source_kind": "blocks", "via": "automation",
-			"automation_request_id": request.ID, "template_id": template.ID,
-			"template_version": template.Version, "template_content_sha256": contentDigest,
-		},
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("audit automation signature document: %w", err)
-	}
-	pendingAudits = append(pendingAudits, pending)
-
-	now := time.Now()
-	for _, recipient := range input.Request.Recipients {
-		_, tokenHash, err := auth.MintMagicToken()
-		if err != nil {
-			return nil, false, fmt.Errorf("mint automation recipient token: %w", err)
-		}
-		created, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{
-			DocumentID: document.ID, Role: recipient.Role, Email: recipient.Email, Name: recipient.Name,
-			OrderIndex: recipient.OrderIndex, Locale: recipient.Locale, MagicTokenHash: tokenHash,
-			MagicTokenExpiresAt: magictoken.Expiry(document.ExpiresAt, now),
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("create automation signature recipient: %w", err)
-		}
-		pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-			OrgID: input.User.OrgID, ActorUserID: &input.User.UserID, DocumentID: &document.ID, RecipientID: &created.ID,
-			Kind: audit.KindRecipientCreated, IP: input.IP, UserAgent: input.UserAgent,
-			Payload: map[string]any{
-				"email": created.Email, "name": created.Name, "role": created.Role,
-				"via": "automation", "automation_request_id": request.ID,
-			},
-		})
-		if err != nil {
-			return nil, false, fmt.Errorf("audit automation signature recipient: %w", err)
-		}
-		pendingAudits = append(pendingAudits, pending)
-	}
-	if billingEngine != nil {
-		// The transaction sees its own new document and recipients. Enforcing
-		// quota before commit makes a 402/entitlement outage roll back every PII,
-		// audit, and idempotency write instead of stranding an unreported draft.
-		if err := billingEngine.EnforceDocumentQuotaMutation(ctx, q, input.User.OrgID); err != nil {
-			return nil, false, fmt.Errorf("enforce automation signature request quota: %w", err)
-		}
-	}
-	if _, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{
-		DocumentID: document.ID, OrgID: document.OrgID, Name: document.Name, SourceKind: document.SourceKind,
-		BlocksJSON: document.BlocksJson, VariablesJS: document.VariablesJson, CreatedBy: &input.User.UserID,
-		Via: versions.ViaAgent, Summary: "automation signature request",
-	}); err != nil {
-		return nil, false, fmt.Errorf("snapshot automation signature document: %w", err)
-	}
-	request, err = q.BindAutomationSignatureRequestDocument(ctx, generated.BindAutomationSignatureRequestDocumentParams{
-		ID: request.ID, OrgID: input.User.OrgID, DocumentID: pgtype.UUID{Bytes: document.ID, Valid: true},
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("bind automation signature document: %w", err)
-	}
-	if err := authorize(ctx, tx, user); err != nil {
-		return nil, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("commit automation signature request: %w", err)
-	}
-	for _, event := range pendingAudits {
-		s.Audit.Publish(event)
-	}
-	return request, replayed, nil
+	return result.Request, result.Replayed, nil
 }
 
 func (s *Server) sendAutomationSignatureRequest(ctx context.Context, user auth.SessionUser, documentID uuid.UUID, requestState, lawfulBasis, ip string) (string, error) {
-	document, err := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: documentID, OrgID: user.OrgID})
+	document, err := s.Queries.GetAutomationSignatureDocumentStateV1(ctx, generated.GetAutomationSignatureDocumentStateV1Params{DocumentID: documentID, OrgID: user.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errAutomationRequestGone
 	}
 	if err != nil {
 		return "", fmt.Errorf("load automation signature document: %w", err)
 	}
-	if err := rejectSupersededAutomationCeremony(requestState, document); err != nil {
+	if err := rejectSupersededAutomationStateV1(requestState, document.Status, document.Article13NoticeEpochAt); err != nil {
 		return "", err
 	}
 	if automationRequestWasSent(document.Status) {
@@ -530,8 +396,16 @@ func (s *Server) sendAutomationSignatureRequest(ctx context.Context, user auth.S
 	// reservation instead of charging it a second time.
 	automationSend := *s.Send
 	automationSend.Billing = nil
+	responseOwner := automationSendResponseFromV1(ctx)
+	if responseOwner == nil {
+		return "", errors.New("send response ownership unavailable")
+	}
 	if document.Status == "sealing" {
 		result, resumeErr := automationSend.ResumeSendSealing(ctx, document.ID, document.OrgID)
+		if !responseOwner.retainV1(&result) {
+			result.CloseConsumerV1()
+			return "", errors.New("send response ownership unavailable")
+		}
 		if resumeErr == nil {
 			return result.Status, nil
 		}
@@ -541,6 +415,10 @@ func (s *Server) sendAutomationSignatureRequest(ctx context.Context, user auth.S
 		return "", send.ErrNotDraft
 	}
 	result, sendErr := automationSend.Send(ctx, actor, document.ID)
+	if !responseOwner.retainV1(&result) {
+		result.CloseConsumerV1()
+		return "", errors.New("send response ownership unavailable")
+	}
 	if sendErr == nil {
 		return result.Status, nil
 	}
@@ -553,10 +431,16 @@ func (s *Server) sendAutomationSignatureRequest(ctx context.Context, user auth.S
 // so it also closes the crash window where the first send committed but the
 // automation request had not yet advanced from ready to sent.
 func rejectSupersededAutomationCeremony(requestState string, document *generated.Document) error {
-	if document == nil || document.Status != "draft" {
+	if document == nil {
 		return nil
 	}
-	if requestState == "sent" || document.Article13NoticeEpochAt.Valid {
+	return rejectSupersededAutomationStateV1(requestState, document.Status, document.Article13NoticeEpochAt)
+}
+func rejectSupersededAutomationStateV1(requestState, status string, noticeEpoch pgtype.Timestamptz) error {
+	if status != "draft" {
+		return nil
+	}
+	if requestState == "sent" || noticeEpoch.Valid {
 		return errAutomationCeremonySuperseded
 	}
 	return nil
@@ -580,7 +464,7 @@ func (s *Server) reconcileAutomationSendError(ctx context.Context, sendEngine *s
 	if sendEngine == nil {
 		return "", errors.Join(original, errors.New("reconcile automation signature send: send engine unavailable"))
 	}
-	document, err := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: documentID, OrgID: actor.OrgID})
+	document, err := s.Queries.GetAutomationSignatureDocumentStateV1(ctx, generated.GetAutomationSignatureDocumentStateV1Params{DocumentID: documentID, OrgID: actor.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errAutomationRequestGone
 	}
@@ -595,11 +479,19 @@ func (s *Server) reconcileAutomationSendError(ctx context.Context, sendEngine *s
 	// engine's documented idempotent recovery path; a second completion race is
 	// reconciled by one final authoritative document read below.
 	if errors.Is(original, send.ErrNotDraft) && document.Status == "sealing" {
+		responseOwner := automationSendResponseFromV1(ctx)
+		if responseOwner == nil {
+			return "", errors.New("send response ownership unavailable")
+		}
 		result, resumeErr := sendEngine.ResumeSendSealing(ctx, document.ID, document.OrgID)
+		if !responseOwner.retainV1(&result) {
+			result.CloseConsumerV1()
+			return "", errors.New("send response ownership unavailable")
+		}
 		if resumeErr == nil {
 			return result.Status, nil
 		}
-		latest, loadErr := s.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: documentID, OrgID: actor.OrgID})
+		latest, loadErr := s.Queries.GetAutomationSignatureDocumentStateV1(ctx, generated.GetAutomationSignatureDocumentStateV1Params{DocumentID: documentID, OrgID: actor.OrgID})
 		if loadErr == nil && automationRequestWasSent(latest.Status) {
 			return latest.Status, nil
 		}
@@ -625,6 +517,12 @@ func decodeAutomationSignatureRequestJSON(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return err
 	}
+	return decodeAutomationSignatureRequestRawV1(raw, target)
+}
+
+// Same original strict parser, called only after the real route's raw/typed
+// request admission. This helper grants no source or transaction authority.
+func decodeAutomationSignatureRequestRawV1(raw []byte, target *automationSignatureRequestInput) error {
 	if !utf8.Valid(raw) {
 		return errors.New("JSON must be valid UTF-8")
 	}

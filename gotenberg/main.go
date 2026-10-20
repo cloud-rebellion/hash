@@ -4,9 +4,9 @@
 package main
 
 import (
+	_ "github.com/bright-interaction/hash/gotenberg/internal/chromium"
+	_ "github.com/bright-interaction/hash/gotenberg/internal/hashapi"
 	gotenbergcmd "github.com/gotenberg/gotenberg/v8/cmd"
-	_ "github.com/gotenberg/gotenberg/v8/pkg/modules/api"
-	_ "github.com/gotenberg/gotenberg/v8/pkg/modules/chromium"
 )
 
 func main() {

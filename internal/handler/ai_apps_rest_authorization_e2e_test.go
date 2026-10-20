@@ -29,12 +29,12 @@ type staffAIActionE2E struct {
 
 func setupGuardedAIAppsRESTE2E(t *testing.T, sent, blocking bool) guardedAIAppsFixture {
 	t.Helper()
-	f := setupGuardedAIAppsMCPE2E(t, sent, blocking)
+	f := setupStaffAIAppsHTTP300E2E(t, sent, blocking)
 	shield, err := ai.NewLocalShield(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := ai.New(f.q, shield, nil, f.provider)
+	runtime := ai.New(f.q, shield, nil, f.nativeProvider)
 	f.s.Negotiator = &aiapps.Negotiator{Runtime: runtime}
 	f.s.Bilingual = &aiapps.Bilingual{Runtime: runtime}
 	f.s.RiskAnalyzer = &aiapps.RiskAnalyzer{Runtime: runtime}
@@ -96,11 +96,11 @@ func TestAIAppsRESTOriginalSessionAfterDocumentWaitE2E(t *testing.T) {
 					ttl = time.Second
 				}
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-				done := make(chan *httptest.ResponseRecorder, 1)
-				go func() { done <- staffAISubmitE2E(f, f.ctx, op, cookie) }()
-				query := "-- name: GetDocumentForUpdate"
+				done, cancel, joined := guardedAIAsync264(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return staffAISubmitE2E(f, ctx, op, cookie) })
+				defer guardedAICleanup264(t, blocked, cancel, joined)
+				query := "-- name: LockManualNegotiationRootV1"
 				if op.provider {
-					query = "-- name: GetDocumentForShare"
+					query = "-- name: LockDocumentAIRootV1"
 				}
 				awaitSessionOperationLockE2E(t, f.ctx, f.pool, query, "transactionid")
 				var err error
@@ -143,13 +143,13 @@ func TestAIAppsRESTMutationExpiryAfterAuditWaitAndAtomicAuditE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer blocked.Rollback(context.Background())
+			defer nativeReminderRollback255(t, blocked)
 			if err = f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 				t.Fatal(err)
 			}
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-			done := make(chan *httptest.ResponseRecorder, 1)
-			go func() { done <- staffAISubmitE2E(f, f.ctx, op, cookie) }()
+			done, cancel, joined := guardedAIAsync264(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return staffAISubmitE2E(f, ctx, op, cookie) })
+			defer guardedAICleanup264(t, blocked, cancel, joined)
 			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 			awaitSessionCookieExpiryE2E(t, f.s, cookie)
 			if err = blocked.Commit(f.ctx); err != nil {
@@ -184,8 +184,8 @@ func TestAIAppsRESTProviderExpiryTruthfulCostAndResultRefusalE2E(t *testing.T) {
 			f := setupGuardedAIAppsRESTE2E(t, false, true)
 			op := staffAIActionForE2E(t, f, name)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-			done := make(chan *httptest.ResponseRecorder, 1)
-			go func() { done <- staffAISubmitE2E(f, f.ctx, op, cookie) }()
+			done, cancel, joined := guardedAIAsync264(f.ctx, func(ctx context.Context) *httptest.ResponseRecorder { return staffAISubmitE2E(f, ctx, op, cookie) })
+			defer guardedAICleanup264(t, nil, cancel, joined)
 			req := awaitAIProviderE2E(t, f.provider)
 			if strings.Contains(req.User, "alice@example.com") || strings.Contains(req.User, "Lifecycle signer") {
 				t.Fatal("staff adapter lost Shield/recipient lookup")
@@ -196,7 +196,7 @@ func TestAIAppsRESTProviderExpiryTruthfulCostAndResultRefusalE2E(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "Reviewed AI suggestion") {
 				t.Fatalf("expired provider result=%d %s", w.Code, w.Body.String())
 			}
-			assertAIReceiptCostE2E(t, f, 2)
+			assertStaffAIHTTPReceiptCost300E2E(t, f, 2)
 			assertStaffAIChainE2E(t, f)
 		})
 	}
@@ -224,7 +224,7 @@ func TestAIAppsRESTRequiredProviderEvidenceAndActiveNegotiationE2E(t *testing.T)
 				t.Fatalf("missing result=%d %s", w.Code, w.Body.String())
 			}
 			drop()
-			assertAIReceiptCostE2E(t, f, 2)
+			assertStaffAIHTTPReceiptCost300E2E(t, f, 2)
 			if w = staffAISubmitE2E(f, f.ctx, op, cookie); w.Code != http.StatusOK || !json.Valid(w.Body.Bytes()) {
 				t.Fatalf("fresh provider=%d %s", w.Code, w.Body.String())
 			}
@@ -292,7 +292,7 @@ func TestAIAppsRESTTenantParentBlockAndPrivacyBoundariesE2E(t *testing.T) {
 	if authoringMCPStateE2E(t, other.lifecycleAuthorizationFixture) != foreignBefore {
 		t.Fatal("cross tenant mutated foreign state")
 	}
-	sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Sibling proposal boundary", BlocksJson: f.doc.BlocksJson, VariablesJson: []byte(`{}`)})
+	sibling, err := guardedAISiblingNative264(t, f.lifecycleAuthorizationFixture, "Sibling proposal boundary")
 	if err != nil {
 		t.Fatal(err)
 	}

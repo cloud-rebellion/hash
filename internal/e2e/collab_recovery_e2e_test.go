@@ -13,7 +13,6 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/pressly/goose/v3"
 )
 
 func TestCanonicalCollabRecoveryPreservesUnknownAndActiveHistoryE2E(t *testing.T) {
@@ -26,7 +25,7 @@ func TestCanonicalCollabRecoveryPreservesUnknownAndActiveHistoryE2E(t *testing.T
 	defer cleanup()
 	conn := stdlibConn(t, pool)
 	defer conn.Close()
-	must(t, mdb.RunMigrationsUpTo(conn, 71), "migrate to71")
+	must(t, mdb.RunMigrationsUpToContext(ctx, conn, 71), "migrate to71")
 	var org, user, doc uuid.UUID
 	must(t, pool.QueryRow(ctx, `INSERT INTO orgs(name,plan) VALUES('recovery','pro') RETURNING id`).Scan(&org), "org")
 	must(t, pool.QueryRow(ctx, `INSERT INTO users(org_id,email,name,role) VALUES($1,'recovery@example.test','owner','owner') RETURNING id`, org).Scan(&user), "user")
@@ -115,7 +114,7 @@ func TestCanonicalCollabRecoveryPreservesUnknownAndActiveHistoryE2E(t *testing.T
 	if accepted {
 		t.Fatal("old flush revived recovered history")
 	}
-	if err := goose.Down(conn, "../db/migrations"); err == nil {
+	if err := mdb.RunMigrationsDownContext(ctx, conn); err == nil {
 		t.Fatal("rollback discarded archives")
 	}
 	_, err = pool.Exec(ctx, `DELETE FROM documents WHERE id=$1`, doc)

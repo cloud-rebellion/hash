@@ -6,66 +6,42 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"os"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/blocks"
-	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/send"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/templatepin"
 )
 
 func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing.T) {
-	dsn := os.Getenv("HASH_E2E_DB_URL")
-	if dsn == "" {
-		t.Skip("set HASH_E2E_DB_URL to run")
-	}
-	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	migrationDB := stdlib.OpenDB(*config.ConnConfig)
-	if err := mdb.RunMigrations(migrationDB); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	_ = migrationDB.Close()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	q := generated.New(pool)
-	auditLog := audit.New(q, pool)
-
-	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "Automation request " + uuid.NewString(), Plan: "pro"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	user, err := q.CreateUser(ctx, generated.CreateUserParams{
-		OrgID: org.ID, Email: uuid.NewString() + "@automation.test", Name: "Automation Sender", Role: "owner",
-		ZitadelSub: pgtype.Text{String: uuid.NewString(), Valid: true},
-	})
+	owned := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, owned)
+	ownedAutomationAuthorizationPrepareFreePlanV1(t, owned)
+	base := owned.f
+	ctx, pool, q, server := base.ctx, base.pool, base.q, base.s
+	user := base.user
+	org, err := q.GetOrg(ctx, base.org)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx = automationCredentialContextE2E(t, ctx, q, user)
+	sendEngine := server.Send
+	// Preserve this original regression's nil billing and no-op mail policy;
+	// concrete storage, restricted renderer and native runtime remain genuine.
+	server.Billing = nil
+	sendEngine.Billing = nil
+	sendEngine.Mailer = dispatch.NoopMailer{}
 	tree := blocks.Tree{Version: blocks.SchemaVersion, Blocks: []blocks.Block{
 		{ID: "intro", Type: blocks.TypeParagraph, Text: "Agreement for {{customer.name}}"},
 		{ID: "signature", Type: blocks.TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},
@@ -74,10 +50,7 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	template, err := q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
-		OrgID: org.ID, Name: "Partner agreement", BlocksJson: blocksJSON,
-		VariablesJson: json.RawMessage(`{"customer.name":"Template default","company.name":"Example AB"}`), CreatedBy: user.ID,
-	})
+	template, err := originalAutomationTemplateCreateV1(t, owned, "Partner agreement", blocksJSON, json.RawMessage(`{"customer.name":"Template default","company.name":"Example AB"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +58,6 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendEngine := &send.Engine{
-		Pool: pool, Queries: q, Audit: auditLog, Mailer: dispatch.NoopMailer{},
-		PublicURL: "https://hash.example.test", OrgName: "Hash E2E",
-	}
-	server := &Server{Pool: pool, Queries: q, Audit: auditLog, Send: sendEngine}
 	baseRequestInput := automationSignatureRequestInput{
 		TemplateID: template.ID.String(), TemplateVersion: template.Version,
 		TemplateContentSHA256: templateContent.SHA256Hex(),
@@ -165,7 +133,8 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 			mismatchedProcess.RequestHash = mismatchedHash
 			mismatchedProcess.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-pin-mismatch-" + uuid.NewString())
 			before := readDurableCounts(mismatched.Recipients[0].Email)
-			_, _, callErr := server.materializeAutomationSignatureRequest(ctx, mismatchedProcess)
+			_, _, callErr, callLease := originalAutomationMaterializeV1(t, server, ctx, mismatchedProcess)
+			defer callLease.closeV1()
 			var precondition *automationTemplatePreconditionError
 			if !errors.As(callErr, &precondition) || precondition.ActualVersion != template.Version ||
 				precondition.ExpectedVersion != test.wantExpectedVersion ||
@@ -173,26 +142,34 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 				t.Fatalf("precondition error = %#v/%v", precondition, callErr)
 			}
 			after := readDurableCounts(mismatched.Recipients[0].Email)
+			callErr = nil
+			callLease.closeV1()
 			if after != before {
 				t.Fatalf("pin mismatch leaked durable state: before=%#v after=%#v", before, after)
 			}
 		})
 	}
 
-	first, err := server.processAutomationSignatureRequest(ctx, processInput)
+	first, err, firstLease := originalAutomationProcessV1(t, server, ctx, processInput)
+	defer firstLease.closeV1()
 	if err != nil {
 		t.Fatalf("first composite request: %v", err)
 	}
 	if first.Replayed || first.Status != "sent" || first.AutomationRequestID == uuid.Nil || first.DocumentID == uuid.Nil {
 		t.Fatalf("first response = %#v", first)
 	}
-	replayed, err := server.processAutomationSignatureRequest(ctx, processInput)
+	replayed, err, replayLease := originalAutomationProcessV1(t, server, ctx, processInput)
+	defer replayLease.closeV1()
 	if err != nil {
 		t.Fatalf("replay composite request: %v", err)
 	}
 	if !replayed.Replayed || replayed.AutomationRequestID != first.AutomationRequestID || replayed.DocumentID != first.DocumentID || replayed.Status != "sent" {
 		t.Fatalf("replay response = %#v, first = %#v", replayed, first)
 	}
+	first.Status = ""
+	replayed.Status = ""
+	firstLease.closeV1()
+	replayLease.closeV1()
 	document, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: first.DocumentID, OrgID: org.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -269,9 +246,13 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 
 	collision := processInput
 	collision.RequestHash[0] ^= 0xff
-	if _, err := server.processAutomationSignatureRequest(ctx, collision); !errors.Is(err, errAutomationIdempotencyConflict) {
+	_, collisionErr, collisionLease := originalAutomationProcessV1(t, server, ctx, collision)
+	defer collisionLease.closeV1()
+	if err := collisionErr; !errors.Is(err, errAutomationIdempotencyConflict) {
 		t.Fatalf("same key/different request error = %v", err)
 	}
+	collisionErr = nil
+	collisionLease.closeV1()
 	for _, test := range []struct {
 		name   string
 		mutate func(*automationSignatureRequestInput)
@@ -291,9 +272,13 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 			changedInput := processInput
 			changedInput.Request = changedPrepared
 			changedInput.RequestHash = changedHash
-			if _, err := server.processAutomationSignatureRequest(ctx, changedInput); !errors.Is(err, errAutomationIdempotencyConflict) {
+			_, changedErr, changedLease := originalAutomationProcessV1(t, server, ctx, changedInput)
+			defer changedLease.closeV1()
+			if err := changedErr; !errors.Is(err, errAutomationIdempotencyConflict) {
 				t.Fatalf("same idempotency key/changed pin error = %v", err)
 			}
+			changedErr = nil
+			changedLease.closeV1()
 		})
 	}
 
@@ -316,17 +301,24 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		IdempotencyKeyHash: automationIdempotencyKeyHash("e2e-expiring-" + uuid.NewString()),
 		RequestHash:        expiringHash, IP: "127.0.0.1", UserAgent: "hash-e2e",
 	}
-	expiringRequest, _, err := server.materializeAutomationSignatureRequest(ctx, expiringInput)
+	expiringRequest, _, err, expiringLease := originalAutomationMaterializeV1(t, server, ctx, expiringInput)
+	defer expiringLease.closeV1()
 	if err != nil {
 		t.Fatal(err)
 	}
 	expiringDocumentID := uuid.UUID(expiringRequest.DocumentID.Bytes)
+	expiringRequest = nil
+	expiringLease.closeV1()
 	if _, err := pool.Exec(ctx, `UPDATE documents SET expires_at = clock_timestamp() + interval '4 minutes' WHERE id = $1`, expiringDocumentID); err != nil { //nolint:rawsql
 		t.Fatal(err)
 	}
-	if _, err := server.processAutomationSignatureRequest(ctx, expiringInput); !errors.Is(err, errAutomationExpiryTooSoon) {
+	_, expiryErr, expiryLease := originalAutomationProcessV1(t, server, ctx, expiringInput)
+	defer expiryLease.closeV1()
+	if err := expiryErr; !errors.Is(err, errAutomationExpiryTooSoon) {
 		t.Fatalf("delayed replay expiry error = %v, want ErrAutomationExpiryTooSoon", err)
 	}
+	expiryErr = nil
+	expiryLease.closeV1()
 	var expiringStatus string
 	var expiringInviteEvents int
 	if err := pool.QueryRow(ctx, `SELECT status FROM documents WHERE id = $1`, expiringDocumentID).Scan(&expiringStatus); err != nil { //nolint:rawsql
@@ -341,35 +333,13 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 
 	stageExpiringSealing := func() {
 		t.Helper()
-		seedCompleteFrozenBrandingHandlerE2E(t, ctx, pool, expiringDocumentID)
-		if _, err := pool.Exec(ctx, `UPDATE documents SET expires_at = clock_timestamp() + interval '10 minutes' WHERE id = $1 AND status = 'draft'`, expiringDocumentID); err != nil { //nolint:rawsql
+		if _, err := pool.Exec(ctx, `UPDATE documents SET expires_at = clock_timestamp() + interval '10 minutes' WHERE id = $1 AND status = 'draft'`, expiringDocumentID); err != nil {
 			t.Fatal(err)
+		} //nolint:rawsql -- original controlled recovery deadline stimulus
+		if err := originalAutomationStageSealingV1(ctx, server.HTMLCreationSessions, org.ID, expiringDocumentID, user.ID); err != nil {
+			t.Fatal("genuine controlled pre-retention stage", err)
 		}
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		tq := generated.New(tx)
-		if _, err := tq.ConfirmDocumentLawfulBasis(ctx, generated.ConfirmDocumentLawfulBasisParams{
-			DocumentID: expiringDocumentID, OrgID: org.ID, LawfulBasis: "contract", Via: "automation",
-			ConfirmedBy: pgtype.UUID{Bytes: user.ID, Valid: true},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tq.CreateSendSealingIntent(ctx, generated.CreateSendSealingIntentParams{
-			DocumentID: expiringDocumentID, OrgID: org.ID,
-			ActorUserID: pgtype.UUID{Bytes: user.ID, Valid: true}, ActorEmail: user.Email,
-			ActorIp: "127.0.0.1", Via: "automation", Tool: "signature_request",
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tq.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: expiringDocumentID, OrgID: org.ID}); err != nil {
-			t.Fatal(err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
+		ownedPlainAssertDrainedV1(t, owned)
 	}
 
 	// Before retention begins, a now-too-close deadline unwinds sealing back to
@@ -378,9 +348,14 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	if _, err := pool.Exec(ctx, `UPDATE documents SET expires_at = clock_timestamp() + interval '4 minutes' WHERE id = $1`, expiringDocumentID); err != nil { //nolint:rawsql
 		t.Fatal(err)
 	}
-	if _, err := sendEngine.ResumeSendSealing(ctx, expiringDocumentID, org.ID); !errors.Is(err, send.ErrExpiryTooSoon) {
+	reversible, reversibleErr := sendEngine.ResumeSendSealing(ctx, expiringDocumentID, org.ID)
+	defer reversible.CloseConsumerV1()
+	if err := reversibleErr; !errors.Is(err, send.ErrExpiryTooSoon) {
 		t.Fatalf("reversible expired sealing error = %v, want ErrExpiryTooSoon", err)
 	}
+	reversible.Links = nil
+	reversible.CloseConsumerV1()
+	reversibleErr = nil
 	var expiringIntentCount int
 	if err := pool.QueryRow(ctx, `SELECT status, (SELECT count(*) FROM send_sealing_intents WHERE document_id = $1) FROM documents WHERE id = $1`, expiringDocumentID).Scan(&expiringStatus, &expiringIntentCount); err != nil { //nolint:rawsql
 		t.Fatal(err)
@@ -404,12 +379,15 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		t.Fatal(err)
 	}
 	expiredRecovery, err := sendEngine.ResumeSendSealing(ctx, expiringDocumentID, org.ID)
+	defer expiredRecovery.CloseConsumerV1()
 	if err != nil {
 		t.Fatalf("irreversible expired sealing recovery: %v", err)
 	}
 	if expiredRecovery.Status != "expired" || len(expiredRecovery.Links) != 0 {
 		t.Fatalf("irreversible expired recovery = %#v, want expired with no links", expiredRecovery)
 	}
+	expiredRecovery.Links = nil
+	expiredRecovery.CloseConsumerV1()
 	var expiredEvents int
 	if err := pool.QueryRow(ctx, `SELECT status,
 		(SELECT count(*) FROM events WHERE document_id = $1 AND kind = 'recipient.invited'),
@@ -425,10 +403,12 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	// recover one durable command result rather than enqueueing two ceremonies.
 	completeConcurrent := processInput
 	completeConcurrent.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-complete-concurrent-" + uuid.NewString())
-	completeResponses := make(chan struct {
+	type completeAutomationResultV1 struct {
 		response automationSignatureRequestResponse
 		err      error
-	}, 2)
+		lease    *originalAutomationCallLeaseV1
+	}
+	completeResponses := make(chan completeAutomationResultV1, 2)
 	completeStart := make(chan struct{})
 	var completeReady sync.WaitGroup
 	completeReady.Add(2)
@@ -436,18 +416,25 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		go func() {
 			completeReady.Done()
 			<-completeStart
-			response, callErr := server.processAutomationSignatureRequest(ctx, completeConcurrent)
-			completeResponses <- struct {
-				response automationSignatureRequestResponse
-				err      error
-			}{response: response, err: callErr}
+			response, callErr, lease := originalAutomationProcessV1(t, server, ctx, completeConcurrent)
+			completeResponses <- completeAutomationResultV1{response: response, err: callErr, lease: lease}
 		}()
 	}
 	completeReady.Wait()
 	close(completeStart)
+	// Join both actual calls before an assertion can stop their consumer. The
+	// deferred close covers errors/status/divergence as well as the happy path.
+	completeJoined := [2]completeAutomationResultV1{<-completeResponses, <-completeResponses}
+	defer func() {
+		for i := range completeJoined {
+			lease := completeJoined[i].lease
+			completeJoined[i] = completeAutomationResultV1{}
+			lease.closeV1()
+		}
+	}()
 	var completeRequestID, completeDocumentID uuid.UUID
-	for range 2 {
-		result := <-completeResponses
+	for i := range completeJoined {
+		result := &completeJoined[i]
 		if result.err != nil {
 			t.Fatal(result.err)
 		}
@@ -460,6 +447,9 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		} else if result.response.AutomationRequestID != completeRequestID || result.response.DocumentID != completeDocumentID {
 			t.Fatalf("complete concurrent commands diverged: %#v", result.response)
 		}
+		lease := result.lease
+		*result = completeAutomationResultV1{}
+		lease.closeV1()
 	}
 	var completeDocumentCount, completeInviteEvents int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE id = $1`, completeDocumentID).Scan(&completeDocumentCount); err != nil { //nolint:rawsql
@@ -475,18 +465,27 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	// now-consumed intent. It must converge from the authoritative send proof
 	// without recreating bearer links or reporting a false retry failure.
 	alreadyCompleted, err := sendEngine.ResumeSendSealing(ctx, completeDocumentID, org.ID)
+	defer alreadyCompleted.CloseConsumerV1()
 	if err != nil || alreadyCompleted.Status != "sent" || len(alreadyCompleted.Links) != 0 {
 		t.Fatalf("post-completion recovery = %#v/%v, want sent without reconstructed links", alreadyCompleted, err)
 	}
+	alreadyCompleted.Links = nil
+	alreadyCompleted.CloseConsumerV1()
 	if _, err := q.RequestChangesOnDocument(ctx, generated.RequestChangesOnDocumentParams{ID: completeDocumentID, OrgID: org.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&sign.Engine{Pool: pool, Queries: q, Audit: auditLog}).Revise(ctx, org.ID, completeDocumentID); err != nil {
+	revised, err := server.Sign.Revise(ctx, org.ID, completeDocumentID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.processAutomationSignatureRequest(ctx, completeConcurrent); !errors.Is(err, errAutomationCeremonySuperseded) {
+	revised.CloseConsumerV1()
+	_, revisedErr, revisedLease := originalAutomationProcessV1(t, server, ctx, completeConcurrent)
+	defer revisedLease.closeV1()
+	if err := revisedErr; !errors.Is(err, errAutomationCeremonySuperseded) {
 		t.Fatalf("revised ceremony replay error = %v, want superseded conflict", err)
 	}
+	revisedErr = nil
+	revisedLease.closeV1()
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE document_id = $1 AND kind = 'recipient.invited'`, completeDocumentID).Scan(&completeInviteEvents); err != nil { //nolint:rawsql
 		t.Fatal(err)
 	}
@@ -498,11 +497,13 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	// on the same prepared draft and exactly one may report first materialization.
 	concurrent := processInput
 	concurrent.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-concurrent-" + uuid.NewString())
-	responses := make(chan struct {
+	type materializedAutomationResultV1 struct {
 		request  *generated.AutomationSignatureRequest
 		replayed bool
 		err      error
-	}, 2)
+		lease    *originalAutomationCallLeaseV1
+	}
+	responses := make(chan materializedAutomationResultV1, 2)
 	start := make(chan struct{})
 	var ready sync.WaitGroup
 	ready.Add(2)
@@ -510,20 +511,24 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		go func() {
 			ready.Done()
 			<-start
-			request, wasReplay, callErr := server.materializeAutomationSignatureRequest(ctx, concurrent)
-			responses <- struct {
-				request  *generated.AutomationSignatureRequest
-				replayed bool
-				err      error
-			}{request: request, replayed: wasReplay, err: callErr}
+			request, wasReplay, callErr, lease := originalAutomationMaterializeV1(t, server, ctx, concurrent)
+			responses <- materializedAutomationResultV1{request: request, replayed: wasReplay, err: callErr, lease: lease}
 		}()
 	}
 	ready.Wait()
 	close(start)
+	materializedJoined := [2]materializedAutomationResultV1{<-responses, <-responses}
+	defer func() {
+		for i := range materializedJoined {
+			lease := materializedJoined[i].lease
+			materializedJoined[i] = materializedAutomationResultV1{}
+			lease.closeV1()
+		}
+	}()
 	var concurrentID, concurrentDocumentID uuid.UUID
 	firstCount, replayCount := 0, 0
-	for range 2 {
-		result := <-responses
+	for i := range materializedJoined {
+		result := &materializedJoined[i]
 		if result.err != nil {
 			t.Fatal(result.err)
 		}
@@ -538,6 +543,9 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		} else if result.request.ID != concurrentID || uuid.UUID(result.request.DocumentID.Bytes) != concurrentDocumentID {
 			t.Fatalf("concurrent claims diverged: %#v", result.request)
 		}
+		lease := result.lease
+		*result = materializedAutomationResultV1{}
+		lease.closeV1()
 	}
 	if firstCount != 1 || replayCount != 1 {
 		t.Fatalf("concurrent first/replay = %d/%d, want 1/1", firstCount, replayCount)
@@ -555,10 +563,7 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	raceTemplate, err := q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
-		OrgID: org.ID, Name: "Concurrent approved template", BlocksJson: raceBlocksJSON,
-		VariablesJson: json.RawMessage(`{"customer.name":"Old default"}`), CreatedBy: user.ID,
-	})
+	raceTemplate, err := originalAutomationTemplateCreateV1(t, owned, "Concurrent approved template", raceBlocksJSON, json.RawMessage(`{"customer.name":"Old default"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,22 +590,35 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		close(snapshotReady)
 		<-releaseSnapshot
 	}
+	materializedRead := false
+	var joinTemplateUpdate func()
+	materialized := make(chan struct {
+		request *generated.AutomationSignatureRequest
+		err     error
+		lease   *originalAutomationCallLeaseV1
+	}, 1)
+	go func() {
+		request, _, callErr, lease := originalAutomationMaterializeV1(t, server, ctx, raceInput)
+		materialized <- struct {
+			request *generated.AutomationSignatureRequest
+			err     error
+			lease   *originalAutomationCallLeaseV1
+		}{request: request, err: callErr, lease: lease}
+	}()
 	defer func() {
 		if !releasedSnapshot {
 			close(releaseSnapshot)
 		}
+		if !materializedRead {
+			result := <-materialized
+			result.request = nil
+			result.err = nil
+			result.lease.closeV1()
+		}
+		if joinTemplateUpdate != nil {
+			joinTemplateUpdate()
+		}
 		server.automationTemplateSnapshotHook = nil
-	}()
-	materialized := make(chan struct {
-		request *generated.AutomationSignatureRequest
-		err     error
-	}, 1)
-	go func() {
-		request, _, callErr := server.materializeAutomationSignatureRequest(ctx, raceInput)
-		materialized <- struct {
-			request *generated.AutomationSignatureRequest
-			err     error
-		}{request: request, err: callErr}
 	}()
 	select {
 	case <-snapshotReady:
@@ -620,12 +638,17 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		template *generated.Template
 		err      error
 	}, 1)
+	updatedRead := false
+	joinTemplateUpdate = func() {
+		if !updatedRead {
+			result := <-updated
+			result.template = nil
+			result.err = nil
+		}
+	}
 	go func() {
 		close(updateStarted)
-		value, callErr := q.UpdateBlocksTemplate(ctx, generated.UpdateBlocksTemplateParams{
-			ID: raceTemplate.ID, OrgID: org.ID, Name: raceTemplate.Name,
-			BlocksJson: updatedBlocksJSON, VariablesJson: json.RawMessage(`{"customer.name":"New default"}`),
-		})
+		value, callErr := originalAutomationTemplateUpdateV1(owned, raceTemplate, updatedBlocksJSON, json.RawMessage(`{"customer.name":"New default"}`))
 		updated <- struct {
 			template *generated.Template
 			err      error
@@ -634,21 +657,31 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	<-updateStarted
 	select {
 	case result := <-updated:
+		updatedRead = true
 		t.Fatalf("concurrent template update escaped the pinned snapshot lock: %#v/%v", result.template, result.err)
 	case <-time.After(150 * time.Millisecond):
 	}
 	close(releaseSnapshot)
 	releasedSnapshot = true
 	materializeResult := <-materialized
+	materializedRead = true
+	defer func() {
+		materializeResult.request = nil
+		materializeResult.err = nil
+		materializeResult.lease.closeV1()
+	}()
 	if materializeResult.err != nil {
 		t.Fatalf("materialize pinned concurrent snapshot: %v", materializeResult.err)
 	}
 	updateResult := <-updated
+	updatedRead = true
 	if updateResult.err != nil || updateResult.template.Version != raceTemplate.Version+1 {
 		t.Fatalf("concurrent template update = %#v/%v", updateResult.template, updateResult.err)
 	}
 	server.automationTemplateSnapshotHook = nil
 	raceDocumentID := uuid.UUID(materializeResult.request.DocumentID.Bytes)
+	materializeResult.request = nil
+	materializeResult.lease.closeV1()
 	raceDocument, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: raceDocumentID, OrgID: org.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -695,12 +728,15 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		t.Fatal(err)
 	}
 	for documentsBefore < int(plan.DocumentQuotaMonthly) {
-		if _, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-			OrgID: org.ID, Name: "quota fixture", BlocksJson: blocksJSON,
-			VariablesJson: json.RawMessage(`{"customer.name":"fixture"}`), SenderID: user.ID,
-		}); err != nil {
+		raw, err := json.Marshal(map[string]any{"name": "quota fixture", "source_kind": "blocks", "blocks_json": json.RawMessage(blocksJSON), "variables_json": map[string]string{"customer.name": "fixture"}})
+		if err != nil {
 			t.Fatal(err)
 		}
+		response := submitSessionOperationE2E(server, http.MethodPost, "/api/v1/documents", string(raw), owned.cookie)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("actual quota fixture document=%d %s", response.Code, response.Body.String())
+		}
+		ownedPlainAssertDrainedV1(t, owned)
 		documentsBefore++
 	}
 	var requestsBefore, recipientsBefore, eventsBefore int
@@ -716,9 +752,12 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	server.Billing = billingEngine
 	quotaInput := processInput
 	quotaInput.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-quota-" + uuid.NewString())
-	if _, _, err := server.materializeAutomationSignatureRequest(ctx, quotaInput); !errors.Is(err, billing.ErrQuotaExceeded) {
+	_, _, quotaErr, quotaLease := originalAutomationMaterializeV1(t, server, ctx, quotaInput)
+	if err := quotaErr; !errors.Is(err, billing.ErrQuotaExceeded) {
 		t.Fatalf("quota materialization error = %v, want ErrQuotaExceeded", err)
 	}
+	quotaErr = nil
+	quotaLease.closeV1()
 	var documentsAfter, requestsAfter, recipientsAfter, eventsAfter int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE org_id = $1`, org.ID).Scan(&documentsAfter); err != nil { //nolint:rawsql
 		t.Fatal(err)
@@ -737,4 +776,5 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 			documentsBefore, documentsAfter, requestsBefore, requestsAfter,
 			recipientsBefore, recipientsAfter, eventsBefore, eventsAfter)
 	}
+	ownedPlainAssertDrainedV1(t, owned)
 }

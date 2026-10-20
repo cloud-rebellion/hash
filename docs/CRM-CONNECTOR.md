@@ -23,11 +23,91 @@ response does not expose the key's scopes or expiry; Hash does not claim to
 verify those properties. This API-key integration is separate from sender OIDC
 login. Automatic CRM OAuth enrollment/refresh is not implemented.
 
-The production transport currently permits HTTPS public destinations only;
-private, loopback and Tailscale/CGNAT addresses are refused. The development
-loopback exception used by synthetic tests is not a production configuration.
-Connecting to the private CloudRebellion CRM requires a separately reviewed,
-narrowly pinned transport policy and real account/read acceptance before use.
+The default production transport permits HTTPS public destinations only. An
+operator can select the separate strict private lane with
+HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS; see the private-egress section below.
+It has no development bypass. Source checks do not establish private service,
+account/read or deployment acceptance.
+
+## Operator-pinned private CRM egress
+
+Leave HASH_BRIGHTCRM_TRUSTED_PRIVATE_CIDRS empty to preserve the default public-only
+production policy. A nonempty value is operator boot configuration, bound to the
+configured canonical HASH_BRIGHTCRM_URL and effective HTTPS port. It requires the
+existing URL/key pair. The development environment label may use this strict
+lane with a valid HTTPS origin and pins; that label grants no bypass authority.
+HTTP is refused even in development, and the separate legacy development
+constructor cannot widen this lane. Settings,
+credentials, CRM record values, REST/MCP input and tenant roles cannot change it.
+
+The new startup grammar bound is at most16 distinct comma-separated canonical
+host prefixes: IPv4 /32 or IPv6 /128. This bounds configuration parsing, not CRM
+record counts, traffic or worker capacity. Empty/duplicate entries, whitespace,
+non-host networks, zones, mapped IPv6 spellings and noncanonical forms refuse the
+whole setting. Parsing uses a fixed16-entry array and refuses a seventeenth entry
+before retaining it. Only private RFC1918/ULA or CGNAT destinations are eligible;
+public fallback is disabled in this mode. No actual approved destination is
+provided by this documentation or by the empty environment template.
+
+Ordinary system DNS still resolves the original hostname. Before each actual
+socket connect, net.Dialer.Control checks the real resolved numeric IP and port
+against the immutable exact set. Request origin, normal Host hostname/effective
+port and dial hostname/port must all match the configured HTTPS origin. Normal
+hostname case and omitted/explicit443 equivalence are allowed. Disagreement,
+userinfo and opaque URLs refuse before DNS or socket dispatch. All redirects and
+HTTP environment proxies remain disabled. Normal system roots and original-host
+TLS verification remain enabled; provision any actual internal CA through the
+approved OS/container trust store, never an insecure client option.
+
+Hard denials take precedence over exact pins: loopback, link-local, unspecified,
+multicast, benchmarking and the finite known metadata destinations below. The
+inventory was verified on 2026-10-16 from primary provider documentation:
+
+- AWS EC2: fd00:ec2::254; IPv6 use has provider-specific prerequisites.
+  https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
+- Google Compute Engine: fd20:ce::254 for IPv6-only VMs.
+  https://docs.cloud.google.com/compute/docs/metadata/overview
+- Alibaba ECS: 100.100.100.200.
+  https://www.alibabacloud.com/help/en/ecs/user-guide/view-instance-metadata
+
+169.254.169.254 is already denied by the whole link-local predicate. This finite
+inventory does not identify every administrator-routed metadata/service address.
+A host prefix alone does not establish every subnet-directed broadcast address;
+operator approval must establish a genuine unicast CRM host in the actual owned
+network. Neither a hostname-only exemption nor an arbitrary private network CIDR
+is accepted. Policy changes require a fresh client/restart and normal old-client
+retirement; this is not retroactive revocation of established sockets.
+
+The credential's encrypted organization/account/origin/generation binding,
+re-enrollment rules, explicit owner account confirmation and existing read limits
+are unchanged. Private network permission grants no cross-account authority,
+credential recovery, OAuth enrollment or verified key scopes/expiry.
+
+### Required private-network acceptance
+
+The tagged nethard fixture is selected explicitly with
+crm_private_egress_integration. It requires a genuine eligible private interface,
+two operator-provisioned DNS names resolving to that interface, a valid leaf/key
+for the first name (not the second), and the issuing CA already in the fresh
+process's normal trust store. The required fixture settings are
+HASH_CRM_PRIVATE_EGRESS_TEST_HOST, HASH_CRM_PRIVATE_EGRESS_TEST_WRONG_HOST,
+HASH_CRM_PRIVATE_EGRESS_TEST_IP, HASH_CRM_PRIVATE_EGRESS_TEST_CERT_FILE and
+HASH_CRM_PRIVATE_EGRESS_TEST_KEY_FILE. Missing setup fails the selected test.
+It never maps a private destination to localhost or installs a client TLS/dial
+exception. These are test inputs, not application configuration.
+
+That fixture exercises actual private DNS/connect/TLS under hostile proxy
+environment settings with zero proxy dispatch, exact unpinned socket
+refusal, all five same-origin redirects, wrong TLS hostname and an independently
+untrusted matching-host certificate without authenticated HTTP to denied peers.
+It is not a full DNS-rebinding oracle: a separately controlled DNS fixture must
+also prove mixed and changed A/AAAA answers never dispatch to an unpinned or
+hard-denied peer. Pure numeric Control vectors are useful regression checks,
+but do not replace that actual resolver/service acceptance. Before salesperson
+use, verify the exact released image/trust store, private routing and service
+identity; real owner enrollment and auth/me account confirmation; company,
+contact and deal reads; stale/revoked/wrong-account/wrong-tenant refusal; and
+unchanged Send observations. Keep actual tokens out of logs and artifacts.
 
 ## Owner API
 

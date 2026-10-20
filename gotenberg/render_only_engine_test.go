@@ -10,8 +10,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bright-interaction/hash/gotenberg/internal/hashpdfengines"
 	"github.com/gotenberg/gotenberg/v8/pkg/gotenberg"
-	"github.com/gotenberg/gotenberg/v8/pkg/modules/pdfengines"
 )
 
 func TestModuleGraphIsRenderOnly(t *testing.T) {

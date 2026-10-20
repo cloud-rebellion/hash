@@ -68,18 +68,14 @@ func TestBuildPageOverlayHTMLPreservesSmallestStoredCoordinatePrecision(t *testi
 	}
 }
 
-func TestStampInnerHTMLRejectsOverlongStoredSignature(t *testing.T) {
+func TestStampInnerHTMLRejectsEmptyTrustedSignature(t *testing.T) {
 	recipientID := uuid.New()
 	field := &generated.DocumentField{
 		Type:        "signature",
 		RecipientID: pgtype.UUID{Bytes: recipientID, Valid: true},
 	}
-	signature := &generated.Signature{
-		ID: recipientID, RecipientID: recipientID, Font: "Caveat",
-		TypedName: strings.Repeat("界", render.MaxSignatureNameRunes+1),
-	}
-	if _, err := stampInnerHTML(field, map[string]*generated.Signature{recipientID.String(): signature}); err == nil {
-		t.Fatal("terminal PDF stamp accepted an overlong stored signature name")
+	if _, err := stampInnerHTML(field, map[string]render.ArchivedSignatureSpan{recipientID.String(): {}}); err == nil {
+		t.Fatal("terminal PDF stamp accepted an empty trusted signature")
 	}
 }
 
@@ -90,34 +86,6 @@ func TestStampInnerHTML_Checkbox(t *testing.T) {
 	}
 	if got := isTruthy("no"); got {
 		t.Error("no should not be truthy")
-	}
-}
-
-func TestStampOverlays_AppliesPerPage(t *testing.T) {
-	original := onePagePDF(t, "contract body")
-	overlay := onePagePDF(t, "SIGNED")
-
-	out, err := stampOverlays(original, map[int][]byte{1: overlay})
-	if err != nil {
-		t.Fatalf("stampOverlays: %v", err)
-	}
-	if pc := pageCount(t, out); pc != 1 {
-		t.Fatalf("stamped page count = %d, want 1", pc)
-	}
-	// Output must be larger than the blank original now that an overlay landed.
-	if len(out) <= len(original) {
-		t.Errorf("stamped pdf (%d bytes) not larger than original (%d bytes)", len(out), len(original))
-	}
-}
-
-func TestStampOverlays_EmptyMapPassthrough(t *testing.T) {
-	original := onePagePDF(t, "contract body")
-	out, err := stampOverlays(original, map[int][]byte{})
-	if err != nil {
-		t.Fatalf("stampOverlays: %v", err)
-	}
-	if !bytes.Equal(out, original) {
-		t.Error("empty overlay map should return the original bytes unchanged")
 	}
 }
 
@@ -132,17 +100,5 @@ func TestValidateStampTargetPageRejectsInvisibleOutOfRangeField(t *testing.T) {
 	}
 	if err := validateStampTargetPage(nil, 1); err == nil {
 		t.Fatal("nil field must fail closed")
-	}
-}
-
-func TestMergePDFs_ConcatenatesPages(t *testing.T) {
-	a := onePagePDF(t, "page A")
-	b := onePagePDF(t, "page B")
-	out, err := mergePDFs(a, b)
-	if err != nil {
-		t.Fatalf("mergePDFs: %v", err)
-	}
-	if pc := pageCount(t, out); pc != 2 {
-		t.Fatalf("merged page count = %d, want 2", pc)
 	}
 }

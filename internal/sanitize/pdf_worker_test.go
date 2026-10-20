@@ -33,14 +33,24 @@ func TestPDFWorkerChildHelper(t *testing.T) {
 		if ServePDFWorker(os.Stdin, os.Stdout) != nil {
 			os.Exit(3)
 		}
+	case "previous-version":
+		os.Stdout.WriteString("{\"protocol_version\":2,\"length\":0}\n")
+	case "manual-wrong-binding", "manual-wrong-report", "manual-missing-proof", "manual-no-op":
+		if serveMalformedManualForTest(os.Args[len(os.Args)-1]) != nil {
+			os.Exit(8)
+		}
 	case "broken":
 		os.Stdout.WriteString("{not-json}\n")
 	case "short":
-		os.Stdout.WriteString("{\"protocol_version\":2,\"length\":4}\nabc")
+		os.Stdout.WriteString("{\"protocol_version\":3,\"length\":4}\nabc")
 	case "extra":
-		os.Stdout.WriteString("{\"protocol_version\":2,\"length\":1}\nab")
+		os.Stdout.WriteString("{\"protocol_version\":3,\"length\":1}\nab")
 	case "too-many-pages":
-		os.Stdout.WriteString("{\"protocol_version\":2,\"length\":0,\"pages\":501}\n")
+		os.Stdout.WriteString("{\"protocol_version\":3,\"length\":0,\"pages\":501}\n")
+	case "provider-refusal-stage":
+		os.Stdout.WriteString("{\"protocol_version\":3,\"length\":0,\"error\":\"invalid-provider-overlay:font-name\"}\n")
+	case "provider-refusal-unknown-stage":
+		os.Stdout.WriteString("{\"protocol_version\":3,\"length\":0,\"error\":\"invalid-provider-overlay:PRIVATE_PARSER_OR_CONTRACT_TEXT\"}\n")
 	case "oversized-header":
 		os.Stdout.WriteString(strings.Repeat("x", pdfWorkerHeaderLimit+1))
 	case "exit":
@@ -55,6 +65,10 @@ func TestPDFWorkerChildHelper(t *testing.T) {
 	case "composition-wrong-input", "composition-wrong-output", "composition-wrong-report", "composition-missing-report", "composition-missing-manifest", "composition-extra-key", "composition-wrong-geometry":
 		if serveMalformedCompositionForTest(os.Args[len(os.Args)-1]) != nil {
 			os.Exit(6)
+		}
+	case "provider-wrong-input", "provider-wrong-output", "provider-wrong-bindings", "provider-missing-proof", "provider-wrong-report":
+		if serveMalformedProviderOverlayForTest(os.Args[len(os.Args)-1]) != nil {
+			os.Exit(7)
 		}
 	default:
 		os.Exit(5)
@@ -226,7 +240,11 @@ func TestPDFWorkerConfigurationFailsClosed(t *testing.T) {
 func TestPDFWorkerReadinessCoalescesAndCachesWithoutCallerCancellation(t *testing.T) {
 	t.Cleanup(func() { activePDFWorker.Store(nil) })
 	countFile := filepath.Join(t.TempDir(), "probes")
-	path := workerTestScript(t, "echo probe >> "+shellTestQuote(countFile)+"\n/bin/sleep 0.2\nprintf '%s\\n' '{\"protocol_version\":2,\"length\":0,\"pages\":1}'")
+	probeHeader, err := json.Marshal(pdfWorkerResponse{ProtocolVersion: pdfWorkerProtocolVersion, Pages: 1, ManualOperations: pdfManualOperationsCapabilityV1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := workerTestScript(t, "echo probe >> "+shellTestQuote(countFile)+"\n/bin/sleep 0.2\nprintf '%s\\n' "+shellTestQuote(string(probeHeader)))
 	w := &pdfWorker{path: path, slots: make(chan struct{}, 2)}
 	activePDFWorker.Store(w)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -291,11 +309,11 @@ func TestPDFWorkerReadinessCoalescesAndCachesWithoutCallerCancellation(t *testin
 
 func TestPDFWorkerProtocolInputIsBounded(t *testing.T) {
 	for _, text := range []string{
-		`{"protocol_version":2,"operation":"probe","length":1}` + "\nx",
-		`{"protocol_version":2,"operation":"exec","length":0}` + "\n",
-		`{"protocol_version":2,"operation":"clean","length":52428801}` + "\n",
-		`{"protocol_version":2,"operation":"probe","length":0,"extra":true}` + "\n",
-		`{"protocol_version":2,"operation":"clean","length":3}` + "\nabcd",
+		`{"protocol_version":3,"operation":"probe","length":1}` + "\nx",
+		`{"protocol_version":3,"operation":"exec","length":0}` + "\n",
+		`{"protocol_version":3,"operation":"clean","length":52428801}` + "\n",
+		`{"protocol_version":3,"operation":"probe","length":0,"extra":true}` + "\n",
+		`{"protocol_version":3,"operation":"clean","length":3}` + "\nabcd",
 	} {
 		var out bytes.Buffer
 		if err := ServePDFWorker(strings.NewReader(text), &out); err == nil || out.Len() != 0 {
@@ -303,7 +321,7 @@ func TestPDFWorkerProtocolInputIsBounded(t *testing.T) {
 		}
 	}
 	var out bytes.Buffer
-	if err := ServePDFWorker(strings.NewReader("{\"protocol_version\":2,\"operation\":\"probe\",\"length\":0}\n"), &out); err != nil {
+	if err := ServePDFWorker(strings.NewReader("{\"protocol_version\":3,\"operation\":\"probe\",\"length\":0}\n"), &out); err != nil {
 		t.Fatal(err)
 	}
 	decoder := json.NewDecoder(&out)

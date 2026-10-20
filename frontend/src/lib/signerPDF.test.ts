@@ -95,6 +95,13 @@ describe('bounded artifact and field reads', () => {
     await expect(readSignerFieldResponse(new Response('[]', { headers: headers(observation, 'application/json') }), observation, signal)).rejects.toThrow('verified');
     expect(() => validateSignerPDFFields(undefined, observation, 1)).toThrow();
   });
+  test('malformed JSON and invalid UTF8 expose a fixed field-verification error without parser excerpts', async () => {
+    const signal = new AbortController().signal;
+    for (const body of ['{"synthetic_private_excerpt":', new Uint8Array([0xff])]) {
+      await expect(readSignerFieldResponse(new Response(body, { headers: headers(observation, 'application/json') }), observation, signal))
+        .rejects.toThrow('The document fields could not be verified. Please reopen your signing link.');
+    }
+  });
   test('validates field ownership, actual page geometry, uniqueness and choice bounds; retains unassigned legacy fields', () => {
     expect(validateSignerPDFFields([{ ...field, recipient_id: undefined }], observation, 1)).toHaveLength(1);
     for (const invalid of [{ ...field, document_id: recipientID }, { ...field, recipient_id: documentID }, { ...field, page: 2 },
@@ -121,7 +128,7 @@ describe('PDF lifetime and complete page rendering', () => {
       let destroyed = 0;
       live = signerPDFScopeKey(changed.token, changed.noticeDigest, changed.observation);
       expect(session.current()).toBe(false);
-      expect(() => session.attach({ loadingTask: { destroy: async () => { destroyed++; } } })).toThrow('closed');
+      expect(() => session.attach({ destroy: async () => { destroyed++; } })).toThrow('closed');
       expect(destroyed).toBe(1);
       session.destroy();
       expect(session.controller.signal.aborted).toBe(true);
@@ -130,10 +137,41 @@ describe('PDF lifetime and complete page rendering', () => {
   test('destroy aborts requests and destroys an attached PDF once', () => {
     const session = new SignerPDFSession(scope, () => signerPDFScopeKey(scope.token, scope.noticeDigest, scope.observation));
     let destroyed = 0;
-    session.attach({ loadingTask: { destroy: async () => { destroyed++; } } });
+    session.attach({ destroy: async () => { destroyed++; } });
     session.destroy(); session.destroy();
     expect(session.current()).toBe(false);
     expect(destroyed).toBe(1);
+  });
+  test('immediately aborts its signal while real PDF retirement remains pending', async () => {
+    const session = new SignerPDFSession(scope, () => signerPDFScopeKey(scope.token, scope.noticeDigest, scope.observation));
+    let finish!: () => void, destroyed = 0, retired = false;
+    const closing = new Promise<void>(resolve => { finish = resolve; });
+    session.attach({ destroy() { destroyed++; return closing; } });
+    const joined = session.destroy();
+    expect(session.current()).toBe(false); expect(session.controller.signal.aborted).toBe(true);
+    expect(session.destroy()).toBe(joined); expect(destroyed).toBe(1);
+    void joined.then(() => { retired = true; });
+    await Promise.resolve(); expect(retired).toBe(false);
+    finish(); await joined; expect(retired).toBe(true);
+  });
+  test('retains failed PDF retirement across repeated disposal', async () => {
+    const session = new SignerPDFSession(scope, () => signerPDFScopeKey(scope.token, scope.noticeDigest, scope.observation));
+    const failure = new Error('synthetic retirement refusal');
+    let destroyed = 0;
+    session.attach({ destroy() { destroyed++; return Promise.reject(failure); } });
+    const joined = session.destroy();
+    await expect(joined).rejects.toBe(failure);
+    expect(session.destroy()).toBe(joined); expect(destroyed).toBe(1); expect(session.current()).toBe(false);
+  });
+  test('a stale attachment after idle disposal has a distinct joined retirement', async () => {
+    const session = new SignerPDFSession(scope, () => signerPDFScopeKey(scope.token, scope.noticeDigest, scope.observation));
+    const idle = session.destroy(); await idle;
+    let finish!: () => void, destroyed = 0, retired = false;
+    const closing = new Promise<void>(resolve => { finish = resolve; });
+    expect(() => session.attach({ destroy() { destroyed++; return closing; } })).toThrow('closed');
+    const joined = session.destroy(); expect(joined).not.toBe(idle); expect(destroyed).toBe(1);
+    void joined.then(() => { retired = true; }); await Promise.resolve(); expect(retired).toBe(false);
+    finish(); await joined; expect(retired).toBe(true); expect(session.current()).toBe(false);
   });
   test('mounts all canvases before rendering, and only resolves after every page rendered with positive dimensions', async () => {
     const calls: string[] = [];

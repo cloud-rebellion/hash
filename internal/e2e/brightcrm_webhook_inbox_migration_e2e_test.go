@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/pressly/goose/v3"
 
 	mdb "github.com/bright-interaction/hash/internal/db"
 )
@@ -28,26 +27,17 @@ func TestBrightCRMWebhookInboxMigrationRollbackGuardE2E(t *testing.T) {
 	migConn := stdlibConn(t, pool)
 	defer migConn.Close()
 
-	must(t, mdb.RunMigrationsUpTo(migConn, 61), "migrate BrightCRM inbox scratch database to version 61")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 61), "migrate BrightCRM inbox scratch database to version 61")
 	assertBrightCRMInboxSchema(t, ctx, pool, false)
-	must(t, mdb.RunMigrationsUpTo(migConn, 62), "apply durable BrightCRM inbox migration")
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 62), "apply durable BrightCRM inbox migration")
 	assertBrightCRMInboxSchema(t, ctx, pool, true)
 
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
 	// A deployment rehearsal with no accepted delivery remains reversible.
-	must(t, goose.DownTo(migConn, "../db/migrations", 61), "roll back empty BrightCRM inbox migration")
+	must(t, mdb.RunMigrationsDownToContext(ctx, migConn, 61), "roll back empty BrightCRM inbox migration")
 	assertAppliedMigrationVersion(t, ctx, pool, 61)
 	assertBrightCRMInboxSchema(t, ctx, pool, false)
-	must(t, mdb.RunMigrationsUpTo(migConn, 62), "re-apply durable BrightCRM inbox migration")
-	// RunMigrationsUpTo restores the embedded migration FS. The explicit local
-	// rollback below must reset Goose just like the first rehearsal did.
-	goose.SetBaseFS(nil)
-	if err := goose.SetDialect("postgres"); err != nil {
-		t.Fatal(err)
-	}
+	must(t, mdb.RunMigrationsUpToContext(ctx, migConn, 62), "re-apply durable BrightCRM inbox migration")
+	// The second rollback uses the same embedded provider and caller deadline.
 
 	// Even a zero-tenant event is a committed replay claim. Dropping it would
 	// turn a late retry into a new delivery, so rollback must fail atomically.
@@ -55,7 +45,7 @@ func TestBrightCRMWebhookInboxMigrationRollbackGuardE2E(t *testing.T) {
 		(delivery_correlation, payload_correlation, org_ids)
 		VALUES (repeat('a', 64), repeat('b', 64), '{}'::uuid[])`)
 	must(t, err, "insert committed zero-tenant BrightCRM receipt")
-	err = goose.DownTo(migConn, "../db/migrations", 61)
+	err = mdb.RunMigrationsDownToContext(ctx, migConn, 61)
 	if err == nil || !strings.Contains(err.Error(), "preserve replay protection") {
 		t.Fatalf("migration 00062 down after durable receipt = %v, want replay-protection refusal", err)
 	}

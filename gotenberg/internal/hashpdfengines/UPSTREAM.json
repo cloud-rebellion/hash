@@ -1,0 +1,44 @@
+{
+  "upstream_module": "github.com/gotenberg/gotenberg/v8",
+  "upstream_version": "v8.36.0",
+  "upstream_h1": "h1:K4VDxqHRBIh/yKJbEStzQlaWOl286AnNjFwRFDtoKYc=",
+  "files": [
+    {
+      "file": "README.md",
+      "bytes": 1132,
+      "sha256": "1d2c98833c9544672c91b0cf5ff17db6b55e71b47cb25d7a2619c7c4076d7b01"
+    },
+    {
+      "file": "doc.go",
+      "bytes": 108,
+      "sha256": "5f194c491786946ae20b97df73f7f81245d4a78fba95673d8aa005e5173135d9"
+    },
+    {
+      "file": "fallback_test.go",
+      "bytes": 4958,
+      "sha256": "0a5cef1d6ad95aff8434056e9641e2b9bfd0dabac52e07522084789888655c12"
+    },
+    {
+      "file": "multi.go",
+      "bytes": 15270,
+      "sha256": "5f6fdbe290a8c12e609f9051744f06d86b4a1c1aa6a355d0293d87dadda0a132"
+    },
+    {
+      "file": "pdfengines.go",
+      "bytes": 14161,
+      "sha256": "7cda89570eff24f09c542a1f76c2bab7e3bbbd46b700f03ed0985c0f3cfa33ca"
+    },
+    {
+      "file": "routes.go",
+      "bytes": 56784,
+      "sha256": "c3ab042a55ccda91b1cb62a6a80b3afdc46a60a9dcea4fe1297fb57b2fb2ffa1"
+    },
+    {
+      "file": "stamp_test.go",
+      "bytes": 4825,
+      "sha256": "ece6b93d8bd7b221f9884d759ea5f88fea79741aa34167dc13d5d3ad15fe08a5"
+    }
+  ],
+  "license_sha256": "24b9edd14f44d08af320e1d4fc63535636cb71f7c8e7d3827dc831692f27e1aa",
+  "adaptations": "Local API import identity inpdfengines.go/routes.go/stamp_test.go; alloriginalflags/moduleID/provider/optionalvalidation retained."
+}

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -161,5 +162,66 @@ func TestHTMLSourceLockWaitComparisonIncludesProvenanceAndReview(t *testing.T) {
 				t.Fatalf("terminal lock wait = %v", err)
 			}
 		})
+	}
+}
+
+// A reviewed HTML PDF already commits its complete current values. A valid
+// same-value resolver result must not rewrite that actual stored snapshot just
+// because PostgreSQL JSONB and encoding/json spell it differently. Nil queries
+// prove the no-write boundary; actual cache survival is qualified in the public
+// owned-PG lifecycle, not fabricated by this source fixture.
+func TestReviewedHTMLSameValuesRetainOriginalSnapshotWithoutSQL(t *testing.T) {
+	for _, spelling := range []string{"{\"customer_name\":\"Reviewed AB\"}", "{\n  \"customer_name\": \"Reviewed AB\"\n}", "{\"customer_name\":\"Reviewed \\u0041B\"}"} {
+		t.Run(spelling, func(t *testing.T) {
+			doc := reviewedHTMLDocument(t)
+			doc.VariablesJson = json.RawMessage("{ \"customer_name\" : \"Reviewed AB\" }")
+			doc.UpdatedAt = pgtype.Timestamptz{Time: time.Date(2026, 10, 14, 10, 0, 0, 123000, time.UTC), Valid: true}
+			before := *doc
+			before.VariablesJson = bytes.Clone(doc.VariablesJson)
+			before.HtmlSourceJson = bytes.Clone(doc.HtmlSourceJson)
+			before.PdfSha256 = bytes.Clone(doc.PdfSha256)
+			before.HtmlReviewedPdfSha256 = bytes.Clone(doc.HtmlReviewedPdfSha256)
+			got, err := persistAuthorizedFrozenDocument(context.Background(), nil, doc, json.RawMessage(spelling))
+			if err != nil || got != doc || !reflect.DeepEqual(doc, &before) {
+				t.Fatalf("same-value HTML snapshot was rewritten: same_original=%t unchanged=%t error=%v", got == doc, reflect.DeepEqual(doc, &before), err)
+			}
+		})
+	}
+}
+
+func TestReviewedHTMLNoWriteCannotRepairInvalidOriginalOrAcceptChangedValues(t *testing.T) {
+	for _, state := range []string{"changed resolved value", "extra resolved value", "invalid original values", "review missing"} {
+		t.Run(state, func(t *testing.T) {
+			doc := reviewedHTMLDocument(t)
+			frozen := json.RawMessage(`{"customer_name":"Reviewed AB"}`)
+			want := htmlsource.ErrInvalid
+			switch state {
+			case "changed resolved value":
+				frozen = json.RawMessage(`{"customer_name":"Changed after preview"}`)
+			case "extra resolved value":
+				frozen = json.RawMessage(`{"customer_name":"Reviewed AB","unreviewed":"extra"}`)
+			case "invalid original values":
+				doc.VariablesJson = json.RawMessage(`{"customer_name":"Original differs from reviewed PDF"}`)
+			case "review missing":
+				doc.HtmlReviewedBy.Valid = false
+				want = htmlsource.ErrReviewRequired
+			}
+			before := bytes.Clone(doc.VariablesJson)
+			got, err := persistAuthorizedFrozenDocument(context.Background(), nil, doc, frozen)
+			if got != nil || !errors.Is(err, want) || !bytes.Equal(before, doc.VariablesJson) {
+				t.Fatalf("invalid snapshot passed no-write gate: returned=%t unchanged=%t error=%v want=%v", got != nil, bytes.Equal(before, doc.VariablesJson), err, want)
+			}
+		})
+	}
+}
+
+func TestReviewedHTMLSameValuesNoWriteHonorsOriginalContext(t *testing.T) {
+	doc := reviewedHTMLDocument(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := bytes.Clone(doc.VariablesJson)
+	got, err := persistAuthorizedFrozenDocument(ctx, nil, doc, json.RawMessage(`{"customer_name":"Reviewed AB"}`))
+	if got != nil || !errors.Is(err, context.Canceled) || !bytes.Equal(before, doc.VariablesJson) {
+		t.Fatalf("cancelled no-write accepted: returned=%t unchanged=%t error=%v", got != nil, bytes.Equal(before, doc.VariablesJson), err)
 	}
 }

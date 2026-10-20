@@ -119,6 +119,13 @@ The fixed native projection retains off, queue, rate, size, cancellation and
 privacy controls. There is no additional worker goroutine or database callback
 inside the telemetry sender.
 
+Backlog observations are native-log fields, not automatic SDK failure events or
+job-health checkins. Only `read_unavailable` or `stale` raises this record to
+`warn`. Business-age/count thresholds, missing intents, unknown ages and cap
+flags require explicit stored-log rules independently of invocation health and
+collector freshness. A normal checkin or fresh sample does not establish business
+completion or acceptable backlog.
+
 Controlled PostgreSQL checks cover count/filter/cap semantics, a genuinely
 blocked query interrupted by the unchanged one-second budget, unavailable-state
 reporting, backend query retirement and physical connection cleanup. These use
@@ -138,6 +145,10 @@ single/double quotes are supported; shell evaluation, interpolation and a full
 dotenv grammar are not provided by that helper. Legacy DSN/OTLP file forwarding
 retains its original raw format; Hash has no runtime OTLP consumer. These wiring
 checks do not prove the deployed effective configuration or accepted signals.
+`FLARE_HEARTBEAT=off` suppresses only SDK service-up messages. Configured role and
+job checkins continue when telemetry and a valid `HASH_FLARE_MONITOR_PREFIX` are
+enabled; backlog and delivery-diagnostic logs retain their own existing controls.
+The heartbeat setting does not disable all monitoring.
 
 ## Coverage matrix
 

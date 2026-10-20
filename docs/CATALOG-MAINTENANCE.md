@@ -1,4 +1,4 @@
-# Controlled plan catalog maintenance
+# Controlled plan and EIDAS rule catalog maintenance
 
 Plan measurement is an explicit deployment prerequisite, not plan approval or
 an entitlement grant. M95 intentionally does not backfill historical/default
@@ -195,3 +195,174 @@ catalog-ready signal. On refusal, keep the release held and inspect the fixed
 failure and receipt. Do not insert fabricated size rows, disable triggers,
 repin versions, raise caps or bypass billing. This runbook adds no automatic
 measurement, readiness endpoint, alert default or entitlement.
+
+
+## Existing EIDAS rules: conditional upgrade preparation
+
+M96 deliberately installs no rule backfill. Unlike the default plan catalog,
+there are no seeded rule rows in a fresh organization: an empty active rule set
+is valid and evaluates to SES. Current compliance baseline seeding adds no rules,
+and Swedish AES/QES defaults are unavailable. Do not seed policies or enable
+higher tiers to satisfy a metadata gate.
+
+An organization with retained active rules needs each exact source prepared
+before ordinary Send. This includes active SES rules and predicates that would
+not match the proposed document: Send admits and reads the complete active set
+before evaluating it. One missing/stale source measurement refuses with503.
+Inactive rules do not enter Send's set, but still need valid metadata before a
+normal PATCH can read/edit them. Confirm the actual organization's inventory;
+this is a conditional upgrade prerequisite, not evidence that any deployed
+organization currently has unmeasured rules.
+
+Owner create through `/settings/eidas-rules` (REST) and supported MCP create
+already measures the new source intrinsically in its owned transaction. A
+normal PATCH reads the prior measured row, changes it and measures the exact new
+source in the same transaction. It cannot repair an unmeasured legacy row, even
+when the intended edit is only `active:false`. Owner DELETE remains available
+without predicate expansion; deleting a policy is a separately reviewed policy
+change, not an automatic maintenance fallback. Listing or previewing a rule uses
+a different read path and is not proof of strict Send readiness.
+
+Select only independently reviewed existing `(organization UUID, rule UUID)`
+pairs. Do not turn an inventory into a blanket measurement list. Measurement
+neither approves the predicate/legal rationale nor changes activation, tier,
+priority or content. In particular, measuring historical AES/QES rules does not
+make those ceremonies available or authorize their use. An unexpected policy
+holds deployment pending owner review.
+
+### One-source identity and version gate
+
+Reuse the exact image/tool, secret-safe connection context, complete explicit
+work allocation, physical process owner and independent retirement requirements
+above. The command's source proof still requires PostgreSQL16.15, UTF8 and direct
+uncompressed stored JSONB. Do not rewrite/decompress a predicate, repin the
+version or insert a size row to satisfy the gate.
+
+Save this as `eidas-rule-catalog-gate.sql`. Its database identity predicate is the
+same least-privilege release contract used by the plan gate; rule identity adds
+the exact reviewed tenant and both source timestamps. No predicate body is
+expanded or returned. The five-second statement timeout bounds execution time;
+scalar output does not itself bound database scan work.
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN READ ONLY;
+SET LOCAL statement_timeout = '5s';
+SET LOCAL lock_timeout = '1s';
+WITH identity AS MATERIALIZED (
+ SELECT current_database()='hash'
+    AND current_database()=:'expected_database'::text
+    AND session_user=:'expected_user'::text AND current_user=session_user
+    AND system_identifier::text=:'expected_system_identifier'::text
+    AND (SELECT oid::text FROM pg_database WHERE datname=current_database())
+        =:'expected_database_oid'::text
+    AND current_schema()='public'
+    AND current_schemas(false)=ARRAY['public']::name[]
+    AND EXISTS (
+      SELECT 1 FROM pg_roles r JOIN pg_database d ON d.datdba=r.oid
+      WHERE d.datname=current_database() AND r.rolname=current_user
+        AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb
+        AND NOT r.rolreplication AND NOT r.rolbypassrls
+    ) AS exact_identity
+ FROM pg_control_system()
+), selected AS MATERIALIZED (
+ SELECT id,org_id,created_at,updated_at,
+        pg_column_compression(predicate_json) IS NULL AS uncompressed,
+        pg_column_size(predicate_json)>0 AS stored_source_present
+ FROM public.eidas_routing_rules
+ WHERE id=:'rule_id'::uuid AND org_id=:'org_id'::uuid
+)
+SELECT COALESCE((SELECT exact_identity FROM identity),false)
+   AND current_setting('server_encoding')='UTF8'
+   AND current_setting('server_version_num')::integer=160015
+   AND EXISTS(SELECT 1 FROM public.orgs WHERE id=:'org_id'::uuid)
+   AND (SELECT count(*)=1 FROM selected)
+   AND COALESCE((
+     SELECT bool_and(r.uncompressed AND r.stored_source_present AND
+       (NOT :'require_measurement'::boolean OR
+         (m.rule_id IS NOT NULL AND m.org_id=r.org_id
+          AND m.rule_created_at=r.created_at
+          AND m.rule_updated_at=r.updated_at
+          AND m.predicate_wire_bytes>=1
+          AND m.measurement_server_version_num=
+              current_setting('server_version_num')::integer
+          AND isfinite(m.measured_at))))
+     FROM selected r LEFT JOIN public.eidas_rule_wire_sizes_v1 m
+       ON m.rule_id=r.id
+   ),false) AS gate_ok
+\gset
+\if :gate_ok
+ COMMIT;
+\else
+ ROLLBACK;
+ \quit 1
+\endif
+```
+
+Run the preflight with the already approved connection and non-secret contract
+identifiers, without a credential-bearing URL argument:
+
+```sh
+psql -X --set=ON_ERROR_STOP=1 \
+  --set=expected_database=hash --set=expected_user="$APPROVED_DATABASE_USER" \
+  --set=expected_system_identifier="$APPROVED_SYSTEM_IDENTIFIER" \
+  --set=expected_database_oid="$APPROVED_DATABASE_OID" \
+  --set=org_id="$APPROVED_ORGANIZATION_UUID" --set=rule_id="$APPROVED_RULE_UUID" \
+  --set=require_measurement=false --file=eidas-rule-catalog-gate.sql
+```
+
+After that passes, invoke the existing command for that one reviewed pair within
+the same approved finite maintenance allocation:
+
+```text
+/usr/local/bin/hash-catalogmeasure --kind=eidas-rule --org=<approved-org-uuid> --id=<approved-rule-uuid>
+```
+
+Require exit0 and `measurement_committed:true`; the receipt must have
+`Kind=eidas-rule`, exact `OrgID` and `SourceID`, positive `WireBytes`, version160015,
+and finite acknowledged `CreatedAt`, `UpdatedAt` and `MeasuredAt`. Retain the
+same original30-second operation/five-second cleanup and independent final
+process/backend-retirement caveat as plan maintenance. Then repeat the exact
+preflight command with `--set=require_measurement=true`. This joins tenant,
+creation/update clocks and server version without using stale receipt identity
+as present source authority.
+
+### Complete active-set postflight and Send acceptance
+
+Before enabling Send for an organization with retained policies, use the same
+exact database-identity check and read-only statement/lock timeouts above, then
+require this scalar result to be true (`\gset`, `\if`, nonzero `\quit` on false,
+as in the one-source gate):
+
+```sql
+SELECT current_setting('server_encoding')='UTF8'
+   AND current_setting('server_version_num')::integer=160015
+   AND EXISTS(SELECT 1 FROM public.orgs WHERE id=:'org_id'::uuid)
+   AND NOT EXISTS (
+     SELECT 1 FROM public.eidas_routing_rules r
+     LEFT JOIN public.eidas_rule_wire_sizes_v1 m ON m.rule_id=r.id
+     WHERE r.org_id=:'org_id'::uuid AND r.active
+       AND (m.rule_id IS NULL OR m.org_id IS DISTINCT FROM r.org_id
+         OR m.rule_created_at IS DISTINCT FROM r.created_at
+         OR m.rule_updated_at IS DISTINCT FROM r.updated_at
+         OR m.predicate_wire_bytes<1
+         OR m.measurement_server_version_num<>
+              current_setting('server_version_num')::integer
+         OR NOT isfinite(m.measured_at))
+   ) AS gate_ok;
+```
+
+An existing organization with zero active rules passes the metadata condition;
+a nonexistent organization fails. This complete-set gate checks all active
+rules, not only the approved maintenance list, and does not automatically
+measure unreviewed rows. Keep it in the same read-only transaction as the exact
+identity check; do not infer identity from a database name alone. Missing source,
+unknown identity, unsupported version, query timeout or a false result holds
+acceptance. A later source update or server-version change invalidates the
+point-in-time result; it does not authorize a read repair.
+
+Finally require an ordinary authenticated Send appropriate to the exact release,
+source and organization's reviewed policy. Empty-set success is not coverage of
+retained-rule upgrades; a successful rule preview is not Send acceptance. The
+metadata procedure adds no rule seed, higher-tier activation, BankID feature,
+automatic startup measurement, readiness endpoint or admission-cap change.

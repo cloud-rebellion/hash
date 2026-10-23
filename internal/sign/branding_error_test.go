@@ -124,7 +124,7 @@ func checkFinalizationBrandingGateForTestV1(source, function string, requiredEff
 		if !ok || condition.Op != token.NOT || brandingGateCallNameForTestV1(condition.X) != "frozenCertificate" {
 			continue
 		}
-		if gate != nil || candidate.Init != nil || candidate.Else != nil || len(candidate.Body.List) != 2 {
+		if gate != nil || candidate.Init != nil || candidate.Else != nil || (len(candidate.Body.List) != 2 && len(candidate.Body.List) != 3) {
 			return fmt.Errorf("ambiguous fresh branding gate in %s", function)
 		}
 		gateIndex, gate = i, candidate
@@ -135,7 +135,25 @@ func checkFinalizationBrandingGateForTestV1(source, function string, requiredEff
 	if err := checkBrandingErrorReturnForTestV1(fn.Body.List[lookupIndex+1], "", function); err != nil {
 		return err
 	}
-	assignment, ok := gate.Body.List[0].(*ast.AssignStmt)
+	brandingBody := gate.Body.List
+	if len(brandingBody) == 3 {
+		// A fixed local diagnostic label has no rendering or storage effect.
+		// Accept only this constant assignment, never an arbitrary preamble.
+		diagnostic, ok := brandingBody[0].(*ast.AssignStmt)
+		if function != "finalize" || !ok || diagnostic.Tok != token.ASSIGN || len(diagnostic.Lhs) != 1 || len(diagnostic.Rhs) != 1 || brandingGateCallNameForTestV1(diagnostic.Lhs[0]) != "stage" {
+			return fmt.Errorf("unexpected fresh branding diagnostic in %s", function)
+		}
+		literal, ok := diagnostic.Rhs[0].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return fmt.Errorf("fresh branding diagnostic must be constant in %s", function)
+		}
+		label, err := strconv.Unquote(literal.Value)
+		if err != nil || label != "finalize_branding" {
+			return fmt.Errorf("unexpected fresh branding diagnostic label in %s", function)
+		}
+		brandingBody = brandingBody[1:]
+	}
+	assignment, ok := brandingBody[0].(*ast.AssignStmt)
 	if !ok || len(assignment.Rhs) != 1 || len(assignment.Lhs) != 2 || brandingGateCallNameForTestV1(assignment.Lhs[1]) != "err" {
 		return fmt.Errorf("missing fresh branding assignment in %s", function)
 	}
@@ -143,7 +161,7 @@ func checkFinalizationBrandingGateForTestV1(source, function string, requiredEff
 	if !ok || brandingGateCallNameForTestV1(call.Fun) != "e.resolveBrandingCSSForFinalizationOwnedV1" {
 		return fmt.Errorf("missing native fresh branding resolver in %s", function)
 	}
-	if err := checkBrandingErrorReturnForTestV1(gate.Body.List[1], message, function); err != nil {
+	if err := checkBrandingErrorReturnForTestV1(brandingBody[1], message, function); err != nil {
 		return err
 	}
 	seen := make(map[string]bool, len(requiredEffects)+16)
@@ -304,6 +322,39 @@ func TestFinalizationBrandingGateAssertionRejectsBypasses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := check(prefix + tc.body + suffix); err == nil {
 				t.Fatal("branding assertion accepted bypass")
+			}
+		})
+	}
+	// The finalizer's optional diagnostic is pure bookkeeping. Exercise its
+	// grammar independently of the real-source ordering check above, including
+	// a call hidden in the diagnostic position and effects before the gate.
+	finalizePrefix := strings.Replace(prefix, "completeAcknowledgedDocument", "finalize", 1)
+	finalizeGate := strings.Replace(gate, "finalize acknowledgement", "finalize document", 1)
+	const diagnostic = "stage = \"finalize_branding\"\n"
+	diagnosticGate := strings.Replace(finalizeGate, "if !frozenCertificate {\n", "if !frozenCertificate {\n"+diagnostic, 1)
+	checkFinalize := func(body string) error {
+		return checkFinalizationBrandingGateForTestV1(finalizePrefix+body+suffix, "finalize",
+			"e.prepareOrdinaryHistoricalFinalizationV1")
+	}
+	for _, body := range []string{finalizeGate + effects, diagnosticGate + effects} {
+		if err := checkFinalize(body); err != nil {
+			t.Fatal("valid finalization branding gate rejected", err)
+		}
+	}
+	diagnosticCases := []struct{ name, body string }{
+		{"diagnostic_effectful_rhs", strings.Replace(diagnosticGate, diagnostic, "stage = e.PDF.HTMLToPDF()\n", 1) + effects},
+		{"diagnostic_wrong_label", strings.Replace(diagnosticGate, diagnostic, "stage = \"other\"\n", 1) + effects},
+		{"diagnostic_other_target", strings.Replace(diagnosticGate, diagnostic, "other = \"finalize_branding\"\n", 1) + effects},
+		{"diagnostic_new_binding", strings.Replace(diagnosticGate, diagnostic, "stage := \"finalize_branding\"\n", 1) + effects},
+		{"diagnostic_duplicate", strings.Replace(diagnosticGate, diagnostic, diagnostic+diagnostic, 1) + effects},
+		{"diagnostic_gate_after_effect", effects + diagnosticGate},
+		{"diagnostic_storage_before_gate", "e.Storage.PutEvidenceVersioned()\n" + diagnosticGate + effects},
+		{"diagnostic_error_swallowed", strings.Replace(diagnosticGate, "return fmt.Errorf(\"finalize document: resolve branding: %w\", err)", "return nil", 1) + effects},
+	}
+	for _, tc := range diagnosticCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkFinalize(tc.body); err == nil {
+				t.Fatal("branding diagnostic allowance accepted bypass")
 			}
 		})
 	}

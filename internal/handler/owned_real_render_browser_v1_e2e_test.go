@@ -62,6 +62,7 @@ import (
 func newOwnedRealRenderBrowserFixtureV1(t *testing.T, publicURL, rendererURL string) *ownedPublicReadFixtureV1 {
 	const withLifecycleDocument = false // fresh current-native fixture, no unrelated legacy document
 	t.Helper()
+	birth := browserFixtureContext368(t) // before isolated DB, pool and native authority exist
 	for _, name := range []string{"HASH_E2E_DB_URL", "HASH_E2E_PDF_WORKER_PATH"} {
 		if os.Getenv(name) == "" {
 			t.Fatalf("selected owned public signer fixture requires %s", name)
@@ -113,7 +114,7 @@ func newOwnedRealRenderBrowserFixtureV1(t *testing.T, publicURL, rendererURL str
 	if withLifecycleDocument {
 		f = setupLifecycleAuthorizationE2E(t, "owner", false, false)
 	} else {
-		ctx, pool, q, s, org, id := setupDSRE2E(t)
+		ctx, pool, q, s, org, id := setupDSRBrowserBirth368E2E(t, birth)
 		user, err := q.UpdateUserRole(ctx, generated.UpdateUserRoleParams{ID: id, OrgID: org, Role: "owner"})
 		if err != nil {
 			t.Fatal(err)
@@ -121,9 +122,9 @@ func newOwnedRealRenderBrowserFixtureV1(t *testing.T, publicURL, rendererURL str
 		f = lifecycleAuthorizationFixture{ctx: ctx, pool: pool, q: q, s: s, org: org, user: user}
 	}
 	application = f.pool.Config().ConnConfig.RuntimeParams["application_name"]
-	ctx, cancel := context.WithTimeout(f.ctx, 4*time.Minute)
-	t.Cleanup(cancel)
-	f.ctx = ctx
+	// The original four-minute browser owner was created before migration and
+	// pool/runtime birth. Do not reparent or extend an admitted90s fixture.
+	ctx := f.ctx
 	f.s.PublicURL = publicURL
 	// Same whole-disposable-estate cleanup as the existing authoring fixtures;
 	// this does not weaken immutable history guards or authorize production erase.

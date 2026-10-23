@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/hash/internal/actiontoken"
+	"github.com/bright-interaction/hash/internal/amendments"
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
@@ -293,6 +294,8 @@ type RecipientContext struct {
 	Document                *generated.Document
 	ControllerOrg           *generated.Org
 	LawfulBasisConfirmation *generated.DocumentLawfulBasisConfirmation
+	AmendmentContext        *amendments.SignerContextV1
+	delegated               *delegatedSignerEvidenceV1
 	// Only LookupByToken issues this private original-request snapshot.
 	presentedCredential *presentedCredentialV1
 }
@@ -425,7 +428,8 @@ func checkCompletedArtifactObservation(original, current *RecipientContext, now 
 		checkCompletedArtifactAccess(current.Recipient, current.Document, now) != nil {
 		return ErrCompletedArtifactUnavailable
 	}
-	if original.Recipient.ID != current.Recipient.ID ||
+	if !amendments.EqualSignerContextV1(original.AmendmentContext, current.AmendmentContext) ||
+		original.Recipient.ID != current.Recipient.ID ||
 		original.Recipient.DocumentID != current.Recipient.DocumentID ||
 		original.Document.ID != current.Document.ID || original.Document.OrgID != current.Document.OrgID ||
 		original.Document.FinalPdfKey != current.Document.FinalPdfKey ||
@@ -2316,6 +2320,8 @@ func (e *Engine) insertSignatureRow(ctx context.Context, q *generated.Queries, d
 // Returns didFinalize=false (with the existing keys) when the document was
 // already finalized, so callers don't re-emit completion events/emails.
 func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *completionCredentialCapture) (finalKey, certKey string, didFinalize bool, err error) {
+	stage := "finalize_lock"
+	defer func() { err = blockSignatureDiagnosticV1(stage, err) }()
 	// Per-document finalize mutex. pg_try_advisory_lock returns immediately;
 	// if another finalize holds it, bail with ErrFinalizeInProgress and let
 	// that one (or the retry worker) complete.
@@ -2325,6 +2331,7 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	}
 	defer closeHistoricalFinalizationLockV1(ctx, serialization, orgID, docID)
 	// The remaining lifecycle transactions are ported as their own fixed native phases.
+	stage = "finalize_connection"
 	conn, err := e.Pool.Acquire(ctx)
 	if err != nil {
 		return "", "", false, err
@@ -2337,10 +2344,12 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		}
 	}()
 
+	stage = "finalize_document"
 	doc, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: orgID})
 	if err != nil {
 		return "", "", false, err
 	}
+	stage = "finalize_admission"
 	if err := requireHistoricalSigningAdmissionV1(doc); err != nil {
 		return "", "", false, err
 	}
@@ -2348,23 +2357,29 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	if doc.FinalPdfKey.Valid && doc.AuditCertKey.Valid {
 		return doc.FinalPdfKey.String, doc.AuditCertKey.String, false, nil
 	}
+	stage = "finalize_signature_policy"
 	if !doc.RequiresSignature {
 		return "", "", false, ErrNotAcknowledgement
 	}
 	// Recheck immutable block evidence before either claiming finalizing or
 	// resuming a prior claim. This covers legacy/pre-gate ceremonies and every
 	// envelope child; no terminal PDF may dereference a mutable storage key.
+	stage = "finalize_frozen_family"
 	if err := e.validateFrozenDocumentFamily(ctx, doc); err != nil {
 		return "", "", false, fmt.Errorf("finalize block evidence: %w", err)
 	}
+	stage = "finalize_claim"
 	if doc.Status == "finalizing" {
+		stage = "finalize_claim"
 		doc, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, doc.OrgID, doc.ID, "signature")
 		if err != nil {
 			return "", "", false, err
 		}
+		stage = "finalize_intent"
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: doc.ID, OrgID: doc.OrgID,
 		}); ierr == nil {
+			stage = "finalize_resume_intent"
 			completed, did, rerr := e.resumeDocumentFinalizationAfterSerializedClaimOwnedV1(ctx, conn, doc, capture, nativeClaim, serialization)
 			if rerr != nil || completed == nil {
 				return "", "", false, rerr
@@ -2377,6 +2392,7 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		// could persist the staged-object intent. Reuse the durable original
 		// preparation below; only absent captures may produce new bytes.
 	} else if doc.Status == "in_progress" {
+		stage = "finalize_claim"
 		doc, nativeClaim, err = e.claimHistoricalFinalizingOwnedV1(ctx, doc.OrgID, doc.ID, "signature")
 		if err != nil {
 			return "", "", false, err
@@ -2384,11 +2400,13 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	} else {
 		return "", "", false, ErrDocumentRevisedDuringFinalize
 	}
+	stage = "finalize_reference"
 	reference, err := e.captureHistoricalFinalizationStageReferenceV1(ctx, doc, serialization, nativeClaim)
 	if err != nil {
 		return "", "", false, err
 	}
 	doc = nil
+	stage = "finalize_claim_retire"
 	if err = nativeClaim.retireForStageV1(ctx, e, reference); err != nil {
 		return "", "", false, err
 	}
@@ -2399,19 +2417,23 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 			retainHistoricalFinalizationInputV1(capture, sourceOwner)
 		}
 	}()
+	stage = "finalize_source"
 	doc, sourceOwner, err = e.loadHistoricalFinalizationSignatureSourceOwnedV1(ctx, reference)
 	if err != nil {
 		return "", "", false, err
 	}
+	stage = "finalize_retention"
 	_, err = finalizationRetentionDeadline(doc)
 	if err != nil {
 		return "", "", false, fmt.Errorf("finalize document: %w", err)
 	}
+	stage = "finalize_certificate_state"
 	frozenCertificate, err := e.ordinaryCertificateInputFrozenV1(ctx, reference)
 	if err != nil {
 		return "", "", false, err
 	}
 	if !frozenCertificate {
+		stage = "finalize_branding"
 		_, err = e.resolveBrandingCSSForFinalizationOwnedV1(ctx, reference, sourceOwner)
 		if err != nil {
 			return "", "", false, fmt.Errorf("finalize document: resolve branding: %w", err)
@@ -2428,15 +2450,18 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	// guards prevent either set from changing after the ceremony starts.
 	var manifest *pdfadmission.ApplicationHistoricalTerminalManifestV1
 	if doc.IsEnvelope && !frozenCertificate {
+		stage = "finalize_children"
 		if _, err = sourceOwner.ensureEnvelopeChildrenEvidenceVersionsV1(e); err != nil {
 			return "", "", false, err
 		}
+		stage = "finalize_manifest"
 		manifest, err = sourceOwner.terminalManifestV1(e)
 		if err != nil {
 			return "", "", false, fmt.Errorf("finalize envelope: build terminal manifest: %w", err)
 		}
 		defer manifest.CloseConsumerV1()
 	}
+	stage = "finalize_ordinary_prepare"
 	retired, err := e.prepareOrdinaryHistoricalFinalizationV1(ctx, reference, sourceOwner, doc, manifest)
 	if retired {
 		sourceOwner = nil
@@ -2448,6 +2473,7 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		manifest.CloseConsumerV1()
 		manifest = nil
 	}
+	stage = "finalize_resume_stage"
 	completedDoc, did, err := e.resumeDocumentFinalizationFromStageReferenceOwnedV1(ctx, conn, reference, capture)
 	if err != nil || completedDoc == nil {
 		return "", "", false, err

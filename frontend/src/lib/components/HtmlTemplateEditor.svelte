@@ -4,7 +4,7 @@
   import { APIError, getMe, getTemplate, createHTMLTemplate, updateHTMLTemplate, previewHTMLTemplate, approveHTMLTemplate,
     type TemplateResponse, type HTMLTemplatePreview } from '$lib/api/client';
   import { blankHTMLAuthorDraft, blankHTMLContractProfile, blankHTMLSigningPage, draftFromHTMLTemplate, htmlAuthorInput, htmlAuthorFingerprint, htmlAssetFromFile, assetByteLength } from '$lib/htmlAuthor';
-  import { htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlSigningPageColours, htmlSigningPageColourLabels, htmlPartyBindings, htmlPartyLabels, requiredHTMLContractTerms, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLContractProfile } from '$lib/htmlTemplate';
+  import { htmlContractProfile, htmlAmendmentClause, htmlAmendmentModes, htmlAmendmentModeLabels, type HTMLAmendmentMode, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlSigningPageColours, htmlSigningPageColourLabels, htmlPartyBindings, htmlPartyLabels, requiredHTMLContractTerms, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, type HTMLContractProfile } from '$lib/htmlTemplate';
   import VerifiedPDFPages from './VerifiedPDFPages.svelte';
 
   type Identity = Awaited<ReturnType<typeof getMe>>;
@@ -56,6 +56,7 @@
       ...(draft.contract_profile ? { contract_profile: draft.contract_profile } : {}) }); return null; }
     catch (e) { return (e as Error).message; }
   });
+  const amendmentClause = $derived(draft.contract_profile ? htmlAmendmentClause(draft.contract_profile, Object.fromEntries(draft.values.map(value => [value.name, value.default_value])), Object.fromEntries(draft.sections.map(section => [section.name, section.default_text]))) : null);
   const previewKey = $derived(`preview-${previewSequence}`);
   const previewValid = $derived(!!preview && !!saved && !dirty && !assetDraftDirty && !needsRefresh && !writeUncertain
     && preview.templateID === saved.id && preview.version === saved.version && preview.contentSHA256 === saved.content_sha256
@@ -223,6 +224,19 @@
     draft.contract_profile = enabled ? blankHTMLContractProfile() : null;
     draft.signing_page = null;
   }
+  function changeAmendmentPolicy(event: Event) {
+    if (!canApprove || busy || !draft.contract_profile) return;
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    if (!enabled && !window.confirm('Remove the later-change policy from this design revision? Existing documents retain their saved settings.')) { (event.currentTarget as HTMLInputElement).checked = true; return; }
+    if (enabled) draft.contract_profile.amendment_policy = { term: '', clause_reference: '', allowed_modes: [], allowed_channels: [], effective_condition: '' };
+    else delete draft.contract_profile.amendment_policy;
+  }
+  function changeAmendmentMode(mode: HTMLAmendmentMode, checked: boolean) {
+    if (!canApprove || busy || !draft.contract_profile?.amendment_policy) return;
+    const policy = draft.contract_profile.amendment_policy;
+    policy.allowed_modes = (checked ? [...policy.allowed_modes.filter(value => value !== mode), mode] : policy.allowed_modes.filter(value => value !== mode)).sort();
+    if (!policy.allowed_modes.includes('agreed_notice')) policy.allowed_channels = [];
+  }
   function changeSigningPage(event: Event) {
     if (!canWrite || busy || !draft.contract_profile) return;
     const enabled = (event.currentTarget as HTMLInputElement).checked;
@@ -383,6 +397,21 @@
               </div>{/each}
               <button type="button" class="btn btn-secondary" disabled={draft.contract_profile.terms.length >= 16} onclick={() => draft.contract_profile?.terms.push({ name: '', value: '' })}>Add another term</button>
             </div>
+            <fieldset disabled={!canApprove || !!busy} class="border border-border-light rounded-md p-4 space-y-4" aria-label="Later-change policy in this agreement">
+              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={!!draft.contract_profile.amendment_policy} onchange={changeAmendmentPolicy} /><span>Include an owner-reviewed policy for later changes, using an existing printed agreement clause.</span></label>
+              <p class="text-sm text-text-secondary">Optional. Choose only processes the agreement permits. Hash records your declaration; it does not interpret the legal effect of the clause. Approval still requires review of the complete PDF.</p>
+              {#if draft.contract_profile.amendment_policy}
+                {@const policy = draft.contract_profile.amendment_policy}
+                <label class="block text-sm">Printed contract term<select class="input w-full mt-1" bind:value={policy.term} required><option value="">Choose an existing term</option>{#each draft.contract_profile.terms.filter(term => term.name) as term, index (index)}<option value={term.name}>{term.name.replaceAll('_', ' ')}</option>{/each}</select></label>
+                {#if amendmentClause}<div class="space-y-2"><p class="text-sm font-medium">Current design wording for this term</p><blockquote class="whitespace-pre-wrap break-words border-l-2 border-border-light pl-3 text-sm">{amendmentClause}</blockquote></div>{:else}<p class="text-sm text-text-secondary">The selected term needs actual wording. Edit its existing printed value or wording section below. For a value populated later, each document must supply the exact clause before its PDF can be sent.</p>{/if}
+                <label class="block text-sm">Clause reference quoted in that wording<input class="input w-full mt-1" bind:value={policy.clause_reference} required maxlength="512" /></label>
+                <fieldset class="space-y-2"><legend class="text-sm mb-2">Processes permitted by this clause</legend>{#each htmlAmendmentModes as mode}<label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={policy.allowed_modes.includes(mode)} onchange={(event) => changeAmendmentMode(mode, event.currentTarget.checked)} /><span>{htmlAmendmentModeLabels[mode]}</span></label>{/each}</fieldset>
+                {#if policy.allowed_modes.includes('agreed_notice')}<label class="flex gap-2 text-sm"><input type="checkbox" checked={policy.allowed_channels.includes('email')} onchange={(event) => { if (canApprove && !busy) policy.allowed_channels = event.currentTarget.checked ? ['email'] : []; }} />The printed clause permits notice by email</label>{/if}
+                <label class="block text-sm">Timing or other conditions quoted exactly from the clause<textarea class="input w-full mt-1" bind:value={policy.effective_condition} required maxlength="2048"></textarea></label>
+                <p class="text-sm text-text-secondary">The selected wording is already part of the document. This setting adds no hidden clause and generates no legal text. The exact clause and saved document version are preserved when that agreement is sent.</p>
+              {/if}
+              {#if !canApprove}<p class="text-sm text-text-secondary">An owner can change this optional setting. Existing saved settings remain part of this design revision.</p>{/if}
+            </fieldset>
             <p class="text-sm text-text-secondary">Both representatives will sign; their names and email addresses come from the printed document values. Changing those values creates a fresh PDF for review. Pre-signing on someone’s behalf is unavailable.</p>
             <div class="border border-border-light rounded-md p-4 space-y-4" aria-label="Appended signing page">
               <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 3} onchange={changeSigningPage} class="mt-1" /><span>Append a branded signing page with fixed signature locations for both parties.</span></label>

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/presignexecute"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
@@ -42,29 +43,38 @@ type ApplicationHistoricalFinalizationSourceEvidenceV1 struct {
 	sourceAttempted, sourceChecked, signaturesAttempted, signaturesChecked, familyAttempted, intentVersionsAttempted bool
 	intentVersionOriginal, intentVersionPinned                                                                       *generated.DocumentFinalizationIntent
 	resumePredecessor                                                                                                *ApplicationHistoricalFinalizationSourceEvidenceV1
+	delegated                                                                                                        *presignexecute.RetainedAssetsV1
+	delegatedAttempted                                                                                               bool
+	delegatedError                                                                                                   error
 	releaseBody                                                                                                      func()
 	bodyBorrowers                                                                                                    int
 }
 
-func (w *ApplicationHTMLSendWorkV1) NewHistoricalFinalizationSourceEvidenceV1(call context.Context, client *storage.Client) (*ApplicationHistoricalFinalizationSourceEvidenceV1, error) {
+func (w *ApplicationHTMLSendWorkV1) NewHistoricalFinalizationSourceEvidenceV1(call context.Context, client *storage.Client) (result *ApplicationHistoricalFinalizationSourceEvidenceV1, failure error) {
+	stage := "source_new_scope"
+	defer func() { failure = historicalSourceDiagnosticV1(stage, failure) }()
 	if w == nil || w.self != w || client == nil {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
+	stage = "source_new_limits"
 	limits, err := client.SendEvidenceLimitsV1()
 	if err != nil {
 		return nil, errors.Join(ErrHistoricalFinalizationSourceV1, err)
 	}
+	stage = "source_new_work"
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.valid(call) || w.stage == nil || w.stage.purpose != HTMLHistoricalFinalizationSourceV1 || w.sourceDocument == nil || w.sourceDocument.Status != "finalizing" || w.models == nil || w.historicalSourceEvidence != nil || w.stage.operation == nil || w.stage.operation.factory == nil || w.stage.operation.factory.state != w.session.state.factory {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
+	stage = "source_new_quote"
 	raw := 2*int64(unsafe.Sizeof(ApplicationHistoricalFinalizationSourceEvidenceV1{})) + 2*int64(unsafe.Sizeof(sync.Once{})) + 8*int64(unsafe.Sizeof(uintptr(0)))
 	for _, n := range []int64{limits.MetadataBytes, limits.HeaderBytes, limits.VersionIDBytes} {
 		if !htmlInputAddV1(&raw, n, 4) {
 			return nil, ErrHistoricalFinalizationSourceV1
 		}
 	}
+	stage = "source_new_loan"
 	closeOwner, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, 0)
 	if err != nil {
 		return nil, err
@@ -122,6 +132,8 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) retireClosedV1() {
 	e.intentVersionOriginal = nil
 	e.intentVersionPinned = nil
 	e.resumePredecessor = nil
+	e.delegated = nil
+	e.delegatedError = nil
 	if release != nil {
 		release()
 	}
@@ -236,18 +248,23 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) resolveSourceV1(key 
 
 // Preserve PDF-source then rendered-source resolution order. The old SQL CAS
 // and exact unchanged returned source are validated before private replacement.
-func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersionsV1(call context.Context) (*generated.Document, error) {
+func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersionsV1(call context.Context) (document *generated.Document, failure error) {
+	stage := "source_scope"
+	defer func() { failure = historicalSourceDiagnosticV1(stage, failure) }()
 	if e == nil || e.self != e {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
+	stage = "source_activity"
 	if !e.lockV1() {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
 	defer func() { e.unlockV1() }()
+	stage = "source_attempt"
 	if !e.validV1() || e.sourceAttempted {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
 	e.sourceAttempted = true
+	stage = "source_work"
 	w := e.work
 	w.mu.Lock()
 	valid := w.valid(call)
@@ -255,11 +272,17 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersions
 	if !valid {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
+	stage = "source_delegated"
+	if err := e.captureDelegatedFinalizationV1(call); err != nil {
+		return nil, err
+	}
 	before := e.document
+	stage = "source_pdf"
 	pdf, err := e.resolveSourceV1(before.PdfStorageKey, before.PdfSha256, before.PdfStorageVersionID)
 	if err != nil {
 		return nil, err
 	}
+	stage = "source_rendered"
 	rendered, err := e.resolveSourceV1(before.RenderedPdfKey, before.RenderedPdfSha, before.RenderedPdfVersionID)
 	if err != nil {
 		return nil, err
@@ -269,6 +292,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersions
 		return e.view, nil
 	}
 	w.mu.Lock()
+	stage = "source_pin_quote"
 	extra := int64(0)
 	if !htmlInputAddV1(&extra, e.limits.VersionIDBytes, 2) {
 		w.mu.Unlock()
@@ -279,10 +303,12 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersions
 	if err != nil {
 		return nil, err
 	}
+	stage = "source_pin_sql"
 	row, err := w.queries.PinDocumentSendEvidenceVersions(call, generated.PinDocumentSendEvidenceVersionsParams{ID: before.ID, OrgID: before.OrgID, PdfStorageVersionID: pdf, RenderedPdfVersionID: rendered})
 	if err != nil {
 		return nil, fmt.Errorf("finalization: persist source VersionIds: %w", err)
 	}
+	stage = "source_pin_shape"
 	if row == nil || !row.EvidenceVersionPinsRequired || (row.PdfStorageKey.Valid && !row.PdfStorageVersionID.Valid) || (row.RenderedPdfKey.Valid && !row.RenderedPdfVersionID.Valid) {
 		return nil, errors.New("finalization: persisted source VersionIds are incomplete")
 	}
@@ -293,6 +319,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSourceVersions
 	expected.UpdatedAt = row.UpdatedAt
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	stage = "source_pin_tuple"
 	if !w.valid(call) || !w.verifyDocumentReturnV1(row, raw) || !htmlSendDocumentExactTupleEqualV1(&expected, row) || !applicationStampV1(row.UpdatedAt) {
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
@@ -316,29 +343,36 @@ func historicalInputSignatureExactV1(a, b *generated.Signature) bool {
 	}
 	return a.ID == b.ID && a.DocumentID == b.DocumentID && a.RecipientID == b.RecipientID && a.FieldID == b.FieldID && a.Font == b.Font && a.TypedName == b.TypedName && a.ImageStorageKey == b.ImageStorageKey && bytes.Equal(a.ImageSha256, b.ImageSha256) && a.SignerUa == b.SignerUa && a.SignedAt == b.SignedAt && a.ImageVersionID == b.ImageVersionID && a.ImageVersionPinRequired == b.ImageVersionPinRequired && a.SignatureKind == b.SignatureKind && a.PresignExecutionID == b.PresignExecutionID
 }
-func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersionsV1(call context.Context) error {
+func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersionsV1(call context.Context) (failure error) {
+	stage := "signature_scope"
+	defer func() { failure = historicalSourceDiagnosticV1(stage, failure) }()
 	if e == nil || e.self != e {
 		return ErrHistoricalFinalizationSourceV1
 	}
+	stage = "signature_activity"
 	if !e.lockV1() {
 		return ErrHistoricalFinalizationSourceV1
 	}
 	defer func() { e.unlockV1() }()
+	stage = "signature_attempt"
 	if !e.validV1() || e.signaturesAttempted {
 		return ErrHistoricalFinalizationSourceV1
 	}
 	e.signaturesAttempted = true
 	w := e.work
+	stage = "signature_read"
 	if _, err := w.ReadHistoricalFinalizationSignaturesV1(call); err != nil {
 		return fmt.Errorf("finalization: list signature evidence: %w", err)
 	}
 	w.mu.Lock()
+	stage = "signature_state"
 	state, err := w.historicalFinalizationStateV1(call)
 	if err != nil {
 		w.mu.Unlock()
 		return err
 	}
 	source := state.signatures
+	stage = "signature_quote"
 	raw := int64(0)
 	for _, s := range source {
 		n, err := historicalFinalizationSignatureRawV1(s)
@@ -347,6 +381,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersi
 			return ErrHistoricalFinalizationSourceV1
 		}
 	}
+	stage = "signature_loan"
 	closeRows, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, raw)
 	if err != nil {
 		w.mu.Unlock()
@@ -356,14 +391,18 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersi
 	w.mu.Unlock()
 	e.signatures = make([]*generated.Signature, len(source))
 	e.signatureViews = make([]*generated.Signature, len(source))
+	stage = "signature_rows"
 	for index, signature := range source {
+		stage = "signature_row_shape"
 		if signature == nil || strings.TrimSpace(signature.ImageStorageKey) == "" || len(signature.ImageSha256) != sha256.Size {
 			return errors.New("finalization: signature evidence commitment is incomplete")
 		}
+		stage = "signature_version_shape"
 		if signature.ImageVersionPinRequired {
 			if !signature.ImageVersionID.Valid || strings.TrimSpace(signature.ImageVersionID.String) == "" {
 				return errors.New("finalization: signature evidence is missing its required VersionId")
 			}
+			stage = "signature_body"
 			if _, err = e.readV1(signature.ImageStorageKey, signature.ImageVersionID.String, signature.ImageSha256, false, nil); err != nil {
 				return fmt.Errorf("finalization: verify signature evidence %s: %w", signature.ID, err)
 			}
@@ -374,6 +413,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersi
 		if signature.ImageVersionID.Valid {
 			return errors.New("finalization: legacy signature evidence has a partial VersionId commitment")
 		}
+		stage = "signature_legacy_body"
 		stored, err := e.readV1(signature.ImageStorageKey, "", signature.ImageSha256, true, nil)
 		if err != nil {
 			return fmt.Errorf("finalization: resolve legacy signature evidence %s: %w", signature.ID, err)
@@ -381,6 +421,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersi
 		if strings.TrimSpace(stored.VersionID) == "" {
 			return fmt.Errorf("finalization: resolve legacy signature evidence %s returned no VersionId", signature.ID)
 		}
+		stage = "signature_pin"
 		pinned, err := w.queries.PinLegacySignatureVersion(call, generated.PinLegacySignatureVersionParams{ID: signature.ID, DocumentID: e.document.ID, ImageVersionID: pgtype.Text{String: stored.VersionID, Valid: true}})
 		if errors.Is(err, pgx.ErrNoRows) {
 			refreshed, listErr := w.queries.ListSignaturesByDocument(call, e.document.ID)
@@ -408,15 +449,18 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) EnsureSignatureVersi
 		if err != nil {
 			return fmt.Errorf("finalization: persist signature VersionId %s: %w", signature.ID, err)
 		}
+		stage = "signature_pin_shape"
 		if pinned == nil || !pinned.ImageVersionPinRequired || !pinned.ImageVersionID.Valid || pinned.ImageVersionID.String != stored.VersionID {
 			return fmt.Errorf("finalization: persisted signature VersionId %s does not match resolved object", signature.ID)
 		}
 		expected := *signature
 		expected.ImageVersionPinRequired = true
 		expected.ImageVersionID = pinned.ImageVersionID
+		stage = "signature_pin_tuple"
 		if !historicalInputSignatureExactV1(&expected, pinned) {
 			return ErrHistoricalFinalizationSourceV1
 		}
+		stage = "signature_pinned_body"
 		if _, err = e.readV1(pinned.ImageStorageKey, pinned.ImageVersionID.String, pinned.ImageSha256, false, nil); err != nil {
 			return fmt.Errorf("finalization: verify pinned signature evidence %s: %w", signature.ID, err)
 		}
@@ -596,11 +640,12 @@ func (w *ApplicationHTMLSendWorkV1) RetainHistoricalFinalizationSignatureInputsV
 	for _, member := range members {
 		member.mu.Lock()
 		actual := member.sourceDocument
-		requires := actual != nil && actual.RequiresSignature
 		member.mu.Unlock()
-		if !requires {
-			continue
+		if actual == nil {
+			return ErrHistoricalFinalizationSourceV1
 		}
+		// Acknowledgement members have a measured empty signature set, but
+		// their original source versions share the same final intent deadline.
 		if _, err = member.ReadHistoricalFinalizationSignaturesV1(call); err != nil {
 			return fmt.Errorf("resume finalization: list signature evidence for %s: %w", actual.ID, err)
 		}
@@ -642,9 +687,63 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) retainPrivateSignatu
 	}
 	signatures := state.signatures
 	w.mu.Unlock()
+	if err := e.retainDelegatedAssetsV1(call, until); err != nil {
+		return err
+	}
 	for _, signature := range signatures {
 		if signature != nil && signature.SignatureKind == "manual_pdf_fit_v1" {
 			return ErrHistoricalFittedPublicationV1
+		}
+	}
+	if e.delegated == nil {
+		// Only the native private row supplies ordinary source pins. Delegated
+		// base/assets already use their original closed retention path above;
+		// fitted signatures were refused before any ordinary source mutation.
+		d := e.document
+		if !d.EvidenceVersionPinsRequired || (d.SourceKind == "pdf" && (!d.PdfStorageKey.Valid || strings.TrimSpace(d.PdfStorageKey.String) == "")) {
+			return ErrHistoricalFinalizationSourceV1
+		}
+		type sourceArtifact struct {
+			key, version string
+			digest       []byte
+		}
+		var artifacts [2]sourceArtifact
+		n := 0
+		for _, pin := range [2]struct {
+			key, version pgtype.Text
+			digest       []byte
+		}{{d.PdfStorageKey, d.PdfStorageVersionID, d.PdfSha256}, {d.RenderedPdfKey, d.RenderedPdfVersionID, d.RenderedPdfSha}} {
+			if !pin.key.Valid && pin.key.String == "" && !pin.version.Valid && pin.version.String == "" && len(pin.digest) == 0 {
+				continue
+			}
+			if !pin.key.Valid || strings.TrimSpace(pin.key.String) == "" || !pin.version.Valid || strings.TrimSpace(pin.version.String) == "" || len(pin.digest) != sha256.Size {
+				return ErrHistoricalFinalizationSourceV1
+			}
+			duplicate := false
+			for _, prior := range artifacts[:n] {
+				if prior.key == pin.key.String && prior.version == pin.version.String {
+					if !bytes.Equal(prior.digest, pin.digest) {
+						return ErrHistoricalFinalizationSourceV1
+					}
+					duplicate = true
+				}
+			}
+			if !duplicate {
+				artifacts[n] = sourceArtifact{pin.key.String, pin.version.String, pin.digest}
+				n++
+			}
+		}
+		for _, pin := range artifacts[:n] {
+			body, stream, err := e.providerV1()
+			if err != nil {
+				return err
+			}
+			err = e.client.RetainEvidenceVersionForSendV1(e.ctx, pin.key, pin.version, pin.digest, until)
+			stream.Close()
+			body.Close()
+			if err != nil {
+				return fmt.Errorf("resume finalization: retain original source evidence: %w", err)
+			}
 		}
 	}
 	for _, signature := range signatures {

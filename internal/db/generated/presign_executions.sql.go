@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const bindPresignSealingIntent = `-- name: BindPresignSealingIntent :one
@@ -54,6 +55,31 @@ func (q *Queries) BindPresignSealingIntent(ctx context.Context, arg BindPresignS
 		&i.PackageSendAttemptID,
 	)
 	return &i, err
+}
+
+const closePreparingPresignExecutionRequestV1 = `-- name: ClosePreparingPresignExecutionRequestV1 :exec
+UPDATE presign_preparations_v1 SET state='closed'
+ WHERE org_id=$1 AND executor_kind=$2 AND executor_user_id=$3 AND executor_credential_id=$4 AND request_id=$5 AND state='preparing'
+`
+
+type ClosePreparingPresignExecutionRequestV1Params struct {
+	OrgID                uuid.UUID `json:"org_id"`
+	ExecutorKind         string    `json:"executor_kind"`
+	ExecutorUserID       uuid.UUID `json:"executor_user_id"`
+	ExecutorCredentialID uuid.UUID `json:"executor_credential_id"`
+	RequestID            uuid.UUID `json:"request_id"`
+}
+
+// Caller holds the original request lock and same authenticated/audited Tx.
+func (q *Queries) ClosePreparingPresignExecutionRequestV1(ctx context.Context, arg ClosePreparingPresignExecutionRequestV1Params) error {
+	_, err := q.db.Exec(ctx, closePreparingPresignExecutionRequestV1,
+		arg.OrgID,
+		arg.ExecutorKind,
+		arg.ExecutorUserID,
+		arg.ExecutorCredentialID,
+		arg.RequestID,
+	)
+	return err
 }
 
 const getPresignExecutionByDocument = `-- name: GetPresignExecutionByDocument :one
@@ -187,6 +213,56 @@ func (q *Queries) GetPresignExecutionRequest(ctx context.Context, arg GetPresign
 		&i.OccurredAt,
 	)
 	return &i, err
+}
+
+const getPresignExecutionRequestLocatorV1 = `-- name: GetPresignExecutionRequestLocatorV1 :one
+SELECT r.state,e.document_id,r.execution_id
+ FROM presign_execution_requests r LEFT JOIN presign_executions e ON e.org_id=r.org_id AND e.id=r.execution_id
+ WHERE r.org_id=$1 AND r.executor_kind=$2 AND r.executor_user_id=$3 AND r.executor_credential_id=$4 AND r.request_id=$5
+`
+
+type GetPresignExecutionRequestLocatorV1Params struct {
+	OrgID                uuid.UUID `json:"org_id"`
+	ExecutorKind         string    `json:"executor_kind"`
+	ExecutorUserID       uuid.UUID `json:"executor_user_id"`
+	ExecutorCredentialID uuid.UUID `json:"executor_credential_id"`
+	RequestID            uuid.UUID `json:"request_id"`
+}
+
+type GetPresignExecutionRequestLocatorV1Row struct {
+	State       string      `json:"state"`
+	DocumentID  pgtype.UUID `json:"document_id"`
+	ExecutionID pgtype.UUID `json:"execution_id"`
+}
+
+// Private scalar locator only; retained document evidence is loaded separately.
+func (q *Queries) GetPresignExecutionRequestLocatorV1(ctx context.Context, arg GetPresignExecutionRequestLocatorV1Params) (*GetPresignExecutionRequestLocatorV1Row, error) {
+	row := q.db.QueryRow(ctx, getPresignExecutionRequestLocatorV1,
+		arg.OrgID,
+		arg.ExecutorKind,
+		arg.ExecutorUserID,
+		arg.ExecutorCredentialID,
+		arg.RequestID,
+	)
+	var i GetPresignExecutionRequestLocatorV1Row
+	err := row.Scan(&i.State, &i.DocumentID, &i.ExecutionID)
+	return &i, err
+}
+
+const hasPresignExecutionForDocumentV1 = `-- name: HasPresignExecutionForDocumentV1 :one
+SELECT EXISTS(SELECT 1 FROM presign_executions WHERE org_id=$1 AND document_id=$2)
+`
+
+type HasPresignExecutionForDocumentV1Params struct {
+	OrgID      uuid.UUID `json:"org_id"`
+	DocumentID uuid.UUID `json:"document_id"`
+}
+
+func (q *Queries) HasPresignExecutionForDocumentV1(ctx context.Context, arg HasPresignExecutionForDocumentV1Params) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPresignExecutionForDocumentV1, arg.OrgID, arg.DocumentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const insertClosedPresignExecutionRequest = `-- name: InsertClosedPresignExecutionRequest :one

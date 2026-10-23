@@ -33,9 +33,10 @@ function fixture(ownerPage = false) {
 }
 async function prepare(f: ReturnType<typeof fixture>) { await f.controller.refresh(); await f.controller.preview(grantIntent()); f.controller.confirm(true); expect(f.controller.canConfirm).toBe(true); }
 
-test('bounded strict context uses live self, server font assets and an unavailable execution gate', () => {
+test('bounded strict context uses live self, server font assets and a real boolean execution gate', () => {
   expect(checkedSigningContext(context())).toEqual(context());
-  for (const value of [{ ...context(), execution_available: true }, { ...context(), self: { ...context().self, id: grantID } }, { ...context(), fonts: ['Caveat'] }, { ...context(), credential: 'secret' }, { ...context(), disclosure: { ...context().disclosure, text: null } }]) expect(() => checkedSigningContext(value)).toThrow();
+  expect(checkedSigningContext({ ...context(), execution_available: true }).execution_available).toBe(true);
+  for (const value of [{ ...context(), execution_available: 1 }, { ...context(), execution_available: 'true' }, { ...context(), self: { ...context().self, id: grantID } }, { ...context(), fonts: ['Caveat'] }, { ...context(), credential: 'secret' }, { ...context(), disclosure: { ...context().disclosure, text: null } }]) expect(() => checkedSigningContext(value)).toThrow();
 });
 test('workflow normalization matches server sorted declarations, complete mode fields and decimal CRM generation', () => {
   const d = definition(); d.data_rules.values = [{ variable: 'zeta', mode: 'literal', literal: '' }, { variable: 'alpha', mode: 'grantor_field', grantor_field: 'name' }];

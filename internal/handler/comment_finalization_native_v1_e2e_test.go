@@ -21,6 +21,7 @@ import (
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // The closed one-shot schedule affects only the synthetic HTTP peer. It grants
@@ -132,10 +133,35 @@ func ownedEnvelopeChildCommentBeforeFreeze165V1(t *testing.T, q *ownedPublicRead
 	var rows, events, measured int
 	if err = q.f.pool.QueryRow(q.f.ctx, `SELECT
  (SELECT count(*)::integer FROM document_comments WHERE document_id=$1 AND body=$3 AND author_side='sender' AND user_id=$4),
- (SELECT count(*)::integer FROM events WHERE document_id=$1 AND org_id=$2 AND kind='document.comment_posted' AND actor_user_id=$4 AND payload_json='{"side":"sender"}'::jsonb),
+ (SELECT count(*)::integer FROM events WHERE document_id=$1 AND org_id=$2 AND kind='document.comment_posted' AND actor_user_id=$4 AND recipient_id IS NULL AND payload_json->>'side'='sender'),
  (SELECT count(*)::integer FROM events e JOIN html_snapshot_event_payload_sizes_v1 m ON m.event_id=e.id AND m.document_id=e.document_id AND m.org_id=e.org_id AND m.payload_wire_bytes=octet_length(e.payload_json::text) AND m.measurement_server_version_num=current_setting('server_version_num')::integer WHERE e.document_id=$1 AND e.org_id=$2 AND e.kind='document.comment_posted')`, childID, q.f.org, nativeCommentBody163V1, q.f.user.ID).Scan(&rows, &events, &measured); err != nil || rows != 1 || events != 1 || measured != 1 {
 		t.Fatal("actual child comment lost row/actor/fresh measurement", err)
 	} //nolint:rawsql -- positive exact-child native audit witness
+	// Current staff events carry the complete five-key content evidence, not
+	// the old side-only payload. Bind every actual row/event to that evidence
+	// and the exact native staff actor before the family freeze proceeds.
+	commentRows, err := q.f.q.ListComments(q.f.ctx, childID)
+	if err != nil || len(commentRows) != 1 || commentRows[0].ID.String() != response.ID || commentRows[0].Body != nativeCommentBody163V1 {
+		t.Fatal("exact native child comment response/row differs", err)
+	}
+	commentEvents, err := q.f.q.ListEventsByDocumentChronological(q.f.ctx, generated.ListEventsByDocumentChronologicalParams{DocumentID: pgtype.UUID{Bytes: childID, Valid: true}, Limit: 1000})
+	if err != nil {
+		t.Fatal("exact native child event history unavailable", err)
+	}
+	// Public recipients belong to the actual ceremony root. The shared oracle
+	// requires a real expected recipient even for this staff-only observation;
+	// do not invent one or obtain a new signer credential.
+	if !child.ParentEnvelopeID.Valid {
+		t.Fatal("genuine envelope child lost its ceremony root")
+	}
+	rootID := uuid.UUID(child.ParentEnvelopeID.Bytes)
+	parties, err := q.f.q.ListRecipientsByDocument(q.f.ctx, rootID)
+	if err != nil || len(parties) != 2 || parties[0].DocumentID != rootID {
+		t.Fatal("actual ceremony parties unavailable for child audit oracle", err)
+	}
+	if err = ownedChatCurrentAudit487V1(commentEvents, commentRows, q.f.org, childID, q.f.user.ID, parties[0].ID, 1, 0); err != nil {
+		t.Fatal("native child comment lost exact schema/body/hash/actor association", err)
+	}
 	nativeCommentDrained164V1(t, q)
 }
 

@@ -7,8 +7,8 @@
  import { DocumentAttachmentsController, attachmentDocumentKey, attachmentLabel, initialAttachmentState, type AttachmentActor, type AttachmentMember, type AttachmentState } from '$lib/documentAttachments';
  import { AttachmentPreviewController, initialAttachmentPreview, type AttachmentPreviewState } from '$lib/documentAttachmentPreview';
  import VerifiedPDFPages from './VerifiedPDFPages.svelte';
- let { document: doc, actor, mainEditorClean, externalBusy = false, reconciliationBusy = false, packageReviewRequest = { revision: 0, inspect: false }, onSaved, onStateChange }: {
-  document: DocumentResponse; actor: AttachmentActor; mainEditorClean: boolean; externalBusy?: boolean; reconciliationBusy?: boolean; packageReviewRequest?: { revision: number; inspect: boolean };
+ let { document: doc, actor, mainEditorClean, readonly = false, externalBusy = false, reconciliationBusy = false, packageReviewRequest = { revision: 0, inspect: false }, onSaved, onStateChange }: {
+  document: DocumentResponse; actor: AttachmentActor; mainEditorClean: boolean; readonly?: boolean; externalBusy?: boolean; reconciliationBusy?: boolean; packageReviewRequest?: { revision: number; inspect: boolean };
   onSaved: (document: DocumentResponse, expectedUpdatedAt: string, reconciliation?: boolean) => boolean;
   onStateChange: (attachmentState: { busy: boolean; dirty: boolean; blocked: boolean; message: string; packageSend?: PackageSendObservation }) => void;
  } = $props();
@@ -25,8 +25,8 @@
   });
  const previewController = new AttachmentPreviewController(fetchSelectedAttachmentPDF, async () => { await tick(); const owned=previewOwner; await owned?.retire(); if(previewOwner===owned) previewOwner=null; }, next => { preview = next; });
  const dirty = $derived.by(() => { attachmentState; return controller.dirty(); });
- const canEdit = $derived.by(() => { attachmentState; mainEditorClean; externalBusy; return controller.canEdit(); });
- const canSelect = $derived.by(() => { attachmentState; mainEditorClean; externalBusy; return controller.canSelect() && attachmentLabel(title) && attachmentLabel(category, true); });
+ const canEdit = $derived.by(() => { attachmentState; mainEditorClean; readonly; externalBusy; return !readonly && controller.canEdit(); });
+ const canSelect = $derived.by(() => { attachmentState; mainEditorClean; readonly; externalBusy; return !readonly && controller.canSelect() && attachmentLabel(title) && attachmentLabel(category, true); });
  const choices = $derived((attachmentState.choices?.documents ?? []).filter(d => !query || d.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
  const removed = $derived(attachmentState.baseline?.members.filter(m => !attachmentState.draft.some(next => next.document_id === m.document_id)) ?? []);
  const message = $derived(attachmentState.needsReadback ? 'Inspect and reconcile the saved attachments before sending.' : dirty ? 'Save or undo attachment edits before sending.' : attachmentState.baseline?.requires_reselection ? 'Some selected files need proof repair before sending.' : attachmentState.baseline?.members.length ? 'The exact saved attachments will be included in the contract package.' : 'Load and verify the saved attachments before sending.');
@@ -49,8 +49,9 @@
   if ((dirty || attachmentState.candidate) && !window.confirm('Discard the unsaved attachment edits and reload the saved selection?')) return;
   await previewController.close(); if (preview.blocked) return; controller.undo(); await controller.refresh();
  }
- async function select() { await previewController.close(); if (!preview.blocked) await controller.select(title, category); }
+ async function select() { if (readonly) return; await previewController.close(); if (!preview.blocked) await controller.select(title, category); }
  async function save() {
+  if (readonly) return;
   const confirmed = !removed.length || window.confirm('Remove ' + removed.length + ' attachment(s) from this draft agreement? Their original source documents stay saved.');
   if (!confirmed) return; await previewController.close(); if (!preview.blocked) await controller.saveLayout(confirmed);
  }

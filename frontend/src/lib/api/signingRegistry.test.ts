@@ -30,7 +30,7 @@ test('400/404/409 and non-JSON/oversize/malformed payloads are rejected without 
       globalThis.fetch = (async () => new Response('provider secret cookie and token', { status })) as typeof fetch;
       try { await getSigningRequest(marker, signal); throw new Error('Expected refusal.'); } catch (e) { expect((e as { status: number }).status).toBe(status); expect(String(e)).not.toContain('secret'); }
     }
-    for (const response of [new Response('{}', { headers: { 'Content-Type': 'text/html' } }), new Response(JSON.stringify(context), { headers: { 'Content-Type': 'application/json', 'Content-Length': '65537' } }), json({ ...context, execution_available: true }), json({ ...context, private_key: 'forbidden' }), new Response('{', { headers: { 'Content-Type': 'application/json' } })]) {
+    for (const response of [new Response('{}', { headers: { 'Content-Type': 'text/html' } }), new Response(JSON.stringify(context), { headers: { 'Content-Type': 'application/json', 'Content-Length': '65537' } }), json({ ...context, execution_available: "true" }), json({ ...context, private_key: 'forbidden' }), new Response('{', { headers: { 'Content-Type': 'application/json' } })]) {
       globalThis.fetch = (async () => response) as typeof fetch; expect(await getSigningContext(signal).then(() => false, () => true)).toBe(true);
     }
   } finally { globalThis.fetch = previous; }

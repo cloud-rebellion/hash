@@ -35,7 +35,7 @@ func htmlStoredRetentionFinishV1(n int64) (int64, error) {
 	return rounded / 8192 * 8192, nil
 }
 func htmlStoredRetentionMasterShapeV1(m htmlmaster.Master) bool {
-	return len(m.Values) <= htmlmaster.MaxDefinitions && len(m.Sections) <= htmlmaster.MaxDefinitions && len(m.Assets) <= htmlmaster.MaxAssets && (m.ContractProfile == nil || (len(m.ContractProfile.Parties) <= 2 && len(m.ContractProfile.Terms) <= 16))
+	return len(m.Values) <= htmlmaster.MaxDefinitions && len(m.Sections) <= htmlmaster.MaxDefinitions && len(m.Assets) <= htmlmaster.MaxAssets && (m.ContractProfile == nil || (len(m.ContractProfile.Parties) <= 2 && len(m.ContractProfile.Terms) <= 16 && htmlmaster.AmendmentPolicyShapeV1(m.ContractProfile.AmendmentPolicy)))
 }
 
 // The fixed typed clone code copies these headers/arrays/profile/policy, but
@@ -53,6 +53,14 @@ func htmlStoredPreparedMasterProjectionV1(m htmlmaster.Master) (int64, error) {
 	}
 	if p := m.ContractProfile; p != nil {
 		for _, size := range []int64{int64(unsafe.Sizeof(*p)), int64(len(p.Parties)) * int64(unsafe.Sizeof(htmlmaster.ContractParty{})), int64(len(p.Terms)) * int64(unsafe.Sizeof(htmlmaster.ContractTerm{}))} {
+			if !htmlStoredRetentionAllocV1(&n, size) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+	}
+	if p := m.ContractProfile; p != nil && p.AmendmentPolicy != nil {
+		a := p.AmendmentPolicy
+		for _, size := range []int64{int64(unsafe.Sizeof(*a)), int64(len(a.AllowedModes)+len(a.AllowedChannels)) * 16} {
 			if !htmlStoredRetentionAllocV1(&n, size) {
 				return 0, ErrHTMLAuthoringInputV1
 			}
@@ -106,6 +114,24 @@ func htmlStoredPreparedMasterRetentionV1(m htmlmaster.Master) (int64, error) {
 		}
 		for _, term := range p.Terms {
 			if !text(term.Name) || !text(term.Value) || !text(term.Section) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+	}
+	if p := m.ContractProfile; p != nil && p.AmendmentPolicy != nil {
+		a := p.AmendmentPolicy
+		for _, value := range []string{a.Term, a.ClauseReference, a.EffectiveCondition} {
+			if !text(value) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+		for _, value := range a.AllowedModes {
+			if !text(value) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+		for _, value := range a.AllowedChannels {
+			if !text(value) {
 				return 0, ErrHTMLAuthoringInputV1
 			}
 		}

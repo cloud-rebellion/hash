@@ -214,8 +214,18 @@ func (a *ApplicationAdmissionV1) admit(ctx context.Context, b ApplicationBudgetV
 // The native reader bridge supplies only its actual factory work adapter and
 // already-owned fixed observation. All callers share the original loan core.
 func (a *ApplicationAdmissionV1) admitCoreV1(ctx context.Context, b ApplicationBudgetV1, work *WorkAdmissionV1, denial *workguard.AdmissionDenialV1) (func(), error) {
+	return a.admitCoreObservedV1(ctx, b, work, denial, nil)
+}
+func (a *ApplicationAdmissionV1) admitCoreObservedV1(ctx context.Context, b ApplicationBudgetV1, work *WorkAdmissionV1, denial *workguard.AdmissionDenialV1, audit *htmlAuditLoanObservationV1) (func(), error) {
 	a.mu.Lock()
 	if a.closed || len(a.loans) >= applicationMaxLoansV1 {
+		if audit != nil {
+			if a.closed {
+				audit.branch = htmlAuditLoanClosedV1
+			} else {
+				audit.branch = htmlAuditLoanRegistryLimitV1
+			}
+		}
 		a.mu.Unlock()
 		return nil, applicationErrorV1(ctx, nil)
 	}
@@ -224,8 +234,15 @@ func (a *ApplicationAdmissionV1) admitCoreV1(ctx context.Context, b ApplicationB
 	a.mu.Unlock()
 	var release func()
 	var err error
+	if audit != nil {
+		audit.branch = htmlAuditLoanDecisionV1
+	}
 	if denial != nil {
-		release, err = work.applicationSignerReadWithDenialV1(ctx, b, denial)
+		if audit != nil {
+			release, err = work.applicationAuditWithDenialV1(ctx, b, denial)
+		} else {
+			release, err = work.applicationSignerReadWithDenialV1(ctx, b, denial)
+		}
 	} else {
 		release, err = a.acquire(ctx, b)
 	}
@@ -242,6 +259,9 @@ func (a *ApplicationAdmissionV1) admitCoreV1(ctx context.Context, b ApplicationB
 	var once sync.Once
 	closeConsumer := func() { once.Do(func() { a.mu.Lock(); loan.consumerClosed = true; a.mu.Unlock(); a.notify() }) }
 	if err != nil || ctx.Err() != nil {
+		if audit != nil {
+			audit.branch = htmlAuditLoanConsumerV1
+		}
 		closeConsumer()
 		return nil, applicationErrorV1(ctx, err)
 	}

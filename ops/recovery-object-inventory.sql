@@ -110,6 +110,15 @@ branding_objects AS (
       ) AS m(parts)
 ),
 object_references(reference_class, owner_type, owner_id, org_id, object_key, expected_sha256, expected_version_id, version_pin_required, legacy_version_lookup_allowed, legal_evidence, expected_retain_until) AS (
+ SELECT 'later_amendment_frozen_pdf','later_amendment',a.id::text,a.org_id,
+        f->>'key',f->>'sha256',f->>'version_id',true,false,
+        (n.id IS NOT NULL OR COALESCE(dr.legal_evidence,false)),
+        GREATEST(n.retain_until,dr.expected_retain_until)
+ FROM document_amendments_v1 a
+ CROSS JOIN LATERAL jsonb_array_elements(convert_from(a.file_set,'UTF8')::jsonb->'files') f
+ LEFT JOIN document_amendment_notices_v1 n ON n.amendment_id=a.id AND n.org_id=a.org_id
+ LEFT JOIN document_retention dr ON dr.document_id=a.document_id
+ UNION ALL
 	-- Exact historical membership survives intent deletion; live annex state
 	-- never supplies the contractual retention deadline.
 	SELECT 'package_send_capture_pdf', 'document_package_send_attempt', a.attempt_id::text, a.org_id,
@@ -203,6 +212,15 @@ object_references(reference_class, owner_type, owner_id, org_id, object_key, exp
 	-- Pre-Stage ordinary outputs can be the only surviving provider identity.
  -- Unbound pending outputs intentionally leave a required pin missing, so
  -- recovery readiness cannot call an ambiguous external effect complete.
+ SELECT 'presign_preparation_'||o.role,'presign_preparation',p.id::text,p.org_id,
+ o.object_key,encode(o.object_sha256,'hex'),o.version_id,true,false,
+ p.state='committed' OR pub.retention_started_at IS NOT NULL,
+ CASE WHEN p.state='committed' OR pub.retention_started_at IS NOT NULL THEN GREATEST(pub.retain_until,d.finalization_retain_until) ELSE NULL::timestamptz END
+ FROM presign_preparation_objects_v1 o JOIN presign_preparations_v1 p ON p.org_id=o.org_id AND p.id=o.preparation_id
+ JOIN documents d ON d.id=p.document_id AND d.org_id=p.org_id
+ LEFT JOIN presign_execution_publications_v1 pub ON pub.org_id=p.org_id AND pub.execution_id=p.execution_id AND pub.document_id=p.document_id
+ WHERE o.deleted_at IS NULL AND (o.upload_attempted OR o.version_id IS NOT NULL)
+ UNION ALL
  SELECT 'ordinary_preparation_'||o.kind,'ordinary_finalization_preparation',o.document_id::text,o.org_id,
  o.storage_key,encode(o.sha256,'hex'),o.version_id,true,false,true,p.retain_until
  FROM document_ordinary_finalization_outputs_v1 o JOIN document_ordinary_finalization_preparations_v1 p ON p.document_id=o.document_id AND p.org_id=o.org_id

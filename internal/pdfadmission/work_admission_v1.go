@@ -53,6 +53,15 @@ func (a *WorkAdmissionV1) applicationSignerReadWithDenialV1(ctx context.Context,
 	return a.applicationV1(ctx, b, denial)
 }
 
+// Fixed native fresh-audit companion: the same budget validator and atomic
+// coordinator decision, with only its immutable numeric refusal observation.
+func (a *WorkAdmissionV1) applicationAuditWithDenialV1(ctx context.Context, b ApplicationBudgetV1, denial *workguard.AdmissionDenialV1) (func(), error) {
+	if a == nil || a.coordinator == nil || denial == nil || b.Phase != "locked-html-fresh-event" {
+		return nil, workguard.ErrUnavailableV1
+	}
+	return a.applicationV1(ctx, b, denial)
+}
+
 func (a *WorkAdmissionV1) applicationV1(ctx context.Context, b ApplicationBudgetV1, denial *workguard.AdmissionDenialV1) (func(), error) {
 	if b.OrgID == uuid.Nil || b.DocumentID == uuid.Nil || (b.AdmissionID == uuid.Nil && b.Phase != "locked-request-header" && b.Phase != "locked-html-fresh-creation" && b.Phase != "locked-html-authoring-header" && b.Phase != "locked-html-authoring-read" && b.Phase != "locked-html-template-write" && b.Phase != "locked-signer-read-header" && b.Phase != "locked-signer-read-body" && b.Phase != "locked-html-fresh-event" && b.Phase != "locked-pdf-layout-fresh-events" && b.Phase != "locked-automation-fresh-events" && b.Phase != "locked-package-send-fresh-events" && b.Phase != "locked-package-send-outbox-returns" && b.Phase != "owned-html-revision-source" && b.Phase != "locked-html-authoring-retained-body" && b.Phase != "locked-html-send-collections" && b.Phase != "locked-html-send-eidas" && b.Phase != "locked-html-send-plan-policy") {
 		return nil, workguard.ErrUnavailableV1

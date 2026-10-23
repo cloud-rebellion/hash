@@ -12,72 +12,87 @@ import (
 // This private producer receives only the reader's actual scoped loaded model.
 // There is no public raw-message, size, callback or multiplicity authority.
 // The canonicalizer still decides validity and the exact approved SHA bytes.
-func (c *applicationHTMLCanonicalModelConsumerV1) canonicalTemplateV1(ctx context.Context, masterRaw, defaultsRaw []byte, expectedDigest [32]byte, digestValid bool, purpose htmlStoredTemplatePurposeV1) (htmlmaster.TemplateCommitment, error) {
+func (c *applicationHTMLCanonicalModelConsumerV1) canonicalTemplateV1(ctx context.Context, masterRaw, defaultsRaw []byte, expectedDigest [32]byte, digestValid bool, purpose htmlStoredTemplatePurposeV1) (result htmlmaster.TemplateCommitment, failure error) {
+	phase := "model_purpose"
+	defer func() { failure = htmlCanonicalFailureV1(ctx, phase, failure) }()
 	var empty htmlmaster.TemplateCommitment
 	if purpose > htmlStoredTemplatePreparationV1 {
 		return empty, ErrHTMLAuthoringReadV1
 	}
+	phase = "model_digest"
 	if !digestValid {
 		return empty, fmt.Errorf("%w: stored template content commitment", htmlmaster.ErrInvalid)
 	}
+	phase = "parse_master_shape"
 	shape, err := htmlAuthoringInputRootShapeV1(ctx, htmlInputMasterV1, masterRaw)
 	if err != nil {
 		return empty, err
 	}
+	phase = "parse_master_cost"
 	parse, err := htmlAuthoringInputParserArenaV1(shape, 10)
 	if err != nil {
 		return empty, err
 	}
+	phase = "parse_defaults_shape"
 	defaults, err := htmlAuthoringInputRootShapeV1(ctx, htmlInputStringMapV1, defaultsRaw)
 	if err != nil {
 		return empty, err
 	}
+	phase = "parse_defaults_cost"
 	defaultsParse, err := htmlAuthoringInputParserArenaV1(defaults, 2)
 	if err != nil || !htmlInputAddV1(&parse, defaultsParse, 1) {
 		return empty, errHTMLCanonicalModelWorkV1
 	}
-	if err = c.holdV1(ctx, parse); err != nil {
+	if err = c.holdAtV1(ctx, parse, "parse_hold"); err != nil {
 		return empty, err
 	}
 	// The first Decode is inspection; the unchanged CanonicalTemplate performs
 	// the second. Both are charged before either typed parser allocation.
+	phase = "parse_decode"
 	m, err := htmlmaster.Decode(masterRaw)
 	if err != nil {
 		return empty, err
 	}
+	phase = "parse_bounds"
 	if len(m.HTML) == 0 || len(m.HTML) > htmlmaster.MaxHTMLBytes || len(m.CSS) > htmlmaster.MaxCSSBytes || len(m.Assets) > htmlmaster.MaxAssets {
 		return empty, htmlInputCanonicalInvalidV1()
 	}
+	phase = "inspection_cost"
 	inspection, err := htmlInputCanonicalInspectionResourcesV1(m)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdV1(ctx, inspection); err != nil {
+	if err = c.holdAtV1(ctx, inspection, "inspection_hold"); err != nil {
 		return empty, err
 	}
+	phase = "inspection_scan"
 	stats, err := htmlInputCanonicalInspectV1(ctx, m)
 	if err != nil {
 		return empty, err
 	}
+	phase = "canonical_cost"
 	canonical, err := htmlInputCanonicalResourcesV1(masterRaw, defaultsRaw, m, stats)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdScratchV1(ctx, canonical); err != nil {
+	if err = c.holdScratchAtV1(ctx, canonical, "canonical_scratch"); err != nil {
 		return empty, err
 	}
+	phase = "canonical_parse"
 	content, err := htmlmaster.CanonicalTemplate(masterRaw, defaultsRaw)
 	if err != nil {
 		return empty, err
 	}
+	phase = "canonical_digest"
 	if content.SHA256 != hex.EncodeToString(expectedDigest[:]) {
 		return empty, fmt.Errorf("%w: stored template content commitment", htmlmaster.ErrInvalid)
 	}
+	phase = "retention_cost"
 	retainedContent, err := htmlStoredTemplateResultRetentionV1(content)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdV1(ctx, retainedContent); err != nil {
+	if err = c.holdAtV1(ctx, retainedContent, "retention_hold"); err != nil {
 		return empty, err
 	}
 	if purpose == htmlStoredTemplateCurrentV1 {
@@ -87,6 +102,7 @@ func (c *applicationHTMLCanonicalModelConsumerV1) canonicalTemplateV1(ctx contex
 	// fixed recheck reserves only inspection plus PreparedRetainedTemplate
 	// Decode/Compile/defaults: its result is never materialized by those callers.
 	// Both use ACTUAL canonical output rather than the original JSON spelling.
+	phase = "future_master_shape"
 	output, err := htmlAuthoringInputRootShapeV1(ctx, htmlInputMasterV1, content.MasterJSON)
 	if err != nil {
 		return empty, err
@@ -95,59 +111,68 @@ func (c *applicationHTMLCanonicalModelConsumerV1) canonicalTemplateV1(ctx contex
 	if purpose == htmlStoredTemplateRecheckV1 {
 		masterPasses, defaultsPasses = 10, 2
 	}
+	phase = "future_master_cost"
 	outputParse, err := htmlAuthoringInputParserArenaV1(output, masterPasses)
 	if err != nil {
 		return empty, err
 	}
+	phase = "future_defaults_shape"
 	outputDefaults, err := htmlAuthoringInputRootShapeV1(ctx, htmlInputStringMapV1, content.DefaultsJSON)
 	if err != nil {
 		return empty, err
 	}
+	phase = "future_defaults_cost"
 	outputDefaultsParse, err := htmlAuthoringInputParserArenaV1(outputDefaults, defaultsPasses)
 	if err != nil || !htmlInputAddV1(&outputParse, outputDefaultsParse, 1) {
 		return empty, errHTMLCanonicalModelWorkV1
 	}
-	if err = c.holdV1(ctx, outputParse); err != nil {
+	if err = c.holdAtV1(ctx, outputParse, "future_parse_hold"); err != nil {
 		return empty, err
 	}
+	phase = "future_decode"
 	future, err := htmlmaster.Decode(content.MasterJSON)
 	if err != nil {
 		return empty, err
 	}
+	phase = "future_inspection_cost"
 	futureInspection, err := htmlInputCanonicalInspectionResourcesV1(future)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdV1(ctx, futureInspection); err != nil {
+	if err = c.holdAtV1(ctx, futureInspection, "future_inspection_hold"); err != nil {
 		return empty, err
 	}
+	phase = "future_inspection_scan"
 	futureStats, err := htmlInputCanonicalInspectV1(ctx, future)
 	if err != nil {
 		return empty, err
 	}
+	phase = "future_canonical_cost"
 	futureCanonical, err := htmlInputCanonicalResourcesV1(content.MasterJSON, content.DefaultsJSON, future, futureStats)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdScratchV1(ctx, futureCanonical); err != nil {
+	if err = c.holdScratchAtV1(ctx, futureCanonical, "future_canonical_scratch"); err != nil {
 		return empty, err
 	}
 	// Readiness calls finish synchronously before the next Compile, body or
 	// signing-page materialization. Keep the complete conservative ONE-call
 	// arena in the same continuously retained scratch peak, and price every
 	// retained result independently below. No cancellation/GC credit is given.
+	phase = "readiness_cost"
 	readinessScratch, _, err := htmlStoredTemplateFutureReadinessResourcesV1(purpose, future)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdScratchV1(ctx, readinessScratch); err != nil {
+	if err = c.holdScratchAtV1(ctx, readinessScratch, "readiness_scratch"); err != nil {
 		return empty, err
 	}
+	phase = "future_retention_cost"
 	futureCost, err := htmlStoredTemplateFutureResourcesV1(purpose, content.MasterJSON, content.DefaultsJSON, future, futureStats)
 	if err != nil {
 		return empty, err
 	}
-	if err = c.holdV1(ctx, futureCost); err != nil {
+	if err = c.holdAtV1(ctx, futureCost, "future_retention_hold"); err != nil {
 		return empty, err
 	}
 	return content, nil

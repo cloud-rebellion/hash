@@ -7,6 +7,9 @@
   import PdfSignerView from '$lib/components/PdfSignerView.svelte';
   import A13Notice from '$lib/components/A13Notice.svelte';
   import SignerPackageReview from '$lib/components/SignerPackageReview.svelte';
+  import SignerAmendmentContext from '$lib/components/SignerAmendmentContext.svelte';
+  import { validateSignerAmendmentContext, type SignerAmendmentDisclosure } from '$lib/signerAmendment';
+  import { validateSignerPreSignContext, type SignerPreSignDisclosure } from '$lib/signerPreSign';
   import type { SignerPackageResponse } from '$lib/signerPackage';
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
   import { signerCeremonyKey, validateSignerPDFObservation, type SignerPDFObservation, type SignerPDFScope } from '$lib/signerPDF';
@@ -68,6 +71,8 @@
     fonts: string[];
     privacy: Privacy;
     pdf_observation?: SignerPDFObservation;
+    amendment_context?: SignerAmendmentDisclosure | null;
+    pre_sign_context?: SignerPreSignDisclosure | null;
   };
 
   // Acknowledgement state must never turn the bearer magic-link token into a
@@ -462,12 +467,20 @@
 		loadError = 'The required privacy notice is unavailable.';
 		return;
 	  }
+      // Ordinary absent/null disclosure remains compatible. A present relation
+      // must match this exact candidate and ceremony before any viewer opens.
+      if (loaded.amendment_context !== undefined && loaded.amendment_context !== null) {
+        loaded.amendment_context = validateSignerAmendmentContext(loaded.amendment_context, loaded.document_id, loaded.requires_signature, loaded.source_kind);
+      } else delete loaded.amendment_context;
       if (loaded.source_kind === 'pdf') {
         loaded.pdf_observation = validateSignerPDFObservation(loaded.pdf_observation, loaded.document_id, loaded.recipient.id);
         fieldsFilled = false;
       } else {
         fieldsFilled = true;
       }
+      if (loaded.pre_sign_context !== undefined && loaded.pre_sign_context !== null) {
+        loaded.pre_sign_context = validateSignerPreSignContext(loaded.pre_sign_context, loaded.document_id, loaded.requires_signature, loaded.source_kind, loaded.pdf_observation);
+      } else delete loaded.pre_sign_context;
       loadedToken = token;
       ctx = loaded;
       const installedContext = ctx;
@@ -817,6 +830,15 @@
     </div>
   {:else}
     <main class="signer-main">
+      {#if ctx.amendment_context}<div class="amendment-context"><SignerAmendmentContext disclosure={ctx.amendment_context} /></div>{/if}
+      {#if ctx.pre_sign_context}
+        <section class="state-card mb-4" aria-label="Provider pre-signing disclosure">
+          <h2>Our company’s part is already signed</h2>
+          <p>{ctx.pre_sign_context.provider_name} pre-signed the provider’s part on <time datetime={ctx.pre_sign_context.executed_at}>{ctx.pre_sign_context.executed_at}</time>.</p>
+          <p class="whitespace-pre-wrap">{ctx.pre_sign_context.disclosure_text}</p>
+          <p>Review the provider-signed agreement below. Your own signature still requires your explicit confirmation.</p>
+        </section>
+      {/if}
       <article class="document-frame" aria-label="Current document">
         {#if ctx.source_kind === 'pdf'}
           {#if ctx.pdf_observation}
@@ -1116,6 +1138,7 @@
     flex: 1;
   }
   /* The document column sits on a soft gutter, like a Google-Docs canvas. */
+  .amendment-context { grid-column: 1 / -1; min-width: 0; }
   .document-frame {
     background: var(--t-bg);
     border: 1px solid var(--t-border-light);

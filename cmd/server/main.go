@@ -40,6 +40,7 @@ import (
 	"github.com/bright-interaction/hash/internal/handler"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
+	"github.com/bright-interaction/hash/internal/noticeaccess"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -517,8 +518,16 @@ func run() (runErr error) {
 		RenderEmail:         renderEmailForMCP(cfg.OperatorName),
 	})
 
+	var noticeAccess *noticeaccess.EngineV1
+	if workRuntime != nil {
+		noticeAccess, err = workRuntime.NewLaterAmendmentNoticeAccessV1(store, cookies, cfg.PublicURL)
+		if err != nil {
+			return errors.New("configured notice access runtime unavailable")
+		}
+	}
 	srv := &handler.Server{
 		Pool:                       pool,
+		NoticeAccess:               noticeAccess,
 		HTMLCreationSessions:       workRuntime.SessionsV1(),
 		Queries:                    queries,
 		Storage:                    store,

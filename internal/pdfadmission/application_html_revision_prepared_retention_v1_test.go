@@ -31,7 +31,7 @@ func TestHTMLRevisionPreparedPinnedTypedLayoutsV1(t *testing.T) {
 	}{
 		{"Master", unsafe.Sizeof(htmlmaster.Master{}), 128}, {"Compiled", unsafe.Sizeof(htmlmaster.Compiled{}), 208},
 		{"Value", unsafe.Sizeof(htmlmaster.Value{}), 32}, {"Section", unsafe.Sizeof(htmlmaster.Section{}), 40}, {"Asset", unsafe.Sizeof(htmlmaster.Asset{}), 64},
-		{"ContractProfile", unsafe.Sizeof(htmlmaster.ContractProfile{}), 88}, {"ContractParty", unsafe.Sizeof(htmlmaster.ContractParty{}), 96}, {"ContractTerm", unsafe.Sizeof(htmlmaster.ContractTerm{}), 48},
+		{"ContractProfile", unsafe.Sizeof(htmlmaster.ContractProfile{}), 96}, {"ContractParty", unsafe.Sizeof(htmlmaster.ContractParty{}), 96}, {"ContractTerm", unsafe.Sizeof(htmlmaster.ContractTerm{}), 48},
 		{"SigningPagePolicy", unsafe.Sizeof(htmlmaster.SigningPagePolicy{}), 248}, {"TemplateCommitment", unsafe.Sizeof(htmlmaster.TemplateCommitment{}), 64},
 		{"Input", unsafe.Sizeof(htmlsource.Input{}), 176}, {"PartyBinding", unsafe.Sizeof(htmlsource.PartyBinding{}), 32}, {"SigningArtifact", unsafe.Sizeof(htmlsource.SigningArtifact{}), 384}, {"SigningRectangle", unsafe.Sizeof(htmlsource.SigningRectangle{}), 56}, {"RecordPins", unsafe.Sizeof(htmlsource.RevisionValidationRecordPinsV1{}), 120},
 	} {

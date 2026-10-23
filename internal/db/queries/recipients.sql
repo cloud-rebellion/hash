@@ -117,7 +117,7 @@ WITH locked_document AS MATERIALIZED (
   FOR UPDATE OF d
 )
 UPDATE recipients r
-SET magic_token_expires_at = now()
+SET magic_token_expires_at = LEAST(r.magic_token_expires_at, now())
 FROM locked_document d
 WHERE r.document_id = sqlc.arg(document_id) AND d.id = r.document_id;
 
@@ -136,7 +136,11 @@ UPDATE recipients r
 SET magic_token_expires_at = sqlc.arg(magic_token_expires_at)
 FROM locked_document d
 WHERE r.document_id = sqlc.arg(document_id)
-  AND d.id = r.document_id AND r.status IN ('signed','accepted');
+  AND d.id = r.document_id AND r.status IN ('signed','accepted')
+  AND NOT EXISTS (
+    SELECT 1 FROM presign_executions e
+    WHERE e.document_id = r.document_id AND e.provider_recipient_id = r.id
+  );
 
 -- name: RotateCompletedArtifactToken :execrows
 -- Completion credentials are separate from the ceremony credential. Rotate to
@@ -158,7 +162,11 @@ FROM locked_document d
 WHERE r.id = sqlc.arg(id)
   AND r.document_id = sqlc.arg(document_id)
   AND d.id = r.document_id
-  AND r.status IN ('signed','accepted');
+  AND r.status IN ('signed','accepted')
+  AND NOT EXISTS (
+    SELECT 1 FROM presign_executions e
+    WHERE e.document_id = r.document_id AND e.provider_recipient_id = r.id
+  );
 
 -- name: DeleteRecipient :one
 -- The document-state predicate is part of the DELETE, not only a handler

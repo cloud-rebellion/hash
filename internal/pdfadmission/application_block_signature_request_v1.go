@@ -63,7 +63,7 @@ func (r *ApplicationSignerReaderV1) captureBlockSigningSourceV1(call context.Con
 func (r *ApplicationSignerReaderV1) retireBlockSigningReadConsumersV1() []func() {
 	// Caller holds r.mu. Closing a shell or SQL cannot release an actual ongoing
 	// immutable signing-source operation and its escaped prepared signature view.
-	if !r.consumerClosed || r.blockSigningBorrowers != 0 || r.packageMemberBorrowers != 0 {
+	if !r.consumerClosed || r.blockSigningBorrowers != 0 || r.packageMemberBorrowers != 0 || r.presignBorrowers != 0 {
 		return nil
 	}
 	consumers := r.consumers

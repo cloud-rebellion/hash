@@ -17,7 +17,11 @@ import (
 // source, policy or mutation authority. Resume opens its own genuine org/doc
 // owner and repeats every original lifecycle check. The original fixed50 queue
 // predicates and ordering are preserved; no full intent TEXT is fetched here.
-type HTMLSendRecoveryScopeV1 struct{ DocumentID, OrgID uuid.UUID }
+type HTMLSendRecoveryScopeV1 struct {
+	DocumentID, OrgID    uuid.UUID
+	PreSign              bool
+	CleanupPreparationID uuid.UUID
+}
 type ApplicationHTMLSendRecoveryScanV1 struct {
 	state *applicationHTMLSendRecoveryScanStateV1
 }
@@ -94,7 +98,13 @@ func (f *ApplicationSessionFactoryV1) ScanPendingHTMLSendRecoveryScopesV1(ctx co
 				if row == nil || row.DocumentID == uuid.Nil || row.OrgID == uuid.Nil {
 					return ErrHTMLSendWorkV1
 				}
-				s.scopes[i] = HTMLSendRecoveryScopeV1{DocumentID: row.DocumentID, OrgID: row.OrgID}
+				s.scopes[i] = HTMLSendRecoveryScopeV1{DocumentID: row.DocumentID, OrgID: row.OrgID, PreSign: row.PresignExecution}
+				if row.CleanupPreparationID.Valid {
+					if row.PresignExecution || uuid.UUID(row.CleanupPreparationID.Bytes) == uuid.Nil {
+						return ErrHTMLSendWorkV1
+					}
+					s.scopes[i].CleanupPreparationID = uuid.UUID(row.CleanupPreparationID.Bytes)
+				}
 			}
 			s.count = len(rows)
 			s.resolved = true

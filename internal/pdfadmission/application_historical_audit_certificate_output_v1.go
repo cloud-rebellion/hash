@@ -174,7 +174,7 @@ func (w *ApplicationHTMLSendWorkV1) NewHistoricalAuditCertificateV1(call context
 			return nil, ErrHistoricalFinalizationSourceV1
 		}
 	}
-	if snapshot.reportSchema == render.ParticipantReportSchemaV2 {
+	if snapshot.reportSchema == render.ParticipantReportSchemaV2 || snapshot.reportSchema == render.ParticipantReportSchemaV3 {
 		if !participantReportParserQuoteV2(&resource, len(snapshot.reportHTML), snapshot.reportRows) {
 			return nil, ErrHistoricalFinalizationSourceV1
 		}
@@ -253,7 +253,7 @@ func (w *ApplicationHTMLSendWorkV1) NewHistoricalAuditCertificateV1(call context
 	switch snapshot.reportSchema {
 	case render.ParticipantReportSchemaV1:
 		cert, payload, signature, err = render.CertificateFinishV1(prefix, doc, fields, snapshot.claims, manifestHTML, key, orgName, baseURL)
-	case render.ParticipantReportSchemaV2:
+	case render.ParticipantReportSchemaV2, render.ParticipantReportSchemaV3:
 		cert, payload, signature, err = render.CertificateFinishV2(prefix, doc, fields, snapshot.claims, manifestHTML, key, orgName, baseURL)
 	default:
 		return nil, ErrHistoricalFinalizationSourceV1

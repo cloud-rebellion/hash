@@ -85,6 +85,15 @@ const firstInstallCandidateArg = "--first-install-candidate-estate"
 const databaseIdentityArg = "--database-identity"
 
 func main() {
+	// Exact-image capability inspection is pure and deliberately precedes DB
+	// configuration. No database/env/credential is required or read in this mode.
+	if len(os.Args) == 2 && os.Args[1] == lifecycleContractArgV1 {
+		if err := writeCompiledLifecycleReportV1(os.Stdout); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "rollbackcheck: compiled lifecycle identity unavailable")
+			os.Exit(2)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	dsn := os.Getenv("HASH_DB_URL")

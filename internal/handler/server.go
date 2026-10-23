@@ -42,7 +42,9 @@ import (
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
+	"github.com/bright-interaction/hash/internal/noticeaccess"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/presignregistry"
 	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
@@ -87,7 +89,11 @@ const (
 
 // Server holds shared deps for HTTP handlers.
 type Server struct {
-	Pool *pgxpool.Pool
+	// Explicit controlled qualification gate; production remains disabled until
+	// the complete execution/publication/signing/lifecycle cut is qualified.
+	PreSignExecutionEnabled bool
+	NoticeAccess            *noticeaccess.EngineV1
+	Pool                    *pgxpool.Pool
 	// Must be constructed from the one actual configured process coordinator.
 	// Missing configuration refuses HTML creation, never adopts a Pool Tx.
 	HTMLCreationSessions   *pdfadmission.ApplicationSessionFactoryV1
@@ -248,6 +254,10 @@ func (s *Server) mountPresignRegistryRoutes(r chi.Router) {
 		r.With(auth.RequireRole(auth.RoleOwner)).Get("/grants", s.handlePresignOwnerGrants)
 		r.With(auth.RequireRole(auth.RoleOwner)).Get("/grants/{id}", s.handlePresignOwnerGrant)
 		r.Get("/requests/{request_id}", s.handlePresignRequest)
+		s.mountPresignExecutionRoutesV1(r, false)
+		r.Post("/supersessions", s.handlePreSignSupersessionV1)
+		r.Get("/supersessions/requests/{request_id}", s.handleGetPreSignSupersessionV1)
+		r.Get("/supersessions/documents/{document_id}/context", s.handlePreSignSupersessionContextV1)
 		r.Group(func(r chi.Router) {
 			r.Use(crmDocumentRateLimit(15))
 			r.With(auth.RequireRole(auth.RoleOwner)).Post("/workflows/preview", s.handlePresignWorkflowPreview)
@@ -297,6 +307,8 @@ func (s *Server) Routes() http.Handler {
 		// apply the same exact-origin browser guard as the authenticated API.
 		r.With(s.requireSameOriginMutation, auth.RequireSession(s.Cookies, SessionCookieName, s.Queries)).Post("/auth/logout", s.handleAuthLogout)
 	})
+
+	noticeaccess.MountV1(r, s.NoticeAccess)
 
 	// Public signature-verification surface (anonymous, CPU-heavy crypto +
 	// decompression). Moderate per-IP cap.
@@ -397,9 +409,23 @@ func (s *Server) Routes() http.Handler {
 			r.Use(httprate.LimitByIP(automationGlobalIPPerMinute, time.Minute))
 			r.Use(auth.RequireAPIKey(s.APIKeys))
 			r.Use(automationOrgRateLimit(automationOrgRequestsPerMinute))
-			r.Use(auth.RequireRole(auth.RoleSender))
-			r.Use(requireAutomationSignatureRequestScope)
-			r.Post("/signature-requests", s.handleAutomationSignatureRequest)
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireRole(auth.RoleSender))
+				r.Use(requireAutomationSignatureRequestScope)
+				r.Post("/signature-requests", s.handleAutomationSignatureRequest)
+			})
+			r.Route("/presign", func(r chi.Router) {
+				s.mountPresignExecutionRoutesV1(r, true)
+				r.Post("/documents", func(w http.ResponseWriter, r *http.Request) {
+					if !s.preSignExecutionAvailableV1() {
+						writePreSignExecutionErrorV1(w, presignregistry.ErrUnavailable)
+						return
+					}
+					s.handlePreSignAPISourceV1(w, r)
+				})
+				r.Get("/documents/requests/{request_id}", s.handleGetPreSignAPISourceV1)
+				r.Post("/documents/requests/{request_id}/close", s.handleClosePreSignAPISourceV1)
+			})
 		})
 	}
 
@@ -549,6 +575,11 @@ func (s *Server) Routes() http.Handler {
 			// document straight into the field designer (no template detour).
 			r.Post("/import", s.handleImportDocument)
 			r.Get("/{id}", s.handleGetDocument)
+			r.With(crmDocumentRateLimit(60)).Get("/{id}/amendments", s.handleLaterAmendmentsV1)
+			r.With(crmDocumentRateLimit(10)).Post("/{id}/amendments", s.handleCreateLaterAmendmentV1)
+			r.With(crmDocumentRateLimit(60)).Get("/{id}/amendment", s.handleLaterAmendmentRelationV1)
+			r.With(crmDocumentRateLimit(10)).Post("/{id}/amendments/{amendmentId}/notice", s.handleIssueLaterAmendmentNoticeV1)
+			r.With(crmDocumentRateLimit(10)).Post("/{id}/amendments/{amendmentId}/notice/access/{accessId}/revoke", s.handleRevokeLaterAmendmentNoticeAccessV1)
 			r.With(crmDocumentRateLimit(10)).Post("/{id}/attachments", s.handleSelectDocumentAttachmentV1)
 			r.With(crmDocumentRateLimit(10)).Patch("/{id}/attachments", s.handleSaveDocumentAttachmentLayoutV1)
 			r.With(crmDocumentRateLimit(60)).Get("/{id}/attachments", s.handleDocumentAttachmentsV1)
@@ -871,7 +902,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// Credential routes and APIs contain private document/user data or
 		// authentication redirects. Apply no-store even to error responses.
 		// Public branding and static assets retain their own caching policy.
-		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/completed/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
+		if strings.HasPrefix(r.URL.Path, "/notice/") || strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/completed/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/mcp" || strings.HasPrefix(r.URL.Path, "/mcp/") {
 			h.Set("Cache-Control", "no-store")
 			h.Set("Pragma", "no-cache")
 		}

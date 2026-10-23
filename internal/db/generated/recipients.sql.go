@@ -295,7 +295,7 @@ WITH locked_document AS MATERIALIZED (
   FOR UPDATE OF d
 )
 UPDATE recipients r
-SET magic_token_expires_at = now()
+SET magic_token_expires_at = LEAST(r.magic_token_expires_at, now())
 FROM locked_document d
 WHERE r.document_id = $1 AND d.id = r.document_id
 `
@@ -398,6 +398,10 @@ WHERE r.id = $3
   AND r.document_id = $4
   AND d.id = r.document_id
   AND r.status IN ('signed','accepted')
+  AND NOT EXISTS (
+    SELECT 1 FROM presign_executions e
+    WHERE e.document_id = r.document_id AND e.provider_recipient_id = r.id
+  )
 `
 
 type RotateCompletedArtifactTokenParams struct {
@@ -470,6 +474,10 @@ SET magic_token_expires_at = $1
 FROM locked_document d
 WHERE r.document_id = $2
   AND d.id = r.document_id AND r.status IN ('signed','accepted')
+  AND NOT EXISTS (
+    SELECT 1 FROM presign_executions e
+    WHERE e.document_id = r.document_id AND e.provider_recipient_id = r.id
+  )
 `
 
 type SetCompletedArtifactTokenExpiryParams struct {

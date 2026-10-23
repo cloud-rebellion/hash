@@ -9,6 +9,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/presign"
 	"github.com/google/uuid"
 )
 
@@ -91,7 +92,23 @@ func grantView(s *transactionState, id uuid.UUID, revision int64, owner bool) (G
 	if err != nil {
 		return out, err
 	}
-	return GrantView{OrgID: s.actor.orgID, UserID: s.actor.userID, Grant: g.Snapshot(), Reference: g.Reference(), CurrentRevision: h.CurrentRevision, Revoked: h.RevokedAt.Valid, RevocationReason: h.RevokedReason.String, Expired: !now.Before(g.Snapshot().ExpiresAt), ConsumedUses: r.ConsumedUses, ExecutionAvailable: false}, nil
+	next, err := s.q.NextPresignExecutionUse(s.ctx, generated.NextPresignExecutionUseParams{OrgID: s.actor.orgID, GrantID: id, GrantRevision: revision})
+	if err != nil || next < 1 {
+		return out, errors.Join(ErrUnavailable, err)
+	}
+	consumed := int64(next) - 1
+	available := false
+	if s.executionViews && eligible(s.user) && h.GrantorUserID == s.actor.userID && h.CurrentRevision == revision && !h.RevokedAt.Valid &&
+		!now.Before(g.Snapshot().NotBefore) && now.Before(g.Snapshot().ExpiresAt) && consumed < g.Snapshot().MaxUses {
+		_, policy, activeErr := activePolicy(s, g.Snapshot().Policy)
+		if activeErr == nil {
+			executor := policy.Snapshot().Executor
+			available = executor.Kind == presign.ExecutorMember && executor.UserID == s.actor.userID
+		} else if !errors.Is(activeErr, ErrConflict) && !errors.Is(activeErr, ErrNotFound) && !errors.Is(activeErr, auth.ErrMutationPermissionRevoked) {
+			return out, activeErr
+		}
+	}
+	return GrantView{OrgID: s.actor.orgID, UserID: s.actor.userID, Grant: g.Snapshot(), Reference: g.Reference(), CurrentRevision: h.CurrentRevision, Revoked: h.RevokedAt.Valid, RevocationReason: h.RevokedReason.String, Expired: !now.Before(g.Snapshot().ExpiresAt), ConsumedUses: consumed, ExecutionAvailable: available}, nil
 }
 
 func (e *Engine) getGrant(ctx context.Context, a SessionActor, id uuid.UUID, revision int64, owner bool) (GrantView, error) {

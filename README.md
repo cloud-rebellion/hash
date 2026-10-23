@@ -59,11 +59,16 @@ release acceptance.
 
 ## Quick start
 
-Organisation owners enroll and explicitly confirm their own BrightCRM account
-in Settings → Integrations. Credentials are encrypted with a dedicated operator
-key; fresh reads verify the remote account and selected records. Changed CRM
-values require document review before sending. See [CRM connector](docs/CRM-CONNECTOR.md)
-for setup, supported fields, migration and acceptance limits.
+Reactor is the intended path for connecting Hash to CRMs through scoped APIs;
+see [API contracts](docs/API.md) for the exposed interfaces. Configured Reactor/CRM
+journeys still require integration acceptance before a release claim.
+
+For the optional direct BrightCRM connector, organisation owners enroll and
+explicitly confirm their own account in Settings → Integrations. Credentials are
+encrypted with a dedicated operator key; fresh reads verify the remote account
+and selected records. Changed CRM values require document review before sending.
+See [CRM connector](docs/CRM-CONNECTOR.md) for setup, supported fields, migration
+and acceptance limits.
 
 ```bash
 cp .env.example .env

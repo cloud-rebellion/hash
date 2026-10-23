@@ -10,6 +10,24 @@ API surface. This guide is not a complete OpenAPI contract for that surface.
 
 See [draft document attachments](DOCUMENT-ATTACHMENTS-API.md) for the bounded
 staff REST/MCP selection and observation contract, outcomes and recovery.
+See [later amendments and agreed notice](LATER-AMENDMENTS-API.md) for the separate
+owner/session create/issue/revoke and authorized history reads, exact head/request
+reconciliation, initial visible-policy freeze and optional signer disclosure.
+The purpose-only public notice access/file routes do not accept a staff API key
+or signer token and do not create a signature, acknowledgement or receipt.
+
+## Pre-signing and linked drafts
+
+The isolated implementation candidate adds controlled pre-signing execution,
+approved-data API source creation and linked replacement drafts through sessions
+or policy-authorized API requests.
+The production switch remains disabled by default; source and component checks
+do not establish configured integration or release acceptance. See the exact
+[execution, source and supersession contract](PRE-SIGNING-EXECUTION-API.md) and
+[workflow/self-grant registry](PRE-SIGNING-REGISTRY-API.md). Pre-sign API executors
+require a regular API key with a finite future expiry and the approved executor
+and scope bindings. This additional requirement does not change the expiry rules
+of ordinary API keys used outside pre-sign workflows.
 
 ## Browser telemetry configuration
 

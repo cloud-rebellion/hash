@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	sentry "github.com/getsentry/sentry-go"
@@ -39,8 +40,17 @@ func redactCredentialPath(raw string) string {
 // customer-specific metadata and forwarding IPs, so retain only the redacted
 // method/URL needed to diagnose a failing route. Applied to errors and traces.
 func scrubSensitive(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	if event != nil {
+		event.Message = scrubLogText(event.Message)
+		for i := range event.Exception {
+			event.Exception[i].Value = scrubLogText(event.Exception[i].Value)
+		}
+	}
 	if event != nil && event.Request != nil {
 		event.Request.QueryString = ""
+		if at := strings.IndexAny(event.Request.URL, "?#"); at >= 0 {
+			event.Request.URL = event.Request.URL[:at]
+		}
 		event.Request.URL = redactCredentialPath(event.Request.URL)
 		event.Request.Data = ""
 		event.Request.Cookies = ""

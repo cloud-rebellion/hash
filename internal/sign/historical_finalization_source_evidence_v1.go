@@ -115,39 +115,50 @@ func (e *Engine) loadHistoricalFinalizationSignatureSourceOwnedV1(ctx context.Co
 	return e.loadHistoricalFinalizationRootSourceOwnedV1(ctx, reference, true)
 }
 func (e *Engine) loadHistoricalFinalizationRootSourceOwnedV1(ctx context.Context, reference *pdfadmission.ApplicationHistoricalFinalizationStageReferenceV1, rootSignatures bool) (document *generated.Document, owner *ownedHistoricalFinalizationSourceV1, failure error) {
+	stage := "finalization_source_owner"
+	defer func() { failure = blockSignatureDiagnosticV1(stage, failure) }()
 	owner, err := e.newHistoricalFinalizationSourceOwnerV1(ctx, reference)
 	if err != nil {
 		return nil, nil, err
 	}
+	stage = "finalization_source_storage"
 	client, ok := e.Storage.(*storage.Client)
 	if !ok || client == nil {
 		return nil, owner, ErrSigningAdmissionUnavailableV1
 	}
+	stage = "finalization_source_phase"
 	err = owner.operation.phaseV1(pdfadmission.HTMLHistoricalFinalizationSourceV1, func(call context.Context, _ *pdfadmission.ApplicationSessionV1, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
+		stage = "finalization_source_state"
 		if _, err := w.StateV1(call); err != nil {
 			return err
 		}
+		stage = "finalization_source_models"
 		models, err := w.ReadModelsV1(call)
 		if err != nil {
 			return err
 		}
+		stage = "finalization_source_reference"
 		if err = reference.MatchesDocumentV1(call, owner.operation.factory, models.Document); err != nil {
 			return err
 		}
+		stage = "finalization_source_new"
 		owner.source, err = w.NewHistoricalFinalizationSourceEvidenceV1(call, client)
 		if err != nil {
 			return err
 		}
+		stage = "finalization_source_versions"
 		document, err = owner.source.EnsureSourceVersionsV1(call)
 		if err != nil {
 			return err
 		}
+		stage = "finalization_source_signatures"
 		if rootSignatures {
 			if err = owner.source.EnsureSignatureVersionsV1(call); err != nil {
 				return err
 			}
 			owner.signatures = owner.source
 		}
+		stage = "finalization_source_commit"
 		return nil
 	})
 	if err != nil {

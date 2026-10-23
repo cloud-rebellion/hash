@@ -77,6 +77,12 @@ function eventID(): string {
 }
 
 // Route classes are fixed. Neither raw path segments nor a page URL are sent.
+// Capability entry pages never initialize or emit browser telemetry.
+// Check pathname only: never inspect the credential fragment.
+function noticeCapabilityPage(): boolean {
+	return typeof location !== 'undefined' && location.pathname.startsWith('/notice/');
+}
+
 function pageCategory(): string {
 	if (typeof location === 'undefined') return 'unknown';
 	const path = location.pathname;
@@ -153,7 +159,7 @@ function installSender(dsn: ParsedDsn, options: FlareBrowserCaptureOptions) {
 	return {
 		close() { closed = true; recent.clear(); },
 		send(category: FailureCategory, stack?: string, resource?: ResourceCategory) {
-			if (closed) return;
+			if (closed || noticeCapabilityPage()) return;
 			try {
 				const now = Date.now();
 				if (now - windowStarted >= 60_000) { windowStarted = now; sentInWindow = 0; recent.clear(); }
@@ -184,7 +190,7 @@ function installSender(dsn: ParsedDsn, options: FlareBrowserCaptureOptions) {
 }
 
 export function installFlareBrowserCapture(options: FlareBrowserCaptureOptions): () => void {
-	if (typeof window === 'undefined' || !validIdentity(options.environment) || !environmentNames.has(options.environment) || !validIdentity(options.release) || typeof options.dsn !== 'string') return () => {};
+	if (typeof window === 'undefined' || noticeCapabilityPage() || !validIdentity(options.environment) || !environmentNames.has(options.environment) || !validIdentity(options.release) || typeof options.dsn !== 'string') return () => {};
 	const dsn = parseDsn(options.dsn, options.environment);
 	if (!dsn) return () => {};
 	const marked = window as Window & { [captureMarker]?: boolean };
@@ -194,15 +200,18 @@ export function installFlareBrowserCapture(options: FlareBrowserCaptureOptions):
 	const reporter = { owner: window, send: (category: HandledFailureCategory) => sender.send(category) };
 	renderReporter = reporter;
 	const onError = (event: ErrorEvent) => {
+		if (noticeCapabilityPage()) return;
 		try {
 			if (event.target instanceof Element) return;
 			sender.send('javascript_error', errorStack(event.error));
 		} catch { sender.send('javascript_error'); }
 	};
 	const onRejection = (event: PromiseRejectionEvent) => {
+		if (noticeCapabilityPage()) return;
 		try { sender.send('unhandled_rejection', errorStack(event.reason)); } catch { sender.send('unhandled_rejection'); }
 	};
 	const onResourceError = (event: Event) => {
+		if (noticeCapabilityPage()) return;
 		try {
 			if (!(event.target instanceof Element)) return;
 			const element = event.target.tagName.toLowerCase();
@@ -211,6 +220,7 @@ export function installFlareBrowserCapture(options: FlareBrowserCaptureOptions):
 		} catch { sender.send('resource_error', undefined, 'other'); }
 	};
 	const onBoundary = (event: Event) => {
+		if (noticeCapabilityPage()) return;
 		try {
 			const detail = (event as CustomEvent<unknown>).detail;
 			sender.send('render_error', ownString(detail, 'componentStack'));
@@ -243,7 +253,7 @@ export function captureFlarePDFViewError(): void { captureHandledFlareFailure('p
 function captureHandledFlareFailure(category: HandledFailureCategory): void {
 	let releaseStartup = () => {};
 	try {
-		if (typeof window === 'undefined') return;
+		if (typeof window === 'undefined' || noticeCapabilityPage()) return;
 		const owner = window;
 		if (renderReporter?.owner === owner) { renderReporter.send(category); return; }
 		// Before onMount there is no normal sender. At most one bounded attempt
@@ -332,7 +342,7 @@ async function readRuntimeConfig(response: Response, signal: AbortSignal): Promi
 // Synchronous disposer fits Svelte onMount. A late/failed config response never
 // installs listeners after unmount, and pending fetch/body reads are aborted.
 export function installRuntimeFlareBrowserCapture(): () => void {
-	if (typeof window === 'undefined' || typeof fetch !== 'function') return () => {};
+	if (typeof window === 'undefined' || typeof fetch !== 'function' || noticeCapabilityPage()) return () => {};
 	const controller = new AbortController();
 	let closed = false;
 	let stopCapture = () => {};

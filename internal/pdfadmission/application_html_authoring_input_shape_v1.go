@@ -48,6 +48,16 @@ const (
 	htmlInputTermsV1
 	htmlInputMappingsV1
 	htmlInputRevisionV1
+	htmlInputAmendmentPolicyV1
+	htmlInputAmendmentModesV1
+	htmlInputAmendmentChannelsV1
+	htmlInputPreSignAPISourceV1
+	htmlInputPreSignReferenceV1
+	htmlInputPreSignRecordsV1
+	htmlInputPreSignRecordV1
+	htmlInputPreSignSupersessionV1
+	htmlInputPreSignPriorV1
+	htmlInputPreSignTemplateV1
 )
 
 type htmlInputFieldV1 struct {
@@ -123,6 +133,14 @@ var htmlInputContractV1Fields = [...]htmlInputFieldV1{
 	{"kind", htmlInputScalarV1},
 	{"parties", htmlInputPartiesV1},
 	{"terms", htmlInputTermsV1},
+	{"amendment_policy", htmlInputAmendmentPolicyV1},
+}
+var htmlInputAmendmentPolicyV1Fields = [...]htmlInputFieldV1{
+	{"term", htmlInputScalarV1},
+	{"clause_reference", htmlInputScalarV1},
+	{"allowed_modes", htmlInputAmendmentModesV1},
+	{"allowed_channels", htmlInputAmendmentChannelsV1},
+	{"effective_condition", htmlInputScalarV1},
 }
 var htmlInputPartyV1Fields = [...]htmlInputFieldV1{
 	{"slot", htmlInputScalarV1},
@@ -211,6 +229,9 @@ var htmlInputPopulationV1Fields = [...]htmlInputFieldV1{
 }
 
 func htmlInputFieldsV1(n htmlInputNodeV1) []htmlInputFieldV1 {
+	if fields := htmlPreSignInputFieldsV1(n); fields != nil {
+		return fields
+	}
 	if fields := htmlRevisionCanonicalFieldsV1(n); fields != nil {
 		return fields
 	}
@@ -237,6 +258,8 @@ func htmlInputFieldsV1(n htmlInputNodeV1) []htmlInputFieldV1 {
 		return htmlInputAssetV1Fields[:]
 	case htmlInputContractV1:
 		return htmlInputContractV1Fields[:]
+	case htmlInputAmendmentPolicyV1:
+		return htmlInputAmendmentPolicyV1Fields[:]
 	case htmlInputPartyV1:
 		return htmlInputPartyV1Fields[:]
 	case htmlInputTermV1:
@@ -263,6 +286,8 @@ func htmlInputArrayV1(n htmlInputNodeV1) (htmlInputNodeV1, int) {
 		return child, bound
 	}
 	switch n {
+	case htmlInputPreSignRecordsV1:
+		return htmlInputPreSignRecordV1, 3
 	case htmlInputValuesV1:
 		return htmlInputValueV1, htmlmaster.MaxDefinitions
 	case htmlInputSectionsV1:
@@ -273,6 +298,10 @@ func htmlInputArrayV1(n htmlInputNodeV1) (htmlInputNodeV1, int) {
 		return htmlInputPartyV1, 2
 	case htmlInputTermsV1:
 		return htmlInputTermV1, 16
+	case htmlInputAmendmentModesV1:
+		return htmlInputScalarV1, 3
+	case htmlInputAmendmentChannelsV1:
+		return htmlInputScalarV1, 1
 	case htmlInputMappingsV1:
 		return htmlInputMappingV1, crmconnection.MaxRecordReferences
 	}
@@ -286,6 +315,10 @@ func htmlAuthoringInputLimitV1(p HTMLAuthoringInputProfileV1) (int64, error) {
 		return 1 << 20, nil
 	case HTMLCRMTemplateSearchInputV1:
 		return 16 << 10, nil
+	case HTMLPreSignAPISourceInputV1:
+		return 16 << 10, nil
+	case HTMLPreSignSupersessionInputV1:
+		return 1 << 20, nil
 	case HTMLCRMTemplateObservationInputV1:
 		return 256 << 10, nil
 	case HTMLCreationClosureInputV1:
@@ -303,6 +336,10 @@ func htmlInputRootV1(p HTMLAuthoringInputProfileV1) htmlInputNodeV1 {
 		return htmlInputPreviewV1
 	case HTMLDocumentCreationInputV1:
 		return htmlInputDocumentV1
+	case HTMLPreSignAPISourceInputV1:
+		return htmlInputPreSignAPISourceV1
+	case HTMLPreSignSupersessionInputV1:
+		return htmlInputPreSignSupersessionV1
 	case HTMLCRMTemplateSearchInputV1:
 		return htmlInputSearchV1
 	case HTMLCRMTemplateObservationInputV1:
@@ -674,7 +711,7 @@ func (p *htmlInputScanV1) value(node htmlInputNodeV1, depth int) error {
 	return nil
 }
 
-// Pinned 64-bit Go1.26.9 model: decoder buffers grow 2*cap+512; strings
+// Reviewed 64-bit Go1.26.9/Go1.26.10 model: decoder buffers grow 2*cap+512; strings
 // unquote into encodedLen+8 then at most one copied string. Each bounded map
 // stays below a 1024-slot table split (largest request map64 entries); growth
 // slots include all old groups. Typed element/header maxima are from the fixed
@@ -687,12 +724,11 @@ func htmlInputAddV1(total *int64, count, unit int64) bool {
 	return true
 }
 
-var htmlAuthoringInputRuntimeOKV1 = func() bool {
-	if runtime.Version() != "go1.26.9" || strconv.IntSize != 64 {
-		return false
-	}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
+// The two exact versions share the source implementations used by this model.
+// Module, image and CI release policy separately requires Go1.26.10; retaining
+// Go1.26.9 here preserves only its already-reviewed model compatibility.
+func htmlAuthoringInputRuntimeSupportedV1(version string, intSize int, info *debug.BuildInfo) bool {
+	if (version != "go1.26.9" && version != "go1.26.10") || intSize != 64 || info == nil {
 		return false
 	}
 	for _, setting := range info.Settings {
@@ -701,6 +737,11 @@ var htmlAuthoringInputRuntimeOKV1 = func() bool {
 		}
 	}
 	return true
+}
+
+var htmlAuthoringInputRuntimeOKV1 = func() bool {
+	info, ok := debug.ReadBuildInfo()
+	return ok && htmlAuthoringInputRuntimeSupportedV1(runtime.Version(), strconv.IntSize, info)
 }()
 
 func htmlAuthoringInputReadResourcesV1(limit int64) (int64, error) {

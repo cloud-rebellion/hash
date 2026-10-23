@@ -34,6 +34,16 @@ SELECT EXISTS (
 -- cannot prove complete fulfillment while any of this tenant's HTML authoring
 -- inventory exists, including archived templates and historical snapshots.
 SELECT EXISTS (
+    SELECT 1 FROM document_amendments_v1 a WHERE a.org_id=sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_amendment_policies_v1 p WHERE p.org_id=sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_amendment_notices_v1 n WHERE n.org_id=sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_amendment_notice_deliveries_v1 d WHERE d.org_id=sqlc.arg(org_id)::uuid
+    UNION ALL
+    SELECT 1 FROM document_amendment_notice_access_v1 c WHERE c.org_id=sqlc.arg(org_id)::uuid
+    UNION ALL
     SELECT 1 FROM document_packages_v1 p WHERE p.org_id = sqlc.arg(org_id)::uuid
     UNION ALL
     SELECT 1 FROM document_package_send_attempts_v1 a WHERE a.org_id = sqlc.arg(org_id)::uuid

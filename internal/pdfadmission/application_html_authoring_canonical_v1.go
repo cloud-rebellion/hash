@@ -83,13 +83,16 @@ func (r *ApplicationHTMLAuthoringReaderV1) CanonicalRetainedTemplateV1(ctx conte
 func (r *ApplicationHTMLAuthoringReaderV1) CanonicalRetainedTemplateRecheckV1(ctx context.Context, id uuid.UUID, version int32) (htmlmaster.TemplateCommitment, error) {
 	return r.canonicalSourceV1(ctx, id, version, true, htmlStoredTemplateRecheckV1)
 }
-func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context, id uuid.UUID, version int32, revision bool, purpose htmlStoredTemplatePurposeV1) (htmlmaster.TemplateCommitment, error) {
+func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context, id uuid.UUID, version int32, revision bool, purpose htmlStoredTemplatePurposeV1) (result htmlmaster.TemplateCommitment, failure error) {
+	phase := "reader_identity"
+	defer func() { failure = htmlCanonicalFailureV1(ctx, phase, failure) }()
 	var empty htmlmaster.TemplateCommitment
 	if r == nil || r.self != r {
 		return empty, ErrHTMLAuthoringReadV1
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	phase = "reader_scope"
 	if !r.valid(ctx) {
 		return empty, ErrHTMLAuthoringReadV1
 	}
@@ -102,9 +105,17 @@ func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context
 		}
 	}
 	if entry == nil || entry.started || entry.delivered {
+		phase = "reader_entry_missing"
+		if entry != nil {
+			phase = "reader_entry_delivered"
+			if entry.started {
+				phase = "reader_entry_started"
+			}
+		}
 		return empty, ErrHTMLAuthoringReadV1
 	}
 	entry.started = true
+	phase = "model_owner"
 	owner, err := r.session.newHTMLCanonicalModelConsumerV1(ctx)
 	if err != nil {
 		return empty, err
@@ -117,14 +128,16 @@ func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context
 	if entry.reused && entry.purpose.coversV1(purpose) {
 		// The original parser/Compile/output grants remain live. Price THIS new
 		// defensive byte-copy consumer before exposing another actual result.
+		phase = "reused_copy_cost"
 		cost, e := htmlAuthoringCanonicalCopyResourcesV1(content, 0, 0)
 		if e != nil {
 			return empty, e
 		}
-		if e = owner.holdV1(ctx, cost); e != nil {
+		if e = owner.holdAtV1(ctx, cost, "reused_copy_hold"); e != nil {
 			return empty, e
 		}
 	} else {
+		phase = "canonical_model"
 		var e error
 		content, e = owner.canonicalTemplateV1(ctx, entry.master, entry.defaults, entry.digest, entry.digestValid, purpose)
 		if e != nil {

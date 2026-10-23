@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/bright-interaction/hash/internal/amendments"
 )
 
 // ValidateRecipientReadCredential retains the exact public magic-link
@@ -22,6 +24,11 @@ import (
 func ValidateRecipientReadCredential(original, fresh *RecipientContext, now time.Time) error {
 	if original == nil || fresh == nil || original.Recipient == nil || fresh.Recipient == nil ||
 		original.Document == nil || fresh.Document == nil {
+		return ErrMagicLinkExpired
+	}
+	if original.AmendmentContext.ValidateV1(original.Document.ID, original.Document.RequiresSignature) != nil ||
+		fresh.AmendmentContext.ValidateV1(fresh.Document.ID, fresh.Document.RequiresSignature) != nil ||
+		!amendments.EqualSignerContextV1(original.AmendmentContext, fresh.AmendmentContext) {
 		return ErrMagicLinkExpired
 	}
 	oldRecipient, newRecipient := original.Recipient, fresh.Recipient

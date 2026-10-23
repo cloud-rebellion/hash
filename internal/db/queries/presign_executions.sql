@@ -117,3 +117,17 @@ FROM presign_executions e WHERE e.org_id=$1 AND e.id=$2
  AND i.retain_until=hash_evidence_retain_until(e.ceremony_epoch,7)
  AND i.retention_started_at IS NULL AND i.retention_completed_at IS NULL
 RETURNING i.*;
+
+-- name: HasPresignExecutionForDocumentV1 :one
+SELECT EXISTS(SELECT 1 FROM presign_executions WHERE org_id=$1 AND document_id=$2);
+
+-- name: GetPresignExecutionRequestLocatorV1 :one
+-- Private scalar locator only; retained document evidence is loaded separately.
+SELECT r.state,e.document_id,r.execution_id
+ FROM presign_execution_requests r LEFT JOIN presign_executions e ON e.org_id=r.org_id AND e.id=r.execution_id
+ WHERE r.org_id=$1 AND r.executor_kind=$2 AND r.executor_user_id=$3 AND r.executor_credential_id=$4 AND r.request_id=$5;
+
+-- name: ClosePreparingPresignExecutionRequestV1 :exec
+-- Caller holds the original request lock and same authenticated/audited Tx.
+UPDATE presign_preparations_v1 SET state='closed'
+ WHERE org_id=$1 AND executor_kind=$2 AND executor_user_id=$3 AND executor_credential_id=$4 AND request_id=$5 AND state='preparing';

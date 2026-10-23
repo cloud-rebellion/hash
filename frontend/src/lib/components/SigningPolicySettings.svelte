@@ -74,7 +74,7 @@
 
 <div class="px-4 sm:px-6 py-10 max-w-5xl mx-auto space-y-6" data-signing-policies>
   <div><p class="page-eyebrow">Settings · Signing</p><h1 class="page-title">Signing workflows and policies</h1></div>
-  <div class="card p-5 space-y-2 border-l-4 border-warning"><h2 class="font-medium">Pre-sign execution unavailable</h2><p class="text-sm text-text-secondary">Owners can approve exact workflow rules and manage recorded authority. Approval does not sign or send a document. The full document and customer signing journey must be enabled and verified separately.</p></div>
+  <div class="card p-5 space-y-2 border-l-4 border-warning"><h2 class="font-medium">Approved signing workflows</h2><p class="text-sm text-text-secondary">Approve exact workflow rules and manage recorded authority. Approval does not sign or send a document.</p>{#if registryState.context?.execution_available}<p class="text-sm text-text-secondary">An eligible agreement can use these rules only with current named authority and a confirmed execution.</p>{:else if registryState.context}<p class="text-sm text-text-secondary">Pre-signing is not currently available from this service.</p>{/if}</div>
   {#if registryState.error}<p role="alert" class="card p-4 text-danger text-sm">{registryState.error}</p>{/if}
   {#if registryState.notice}<p role="status" class="card p-4 text-sm">{registryState.notice}</p>{/if}
   {#if registryState.markerError}<p role="alert" class="card p-4 text-danger">Pending request metadata could not be verified. New changes remain blocked. Ask your operator to investigate.</p>{/if}
@@ -112,7 +112,7 @@
         <p class="text-sm">Template version {preview.intent.definition.template.version}, approved by {preview.intent.definition.template.approved_by} at {preview.intent.definition.template.approved_at}.</p>
         <pre class="p-3 bg-bg-elevated rounded text-xs whitespace-pre-wrap break-all">{JSON.stringify(preview.intent.definition, null, 2)}</pre>
         <p class="text-xs font-mono break-all">Workflow commitment: {preview.definition_sha256}</p><p class="text-xs text-text-muted">Confirmation expires {preview.expires_at}. No authority has been granted and no document has been signed.</p>
-        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canWrite} /><span>I approve this exact template revision, executor, complete rule content, provider declarations and limits. I understand that execution is unavailable.</span></label>
+        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canWrite} /><span>I approve this exact template revision, executor, complete rule content, provider declarations and limits. Each execution must satisfy these rules and current named authority.</span></label>
         <button class="btn btn-primary" disabled={!canWrite || !registryState.confirmed} onclick={() => controller.approve()}>Approve workflow and policy</button>
       </section>
     {/if}

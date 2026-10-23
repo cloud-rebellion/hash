@@ -1,5 +1,6 @@
 import { checkedPackageSendObservation, checkedPackageSendReceipt, checkedPackageSendInspection, type PackageSendObservation, type PackageSendReceipt } from '../packageSend';
 import { commentQuery, latestComments, type CommentPage, type CommentSelection } from '../commentHistory';
+import { checkedPreSignDocumentView, type PreSignDocumentView } from '../presignExecution';
 // Hash frontend API client.
 import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot, HTMLSigningPage } from '../htmlTemplate';
 
@@ -32,6 +33,7 @@ export interface DocumentResponse {
   routing_mode: string;
   source_kind: 'blocks' | 'pdf';
   pdf_sha256?: string;
+  pre_sign?: PreSignDocumentView;
   has_html_source?: boolean;
   html_review_required?: boolean;
   html_source_commitment?: string;
@@ -445,7 +447,9 @@ export async function importProposalHTML(
 }
 
 export async function getDocument(id: string, signal?: AbortSignal): Promise<DocumentResponse> {
-  return request('GET', `/api/v1/documents/${id}`, undefined, signal);
+  const document = await request<DocumentResponse>('GET', `/api/v1/documents/${id}`, undefined, signal);
+  if (Object.hasOwn(document, 'pre_sign')) document.pre_sign = checkedPreSignDocumentView(document.pre_sign);
+  return document;
 }
 
 export interface ChangeRequest {

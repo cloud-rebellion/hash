@@ -248,7 +248,9 @@ func (prepared *preparedHTMLDraft) matches(revision *generated.HtmlTemplateRevis
 // Refuse revoked/expired original credentials or drift before writing an object.
 // This short read transaction ends before worker/storage work. The final write
 // transaction must still repeat all checks, including quota and audit waits.
-func (s *Server) recheckHTMLPreparation(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, prepared *preparedHTMLDraft, crm *crmTemplatePopulationAdmission) error {
+func (s *Server) recheckHTMLPreparation(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, prepared *preparedHTMLDraft, crm htmlPopulationV1) (failure error) {
+	defer func() { failure = preSignAPIHTMLCreationFailureV1(ctx, "html_recheck", failure) }()
+	crm = normalizeHTMLPopulationV1(crm)
 	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
 	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, templateID)
@@ -301,11 +303,11 @@ func (s *Server) lockHTMLCreationTemplateRecheckV1(ctx context.Context, tx pgx.T
 func (s *Server) lockHTMLCreationTemplateForV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, recheck bool) (*authoring.MemberGuard, *generated.HtmlTemplateRevision, htmlmaster.TemplateCommitment, error) {
 	reader, err := htmlAuthoringReaderV1(tx)
 	if err != nil {
-		return nil, nil, htmlmaster.TemplateCommitment{}, err
+		return nil, nil, htmlmaster.TemplateCommitment{}, preSignAPIHTMLCreationFailureV1(ctx, "html_template_revision", err)
 	}
 	template, revision, err := reader.ReadTemplateRevisionV1(ctx, templateID, in.ExpectedTemplateVersion)
 	if err != nil {
-		return nil, nil, htmlmaster.TemplateCommitment{}, err
+		return nil, nil, htmlmaster.TemplateCommitment{}, preSignAPIHTMLCreationFailureV1(ctx, "html_template_revision", err)
 	}
 	if template.Version != in.ExpectedTemplateVersion || !bytes.Equal(template.HtmlContentSha256, digest) ||
 		!revision.ApprovedBy.Valid || !revision.ApprovedAt.Valid || !bytes.Equal(revision.ContentSha256, digest) {
@@ -313,7 +315,7 @@ func (s *Server) lockHTMLCreationTemplateForV1(ctx context.Context, tx pgx.Tx, a
 	}
 	guard, err := lockHTMLAuthorV1(ctx, tx, actor, false)
 	if err != nil {
-		return nil, nil, htmlmaster.TemplateCommitment{}, err
+		return nil, nil, htmlmaster.TemplateCommitment{}, preSignAPIHTMLCreationFailureV1(ctx, "html_template_author", err)
 	}
 	var content htmlmaster.TemplateCommitment
 	if recheck {
@@ -322,7 +324,7 @@ func (s *Server) lockHTMLCreationTemplateForV1(ctx context.Context, tx pgx.Tx, a
 		content, err = reader.CanonicalRetainedTemplateV1(ctx, templateID, in.ExpectedTemplateVersion)
 	}
 	if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
-		return nil, nil, htmlmaster.TemplateCommitment{}, err
+		return nil, nil, htmlmaster.TemplateCommitment{}, preSignAPIHTMLCreationFailureV1(ctx, "html_template_canonical", err)
 	}
 	if err != nil || content.SHA256 != in.ExpectedTemplateContentSHA256 {
 		return nil, nil, htmlmaster.TemplateCommitment{}, errHTMLTemplateConflict
@@ -330,9 +332,13 @@ func (s *Server) lockHTMLCreationTemplateForV1(ctx context.Context, tx pgx.Tx, a
 	return guard, revision, content, nil
 }
 
-func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, crm *crmTemplatePopulationAdmission) (result *preparedHTMLDraft, failure error) {
+func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, crm htmlPopulationV1) (result *preparedHTMLDraft, failure error) {
+	phase := "html_prepare"
+	defer func() { failure = preSignAPIHTMLCreationFailureV1(ctx, phase, failure) }()
+	crm = normalizeHTMLPopulationV1(crm)
 	readCtx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
 	defer cancel()
+	phase = "html_prepare_open"
 	o, err := s.openHTMLAuthoringV1(readCtx, actor.OrgID, templateID)
 	if err != nil {
 		return nil, err
@@ -348,9 +354,12 @@ func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, te
 	err = o.session.WithTxV1(readCtx, func(readCtx context.Context, owned generated.DBTX) error {
 		// Bind actual typed input maps before defaults/input clones, Marshal or HTML.
 		producerValues := map[string]string(in.Values)
-		if crm != nil && crm.observation != nil {
-			producerValues = crm.observation.values
+		if crm != nil {
+			if retained := crm.retainedInputValuesV1(); retained != nil {
+				producerValues = retained
+			}
 		}
+		phase = "html_prepare_maps"
 		if err := o.reader.AcquireStringMapsV1(readCtx, producerValues, in.Sections); err != nil {
 			return err
 		}
@@ -360,14 +369,17 @@ func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, te
 			return err
 		}
 		revision, content = r, c
+		phase = "html_template_author"
 		return guard.Recheck(readCtx)
 	})
 	if err != nil {
 		return nil, err
 	}
+	phase = "html_prepare_commit"
 	if err = o.session.CommitV1(readCtx); err != nil {
 		return nil, err
 	}
+	phase = "html_prepare"
 	master, err := htmlmaster.Decode(content.MasterJSON)
 	if err != nil {
 		return nil, err
@@ -401,6 +413,13 @@ func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, te
 }
 
 func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, expires pgtype.Timestamptz, crm *crmTemplatePopulationAdmission, inputDigest string) (result *htmlCreationOutcome, failure error) {
+	return s.instantiateHTMLDocumentPopulationV1(ctx, actor, templateID, in, digest, expires, normalizeHTMLPopulationV1(crm), inputDigest)
+}
+
+func (s *Server) instantiateHTMLDocumentPopulationV1(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, expires pgtype.Timestamptz, crm htmlPopulationV1, inputDigest string) (result *htmlCreationOutcome, failure error) {
+	phase := "html_prepare"
+	defer func() { failure = preSignAPIHTMLCreationFailureV1(ctx, phase, failure) }()
+	crm = normalizeHTMLPopulationV1(crm)
 	if err := in.checkExpectedActor(actor); err != nil {
 		return nil, err
 	}
@@ -416,6 +435,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 			prepared.closeOwned()
 		}
 	}()
+	phase = "html_render"
 	pdf, err := s.Sign.PDF.HTMLToPDF(ctx, prepared.rendered.HTML, render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"})
 	if err != nil {
 		return nil, err
@@ -429,9 +449,11 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 		}
 		composed = &composition
 	}
+	phase = "html_recheck"
 	if err = s.recheckHTMLPreparation(ctx, actor, templateID, in, digest, prepared, crm); err != nil {
 		return nil, err
 	}
+	phase = "html_artifact"
 	var artifact *docintake.PreparedPDFSource
 	if composed != nil {
 		artifact, err = docintake.PrepareComposedPDFTemplateSource(ctx, s.Storage, actor.OrgID, *composed)
@@ -463,6 +485,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	}
 	// Resource identity precedes only a real fresh INSERT; it grants no contract authority.
 	documentID := uuid.New()
+	phase = "html_final_open"
 	session, err := s.HTMLCreationSessions.OpenV1(finalCtx, actor.OrgID, documentID)
 	if err != nil {
 		if session != nil {
@@ -506,12 +529,14 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 		}
 	}()
 	err = session.WithTxV1(finalCtx, func(finalCtx context.Context, owned generated.DBTX) error {
+		phase = "html_final_open"
 		reader, err = session.NewHTMLAuthoringReaderV1(finalCtx)
 		if err != nil {
 			return err
 		}
 		tx := &htmlCreationPolicyTxV1{DBTX: owned, reader: reader}
 		q := generated.New(tx)
+		phase = "html_final_writer"
 		writer, err = session.NewHTMLCreationWriterV1(finalCtx, pdfadmission.HTMLCreationInputsV1{
 			StoredMaster: prepared.revision.HtmlMasterJson, StoredDefaults: prepared.revision.VariablesJson,
 			CanonicalMaster: prepared.content.MasterJSON, CanonicalDefaults: prepared.content.DefaultsJSON, Variables: variables, Sections: sections,
@@ -520,6 +545,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 			return err
 		}
 
+		phase = "html_final_source"
 		if in.RequestID != uuid.Nil {
 			// Retiring a request must fence final creation even when billing is
 			// intentionally disabled for a direct internal caller.
@@ -674,6 +700,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 	}
 	// A replay has no newly attached object; preserve only genuine new-creation uncertainty.
 	commitAttempted = !result.replayed
+	phase = "html_final_commit"
 	if err = session.CommitV1(finalCtx); err != nil {
 		// Observe only this SAME native owner after its synchronous Commit returns.
 		// A genuine pre-dispatch refusal may compensate the unused fresh object;
@@ -684,6 +711,7 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 		result = nil
 		return nil, err
 	}
+	phase = "html_postcommit_publish"
 	for i, event := range pending {
 		if pendingOwners[i] != nil {
 			if err = ownedaudit.PublishV1(s.Audit, event, pendingOwners[i]); err != nil {

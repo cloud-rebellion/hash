@@ -162,6 +162,9 @@ func (e *Engine) completeOwnedSealedSendV1(ctx context.Context, o *ownedSendOper
 				invites = append(invites, pendingInvite{rec.ID, rec.Email, rec.Name, rec.Role, rec.Locale, signURL, beaconURL})
 			}
 		}
+		if err = p.work.FreezePresentedAmendmentPolicyV1(call, source); err != nil {
+			return err
+		}
 		sent, err = p.work.CompleteDocumentSendV1(call)
 		if err != nil {
 			return fmt.Errorf("complete document send sealing: %w", err)

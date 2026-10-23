@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/bright-interaction/hash/internal/amendments"
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/documentpackage"
@@ -47,8 +49,10 @@ type signerContextResponse struct {
 		Status string    `json:"status"`
 		Locale string    `json:"locale"`
 	} `json:"recipient"`
-	Fonts          []string              `json:"fonts"`
-	PDFObservation *signerPDFObservation `json:"pdf_observation,omitempty"`
+	Fonts            []string                    `json:"fonts"`
+	PDFObservation   *signerPDFObservation       `json:"pdf_observation,omitempty"`
+	AmendmentContext *amendments.SignerContextV1 `json:"amendment_context,omitempty"`
+	PreSignContext   *sign.PreSignContextV1      `json:"pre_sign_context,omitempty"`
 
 	// Privacy is the GDPR Article 13 transparency payload the signer
 	// page renders inline. Surfacing it here (rather than only on a
@@ -173,6 +177,8 @@ func (s *Server) handleSignerContext(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Privacy = observation.notice
 	out.PDFObservation = observation.pdf
+	out.AmendmentContext = amendments.CloneSignerContextV1(rc.AmendmentContext)
+	out.PreSignContext = rc.PreSignContextV1()
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -365,6 +371,9 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
 			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
 		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
+			if stage := sign.BlockSignatureFailureStageV1(err); stage != "" {
+				slog.Warn("owned signature admission refused", "stage", stage)
+			}
 			writeError(w, http.StatusServiceUnavailable, "signing is temporarily unavailable")
 		case errors.Is(err, sign.ErrParticipantReportCapacityV1):
 			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing")
@@ -708,6 +717,28 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 	observation, err := s.captureSignerReadObservation(r, rc)
 	if err != nil || observation.pdf == nil {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
+		return
+	}
+	if rc.PreSignContextV1() != nil {
+		wrote := false
+		err := s.Sign.WithSignerPresignPDFV1(r.Context(), rc, func(body []byte) error {
+			sum := sha256.Sum256(body)
+			if hex.EncodeToString(sum[:]) != observation.pdf.PDFSHA256 {
+				return errSignerReadChanged
+			}
+			if err := s.recheckSignerRead(r, rc, observation); err != nil {
+				return err
+			}
+			setSignerPDFObservationHeaders(w, observation.pdf)
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Header().Set("Content-Disposition", "inline")
+			wrote = true
+			_, err := w.Write(body)
+			return err
+		})
+		if err != nil && !wrote {
+			writeSignerReadError(w, err)
+		}
 		return
 	}
 	body, err := readDocumentArtifact(r.Context(), s.Storage, rc.Document, rc.Document.PdfStorageKey.String, rc.Document.PdfSha256, rc.Document.PdfStorageVersionID)

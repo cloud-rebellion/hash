@@ -4,6 +4,8 @@
   import { page } from '$app/stores';
   import { checkedPackageSendObservation, type PackageSendObservation } from '$lib/packageSend';
   import { PackageSendStatusController } from '$lib/packageSendStatus';
+  import PreSignSend from './PreSignSend.svelte';
+  import type { PreSignResult } from '$lib/presignExecution';
   import { sameRecipientDraft, type RecipientDraft } from './senderDraft';
   import {
     listRecipients,
@@ -72,6 +74,7 @@
     defaultLocale?: string;
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
+    onPreSignCommitted?: (result: PreSignResult) => boolean | Promise<boolean>;
     onDefaultLocaleChange?: (locale: string) => Promise<void> | void;
     onRecipientsChange?: () => void;
   };
@@ -96,11 +99,16 @@
     defaultLocale = 'en',
     signatureFields = [],
     onStatusChange,
+    onPreSignCommitted,
     onDefaultLocaleChange,
     onRecipientsChange,
   }: Props = $props();
 
-  const otherMutationBusy = $derived(crmBusy || externalMutationBusy);
+  let preSignMode = $state<'manual' | 'presign'>('manual');
+  let preSignBusy = $state(false);
+  let preSignRecoveryBlocked = $state(true);
+  let preSignDraft = $state(false);
+  const otherMutationBusy = $derived(crmBusy || externalMutationBusy || preSignBusy || preSignRecoveryBlocked);
   // Distinct roles that have a signature field; each needs a recipient to sign.
   const signerRoles = $derived([
     ...new Set([...intendedParties.map((party) => party.role), ...signatureFields.map((field) => field.role.trim().toLowerCase()).filter(Boolean)]),
@@ -207,16 +215,16 @@
     return showForm && formBaseline !== null && !sameRecipientDraft(currentForm(), formBaseline);
   }
   function hasMeaningfulDraft(): boolean {
-    return recipientDraftChanged() || lawfulBasis !== '' || docLocale !== confirmedDocLocale;
+    return recipientDraftChanged() || lawfulBasis !== '' || docLocale !== confirmedDocLocale || preSignDraft;
   }
   function confirmFormReplacement(): boolean {
     return !recipientDraftChanged() || window.confirm('Discard the unsaved recipient changes?');
   }
 
-  $effect(() => { const dirty=recipientDraftChanged() || docLocale!==confirmedDocLocale; untrack(()=>onDraftStateChange?.(dirty)); });
+  $effect(() => { const dirty=recipientDraftChanged() || docLocale!==confirmedDocLocale || preSignDraft; untrack(()=>onDraftStateChange?.(dirty)); });
   // Lifecycle action state.
   let busy = $state<'send' | 'remind' | 'void' | null>(null);
-  $effect(() => { const active = !!busy || saving || savingLocale || !!removingID; untrack(() => onMutationStateChange?.(active)); });
+  $effect(() => { const active = !!busy || saving || savingLocale || !!removingID || preSignBusy || preSignRecoveryBlocked; untrack(() => onMutationStateChange?.(active)); });
   let links = $state<SignerLink[] | null>(null);
   let pendingPackageAttempt=$state<string | null>(null), packageUncertain=$state(false), checkingPackage=$state(false);
   let packageReviewRequired=$state(false), observedPackageReviewRevision=untrack(()=>packageReviewRevision);
@@ -469,7 +477,7 @@
 
   async function send() {
     const scope = captureScope();
-    if (!scope || !editable || packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked
+    if (!scope || preSignMode !== 'manual' || !editable || packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || busy || saving || savingLocale || removingID || reviewRequired || revisionBlocked
         || (generatedPlacementRequired && !generatedPlacementReady) || loading || recipientRefreshError || partyConflicts.length) return;
     if (recipientDraftChanged()) {
       error = 'Save or cancel the recipient changes before sending this document.';
@@ -948,14 +956,21 @@
 			</p>
 		</div>
 	{/if}
+  <PreSignSend {documentID} {sourceCommitment} {status} {lawfulBasis} bind:mode={preSignMode}
+    blocked={packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || crmBusy || externalMutationBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0}
+    onPendingChange={(pending) => { preSignRecoveryBlocked = pending; }} onBusyChange={(active) => { preSignBusy = active; }}
+    onDraftChange={(dirty) => { preSignDraft = dirty; }}
+    onCommitted={(result) => { if (captureScope() && result.document_id === documentID) { links = null; lawfulBasis = ''; return onPreSignCommitted?.(result) ?? false; } return false; }} />
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+      {#if preSignMode === 'manual'}<button class="btn btn-primary" onclick={send} disabled={packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
         <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
-      </button>
+      </button>{/if}
       {#if attachmentsBlocked}
         <span class="text-xs text-warning">{attachmentsMessage || "Review and reconcile the saved attachments before sending."}</span>
-      {:else if crmBlocked || otherMutationBusy}
+      {:else if preSignBusy || preSignRecoveryBlocked}
+        <span class="text-xs text-warning">Inspect and resolve the original pre-signing request before another sending action.</span>
+      {:else if crmBlocked || crmBusy || externalMutationBusy}
         <span class="text-xs text-warning">Refresh, review and apply any pending CRM information before sending.</span>
       {:else if revisionBlocked}
         <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>

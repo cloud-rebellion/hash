@@ -7,6 +7,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +37,51 @@ import (
 type ownedChatRow169V1 struct {
 	ID   string `json:"id"`
 	Body string `json:"body"`
+}
+
+type ownedChatDone169V1 struct {
+	ExitCode int                 `json:"exit_code"`
+	Verified bool                `json:"verified"`
+	Posted   []ownedChatRow169V1 `json:"posted"`
+}
+
+// A browser creates its exclusive private file before its single JSON write.
+// Empty or incomplete first reads remain pending within the existing150s owner.
+// File safety, completed invalid JSON and failed browser verdicts still refuse.
+func ownedChatReadDone169V1(path string) (ownedChatDone169V1, bool, error) {
+	var done ownedChatDone169V1
+	raw, err := oidc439ReadDone(path)
+	if os.IsNotExist(err) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return done, false, nil
+	}
+	if err != nil {
+		return done, false, err
+	}
+	if len(raw) > 1024 {
+		return done, true, os.ErrInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&done); errors.Is(err, io.ErrUnexpectedEOF) {
+		return ownedChatDone169V1{}, false, nil
+	}
+	if err != nil || decoder.Decode(new(any)) != io.EOF || done.ExitCode != 0 || !done.Verified || len(done.Posted) != 2 {
+		return done, true, os.ErrInvalid
+	}
+	for i, row := range done.Posted {
+		id, parseErr := uuid.Parse(row.ID)
+		want := "Owned browser staff message ÅÄÖ"
+		if i == 1 {
+			want = "Owned browser signer message ÅÄÖ"
+		}
+		if parseErr != nil || id == uuid.Nil || row.ID != id.String() || row.Body != want {
+			return done, true, os.ErrInvalid
+		}
+	}
+	if done.Posted[0].ID == done.Posted[1].ID {
+		return done, true, os.ErrInvalid
+	}
+	return done, true, nil
 }
 
 // Separate chat qualification; the original all-party four-artifact oracle is untouched.
@@ -228,23 +274,18 @@ func TestOwnedCommentHistoryPortalsWithExternalBrowserE2E(t *testing.T) {
 		t.Fatal("private input write failed")
 	}
 	defer os.Remove(inputPath)
-	var done struct {
-		ExitCode int                 `json:"exit_code"`
-		Verified bool                `json:"verified"`
-		Posted   []ownedChatRow169V1 `json:"posted"`
-	}
+	var done ownedChatDone169V1
 	deadline := time.Now().Add(150 * time.Second)
 	for {
-		file, e := os.Open(donePath)
-		if e == nil {
-			body, e := io.ReadAll(io.LimitReader(file, 1025))
-			closeErr := file.Close()
-			if e != nil || closeErr != nil || len(body) > 1024 || json.Unmarshal(body, &done) != nil || done.ExitCode != 0 || !done.Verified || len(done.Posted) != 2 {
-				t.Fatal("external chat browser rejected journey")
-			}
+		value, complete, readErr := ownedChatReadDone169V1(donePath)
+		if readErr != nil {
+			t.Fatal("external chat browser rejected journey")
+		}
+		if complete {
+			done = value
 			break
 		}
-		if !os.IsNotExist(e) || ctx.Err() != nil || time.Now().After(deadline) {
+		if ctx.Err() != nil || time.Now().After(deadline) {
 			t.Fatal("bounded chat browser acceptance timed out")
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -279,9 +320,23 @@ func TestOwnedCommentHistoryPortalsWithExternalBrowserE2E(t *testing.T) {
 		t.Fatal("exact two native browser POSTs missing")
 	}
 	var events, measured, staff, public int
-	err = f.pool.QueryRow(ctx, `SELECT count(*)::integer,count(*) FILTER(WHERE m.event_id=e.id AND m.document_id=e.document_id AND m.org_id=e.org_id AND m.payload_wire_bytes=octet_length(e.payload_json::text) AND m.measurement_server_version_num=current_setting('server_version_num')::integer)::integer,count(*) FILTER(WHERE e.actor_user_id=$3 AND e.payload_json='{"side":"sender"}'::jsonb)::integer,count(*) FILTER(WHERE e.recipient_id=$4 AND e.payload_json->>'side'='signer')::integer FROM events e LEFT JOIN html_snapshot_event_payload_sizes_v1 m ON m.event_id=e.id WHERE e.document_id=$1 AND e.org_id=$2 AND e.kind='document.comment_posted'`, doc.ID, f.org, f.user.ID, parties[0].RecipientID).Scan(&events, &measured, &staff, &public)
+	err = f.pool.QueryRow(ctx, `SELECT count(*)::integer,count(*) FILTER(WHERE m.event_id=e.id AND m.document_id=e.document_id AND m.org_id=e.org_id AND m.payload_wire_bytes=octet_length(e.payload_json::text) AND m.measurement_server_version_num=current_setting('server_version_num')::integer)::integer,count(*) FILTER(WHERE e.actor_user_id=$3 AND e.recipient_id IS NULL AND e.payload_json->>'side'='sender')::integer,count(*) FILTER(WHERE e.recipient_id=$4 AND e.payload_json->>'side'='signer')::integer FROM events e LEFT JOIN html_snapshot_event_payload_sizes_v1 m ON m.event_id=e.id WHERE e.document_id=$1 AND e.org_id=$2 AND e.kind='document.comment_posted'`, doc.ID, f.org, f.user.ID, parties[0].RecipientID).Scan(&events, &measured, &staff, &public)
 	if err != nil || events != 107 || measured != 107 || staff != 106 || public != 1 {
 		t.Fatal("actual comment audit/measurement/actor counts differ", events, measured, staff, public, err)
+	}
+	// Current events bind the persisted comment identity, UTF8 body digest and
+	// timestamp in addition to side. A legacy side-only JSON equality is not
+	// the current protocol; prove every actual event/row/actor association.
+	commentRows, err := f.q.ListComments(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentEvents, err := f.q.ListEventsByDocumentChronological(ctx, generated.ListEventsByDocumentChronologicalParams{DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = ownedChatCurrentAudit487V1(commentEvents, commentRows, f.org, doc.ID, f.user.ID, parties[0].RecipientID, 106, 1); err != nil {
+		t.Fatal("actual current comment evidence/actor contract differs", err)
 	}
 	var payload []byte
 	if err = f.pool.QueryRow(ctx, "SELECT payload_json FROM events WHERE document_id=$1 AND org_id=$2 AND kind='document.comment_posted' AND recipient_id=$3", doc.ID, f.org, parties[0].RecipientID).Scan(&payload); err != nil || article13.ValidateAuditPayload(payload, f.org, doc.ID, parties[0].RecipientID) != nil {

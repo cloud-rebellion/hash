@@ -31,9 +31,25 @@ import (
 // resource boundary or enable the intentionally closed pdf-static-v1 driver.
 func TestOwnedManualPDFPublicAuthoringSendTwoSignAndFourArtifactsE2E(t *testing.T) {
 	q := newOwnedPublicReadFixtureV1(t)
+	journey := runOwnedManualPDFPublicJourneyV1(t, q)
+	assertCompletedCompanionAwaitFencesV1(t, q, journey.completed, journey.finalToken, journey.verified[1])
+	q.assertObserversOnlyV1(t)
+}
+
+type ownedManualPDFJourneyResultV1 struct {
+	original, completed *generated.Document
+	originalPDF         []byte
+	finalToken          string
+	verified            [][]byte
+}
+
+// Both named tests keep the same ordinary public-authoring and two-signature
+// assertions. Only the original synthetic top runs its provider fault injection.
+func runOwnedManualPDFPublicJourneyV1(t *testing.T, q *ownedPublicReadFixtureV1) ownedManualPDFJourneyResultV1 {
+	t.Helper()
 	ownedCreationPrepareProPlanV1(t, q)
 	f := q.f
-	f.s.Sign.Storage = f.s.Storage // actual concrete native provider owner, same bounded protocol peer
+	f.s.Sign.Storage = f.s.Storage // the fixture's concrete native provider owner
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
 	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Storage: f.s.Storage, Billing: f.s.Billing, PDFCreationSessions: q.runtime.SessionsV1(), PublicURL: f.s.PublicURL})
 	if err := malwarescan.Configure(f.ctx, "", "development"); err != nil {
@@ -213,6 +229,5 @@ func TestOwnedManualPDFPublicAuthoringSendTwoSignAndFourArtifactsE2E(t *testing.
 			t.Fatal("old invitation accessed completed audit certificate")
 		}
 	}
-	assertCompletedCompanionAwaitFencesV1(t, q, completed, finalToken, verified[1])
-	q.assertObserversOnlyV1(t)
+	return ownedManualPDFJourneyResultV1{original: original, completed: completed, originalPDF: originalPDF, finalToken: finalToken, verified: verified}
 }

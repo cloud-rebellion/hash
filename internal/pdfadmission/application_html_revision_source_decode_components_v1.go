@@ -251,6 +251,9 @@ func htmlRevisionCanonicalOutputComponentsForV1(master htmlmaster.Master, stats 
 	if master.ContractProfile != nil && (len(master.ContractProfile.Parties) > 2 || len(master.ContractProfile.Terms) > 16) {
 		return out, htmlsource.ErrInvalid
 	}
+	if master.ContractProfile != nil && !htmlmaster.AmendmentPolicyShapeV1(master.ContractProfile.AmendmentPolicy) {
+		return out, ErrHTMLAuthoringInputV1
+	}
 	// All arithmetic inputs below are either existing typed maxima or derived by
 	// the private canonical inspection of this SAME actual owned typed master.
 	if stats.tokens < 0 || stats.tokens > 20000 || stats.formatStarts < 0 || stats.formatStarts > stats.tokens || stats.formatEnds < 0 || stats.formatEnds > stats.tokens || stats.cssTokens < 0 || stats.cssTokens > 20001 || stats.maxTagOutput < 0 {
@@ -314,6 +317,20 @@ func htmlRevisionCanonicalOutputComponentsForV1(master htmlmaster.Master, stats 
 			b.text(term.Name)
 			b.text(term.Value)
 			b.text(term.Section)
+		}
+		if a := p.AmendmentPolicy; a != nil {
+			b.object(htmlInputAmendmentPolicyV1Fields[:])
+			b.text(a.Term)
+			b.text(a.ClauseReference)
+			b.array(len(a.AllowedModes))
+			for _, m := range a.AllowedModes {
+				b.text(m)
+			}
+			b.array(len(a.AllowedChannels))
+			for _, c := range a.AllowedChannels {
+				b.text(c)
+			}
+			b.text(a.EffectiveCondition)
 		}
 	}
 	if p := master.SigningPage; p != nil {

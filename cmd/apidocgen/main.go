@@ -19,18 +19,21 @@ type route struct {
 	method, path, handler string
 	gates, conditions     []string
 	line                  int
+	source                string
 }
 type extractor struct {
-	fs      *token.FileSet
-	methods map[string]*ast.FuncDecl
-	routes  []route
-	err     error
-	active  map[string]bool
+	fs           *token.FileSet
+	methods      map[string]*ast.FuncDecl
+	routes       []route
+	err          error
+	active       map[string]bool
+	noticeAccess *noticeAccessExtractorV1
 }
 
 func (e *extractor) expression(node ast.Node) string {
 	if _, ok := node.(*ast.FuncLit); ok {
-		return fmt.Sprintf("inline middleware at server.go:%d", e.fs.Position(node.Pos()).Line)
+		position := e.fs.Position(node.Pos())
+		return fmt.Sprintf("inline middleware at %s:%d", position.Filename, position.Line)
 	}
 	var b bytes.Buffer
 	_ = format.Node(&b, e.fs, node)
@@ -73,6 +76,12 @@ func (e *extractor) walk(block *ast.BlockStmt, prefix string, gates, conditions 
 		case *ast.ExprStmt:
 			call, ok := s.X.(*ast.CallExpr)
 			if !ok {
+				continue
+			}
+			if e.walkNoticeAccessV1(call, prefix, gates, conditions) {
+				if e.err != nil {
+					return
+				}
 				continue
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -148,18 +157,31 @@ func (e *extractor) walk(block *ast.BlockStmt, prefix string, gates, conditions 
 				e.err = fmt.Errorf("nonliteral endpoint path")
 				return
 			}
-			e.routes = append(e.routes, route{method: method, path: join(prefix, part), handler: e.expression(call.Args[1]), gates: local, conditions: clone(conditions), line: e.fs.Position(call.Pos()).Line})
+			position := e.fs.Position(call.Pos())
+			handler := e.expression(call.Args[1])
+			if _, inline := call.Args[1].(*ast.FuncLit); inline && position.Filename == noticeAccessSourceV1 {
+				handler = fmt.Sprintf("inline handler at %s:%d", position.Filename, position.Line)
+			}
+			e.routes = append(e.routes, route{method: method, path: join(prefix, part), handler: handler, gates: local, conditions: clone(conditions), line: position.Line, source: position.Filename})
 		}
 	}
 }
 
 func generate(source []byte) ([]byte, error) {
+	return generateWithNoticeAccessV1(source, nil)
+}
+
+func generateWithNoticeAccessV1(source, noticeSource []byte) ([]byte, error) {
 	fs := token.NewFileSet()
 	file, err := parser.ParseFile(fs, "server.go", source, 0)
 	if err != nil {
 		return nil, err
 	}
-	e := &extractor{fs: fs, methods: map[string]*ast.FuncDecl{}, active: map[string]bool{}}
+	noticeAccess, err := newNoticeAccessExtractorV1(file, noticeSource)
+	if err != nil {
+		return nil, err
+	}
+	e := &extractor{fs: fs, methods: map[string]*ast.FuncDecl{}, active: map[string]bool{}, noticeAccess: noticeAccess}
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			e.methods[fn.Name.Name] = fn
@@ -182,6 +204,9 @@ func generate(source []byte) ([]byte, error) {
 	})
 	var b strings.Builder
 	b.WriteString("# HTTP route inventory\n\nGenerated from `internal/handler/server.go`; update with `go run ./cmd/apidocgen`, verify with `go run ./cmd/apidocgen -check`.\n\nThis inventories registered endpoints, their middleware and availability conditions. Authorization and validation performed inside handlers still apply. `MOUNT` delegates a subtree and `ANY` is a catch-all handler, not a promise that every HTTP method is supported. This inventory is not a complete request/response schema or a production configuration receipt.\n\nSee [Automation API](AUTOMATION-API.md) for the machine signature-request contract and [API guide](API.md) for authentication, lifecycle and documentation boundaries.\n\n")
+	if noticeAccess.used {
+		b.WriteString("The supported `noticeaccess.MountV1(r, s.NoticeAccess)` boundary is expanded from `internal/noticeaccess/http_v1.go`. Its routes inherit parent middleware; handler-level purpose checks still apply and missing service returns unavailable. See [later amendments and agreed notice](LATER-AMENDMENTS-API.md).\n\n")
+	}
 	b.WriteString("| Method | Path | Handler | Authorization / rate middleware | Availability | Source |\n| --- | --- | --- | --- | --- | --- |\n")
 	for _, r := range e.routes {
 		var relevant []string
@@ -194,7 +219,11 @@ func generate(source []byte) ([]byte, error) {
 		if len(r.conditions) > 0 {
 			availability = "`" + strings.ReplaceAll(strings.Join(r.conditions, "; "), "|", "&#124;") + "`"
 		}
-		fmt.Fprintf(&b, "| %s | `%s` | `%s` | %s | %s | [server.go:%d](../internal/handler/server.go#L%d) |\n", r.method, r.path, r.handler, strings.Join(relevant, "<br>"), availability, r.line, r.line)
+		link, err := routeSourceLinkV1(r.source)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&b, "| %s | `%s` | `%s` | %s | %s | [%s:%d](%s#L%d) |\n", r.method, r.path, r.handler, strings.Join(relevant, "<br>"), availability, r.source, r.line, link, r.line)
 	}
 	fmt.Fprintf(&b, "\n%d route registrations. Conditional registrations are listed even when a deployment disables them.\n", len(e.routes))
 	return []byte(b.String()), nil
@@ -203,6 +232,7 @@ func generate(source []byte) ([]byte, error) {
 func main() {
 	input := flag.String("input", "internal/handler/server.go", "router source")
 	output := flag.String("output", "docs/API-ROUTES.md", "generated inventory")
+	noticeInput := flag.String("notice-input", "internal/noticeaccess/http_v1.go", "supported noticeaccess router source")
 	check := flag.Bool("check", false, "fail when inventory differs")
 	flag.Parse()
 	source, err := os.ReadFile(*input)
@@ -211,6 +241,14 @@ func main() {
 		os.Exit(1)
 	}
 	result, err := generate(source)
+	if err == errNoticeSourceRequiredV1 {
+		noticeSource, readErr := os.ReadFile(*noticeInput)
+		if readErr != nil {
+			fmt.Fprintln(os.Stderr, readErr)
+			os.Exit(1)
+		}
+		result, err = generateWithNoticeAccessV1(source, noticeSource)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

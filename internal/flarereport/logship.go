@@ -410,7 +410,9 @@ func (h *flareSlogHandler) WithGroup(name string) slog.Handler {
 // separate Go modules with no shared package between them, and a fix that
 // depends on one project's helper is a fix the other eleven cannot take.
 var (
-	scrubLogPEM = regexp.MustCompile(`(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
+	scrubLogNotice       = regexp.MustCompile(`hn1\.[A-Za-z0-9_-]{43}`)
+	scrubLogNoticeCookie = regexp.MustCompile(`(__Secure-hash_notice_[0-9a-fA-F-]{36}\s*[=:]\s*)[^;\s"',)}]+`)
+	scrubLogPEM          = regexp.MustCompile(`(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
 	// Userinfo in a URL: scheme://user:password@host
 	scrubLogURLCreds = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@"]+:[^/\s@"]+@`)
 	// A credential-bearing query parameter, the shape *url.Error hands over.
@@ -430,6 +432,8 @@ func scrubLogText(s string) string {
 		return s
 	}
 	s = redactCredentialPath(s)
+	s = scrubLogNotice.ReplaceAllString(s, "[notice-capability]")
+	s = scrubLogNoticeCookie.ReplaceAllString(s, "${1}[notice-cookie]")
 	s = scrubLogPEM.ReplaceAllString(s, "[private-key]")
 	s = scrubLogURLCreds.ReplaceAllString(s, "${1}[redacted]@")
 	s = scrubLogQuery.ReplaceAllString(s, "${1}[secret]")

@@ -33,13 +33,13 @@ func (w *ApplicationHTMLSendWorkV1) readParticipantReportLockedV1(call context.C
 // The historical caller retains its original reference gate; the response
 // caller must own its original bound mutation, audit and all family row locks.
 func (w *ApplicationHTMLSendWorkV1) projectParticipantReportLockedV1(call context.Context, cutoff pgtype.Timestamptz, state *applicationHistoricalCertificateReadV1) error {
-	return w.projectParticipantReportForSizingLockedV1(call, cutoff, state, false)
+	return w.projectParticipantReportForSizingLockedV1(call, cutoff, state, false, w.sourceDocument)
 }
 
 // reserveClock is private formatter sizing only. SQL selection/verification
 // always uses the actual locked-history cutoff; no reserved timestamp is ever
 // persisted, signed, returned as report evidence or used to select history.
-func (w *ApplicationHTMLSendWorkV1) projectParticipantReportForSizingLockedV1(call context.Context, cutoff pgtype.Timestamptz, state *applicationHistoricalCertificateReadV1, reserveClock bool) error {
+func (w *ApplicationHTMLSendWorkV1) projectParticipantReportForSizingLockedV1(call context.Context, cutoff pgtype.Timestamptz, state *applicationHistoricalCertificateReadV1, reserveClock bool, document *generated.Document) error {
 	if !w.valid(call) || state == nil || state.reportAttempted || !applicationStampV1(cutoff) {
 		return ErrHTMLSendWorkV1
 	}
@@ -87,6 +87,13 @@ func (w *ApplicationHTMLSendWorkV1) projectParticipantReportForSizingLockedV1(ca
 		// Fresh finalization always selects V2 in its genuine DB transition.
 		// This value is formatter sizing only and never persists evidence.
 		schema = render.ParticipantReportSchemaV2
+		var delegated bool
+		if err := (&applicationOwnedDBTXV1{session: w.session.state}).QueryRow(call, `SELECT EXISTS(SELECT 1 FROM presign_executions WHERE org_id=$1 AND document_id=$2)`, p.OrgID, p.DocumentID).Scan(&delegated); err != nil {
+			return err
+		}
+		if delegated {
+			schema = render.ParticipantReportSchemaV3
+		}
 	}
 	// V2's fixed labels/framing are funded before loading any rows. Reserve at
 	// least half of each existing fixed quote for native scalar/canonical work;
@@ -273,12 +280,23 @@ func (w *ApplicationHTMLSendWorkV1) projectParticipantReportForSizingLockedV1(ca
 		return render.ErrParticipantReportV1
 	}
 	state.reportSchema = schema
-	if schema == render.ParticipantReportSchemaV2 {
+	if schema == render.ParticipantReportSchemaV2 || schema == render.ParticipantReportSchemaV3 {
 		// Reconstruct from the complete original hashed rows, never caller facts.
 		// Actual cutoff selects history; the reserved sizing timestamp is display only.
 		actualCutoff := r.Cutoff
 		r.Cutoff = p.Cutoff.Time.UTC().Format(time.RFC3339Nano)
-		v2, e := render.NewParticipantReportV2(render.ParticipantNarrativeScopeDraft402{Org: p.OrgID, Root: p.DocumentID, Documents: documents}, events, r)
+		scope := render.ParticipantNarrativeScopeDraft402{Org: p.OrgID, Root: p.DocumentID, Documents: documents}
+		var v2 render.ParticipantReportV2
+		var e error
+		if schema == render.ParticipantReportSchemaV3 {
+			delegated, captureErr := w.participantDelegationLockedV3(call, events, document)
+			if captureErr != nil {
+				return captureErr
+			}
+			v2, e = render.NewParticipantReportV3(scope, events, r, delegated)
+		} else {
+			v2, e = render.NewParticipantReportV2(scope, events, r)
+		}
 		r.Cutoff = actualCutoff
 		if e != nil {
 			if errors.Is(e, render.ErrCertificatePayloadCapacityV1) {
@@ -346,5 +364,5 @@ func participantReportCommitmentFromV1(schema string, cutoff pgtype.Timestamptz,
 
 // Closed private dispatch; unknown native variants fail before formatting/storage.
 func participantReportSchemaKnownV1(schema string) bool {
-	return schema == render.ParticipantReportSchemaV1 || schema == render.ParticipantReportSchemaV2
+	return schema == render.ParticipantReportSchemaV1 || schema == render.ParticipantReportSchemaV2 || schema == render.ParticipantReportSchemaV3
 }

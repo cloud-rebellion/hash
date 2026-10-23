@@ -37,6 +37,7 @@ import (
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -358,6 +359,7 @@ func runWorkerMain() (exitCode int) {
 		signEngine:        signEngine,
 		storage:           store,
 		sendEngine:        sendEngine,
+		preSignService:    &send.PreSignServiceV1{Send: sendEngine, Storage: store, PDF: pdfClient},
 		baseURL:           cfg.PublicURL,
 		orgName:           cfg.OperatorName,
 		complianceFeed:    feed,
@@ -464,6 +466,32 @@ func (w *worker) runSendSealingOnceObserved(ctx context.Context) flarereport.Job
 	state := flarereport.InvocationReturned
 	for _, intent := range intents {
 		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		if intent.CleanupPreparationID != uuid.Nil {
+			if w.preSignService == nil {
+				state = flarereport.InvocationPartial
+			} else {
+				err := w.preSignService.CleanupPreSignPreparationV1(rctx, intent.OrgID, intent.DocumentID, intent.CleanupPreparationID)
+				if errors.Is(err, pdfadmission.ErrPreSignCleanupPendingV1) {
+					state = mergeWorkerInvocation385(state, flarereport.InvocationPending)
+				} else if err != nil {
+					state = flarereport.InvocationPartial
+					slog.Warn("send_sealing: transient pre-sign cleanup failed", "document_id", intent.DocumentID)
+				}
+			}
+			cancel()
+			continue
+		}
+		if intent.PreSign {
+			if w.preSignService == nil {
+				state = flarereport.InvocationPartial
+				slog.Warn("send_sealing: committed pre-sign recovery unavailable", "document_id", intent.DocumentID)
+			} else if err := w.preSignService.ResumePreSignV1(rctx, intent.OrgID, intent.DocumentID); err != nil {
+				state = flarereport.InvocationPartial
+				slog.Warn("send_sealing: committed pre-sign recovery failed", "document_id", intent.DocumentID)
+			}
+			cancel()
+			continue
+		}
 		result, err := w.sendEngine.ResumeSendSealing(rctx, intent.DocumentID, intent.OrgID)
 		if err != nil {
 			state = flarereport.InvocationPartial
@@ -501,10 +529,11 @@ type worker struct {
 	storage purgeObjectDeleter
 	// sendEngine drives reminder re-minting through the shared lifecycle engine
 	// so worker-minted links always carry an expiry.
-	sendEngine *send.Engine
-	baseURL    string
-	billing    *billing.Engine
-	orgName    string
+	sendEngine     *send.Engine
+	preSignService *send.PreSignServiceV1
+	baseURL        string
+	billing        *billing.Engine
+	orgName        string
 
 	// Phase 12.2: nil when HASH_COMPLIANCE_FEED_URL is unset, so
 	// the compliance rollup loop short-circuits with a single info log.
@@ -804,12 +833,25 @@ func (w *worker) attemptEmail(ctx context.Context, d *generated.EmailDelivery) e
 	return err
 }
 
-// The result describes an actual SMTP attempt plus its existing durable queue
-// acknowledgement. It never claims a recipient mailbox receipt.
+// The result describes an existing durable queue acknowledgement. An owner
+// alert refused by its fresh check never attempts SMTP. SMTP success itself
+// never claims a recipient mailbox receipt.
 func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDelivery) (emailAttemptOutcome, error) {
 	var headers map[string]string
 	if len(d.HeadersJson) > 0 {
 		_ = json.Unmarshal(d.HeadersJson, &headers)
+	}
+	if headers[dispatch.AmendmentOwnerAlertHeaderV1] == dispatch.AmendmentOwnerAlertPurposeV1 {
+		allowed, checkErr := w.checkAmendmentOwnerAlertV1(ctx, d.ID)
+		if checkErr != nil {
+			return emailCheckpointFailed, errors.New("amendment owner alert eligibility unavailable")
+		}
+		if !allowed {
+			if markErr := w.queries.MarkEmailDeliveryFailed(ctx, generated.MarkEmailDeliveryFailedParams{ID: d.ID, LastError: "owner_alert_not_eligible"}); markErr != nil {
+				return emailCheckpointFailed, errors.New("amendment owner alert refusal acknowledgement unavailable")
+			}
+			return emailFailureAcknowledged, nil
+		}
 	}
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := w.emailSender.Send(sctx, dispatch.Message{
@@ -828,7 +870,7 @@ func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDel
 	next, ok := dispatch.Backoff(int(d.Attempts))
 	if !ok {
 		if markErr := w.queries.MarkEmailDeliveryFailed(ctx, generated.MarkEmailDeliveryFailedParams{
-			ID: d.ID, LastError: truncate(err.Error(), 500),
+			ID: d.ID, LastError: dispatch.SafeEmailDiagnosticV1(err),
 		}); markErr != nil {
 			return emailCheckpointFailed, fmt.Errorf("email delivery %s failure acknowledgement failed: %w", d.ID, markErr)
 		}
@@ -836,7 +878,7 @@ func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDel
 	}
 	if markErr := w.queries.MarkEmailDeliveryRetrying(ctx, generated.MarkEmailDeliveryRetryingParams{
 		ID:            d.ID,
-		LastError:     truncate(err.Error(), 500),
+		LastError:     dispatch.SafeEmailDiagnosticV1(err),
 		NextAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(next), Valid: true},
 	}); markErr != nil {
 		return emailCheckpointFailed, fmt.Errorf("email delivery %s retry acknowledgement failed: %w", d.ID, markErr)

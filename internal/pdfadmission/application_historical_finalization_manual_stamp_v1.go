@@ -27,12 +27,13 @@ import (
 // The source callback's mutex joins an actual producer and original-alias PDF
 // consumer before the SDK clears its raw response and closes its Parent grant.
 type ApplicationHistoricalManualPDFSourceV1 struct {
-	mu           sync.Mutex
-	self         *ApplicationHistoricalManualPDFSourceV1
-	evidence     *ApplicationHistoricalFinalizationSourceEvidenceV1
-	raw          []byte
-	active, used bool
-	result       *ApplicationHistoricalFinalizationManualPDFV1
+	mu               sync.Mutex
+	self             *ApplicationHistoricalManualPDFSourceV1
+	evidence         *ApplicationHistoricalFinalizationSourceEvidenceV1
+	raw              []byte
+	originalGeometry *sanitize.PDFManualGeometry
+	active, used     bool
+	result           *ApplicationHistoricalFinalizationManualPDFV1
 }
 
 func historicalManualCoordinatorV1(w *ApplicationHTMLSendWorkV1) (*workguard.CoordinatorV1, error) {
@@ -51,7 +52,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) WithManualPDFSourceV
 	if e == nil || e.self != e || consume == nil {
 		return ErrHistoricalFinalizationSourceV1
 	}
-	return e.WithSourcePDFV1(func(raw []byte) error {
+	return e.withManualCompositionPDFV1(func(raw []byte, originalGeometry *sanitize.PDFManualGeometry) error {
 		if !e.lockV1() {
 			return ErrHistoricalFinalizationSourceV1
 		}
@@ -71,7 +72,7 @@ func (e *ApplicationHistoricalFinalizationSourceEvidenceV1) WithManualPDFSourceV
 			return err
 		}
 		defer grant.Close()
-		input := &ApplicationHistoricalManualPDFSourceV1{evidence: e, raw: raw, active: true}
+		input := &ApplicationHistoricalManualPDFSourceV1{evidence: e, raw: raw, originalGeometry: originalGeometry, active: true}
 		input.self = input
 		defer input.finishSourceCallbackV1()
 		return consume(input)
@@ -85,6 +86,7 @@ func (input *ApplicationHistoricalManualPDFSourceV1) finishSourceCallbackV1() {
 	defer input.mu.Unlock()
 	input.active = false
 	input.raw = nil
+	input.originalGeometry = nil
 	input.evidence = nil
 	if input.result != nil {
 		m := input.result
@@ -211,6 +213,10 @@ func (input *ApplicationHistoricalManualPDFSourceV1) InspectManualPDFV1() (outpu
 		evidence.unlockV1()
 		return nil, ErrHistoricalFinalizationSourceV1
 	}
+	if (input.originalGeometry == nil) != (evidence.delegated == nil) {
+		evidence.unlockV1()
+		return nil, ErrHistoricalFinalizationSourceV1
+	}
 	old, ctx, org := evidence.work, evidence.ctx, evidence.document.OrgID
 	evidence.unlockV1()
 	coordinator, err := historicalManualCoordinatorV1(old)
@@ -242,6 +248,11 @@ func (input *ApplicationHistoricalManualPDFSourceV1) InspectManualPDFV1() (outpu
 	geometry, err := sanitize.InspectManualPDFWithContext(ctx, input.raw)
 	if err != nil {
 		return output, fmt.Errorf("inspect manual PDF in isolated worker: %w", err)
+	}
+	if original := input.originalGeometry; original != nil {
+		if evidence.delegated == nil || !sameDelegatedManualGeometryV1(geometry, *original, evidence.delegated.Execution().Snapshot().VisiblePDF.Artifact) {
+			return output, ErrHistoricalFinalizationSourceV1
+		}
 	}
 	m.geometry = geometry
 	m.inspected = true
@@ -305,6 +316,10 @@ func (w *ApplicationHTMLSendWorkV1) CompleteHistoricalManualStampV1(call context
 	if err = pdflayout.ValidateSignatureRows(private, recipients, fields, signatures, len(geometry.Pages)); err != nil {
 		return fmt.Errorf("stamp PDF parties: %w", err)
 	}
+	provider, err := delegatedProviderRecipientV1(evidence.delegated, fields, signatures)
+	if err != nil {
+		return err
+	}
 	resources := int64(4096)
 	if !htmlInputAddV1(&resources, int64(len(signatures)+1), 8*render.MaxArchivedSignatureSpanBytes+1024) || !htmlInputAddV1(&resources, int64(len(fields)+1), 8*render.MaxArchivedSignatureSpanBytes+4096) {
 		return ErrHistoricalFinalizationSourceV1
@@ -319,6 +334,9 @@ func (w *ApplicationHTMLSendWorkV1) CompleteHistoricalManualStampV1(call context
 	}
 	spans := map[string]render.ArchivedSignatureSpan{}
 	for _, signature := range signatures {
+		if provider != uuid.Nil && signature != nil && signature.RecipientID == provider {
+			continue
+		}
 		if !evidence.privateArchiveSignatureMatchesV1(signature, w) {
 			return ErrHistoricalFinalizationSourceV1
 		}
@@ -330,6 +348,9 @@ func (w *ApplicationHTMLSendWorkV1) CompleteHistoricalManualStampV1(call context
 	}
 	byPage := map[int][]render.PDFStampItemV1{}
 	for _, field := range fields {
+		if provider != uuid.Nil && field != nil && field.Type == "signature" && field.RecipientID.Valid && uuid.UUID(field.RecipientID.Bytes) == provider {
+			continue
+		}
 		inner, err := historicalStampInnerHTMLV1(field, spans)
 		if err != nil {
 			return err

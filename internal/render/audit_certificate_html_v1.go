@@ -15,6 +15,16 @@ import (
 // Prefix is separate so the original completion-time policy precedes the
 // original filled-field SQL read. It uses only native private row projections.
 func CertificatePrefixV1(doc *generated.Document, recs []*generated.Recipient, sigs []*generated.Signature, claims CertificateEvidenceClaimsV1) (string, error) {
+	// Persisted participant V2 reports use explicit absence labels. Keep the
+	// independent historical V1 formatter's exact payload/signature bytes.
+	formatTS := certificateFormatNullableTSV1
+	formatFont := certificateSignatureFontOrNAV1
+	formatSHA := certificateSignatureSHAOrNAV1
+	if claims.ParticipantReportSchema == ParticipantReportSchemaV2 || claims.ParticipantReportSchema == ParticipantReportSchemaV3 {
+		formatTS = certificateFormatNullableTSV2
+		formatFont = certificateSignatureFontOrNAV2
+		formatSHA = certificateSignatureSHAOrNAV2
+	}
 	sigByRec := map[string]*generated.Signature{}
 	for _, s := range sigs {
 		sigByRec[s.RecipientID.String()] = s
@@ -25,7 +35,7 @@ func CertificatePrefixV1(doc *generated.Document, recs []*generated.Recipient, s
 	sb.WriteString(`<h2>Audit Certificate</h2>`)
 	fmt.Fprintf(&sb, `<p><strong>Document:</strong> %s</p>`, certificateEscapeV1(doc.Name))
 	fmt.Fprintf(&sb, `<p><strong>Document ID:</strong> %s</p>`, doc.ID)
-	fmt.Fprintf(&sb, `<p><strong>Sent at:</strong> %s</p>`, certificateFormatNullableTSV1(doc.SentAt))
+	fmt.Fprintf(&sb, `<p><strong>Sent at:</strong> %s</p>`, formatTS(doc.SentAt))
 	if !doc.CompletionEffectiveAtBound {
 		return "", errors.New("audit certificate: completion-effective timestamp is not bound for this ceremony")
 	}
@@ -50,9 +60,9 @@ func CertificatePrefixV1(doc *generated.Document, recs []*generated.Recipient, s
 			certificateEscapeV1(rec.Name),
 			certificateEscapeV1(rec.Email),
 			certificateEscapeV1(rec.Status),
-			certificateFormatNullableTSV1(rec.SignedAt),
-			certificateSignatureFontOrNAV1(sig),
-			certificateSignatureSHAOrNAV1(sig),
+			formatTS(rec.SignedAt),
+			formatFont(sig),
+			formatSHA(sig),
 		)
 	}
 	sb.WriteString(`</tbody></table>`)

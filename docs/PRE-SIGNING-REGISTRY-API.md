@@ -1,9 +1,11 @@
 # Signing workflow and self-grant registry API
 
-This browser API stores reviewed workflow policies and a named member's own
-revocable authority. It does not execute a signature, consume a use, send an
-invitation or enable the document pre-signing mode. Those gates remain in the
-[implementation contract](PRE-SIGNING-DESIGN.md).
+This browser registry stores reviewed workflow policies and a named member's
+own revocable authority. Registry mutations themselves do not consume a use,
+produce a signature or send an invitation. The isolated implementation candidate
+adds separate [execution, approved-data source and linked-draft routes](PRE-SIGNING-EXECUTION-API.md).
+Their production switch is disabled by default; configured integration and
+release acceptance remain separate from source and component qualification.
 
 All paths start with `/api/v1/presign`. They require a current signed
 `hash_session` cookie; an API key, MCP identity or generic actor callback cannot
@@ -19,7 +21,7 @@ limits; multiple instances need measured deployment-level admission.
 
 | Method | Suffix | Permission and response |
 | --- | --- | --- |
-| GET | `/context` | Current member; actor witness, live own identity/role, bundled font hashes, app-owned disclosure text and `execution_available:false`. |
+| GET | `/context` | Current member; actor witness, live own identity/role, bundled font hashes, app-owned disclosure text and `execution_available` (false by default). |
 | GET | `/fonts/{font}` | Current member; exact bundled WOFF2 bytes for a supported, URL-encoded font name. Verify against the context hash before showing a signature preview. |
 | GET | `/templates` | Owner; up to 20 recent approved schema-3 template revision descriptors, declarations, defaults and contract profile. `truncated` reports the count or byte window. Raw HTML/assets and storage identifiers are absent. |
 | GET | `/workflows` | Current member; bounded current workflow views and original actor witness. |
@@ -50,6 +52,19 @@ round a 64-bit generation. Revisions and finite usage/duration caps are bounded
 by the service. [Go request/response types](../internal/presignregistry/types.go)
 define the exact field names; the generated route inventory is not an OpenAPI
 schema for this browser contract.
+
+## API executor credentials
+
+A workflow naming an API executor must select a regular API key belonging to the
+exact named organization/user, with a non-null `expires_at` strictly after the
+current database clock. A key without expiry is ineligible even if ordinary API
+authentication accepts it. Both authoring and workflow privileges must remain
+available (the explicit scopes are `write:authoring` and `write:workflow`;
+existing broader `write`/`admin` privileges satisfy those checks). Credential
+identity, scope, live membership and natural expiry are rechecked under the
+actual authority transaction. Document-agent credentials and MCP identities do
+not become pre-sign API executors. This finite-expiry rule is specific to
+pre-sign workflow authority and does not impose a new global API-key rule.
 
 ## Review and recovery
 

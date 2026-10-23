@@ -4,6 +4,7 @@ import { checkedGrantIntent, checkedSigningActor, checkedSigningCollection, chec
 import { htmlSHA256, htmlUUID } from '../htmlRevision';
 
 const base = '/api/v1/presign';
+export { request as signingAuthorityRequest };
 async function boundedBytes(response: Response, signal: AbortSignal, max: number) {
   const length = response.headers.get('Content-Length');
   if (length !== null && (!/^[0-9]+$/.test(length) || Number(length) > max)) { await response.body?.cancel().catch(() => {}); throw new Error('Invalid signing authority response.'); }

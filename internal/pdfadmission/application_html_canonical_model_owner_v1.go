@@ -20,18 +20,21 @@ type applicationHTMLCanonicalModelConsumerV1 struct {
 	mu                      sync.Mutex
 	session                 *ApplicationSessionV1
 	factory                 *applicationSessionFactoryStateV1
-	releases                []func()
+	parentCredit            *workguard.GrantV1
 	active                  int
 	scratch                 int64
 	consumerClosed, retired bool
 }
 
-func (h *ApplicationSessionV1) newHTMLCanonicalModelConsumerV1(ctx context.Context) (*applicationHTMLCanonicalModelConsumerV1, error) {
+func (h *ApplicationSessionV1) newHTMLCanonicalModelConsumerV1(ctx context.Context) (result *applicationHTMLCanonicalModelConsumerV1, failure error) {
+	phase := "owner_context"
+	defer func() { failure = htmlCanonicalFailureV1(ctx, phase, failure) }()
 	if !htmlAuthoringInputRuntimeOKV1 || h == nil || h.state == nil || !applicationContextV1(ctx) {
 		return nil, errHTMLCanonicalModelWorkV1
 	}
 	s := h.state
 	p := s.factory
+	phase = "owner_factory"
 	if p == nil {
 		return nil, errHTMLCanonicalModelWorkV1
 	}
@@ -39,6 +42,7 @@ func (h *ApplicationSessionV1) newHTMLCanonicalModelConsumerV1(ctx context.Conte
 	s.mu.Lock()
 	defer p.mu.Unlock()
 	defer s.mu.Unlock()
+	phase = "owner_state"
 	if p.closing || p.work == nil || p.work.coordinator == nil || p.htmlCanonicalConsumers == nil || s.observer || s.closed || s.unknown || s.ended || s.retired || s.creating || s.sqlActive || s.tx == nil || s.conn == nil || !s.dialed || s.fence == nil || !applicationIdentityValidV1(s.fence.identity) || len(p.htmlCanonicalConsumers) >= applicationSessionMaxWorkV1 || s.admission == nil || !s.admission.valid() || s.admission.fence != s.fence || s.admission.cleanupDone != s.fence.clientDone || !s.callbackActive || ctx.Value(applicationSessionCallbackKeyV1{}) != s {
 		return nil, errHTMLCanonicalModelWorkV1
 	}
@@ -50,6 +54,10 @@ func (h *ApplicationSessionV1) newHTMLCanonicalModelConsumerV1(ctx context.Conte
 	return owner, nil
 }
 func (c *applicationHTMLCanonicalModelConsumerV1) holdV1(ctx context.Context, n int64) error {
+	return c.holdAtV1(ctx, n, "model_hold")
+}
+func (c *applicationHTMLCanonicalModelConsumerV1) holdAtV1(ctx context.Context, n int64, phase string) (failure error) {
+	defer func() { failure = htmlCanonicalFailureV1(ctx, phase, failure) }()
 	if c == nil || c.self != c {
 		return errHTMLCanonicalModelWorkV1
 	}
@@ -64,19 +72,26 @@ func (c *applicationHTMLCanonicalModelConsumerV1) holdV1(ctx context.Context, n 
 	}
 	// A genuine native session/callback created this fixed producer; each later
 	// n is derived privately from its actual retained models, never a caller.
-	release, err := p.work.acquire(ctx, c.session.state.org, workguard.VectorV1{ParentBytes: n})
+	// All parent bytes in this producer share the SAME retirement conjunction.
+	// Grow its one private credit before allocation; never merge distinct owners.
+	credit, err := htmlCanonicalChargeV1(ctx, p.work, c.session.state.org, c.parentCredit, n, phase)
 	if err != nil {
 		return errors.Join(errHTMLCanonicalModelWorkV1, err)
 	}
-	c.releases = append(c.releases, release)
+	c.parentCredit = credit
 	return nil
 }
 
 // The fixed producer invokes original canonical/Compile calls synchronously.
 // Keep the largest complete scratch arena charged through LAST future use;
-// all simultaneously retained typed/Compiled/canonical results have separate
-// additive grants. This releases no GC/pool/RSS credit between calls.
+// all simultaneously retained typed/Compiled/canonical results add their full
+// bytes to the same continuously retained credit. No GC/pool/RSS credit is
+// released between calls; grant-count consolidation is not a byte discount.
 func (c *applicationHTMLCanonicalModelConsumerV1) holdScratchV1(ctx context.Context, n int64) error {
+	return c.holdScratchAtV1(ctx, n, "model_scratch")
+}
+func (c *applicationHTMLCanonicalModelConsumerV1) holdScratchAtV1(ctx context.Context, n int64, phase string) (failure error) {
+	defer func() { failure = htmlCanonicalFailureV1(ctx, phase, failure) }()
 	if c == nil || c.self != c || n < 0 {
 		return errHTMLCanonicalModelWorkV1
 	}
@@ -92,11 +107,11 @@ func (c *applicationHTMLCanonicalModelConsumerV1) holdScratchV1(ctx context.Cont
 	if n <= c.scratch {
 		return nil
 	}
-	release, err := p.work.acquire(ctx, c.session.state.org, workguard.VectorV1{ParentBytes: n - c.scratch})
+	credit, err := htmlCanonicalChargeV1(ctx, p.work, c.session.state.org, c.parentCredit, n-c.scratch, phase)
 	if err != nil {
 		return errors.Join(errHTMLCanonicalModelWorkV1, err)
 	}
-	c.releases = append(c.releases, release)
+	c.parentCredit = credit
 	c.scratch = n
 	return nil
 }
@@ -129,9 +144,7 @@ func (c *applicationHTMLCanonicalModelConsumerV1) releaseIfCompleteV1() {
 		return
 	}
 	c.retired = true
-	for _, release := range c.releases {
-		release()
-	}
-	c.releases = nil
+	c.parentCredit.Close()
+	c.parentCredit = nil
 	delete(c.factory.htmlCanonicalConsumers, c)
 }

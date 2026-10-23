@@ -1,6 +1,6 @@
 module github.com/bright-interaction/hash/gotenberg
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/gotenberg/gotenberg/v8 v8.36.0

@@ -19,7 +19,9 @@ for (const drift of ['token', 'recipient', 'document', 'notice', 'source', 'arti
 }
 
 function installPreEffect(source: string, env: any, staff = false) {
-  const start = source.indexOf('  $effect.pre(() => {');
+  const commentAnchor = staff ? source.indexOf("const key = doc ? JSON.stringify([doc.id, doc.org_id])") : -1;
+  const start = staff ? source.lastIndexOf('  $effect.pre(() => {', commentAnchor) : source.indexOf('  $effect.pre(() => {');
+  if (staff && commentAnchor < 0) throw Error('Actual staff comment-scope preeffect missing');
   const end = source.indexOf(staff ? '  beforeNavigate(' : '  $effect(() => {', start);
   let effect!: () => void;
   env.$effect = { pre: (callback: () => void) => { effect = callback; } };

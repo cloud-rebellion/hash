@@ -5,12 +5,14 @@ package pdfadmission
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"strings"
 	"time"
@@ -115,7 +117,24 @@ func (w *ApplicationHTMLSendWorkV1) RotateHistoricalCompletionCredentialsV1(call
 	out.rotated = true
 	expires := pgtype.Timestamptz{Time: now.Add(24 * time.Hour), Valid: true}
 	captured := ""
+	// The immutable committed execution binds the one permanently disabled
+	// provider. Ordinary documents have no such row; lookup errors fail closed.
+	var disabledProvider uuid.UUID
+	lookupErr := (&applicationOwnedDBTXV1{session: w.session.state}).QueryRow(call,
+		`SELECT e.provider_recipient_id FROM presign_executions e WHERE e.org_id=$1 AND e.document_id=$2`,
+		p.completed.OrgID, p.completed.ID).Scan(&disabledProvider)
+	if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+		return "", lookupErr
+	}
+	if lookupErr == nil && disabledProvider == uuid.Nil {
+		return "", ErrHTMLSendWorkV1
+	}
 	for _, row := range out.rows {
+		// Keep the provider's evidence/internal row, but never mint its public
+		// token or append it to the participant credential/delivery list.
+		if disabledProvider != uuid.Nil && row != nil && row.ID == disabledProvider {
+			continue
+		}
 		if !recipients.ReceivesCompletedArtifactV1(p.completed.RequiresSignature, row, out.required) {
 			continue
 		}

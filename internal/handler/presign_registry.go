@@ -48,7 +48,7 @@ func (s *Server) presignEngine(r *http.Request) (*presignregistry.Engine, presig
 	if s.Pool == nil || s.Audit == nil || s.Cookies == nil {
 		return nil, a, presignregistry.ErrUnavailable
 	}
-	return presignregistry.NewEngine(s.Pool, s.Audit, s.Cookies), a, nil
+	return presignregistry.NewEngine(s.Pool, s.Audit, s.Cookies).WithExecutionViewsV1(s.preSignExecutionAvailableV1()), a, nil
 }
 
 func writePresignError(w http.ResponseWriter, err error) {
@@ -422,7 +422,7 @@ func (s *Server) handlePresignContext(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, presignregistry.ErrUnavailable
 		}
-		return map[string]any{"org_id": u.OrgID, "user_id": u.ID, "self": map[string]any{"id": u.ID, "name": u.Name, "email": u.Email, "role": u.Role}, "execution_available": false, "fonts": styles, "disclosure": presignregistry.Disclosure()}, nil
+		return map[string]any{"org_id": u.OrgID, "user_id": u.ID, "self": map[string]any{"id": u.ID, "name": u.Name, "email": u.Email, "role": u.Role}, "execution_available": s.preSignExecutionAvailableV1() && (u.Role == "owner" || u.Role == "sender"), "fonts": styles, "disclosure": presignregistry.Disclosure()}, nil
 	})
 	if err != nil {
 		writePresignError(w, err)

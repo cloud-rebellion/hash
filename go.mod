@@ -1,6 +1,6 @@
 module github.com/bright-interaction/hash
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0

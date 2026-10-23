@@ -29,6 +29,8 @@ const (
 	HTMLCRMTemplateObservationInputV1
 	HTMLCreationClosureInputV1
 	HTMLDocumentRevisionInputV1
+	HTMLPreSignAPISourceInputV1
+	HTMLPreSignSupersessionInputV1
 )
 
 // Copied public shells share the original private owner. Neither a copied

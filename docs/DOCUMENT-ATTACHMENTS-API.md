@@ -199,7 +199,9 @@ conformance and deployed-service acceptance remain separate qualification work.
 The current public package Send, recipient/annex consent, signature binding and
 mandatory participant report are described in [the API contract](API.md#sender-package-send);
 private worker primitives alone do not prove those complete journeys. Draft
-selection APIs do not activate a later amendment endpoint.
+selection APIs do not create a later amendment; the separate
+[later-amendment API](LATER-AMENDMENTS-API.md) links an independently prepared
+document to an immutable completed original through its own owner review.
 
 ## Authentication and observation
 
@@ -292,16 +294,20 @@ or generations require reload and review; failures never authorize weaker pins.
 The current package signing workflow incorporates the main agreement and named business
 attachments in one deliberate acceptance of exact presented bytes. The separate
 automatic negotiation/signature evidence report remains mandatory. Later changes
-will follow the agreement's configured process: a new signature, acknowledgement
-or agreed notice. A changed file does not universally force re-signing. Original
-signed bytes/evidence must remain preserved and later versions linked. The
-selected process must be permitted by that agreement, including the notice
-channel and effective-date conditions; a notice must never appear as a signature
-or an explicit acknowledgement. The current package signing and mandatory
-report contracts are documented in [the API](API.md#sender-package-send); later
-amendment workflows remain planned and are not enabled by these draft selection
-APIs. Implementation and controlled-test evidence do not replace the release
-gates or establish legal sufficiency for an agreement.
+use the agreement-selected process: a new signature, acknowledgement or agreed
+notice. A changed file does not universally force re-signing. The separate
+[later-amendment API](LATER-AMENDMENTS-API.md) now implements linked new documents,
+exact immutable original/file commitments and their own process/evidence. These
+draft attachment selection APIs alone do not create that relation.
+
+The process must be permitted by a visible policy frozen with the presented
+agreement, or an explicitly attributed owner review of an existing clause,
+including its notice channel and effective condition. An email queue/provider
+acceptance/read/download is not a signature, explicit acknowledgement, verified
+receipt or legal-effectiveness decision. The original signed bytes/package/report
+remain preserved. Current package signing and mandatory report contracts are in
+[the API](API.md#sender-package-send). Source and controlled-test evidence do not
+replace release acceptance or establish legal sufficiency for an agreement.
 
 
 ## Save selected order, labels and removals

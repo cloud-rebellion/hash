@@ -26,6 +26,7 @@ import (
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/pdftemplateauthoring"
+	"github.com/bright-interaction/hash/internal/presignexecute"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sign"
@@ -34,32 +35,33 @@ import (
 
 // documentResponse is the JSON shape we return.
 type documentResponse struct {
-	ID                          uuid.UUID       `json:"id"`
-	OrgID                       uuid.UUID       `json:"org_id"`
-	TemplateID                  string          `json:"template_id,omitempty"`
-	Name                        string          `json:"name"`
-	Status                      string          `json:"status"`
-	RoutingMode                 string          `json:"routing_mode"`
-	SourceKind                  string          `json:"source_kind"`
-	RequiresSignature           bool            `json:"requires_signature"`
-	BlocksJSON                  json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON               json.RawMessage `json:"variables_json"`
-	PDFStorageKey               string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256                   string          `json:"pdf_sha256,omitempty"`
-	FinalPDFKey                 string          `json:"final_pdf_key,omitempty"`
-	AuditCertKey                string          `json:"audit_cert_key,omitempty"`
-	ExpiresAt                   string          `json:"expires_at,omitempty"`
-	SentAt                      string          `json:"sent_at,omitempty"`
-	CompletedAt                 string          `json:"completed_at,omitempty"`
-	SenderID                    uuid.UUID       `json:"sender_id"`
-	Metadata                    json.RawMessage `json:"metadata"`
-	DefaultLocale               string          `json:"default_locale"`
-	CreatedAt                   string          `json:"created_at"`
-	UpdatedAt                   string          `json:"updated_at"`
-	HTMLReviewRequired          bool            `json:"html_review_required,omitempty"`
-	HasHTMLSource               bool            `json:"has_html_source,omitempty"`
-	HTMLSourceCommitment        string          `json:"html_source_commitment,omitempty"`
-	HTMLMaterializationRevision int32           `json:"html_materialization_revision,omitempty"`
+	PreSign                     *presignexecute.DocumentViewV1 `json:"pre_sign,omitempty"`
+	ID                          uuid.UUID                      `json:"id"`
+	OrgID                       uuid.UUID                      `json:"org_id"`
+	TemplateID                  string                         `json:"template_id,omitempty"`
+	Name                        string                         `json:"name"`
+	Status                      string                         `json:"status"`
+	RoutingMode                 string                         `json:"routing_mode"`
+	SourceKind                  string                         `json:"source_kind"`
+	RequiresSignature           bool                           `json:"requires_signature"`
+	BlocksJSON                  json.RawMessage                `json:"blocks_json,omitempty"`
+	VariablesJSON               json.RawMessage                `json:"variables_json"`
+	PDFStorageKey               string                         `json:"pdf_storage_key,omitempty"`
+	PDFSHA256                   string                         `json:"pdf_sha256,omitempty"`
+	FinalPDFKey                 string                         `json:"final_pdf_key,omitempty"`
+	AuditCertKey                string                         `json:"audit_cert_key,omitempty"`
+	ExpiresAt                   string                         `json:"expires_at,omitempty"`
+	SentAt                      string                         `json:"sent_at,omitempty"`
+	CompletedAt                 string                         `json:"completed_at,omitempty"`
+	SenderID                    uuid.UUID                      `json:"sender_id"`
+	Metadata                    json.RawMessage                `json:"metadata"`
+	DefaultLocale               string                         `json:"default_locale"`
+	CreatedAt                   string                         `json:"created_at"`
+	UpdatedAt                   string                         `json:"updated_at"`
+	HTMLReviewRequired          bool                           `json:"html_review_required,omitempty"`
+	HasHTMLSource               bool                           `json:"has_html_source,omitempty"`
+	HTMLSourceCommitment        string                         `json:"html_source_commitment,omitempty"`
+	HTMLMaterializationRevision int32                          `json:"html_materialization_revision,omitempty"`
 }
 
 func toDocumentResponse(d *generated.Document) documentResponse {
@@ -297,6 +299,9 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.tryStaffPreSignDocumentV1(w, r, u.OrgID, id, false) {
+		return
+	}
 	d, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "document not found")
@@ -320,6 +325,9 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 	}
 	id, ok := parseUUIDParam(w, r, "id")
 	if !ok {
+		return
+	}
+	if s.tryStaffPreSignDocumentV1(w, r, u.OrgID, id, true) {
 		return
 	}
 	authorize, err := s.sessionDraftAuthorization(r, u.OrgID, u.UserID)

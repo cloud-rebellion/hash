@@ -16,8 +16,8 @@ const participantReportHTMLV3Styles = `<style>
 .hash-doc .hash-participant-report-v3 h5 { margin:0 0 7px;break-after:avoid; }
 .hash-doc .hash-participant-report-v3 .hash-report-record { margin:0 0 13px;padding:10px 0 4px;border-top:1px solid #e4e4e7;break-inside:auto;page-break-inside:auto; }
 .hash-doc .hash-participant-report-v3 .hash-report-meta { display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px 18px;break-inside:auto; }
-.hash-doc .hash-participant-report-v3 .hash-report-field { min-width:0;margin:0; }
-.hash-doc .hash-participant-report-v3 .hash-report-label { display:block;font-size:9px;font-weight:600;color:#52525b; }
+.hash-doc .hash-participant-report-v3 .hash-report-field { min-width:0;margin:0;break-inside:avoid;page-break-inside:avoid; }
+.hash-doc .hash-participant-report-v3 .hash-report-label { display:block;font-size:9px;font-weight:600;color:#52525b;break-after:avoid;page-break-after:avoid; }
 .hash-doc .hash-participant-report-v3 .hash-report-value { display:block;white-space:pre-wrap;overflow-wrap:anywhere; }
 .hash-doc .hash-participant-report-v3 .hash-report-identity { font-family:monospace;font-size:9px;line-height:1.5; }
 .hash-doc .hash-participant-report-v3 .hash-report-text { display:block;width:100%;margin:8px 0 12px;break-inside:auto;page-break-inside:auto; }
@@ -176,8 +176,13 @@ func (w *participantHTMLWriterV3) endMeta()   { w.write(`</div>`) }
 func (w *participantHTMLWriterV3) endRecord() { w.write(`</div>`) }
 
 func (r ParticipantReportV2) writeHTMLV3(w *participantHTMLWriterV3, canonical []byte, digest string) {
-	w.write(ParticipantReportHTMLV3Start)
-	w.write(participantReportHTMLV3Styles)
+	if r.Schema == ParticipantReportSchemaV3 {
+		w.write(ParticipantReportHTMLV4Start)
+		w.write(strings.ReplaceAll(participantReportHTMLV3Styles, "canonical-v2", "canonical-v3"))
+	} else {
+		w.write(ParticipantReportHTMLV3Start)
+		w.write(participantReportHTMLV3Styles)
+	}
 	w.write(`<h3>Participant negotiation and signature report</h3><p>This is the issuer's account of the complete retained shared history in the declared native root and direct envelope family at one cutoff. Original source rows were checked by the native producer before public projection. The public report excludes private original preimages and cannot independently recompute their row hashes. Only change requests and decisions currently have typed payload details; other visible events explicitly retain metadata with details unavailable. Author display names, revision metadata and proposal state are retained observations. A recorded name is not verified identity or company authority. No BankID, qualified signature, legal-effect or organization-chain assurance is asserted.</p><div class="hash-report-meta">`)
 	w.field("Document ID", r.DocumentID, true)
 	w.field("History cutoff (UTC)", r.Cutoff, false)
@@ -193,6 +198,9 @@ func (r ParticipantReportV2) writeHTMLV3(w *participantHTMLWriterV3, canonical [
 		w.field("Root or direct envelope child", id, true)
 	}
 	w.write(`<p>Selected legal-package attachment originals below do not import their independent earlier negotiations into this history. The machine events.json attachment remains ceremony-root only; it is not a complete family preimage export. Later completion publication is outside this cutoff.</p>`)
+	if r.DelegatedExecution != nil {
+		w.delegatedV3(r.DelegatedExecution)
+	}
 	w.section("Shared negotiation comments", len(r.Comments))
 	for i, c := range r.Comments {
 		w.record("Comment", i)
@@ -309,7 +317,11 @@ func (r ParticipantReportV2) writeHTMLV3(w *participantHTMLWriterV3, canonical [
 		w.endRecord()
 	}
 	w.write(`<h4 class="hash-report-canonical-heading">Canonical public evidence appendix</h4><p>This complete closed public projection and the exact readable presentation are bound by the issuer's detached certificate signature. Original private forensic preimages are not included. This report is evidence about the cutoff; it is not part of a previously executed contract body or acceptance of later terms.</p>`)
-	w.write(ParticipantReportCanonicalCarrierV2)
+	if r.Schema == ParticipantReportSchemaV3 {
+		w.write(ParticipantReportCanonicalCarrierV3)
+	} else {
+		w.write(ParticipantReportCanonicalCarrierV2)
+	}
 	w.escapedBytes(canonical)
 	w.write(`</pre></div></section>`)
 }

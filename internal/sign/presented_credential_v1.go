@@ -173,6 +173,9 @@ type fittedSigningIntentV1 struct {
 }
 
 func (e *Engine) validateFittedRequestV1(ctx context.Context, rc *RecipientContext, in SignInput) (*presentedCredentialV1, error) {
+	if rc != nil && rc.delegated != nil {
+		return nil, ErrDelegatedFittedUnsupportedV1
+	}
 	if ctx == nil {
 		return nil, ErrSigningAdmissionUnavailableV1
 	}

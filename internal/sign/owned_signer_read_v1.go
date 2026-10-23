@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"github.com/bright-interaction/hash/internal/amendments"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -85,6 +86,8 @@ type signerReadLeaseV1 struct {
 func cloneSignerReadContextV1(rc *RecipientContext) *RecipientContext {
 	out := *rc
 	out.readLease = nil
+	out.delegated = cloneDelegatedSignerEvidenceV1(rc.delegated)
+	out.AmendmentContext = amendments.CloneSignerContextV1(rc.AmendmentContext)
 	if rc.Document != nil {
 		d := *rc.Document
 		d.BlocksJson = bytes.Clone(d.BlocksJson)
@@ -291,6 +294,10 @@ func (e *Engine) lookupOwnedSignerPurposeRouteV1(ctx context.Context, hash []byt
 		} else {
 			rc, err = e.lookupCompletedArtifactQueriesV1(actual, presentedHash[:], q)
 		}
+		if err == nil && rc != nil {
+			rc.AmendmentContext = amendments.CloneSignerContextV1(models.AmendmentContext)
+			err = bindDelegatedSignerEvidenceV1(rc, models.Presign)
+		}
 		current = models.Current
 		return err
 	})
@@ -419,7 +426,7 @@ func (l *signerReadLeaseV1) borrowOriginalV1(e *Engine, rc *RecipientContext, mo
 		return nil, nil, nil, ErrSigningAdmissionUnavailableV1
 	}
 	l.mu.Lock()
-	if l.closed || l.issuer != e || l.mode != mode || l.original == nil || l.scope == nil || !reflect.DeepEqual(l.original.Document, rc.Document) || !reflect.DeepEqual(l.original.Recipient, rc.Recipient) || !reflect.DeepEqual(l.original.ControllerOrg, rc.ControllerOrg) || !reflect.DeepEqual(l.original.LawfulBasisConfirmation, rc.LawfulBasisConfirmation) {
+	if l.closed || l.issuer != e || l.mode != mode || l.original == nil || l.scope == nil || !reflect.DeepEqual(l.original.Document, rc.Document) || !reflect.DeepEqual(l.original.Recipient, rc.Recipient) || !reflect.DeepEqual(l.original.ControllerOrg, rc.ControllerOrg) || !reflect.DeepEqual(l.original.LawfulBasisConfirmation, rc.LawfulBasisConfirmation) || !amendments.EqualSignerContextV1(l.original.AmendmentContext, rc.AmendmentContext) || !sameDelegatedSignerEvidenceV1(l.original.delegated, rc.delegated) {
 		l.mu.Unlock()
 		return nil, nil, nil, ErrMagicLinkExpired
 	}
@@ -511,6 +518,13 @@ func (e *Engine) RecheckRecipientReadV1(ctx context.Context, rc *RecipientContex
 		if err != nil {
 			return signerReadErrorV1(err)
 		}
+		fresh.AmendmentContext = amendments.CloneSignerContextV1(models.AmendmentContext)
+		if err := bindDelegatedSignerEvidenceV1(fresh, models.Presign); err != nil {
+			return err
+		}
+		if !sameDelegatedSignerEvidenceV1(original.delegated, fresh.delegated) {
+			return ErrMagicLinkExpired
+		}
 		if err := ValidateRecipientReadCredential(original, fresh, time.Now()); err != nil {
 			return err
 		}
@@ -595,6 +609,13 @@ func (e *Engine) recheckCompletedObservationOwnedV1(ctx context.Context, hash []
 		fresh, err = lookup.lookupCompletedArtifactQueriesV1(actual, presentedHash[:], signerReadQueriesV1{models: models})
 		if err != nil {
 			return signerReadErrorV1(err)
+		}
+		fresh.AmendmentContext = amendments.CloneSignerContextV1(models.AmendmentContext)
+		if err := bindDelegatedSignerEvidenceV1(fresh, models.Presign); err != nil {
+			return err
+		}
+		if !sameDelegatedSignerEvidenceV1(original.delegated, fresh.delegated) {
+			return ErrMagicLinkExpired
 		}
 		return observe(original, fresh, e.now())
 	})

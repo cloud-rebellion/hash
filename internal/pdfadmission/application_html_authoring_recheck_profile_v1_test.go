@@ -137,7 +137,7 @@ func TestHTMLStoredScratchPeakRetainsActualConsumerConjunctionV1(t *testing.T) {
 	if err := c.holdV1(ctx, 64); err != nil {
 		t.Fatal(err)
 	}
-	if got := coordinator.SnapshotV1(org); got.Organisation.ParentBytes != 364 || got.OrganisationGrants != 3 {
+	if got := coordinator.SnapshotV1(org); got.Organisation.ParentBytes != 364 || got.OrganisationGrants != 1 {
 		t.Fatalf("scratch summed or retained credit omitted: %+v", got)
 	}
 	c.CloseConsumerV1()

@@ -92,6 +92,12 @@ func signerPDFObservationFor(rc *sign.RecipientContext) (*signerPDFObservation, 
 		out.PageCount = doc.HtmlCurrentPageCount.Int32
 		out.MaterializationRevision = doc.HtmlCurrentMaterializationSequence.Int32
 	}
+	if delegated := rc.PreSignContextV1(); delegated != nil {
+		if delegated.DocumentID != doc.ID || len(delegated.VisiblePDFSHA256) != 64 {
+			return nil, errSignerReadChanged
+		}
+		out.PDFSHA256 = delegated.VisiblePDFSHA256
+	}
 	return out, nil
 }
 

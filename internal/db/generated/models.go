@@ -356,6 +356,87 @@ type DocumentAgentToken struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type DocumentAmendmentNoticeAccessV1 struct {
+	ID                   uuid.UUID          `json:"id"`
+	OrgID                uuid.UUID          `json:"org_id"`
+	NoticeID             uuid.UUID          `json:"notice_id"`
+	EmailDeliveryID      uuid.UUID          `json:"email_delivery_id"`
+	RecipientEmail       string             `json:"recipient_email"`
+	TokenSha256          []byte             `json:"token_sha256"`
+	FileCommitmentSha256 []byte             `json:"file_commitment_sha256"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt            pgtype.Timestamptz `json:"revoked_at"`
+	RevokedBy            pgtype.UUID        `json:"revoked_by"`
+}
+
+type DocumentAmendmentNoticeDeliveriesV1 struct {
+	NoticeID        uuid.UUID `json:"notice_id"`
+	OrgID           uuid.UUID `json:"org_id"`
+	Position        int16     `json:"position"`
+	EmailDeliveryID uuid.UUID `json:"email_delivery_id"`
+	RecipientEmail  string    `json:"recipient_email"`
+	MessageSha256   []byte    `json:"message_sha256"`
+}
+
+type DocumentAmendmentNoticesV1 struct {
+	ID                        uuid.UUID          `json:"id"`
+	AmendmentID               uuid.UUID          `json:"amendment_id"`
+	OrgID                     uuid.UUID          `json:"org_id"`
+	RequestID                 uuid.UUID          `json:"request_id"`
+	RequestSha256             []byte             `json:"request_sha256"`
+	Subject                   string             `json:"subject"`
+	TextBody                  string             `json:"text_body"`
+	NoticeBytes               []byte             `json:"notice_bytes"`
+	NoticeSha256              []byte             `json:"notice_sha256"`
+	FileCommitmentSha256      []byte             `json:"file_commitment_sha256"`
+	IssuedBy                  uuid.UUID          `json:"issued_by"`
+	IssuedAt                  pgtype.Timestamptz `json:"issued_at"`
+	RetainUntil               pgtype.Timestamptz `json:"retain_until"`
+	OwnerAlertUserID          uuid.UUID          `json:"owner_alert_user_id"`
+	OwnerAlertEmailDeliveryID uuid.UUID          `json:"owner_alert_email_delivery_id"`
+	OwnerAlertMessageSha256   []byte             `json:"owner_alert_message_sha256"`
+	EventID                   uuid.UUID          `json:"event_id"`
+}
+
+type DocumentAmendmentPoliciesV1 struct {
+	ID                    uuid.UUID          `json:"id"`
+	OrgID                 uuid.UUID          `json:"org_id"`
+	DocumentID            uuid.UUID          `json:"document_id"`
+	Basis                 []byte             `json:"basis"`
+	BasisSha256           []byte             `json:"basis_sha256"`
+	PresentedSourceSha256 []byte             `json:"presented_source_sha256"`
+	PresentedPdfSha256    []byte             `json:"presented_pdf_sha256"`
+	PresentedPdfVersionID string             `json:"presented_pdf_version_id"`
+	FrozenAt              pgtype.Timestamptz `json:"frozen_at"`
+	FrozenBy              uuid.UUID          `json:"frozen_by"`
+}
+
+type DocumentAmendmentsV1 struct {
+	ID                        uuid.UUID          `json:"id"`
+	OrgID                     uuid.UUID          `json:"org_id"`
+	OriginalDocumentID        uuid.UUID          `json:"original_document_id"`
+	DocumentID                uuid.UUID          `json:"document_id"`
+	Revision                  int64              `json:"revision"`
+	PreviousRevision          int64              `json:"previous_revision"`
+	PredecessorID             pgtype.UUID        `json:"predecessor_id"`
+	RequestID                 uuid.UUID          `json:"request_id"`
+	RequestSha256             []byte             `json:"request_sha256"`
+	Mode                      string             `json:"mode"`
+	Basis                     []byte             `json:"basis"`
+	BasisSha256               []byte             `json:"basis_sha256"`
+	OriginalPins              []byte             `json:"original_pins"`
+	OriginalPinsSha256        []byte             `json:"original_pins_sha256"`
+	FileSet                   []byte             `json:"file_set"`
+	FileCommitmentSha256      []byte             `json:"file_commitment_sha256"`
+	CreatedBy                 uuid.UUID          `json:"created_by"`
+	CreatedAt                 pgtype.Timestamptz `json:"created_at"`
+	OwnerAlertUserID          uuid.UUID          `json:"owner_alert_user_id"`
+	OwnerAlertEmailDeliveryID uuid.UUID          `json:"owner_alert_email_delivery_id"`
+	OwnerAlertMessageSha256   []byte             `json:"owner_alert_message_sha256"`
+	EventID                   uuid.UUID          `json:"event_id"`
+}
+
 type DocumentAttachmentDraftsV1 struct {
 	PackageID               uuid.UUID          `json:"package_id"`
 	OrgID                   uuid.UUID          `json:"org_id"`
@@ -1302,6 +1383,29 @@ type PresignExecution struct {
 	UseNumber                int64              `json:"use_number"`
 }
 
+type PresignExecutionAssetsV1 struct {
+	OrgID           uuid.UUID          `json:"org_id"`
+	ExecutionID     uuid.UUID          `json:"execution_id"`
+	DocumentID      uuid.UUID          `json:"document_id"`
+	PreparationID   uuid.UUID          `json:"preparation_id"`
+	CanonicalAssets []byte             `json:"canonical_assets"`
+	AssetsSha256    []byte             `json:"assets_sha256"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type PresignExecutionPublicationsV1 struct {
+	OrgID                uuid.UUID          `json:"org_id"`
+	ExecutionID          uuid.UUID          `json:"execution_id"`
+	DocumentID           uuid.UUID          `json:"document_id"`
+	CustomerRecipientID  uuid.UUID          `json:"customer_recipient_id"`
+	State                string             `json:"state"`
+	RetainUntil          pgtype.Timestamptz `json:"retain_until"`
+	RetentionStartedAt   pgtype.Timestamptz `json:"retention_started_at"`
+	RetentionCompletedAt pgtype.Timestamptz `json:"retention_completed_at"`
+	PublishedAt          pgtype.Timestamptz `json:"published_at"`
+	PublicationEventID   pgtype.UUID        `json:"publication_event_id"`
+}
+
 type PresignExecutionRequest struct {
 	OrgID                    uuid.UUID          `json:"org_id"`
 	ExecutorKind             string             `json:"executor_kind"`
@@ -1374,6 +1478,81 @@ type PresignMutationRequest struct {
 	ResourceSha256   []byte             `json:"resource_sha256"`
 	OutcomeJson      json.RawMessage    `json:"outcome_json"`
 	OccurredAt       pgtype.Timestamptz `json:"occurred_at"`
+}
+
+type PresignPreparationObjectsV1 struct {
+	OrgID            uuid.UUID          `json:"org_id"`
+	PreparationID    uuid.UUID          `json:"preparation_id"`
+	Role             string             `json:"role"`
+	ObjectKey        string             `json:"object_key"`
+	ContentType      string             `json:"content_type"`
+	ObjectSha256     []byte             `json:"object_sha256"`
+	ObjectBytes      int64              `json:"object_bytes"`
+	UploadAttempted  bool               `json:"upload_attempted"`
+	VersionID        pgtype.Text        `json:"version_id"`
+	ResolvedAt       pgtype.Timestamptz `json:"resolved_at"`
+	CleanupStartedAt pgtype.Timestamptz `json:"cleanup_started_at"`
+	DeletedAt        pgtype.Timestamptz `json:"deleted_at"`
+}
+
+type PresignPreparationsV1 struct {
+	OrgID                    uuid.UUID          `json:"org_id"`
+	ID                       uuid.UUID          `json:"id"`
+	ExecutorKind             string             `json:"executor_kind"`
+	ExecutorUserID           uuid.UUID          `json:"executor_user_id"`
+	ExecutorCredentialID     uuid.UUID          `json:"executor_credential_id"`
+	RequestID                uuid.UUID          `json:"request_id"`
+	DocumentID               uuid.UUID          `json:"document_id"`
+	IntentCanonical          []byte             `json:"intent_canonical"`
+	IntentSha256             []byte             `json:"intent_sha256"`
+	OriginalCredentialSha256 []byte             `json:"original_credential_sha256"`
+	State                    string             `json:"state"`
+	ExecutionID              pgtype.UUID        `json:"execution_id"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+}
+
+type PresignSourceRequestsV1 struct {
+	OrgID                     uuid.UUID          `json:"org_id"`
+	ExecutorCredentialID      uuid.UUID          `json:"executor_credential_id"`
+	RequestID                 uuid.UUID          `json:"request_id"`
+	ExecutorUserID            uuid.UUID          `json:"executor_user_id"`
+	OriginalCredentialSha256  []byte             `json:"original_credential_sha256"`
+	State                     string             `json:"state"`
+	InputSha256               []byte             `json:"input_sha256"`
+	PolicyID                  pgtype.UUID        `json:"policy_id"`
+	PolicyRevision            pgtype.Int8        `json:"policy_revision"`
+	PolicySha256              []byte             `json:"policy_sha256"`
+	GrantID                   pgtype.UUID        `json:"grant_id"`
+	GrantRevision             pgtype.Int8        `json:"grant_revision"`
+	GrantSha256               []byte             `json:"grant_sha256"`
+	TemplateID                pgtype.UUID        `json:"template_id"`
+	TemplateVersion           pgtype.Int8        `json:"template_version"`
+	TemplateContentSha256     []byte             `json:"template_content_sha256"`
+	CreationRequestID         pgtype.UUID        `json:"creation_request_id"`
+	DocumentID                pgtype.UUID        `json:"document_id"`
+	OriginalDocumentUpdatedAt pgtype.Timestamptz `json:"original_document_updated_at"`
+	MaterializationID         pgtype.UUID        `json:"materialization_id"`
+	MaterializationRevision   pgtype.Int8        `json:"materialization_revision"`
+	SourceCommitment          pgtype.Text        `json:"source_commitment"`
+	BasePdfKey                pgtype.Text        `json:"base_pdf_key"`
+	BasePdfVersionID          pgtype.Text        `json:"base_pdf_version_id"`
+	BasePdfSha256             []byte             `json:"base_pdf_sha256"`
+	PageCount                 pgtype.Int4        `json:"page_count"`
+	CloseEventID              pgtype.UUID        `json:"close_event_id"`
+	CrmBindingsSha256         []byte             `json:"crm_bindings_sha256"`
+	CreatedAt                 pgtype.Timestamptz `json:"created_at"`
+}
+
+type PresignSupersessionsV1 struct {
+	OrgID            uuid.UUID          `json:"org_id"`
+	PriorExecutionID uuid.UUID          `json:"prior_execution_id"`
+	PriorDocumentID  uuid.UUID          `json:"prior_document_id"`
+	DocumentID       uuid.UUID          `json:"document_id"`
+	RequestID        uuid.UUID          `json:"request_id"`
+	ActorUserID      uuid.UUID          `json:"actor_user_id"`
+	AuditEventID     uuid.UUID          `json:"audit_event_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
 type PresignWorkflow struct {

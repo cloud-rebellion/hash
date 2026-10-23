@@ -22,6 +22,16 @@ import (
 
 const DataAdmissionDomain = "hash:presign-data-admission:v1\x00"
 
+// Preserve the concrete resolver's sole fixed transformation in canonical
+// evidence. No other source/path can assert it, and this derived catalog value
+// cannot discard its transformation. Ordinary native scalars remain unchanged.
+func dataAdmissionCRMTransformationV1(kind, path, transformation string) bool {
+	if kind == "crm.contact" && path == "full_name" {
+		return transformation == "trim-first-and-last-name-v1"
+	}
+	return transformation == ""
+}
+
 // DataAdmissionSnapshot records checked data, separately from human review and
 // delegated signature evidence. It contains commitments, never CRM credentials.
 // Its canonical bytes are private evidence, not a public API response.
@@ -157,7 +167,7 @@ func EvaluateExecutionData(d WorkflowDefinition, grantor presign.NamedRepresenta
 				return DataAdmission{}, invalid("exact CRM scalar rule")
 			}
 			c, o := d.DataRules.CRM, *entry.CRMObservation
-			if o.ConnectionID != c.ConnectionID || o.Generation != strconv.FormatInt(c.Generation, 10) || o.Origin != c.Origin || o.CRMTeamID != c.TeamID || o.CRMUserID != c.UserID || o.Transformation != "" || !validSHA(o.BodySHA256) ||
+			if o.ConnectionID != c.ConnectionID || o.Generation != strconv.FormatInt(c.Generation, 10) || o.Origin != c.Origin || o.CRMTeamID != c.TeamID || o.CRMUserID != c.UserID || !dataAdmissionCRMTransformationV1(r.SourceKind, r.SourcePath, o.Transformation) || !validSHA(o.BodySHA256) ||
 				o.ObservedAt.IsZero() || o.ObservedAt.After(at) || at.Sub(o.ObservedAt) > resolver.CRMObservationMaxAge {
 				return DataAdmission{}, invalid("exact CRM account and observation")
 			}
@@ -262,7 +272,7 @@ func newDataAdmission(s DataAdmissionSnapshot) (DataAdmission, error) {
 				catalogPath = true
 			}
 		}
-		if !declaredName.MatchString(v.Variable) || v.Variable <= previous || selected[v.SourceKind] != v.SourceRef || !catalogPath || err != nil || o.Generation != strconv.FormatInt(generation, 10) || crmconnection.ValidateIdentity(id) != nil || !validSHA(o.BodySHA256) || !validSHA(o.ValueSHA256) || o.Transformation != "" || o.ObservedAt.IsZero() || o.RecordUpdatedAt.IsZero() {
+		if !declaredName.MatchString(v.Variable) || v.Variable <= previous || selected[v.SourceKind] != v.SourceRef || !catalogPath || err != nil || o.Generation != strconv.FormatInt(generation, 10) || crmconnection.ValidateIdentity(id) != nil || !validSHA(o.BodySHA256) || !validSHA(o.ValueSHA256) || !dataAdmissionCRMTransformationV1(v.SourceKind, v.SourcePath, o.Transformation) || o.ObservedAt.IsZero() || o.RecordUpdatedAt.IsZero() {
 			return DataAdmission{}, invalid("canonical CRM scalar witness")
 		}
 		if account.ID != uuid.Nil && account != id {

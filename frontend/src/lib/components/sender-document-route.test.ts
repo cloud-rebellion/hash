@@ -20,7 +20,9 @@ function fixture() {
   const calls: any[] = [];
   const pending = (kind: string) => (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind, args, resolve, reject }));
   const env: any = {
-    doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
+    amendmentLookupBlocked: false, amendmentLinked: false, amendmentNotice: false, amendmentBusy: false, amendmentDirty: false,
+    supersessionBusy: false, supersessionPending: false,
+    preSignPresentationBlocked: false, doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,
     userName: 'Owner', viewerRole: '', viewerUserID: '', loading: false, error: null, showPreview: true, savingTemplate: false, savedTemplateFlash: false,
     crmBusy: false, crmBlocked: true, crmReviewRequired: false, crmEditorClean: true, crmOtherBusy: false, attachmentBusy:false,attachmentDirty:false,attachmentSendBlocked:true,attachmentMessage:"",crmLocalIntent:false,senderDraftDirty:false,pdfLayoutBusy:false,pdfLayoutDirty:false, htmlEditorClean: false, blocksEditorClean: false, senderMutationBusy: false, crmRefreshRevision: 0, crmReviewRevision: 0, crmEditorRevision: 0,
     attachmentPackageSend: undefined, attachmentReviewRequest: { revision: 0, inspect: false }, attachmentReviewRevision: 0,
@@ -35,6 +37,11 @@ function fixture() {
     reviseDocument: pending('revise'), updateDocument: pending('update'), createBlocksTemplate: pending('template'),
     setChangeApprovalMode: pending('approvalMode'), setTimeout, clearTimeout
   };
+  // This fixture starts after a successful ordinary-document relation read.
+  // Derive the new gate from the actual source, not an invented constant.
+  const readonlyExpression = source.match(/const amendmentReadOnly = \$derived\(([^;]+)\);/)?.[1]; if (!readonlyExpression) throw Error('Actual amendment readonly gate missing');
+  const readOnly = new Function('env', `with(env){return ${readonlyExpression};}`);
+  Object.defineProperty(env,'amendmentReadOnly',{get:()=>readOnly(env)});
   Object.defineProperty(env,'htmlSiblingMutationBusy',{get:()=>env.crmBusy || env.attachmentBusy || env.senderMutationBusy || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.pdfLayoutBusy});
   Object.defineProperty(env,'attachmentBarrier',{get:()=>env.attachmentBusy || env.attachmentDirty});
   Object.defineProperty(env,'attachmentOtherBusy',{get:()=>env.crmBusy || env.crmLocalIntent || env.senderMutationBusy || env.senderDraftDirty || env.savingMode || env.savingTemplate || env.revising || !!env.resolvingId || env.savingApprovalMode || env.pdfLayoutBusy || env.pdfLayoutDirty});
@@ -50,7 +57,9 @@ test('route reset retires the prior package inspection request and reviewed sele
   const f=fixture(), previous={revision:7,inspect:true};
   f.env.attachmentReviewRequest=previous;f.env.attachmentReviewRevision=4;
   f.env.attachmentPackageSend={expected_updated_at:'2026-10-19T12:03:04Z',package_id:'4e972fb2-ae22-4c84-a52d-93d66507b080',generation:'7'};
+  f.env.preSignPresentationBlocked=true;
   f.actions.resetRouteState();
+  expect(f.env.preSignPresentationBlocked).toBe(false);
   expect(f.env.attachmentPackageSend).toBeUndefined();expect(f.env.attachmentReviewRequest).toEqual({revision:8,inspect:false});
   expect(f.env.attachmentReviewRequest).not.toBe(previous);expect(previous).toEqual({revision:7,inspect:true});expect(f.env.attachmentReviewRevision).toBe(5);
 });
@@ -260,10 +269,32 @@ test('CRM Apply lock cannot adopt a late block autosave or change document metad
 });
 test('the actual Send prop blocks dirty or unsynced editable blocks and retains clean manual sending', () => {
   const prop = source.slice(source.indexOf('<SenderPanel')).match(/revisionBlocked=\{([^\n]+)\}/)?.[1]; expect(prop).toBeDefined();
-  const blocked = new Function('doc', 'htmlRevisionBlocked', 'crmEditable', 'blocksEditorClean', `return ${prop};`);
+  const evaluate = new Function('env', `with(env){return ${prop};}`);
+  const blocked = (doc: unknown, htmlRevisionBlocked: boolean, crmEditable: boolean, blocksEditorClean: boolean, amendment: Record<string, boolean> = {}) => evaluate({ doc, htmlRevisionBlocked, crmEditable, blocksEditorClean, amendmentLookupBlocked: false, amendmentNotice: false, amendmentBusy: false, ...amendment });
   const blocks = { source_kind: 'blocks', has_html_source: false };
   expect(blocked(blocks, false, true, false)).toBe(true);
   expect(blocked(blocks, false, true, true)).toBe(false);
   expect(blocked(blocks, false, false, false)).toBe(false);
   expect(blocked({ source_kind: 'pdf', has_html_source: true }, true, true, true)).toBe(true);
+  for (const flag of ['amendmentLookupBlocked', 'amendmentNotice', 'amendmentBusy']) expect(blocked(blocks, false, true, true, { [flag]: true })).toBe(true);
+  expect(blocked({ source_kind: 'pdf', has_html_source: false }, false, false, true, { amendmentLinked: true })).toBe(false);
+});
+
+test('actual parent readonly gate blocks source/mode changes during amendment or supersession and releases only cleared state', async () => {
+ for (const flag of ['amendmentLookupBlocked', 'amendmentLinked', 'amendmentBusy', 'supersessionBusy', 'supersessionPending']) {
+  const f = fixture(); f.env.doc.status = 'draft'; f.env[flag] = true; await f.actions.toggleSignatureMode(); expect(f.calls).toEqual([]); expect(f.env.amendmentReadOnly).toBe(true);
+  f.env.doc.status = 'changes_requested'; await f.actions.revise(); expect(f.calls).toEqual([]);
+  f.env[flag] = false; expect(f.env.amendmentReadOnly).toBe(false);
+  const resumed = f.actions.revise(); expect(f.calls).toHaveLength(1); expect(f.calls[0].kind).toBe('revise');
+  f.calls[0].resolve(document('A', 'draft')); await resumed; expect(f.env.doc.status).toBe('draft');
+ }
+});
+
+test('actual amendment preeffect invalidates a changed source or actor scope and preserves a fresh same-scope read', () => {
+ const f = fixture(); const start = source.indexOf('  $effect.pre(() => { const scope = amendmentScope;'); const end = source.indexOf('  let crmRefreshRevision', start); if (start < 0 || end <= start) throw Error('Actual amendment scope preeffect missing');
+ const expression = source.match(/const amendmentScope = \$derived\(([^;]+)\);/)?.[1]; if (!expression) throw Error('Actual amendment scope missing'); const scope = new Function('env', `with(env){return ${expression};}`); Object.defineProperty(f.env, 'amendmentScope', { get: () => scope(f.env) });
+ let effect!: () => void; f.env.seenAmendmentScope = ''; f.env.$effect = { pre: (callback: () => void) => { effect = callback; } }; f.env.untrack = (callback: () => void) => callback();
+ new Function('env', `with(env){${new Bun.Transpiler({loader:'ts'}).transformSync(source.slice(start,end))}}`)(f.env); effect(); expect(f.env.amendmentLookupBlocked).toBe(true); expect(f.env.amendmentLinked).toBe(false);
+ f.env.amendmentLookupBlocked = false; f.env.amendmentLinked = true; f.env.amendmentBusy = true; effect(); expect(f.env.amendmentLookupBlocked).toBe(false); expect(f.env.amendmentLinked).toBe(true); expect(f.env.amendmentBusy).toBe(true);
+ f.env.doc.org_id = 'different-org'; effect(); expect(f.env.amendmentLookupBlocked).toBe(true); expect(f.env.amendmentLinked).toBe(false); expect(f.env.amendmentBusy).toBe(false);
 });

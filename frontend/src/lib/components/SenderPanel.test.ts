@@ -29,6 +29,7 @@ function fixture() {
     documentChanged: false, initialized: true, status: 'draft', editable: true, isLive: false,
     requiresSignature: true, reviewRequired: false, revisionBlocked: false, crmBlocked: false, crmBusy: false, attachmentsBlocked:false, attachmentsMessage:"", packageSend:undefined, packageReviewRequired:false,packageReviewRevision:0,packageReconciliationBusy:false,observedPackageReviewRevision:0,onPackageReviewRequired:(inspect:boolean)=>calls.push({kind:"package-review",args:[inspect]}),packageStatus:{stop:async()=>{},start:()=>{}},pendingPackageAttempt:null,packageUncertain:false,checkingPackage:false,externalMutationBusy:false, onDraftStateChange:undefined, onCRMReviewRequired: undefined, onMutationStateChange: undefined, generatedPlacementRequired: false, generatedPlacementReady: false, signerRoles: [], missingRoles: [], hasParticipant: true,
     intendedParties: [], recipientIdentityLocked: false, sourceCommitment: '', observedSourceCommitment: '',
+    preSignMode: 'manual', preSignBusy: false, preSignRecoveryBlocked: false, preSignDraft: false,
     roleOptions: [{ value: 'signer' }, { value: 'approver' }],
     docLocale: 'en', confirmedDocLocale: 'en', defaultLocale: 'en', savingLocale: false,
     recipients: [{ id: 'original', document_id: 'A', name: 'Original', email: 'original@example.test', role: 'signer', locale: 'en', order_index: 0 }],
@@ -45,7 +46,7 @@ function fixture() {
     confirm: () => env.confirmed, prompt: () => 'Audit reason', confirmed: false, SendError: class extends Error {},
     setTimeout, clearTimeout
   };
-  Object.defineProperty(env,'otherMutationBusy',{get:()=>env.crmBusy || env.externalMutationBusy});
+  Object.defineProperty(env,'otherMutationBusy',{get:()=>env.crmBusy || env.externalMutationBusy || env.preSignBusy || env.preSignRecoveryBlocked});
   const actions = bind(env);
   Object.defineProperty(env, 'partyConflicts', { get: () => actions.intendedPartyConflicts() });
   return { env, calls, prompts, recipientChanges, actions };
@@ -57,6 +58,14 @@ function bindContractParties(state: ReturnType<typeof fixture>) {
   state.env.recipients = state.env.intendedParties.map((party: any, index: number) => ({ id: party.recipient_id, document_id: 'A', role: party.role,
     name: party.name, email: party.email, locale: 'en', order_index: index }));
 }
+test('pre-sign selection and unresolved original request never fall through to ordinary Send', async () => {
+  for (const patch of [{ preSignMode: 'presign' }, { preSignRecoveryBlocked: true }, { preSignBusy: true }]) {
+    const state = fixture(); bindContractParties(state); state.env.lawfulBasis = 'contract'; Object.assign(state.env, patch);
+    await state.actions.send(); expect(state.calls).toEqual([]);
+  }
+  const state = fixture(); state.env.preSignDraft = true;
+  expect(state.actions.hasMeaningfulDraft()).toBe(true);
+});
 test('both declared parties are checked before any signature field exists and missing or drifting identity blocks send', async () => {
   for (const drift of ['missing', 'name', 'email', 'role', 'extra_role']) {
     const state = fixture(); bindContractParties(state); state.env.lawfulBasis = 'contract';

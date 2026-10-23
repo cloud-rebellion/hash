@@ -5,6 +5,13 @@ Hash exposes separate browser, machine, signer, and webhook boundaries. Use the
 middleware, and conditional dependency. The inventory is generated from the
 router and checked with `go run ./cmd/apidocgen -check`.
 
+The [later-amendment and agreed-notice API](LATER-AMENDMENTS-API.md) documents
+the three agreement-selected processes, immutable original/proposal relation,
+owner/session routes, purpose-only notice access, uncertain-result recovery and
+signer disclosure. Mail progress is not signature, acknowledgement or legal
+acceptance. Its public notice routes are an explicit exception to the ordinary
+signed-session `/api/v1` boundary.
+
 The [signing workflow/self-grant registry](PRE-SIGNING-REGISTRY-API.md) documents
 the session-only review, consent, revocation and durable recovery contract.
 Its registry does not enable document pre-signing or machine execution.
@@ -15,7 +22,8 @@ no public endpoint and does not enable that mode.
 
 | Surface | Authentication | Contract |
 | --- | --- | --- |
-| `/api/v1/*` | Sender session cookie from OIDC login | Browser API. API keys do not replace the cookie on this tree. Current membership, tenant and role are loaded on each request. |
+| `/api/v1/*`, except the purpose-only notice routes below | Sender session cookie from OIDC login | Browser API. API keys do not replace the cookie on this tree. Current membership, tenant and role are loaded on each request. |
+| `/api/v1/notices/{notice_id}` and its documented access/file routes | Notice capability exchange, then a purpose-specific HttpOnly Secure cookie | Read-only exact notice/file access; no sender/signature/acknowledgement grant. See [later amendments](LATER-AMENDMENTS-API.md#public-notice-access-and-exact-downloads). |
 | `/api/automation/v1/signature-requests` | Organization-wide API key | Dedicated sender/owner key with both `write:authoring` and `write:workflow`; stable `Idempotency-Key`. See [Automation API](AUTOMATION-API.md). |
 | `/mcp` | API key, including supported document-scoped credentials | MCP entitlement, role, tool scopes and document scope apply independently. Discover actual tools and input schemas through MCP `tools/list`. |
 | `/sign/{token}/*` | Recipient magic link | The URL token is a bearer credential bound to a recipient and ceremony. It does not grant sender or administrative access. |

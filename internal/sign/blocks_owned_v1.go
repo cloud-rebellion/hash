@@ -130,50 +130,62 @@ func (o *ownedBlocksSignatureOperationV1) closeV1() error {
 // owners. No unavailable runtime/request can fall back to Pool.Begin or a
 // configured child full-row callback. Finalization is a distinct boundary.
 func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in SignInput) (result *Result, failure error) {
-	defer func() { failure = blockSignatureFailureV1(failure) }()
+	stage := "scope"
+	defer func() { failure = blockSignatureFailureV1(blockSignatureDiagnosticV1(stage, failure)) }()
 	if e == nil || rc == nil || rc.readLease == nil || e.WorkRuntime == nil || !e.WorkRuntime.MatchesPoolV1(e.Pool) {
 		return nil, ErrSigningAdmissionUnavailableV1
 	}
+	stage = "original"
 	original, _, finishOriginal, err := rc.readLease.borrowOriginalV1(e, rc, pdfadmission.SignerReadActiveV1)
 	if err != nil {
 		return nil, err
 	}
 	defer finishOriginal()
+	stage = "document"
 	doc, rec := original.Document, original.Recipient
 	if doc == nil || rec == nil || (doc.SourceKind != "blocks" && doc.SourceKind != "pdf") {
 		return nil, ErrSigningAdmissionUnavailableV1
 	}
+	stage = "tier"
 	if err = requireSESTypedSignature(doc); err != nil {
 		return nil, err
 	}
+	stage = "notice"
 	if err = validateNoticeEvidence(original, in.Notice); err != nil {
 		return nil, err
 	}
+	stage = "fitted"
 	if doc.SigningAdmissionPolicy == "pdf-static-v1" {
 		if _, err = e.validateFittedRequestV1(ctx, original, in); err != nil {
 			return nil, err
 		}
 	}
+	stage = "historical"
 	if err = requireHistoricalSigningAdmissionV1(doc); err != nil {
 		return nil, err
 	}
 	factory := e.WorkRuntime.SessionsV1()
+	stage = "package_request"
 	packageRequest, err := factory.NewPackageResponseRequestV1(ctx, rc.readLease.reader, in.PackageResponse, "signed")
 	if err != nil {
 		return nil, err
 	}
+	stage = "package_register"
 	if err = rc.readLease.registerPackageResponseRequestV1(e, packageRequest); err != nil {
 		packageRequest.CloseConsumerV1()
 		return nil, err
 	}
+	stage = "signature_request"
 	request, err := factory.NewBlockSignatureRequestV1(ctx, rc.readLease.reader, in.TypedName, in.Font, in.IP, in.UserAgent)
 	if err != nil {
 		return nil, err
 	}
+	stage = "signature_register"
 	if err = rc.readLease.registerBlockSignatureRequestV1(e, request); err != nil {
 		request.CloseConsumerV1()
 		return nil, err
 	}
+	stage = "operation"
 	native, err := factory.NewHTMLSendOperationV1(ctx, doc.OrgID, doc.ID)
 	if err != nil {
 		return nil, err
@@ -181,39 +193,57 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 	operation := &ownedBlocksSignatureOperationV1{native: native, factory: factory, original: ctx}
 	defer func() {
 		if err := operation.closeV1(); err != nil {
-			failure = errors.Join(failure, err)
+			failure = errors.Join(blockSignatureDiagnosticV1(stage, failure), blockSignatureDiagnosticV1("deferred_close", err))
 		}
 	}()
+	stage = "preparation"
 	if doc.SourceKind == "pdf" {
 		err = operation.phaseV1(pdfadmission.HTMLBlockSignPreparationV1, func(call context.Context, _ *pdfadmission.ApplicationSessionV1, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
+			stage = "preparation_state"
 			if _, err := w.StateV1(call); err != nil {
 				return err
 			}
+			stage = "preparation_models"
 			if _, err := w.ReadModelsV1(call); err != nil {
 				return err
 			}
+			stage = "preparation_fields"
 			if _, err := w.ReadFieldsV1(call); err != nil {
 				return fmt.Errorf("prepare PDF signature targets: %w", err)
 			}
-			return request.PrepareHistoricalPDFV1(call, w)
+			stage = "preparation_pdf"
+			if err := request.PrepareHistoricalPDFV1(call, w); err != nil {
+				return err
+			}
+			stage = "preparation_commit"
+			return nil
 		})
 	} else if doc.IsEnvelope {
 		if e.EnvelopeChildren == nil {
 			return nil, errors.New("find signature field: envelope children unavailable")
 		}
 		err = operation.phaseV1(pdfadmission.HTMLBlockSignPreparationV1, func(call context.Context, _ *pdfadmission.ApplicationSessionV1, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
+			stage = "preparation_state"
 			if _, err := w.StateV1(call); err != nil {
 				return err
 			}
+			stage = "preparation_models"
 			if _, err := w.ReadModelsV1(call); err != nil {
 				return err
 			}
+			stage = "preparation_members"
 			if _, err := w.ReadEnvelopeMembersV1(call); err != nil {
 				return err
 			}
-			return request.PrepareEnvelopeV1(call, w)
+			stage = "preparation_envelope"
+			if err := request.PrepareEnvelopeV1(call, w); err != nil {
+				return err
+			}
+			stage = "preparation_commit"
+			return nil
 		})
 	} else {
+		stage = "preparation_standalone"
 		err = request.PrepareStandaloneV1()
 	}
 	if err != nil {
@@ -228,48 +258,62 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 			auditOwner.CloseConsumerV1()
 		}
 	}()
+	stage = "mutation"
 	err = operation.phaseV1(pdfadmission.HTMLBlockSignMutationV1, func(call context.Context, session *pdfadmission.ApplicationSessionV1, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
+		stage = "mutation_state"
 		if _, err := w.StateV1(call); err != nil {
 			return fmt.Errorf("lock document: %w", err)
 		}
+		stage = "mutation_models"
 		models, err := w.ReadModelsV1(call)
 		if err != nil {
 			return fmt.Errorf("lock document: %w", err)
 		}
 		locked := models.Document
+		stage = "mutation_historical"
 		if err = requireHistoricalSigningAdmissionV1(locked); err != nil {
 			return err
 		}
+		stage = "mutation_notice"
 		if err = ValidateLockedNoticeEvidence(original, locked, in.Notice); err != nil {
 			return err
 		}
+		stage = "mutation_status"
 		if locked.Status != "sent" && locked.Status != "in_progress" {
 			return ErrDocumentNotSignable
 		}
+		stage = "mutation_tier"
 		if err = requireSESTypedSignature(locked); err != nil {
 			return err
 		}
+		stage = "mutation_begin"
 		if err = w.BeginBlockSignatureMutationV1(call, request); err != nil {
 			return err
 		}
+		stage = "package_begin"
 		finishPackage, err := w.BeginPackageResponseV1(call, packageRequest)
 		if err != nil {
 			return err
 		}
 		defer finishPackage()
+		stage = "package_validate"
 		if err = w.ValidatePackageResponseV1(call); err != nil {
 			return err
 		}
+		stage = "recipient"
 		fresh, err := w.ReadBlockSignatureRecipientV1(call)
 		if err != nil {
 			return err
 		}
+		stage = "credential"
 		if err = ValidateLockedRecipientCredential(original, fresh, locked, e.now()); err != nil {
 			return err
 		}
+		stage = "eligibility"
 		if fresh.DocumentID != doc.ID || !recipients.CanRespond(fresh.Role) {
 			return ErrRecipientNotEligibleForResponse
 		}
+		stage = "retry"
 		if fresh.Status == "signed" {
 			matched, retryErr := w.MatchPriorSignedPackageResponseV1(call, request)
 			if retryErr != nil {
@@ -286,24 +330,35 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 				return retryErr
 			}
 			retried = true
-			return ValidateLockedRecipientCredential(original, fresh, locked, e.now())
+			stage = "credential_recheck"
+			if err := ValidateLockedRecipientCredential(original, fresh, locked, e.now()); err != nil {
+				return err
+			}
+			stage = "mutation_commit"
+			return nil
 		}
+		stage = "declined"
 		if fresh.Status == "declined" {
 			return errors.New("recipient already declined")
 		}
+		stage = "envelope"
 		if locked.IsEnvelope && e.EnvelopeChildren == nil {
 			return errors.New("resolve signer roles: envelope children unavailable")
 		}
+		stage = "roles"
 		roles, err := w.RequiredBlockSignatureRolesV1(call)
 		if err != nil {
 			return err
 		}
+		stage = "required_role"
 		if _, required := signerRoleSet(roles)[fresh.Role]; !required {
 			return ErrRecipientNotEligibleForResponse
 		}
+		stage = "report_prepare"
 		if err = w.PrepareResponseReportFamilyV1(call); err != nil {
 			return responseReportAdmissionErrorV1(err)
 		}
+		stage = "unfilled"
 		unfilled, err := w.CountBlockSignatureUnfilledV1(call)
 		if err != nil {
 			return fmt.Errorf("check required signer fields: %w", err)
@@ -311,9 +366,11 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		if unfilled > 0 {
 			return fmt.Errorf("%d required field(s) unfilled", unfilled)
 		}
+		stage = "mutation_fields"
 		if _, err = w.ReadFieldsV1(call); err != nil {
 			return err
 		}
+		stage = "signature_targets"
 		if doc.SourceKind == "pdf" || locked.SourceKind == "pdf" {
 			err = w.ValidateHistoricalPDFSignatureTargetsV1(call)
 			if errors.Is(err, pdfadmission.ErrHistoricalPDFSignaturePreparationChangedV1) {
@@ -325,13 +382,16 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		} else if _, err = w.FindOrCreateBlockSignatureFieldV1(call); err != nil {
 			return err
 		}
+		stage = "storage"
 		client, ok := e.Storage.(*storage.Client)
 		if !ok || client == nil {
 			return errors.New("store signature span: concrete evidence storage unavailable")
 		}
+		stage = "store_evidence"
 		if err = request.StoreEvidenceV1(call, w, client); err != nil {
 			return err
 		}
+		stage = "insert_signature"
 		sig, err := w.InsertBlockSignatureV1(call)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrAlreadySigned
@@ -339,26 +399,32 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		if err != nil {
 			return fmt.Errorf("insert signature row: %w", err)
 		}
+		stage = "mark_signed"
 		if err = w.MarkBlockSignatureSignedV1(call); err != nil {
 			return err
 		}
+		stage = "remaining"
 		remaining, err = w.CountBlockSignatureRemainingV1(call)
 		if err != nil {
 			return err
 		}
+		stage = "prepared_view"
 		view, err := request.PreparedViewV1()
 		if err != nil {
 			return err
 		}
+		stage = "notice_payload"
 		payload, err := responseAuditPayload(map[string]any{"font": view.Font, "typed_name": view.TypedName, "image_sha256": fmt.Sprintf("%x", sig.ImageSha256), "signature_id": sig.ID}, in.Notice)
 		if err != nil {
 			return fmt.Errorf("bind signature notice evidence: %w", err)
 		}
+		stage = "audit_package"
 		packageEvent, err := w.PackageResponseAuditV1(call, payload)
 		if err != nil {
 			return err
 		}
 		entry := audit.Entry{OrgID: doc.OrgID, DocumentID: &doc.ID, RecipientID: &rec.ID, Kind: audit.KindDocumentSigned, IP: view.IP, UserAgent: view.UserAgent, Payload: payload}
+		stage = "audit"
 		if packageEvent {
 			pending, auditOwner, err = ownedaudit.LogPackageResponseV1(e.Audit, call, w, entry)
 		} else {
@@ -367,21 +433,30 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		if err != nil {
 			return fmt.Errorf("audit signature: %w", err)
 		}
+		stage = "record_response"
 		if err = w.RecordPackageResponseV1(call, auditOwner); err != nil {
 			return err
 		}
+		stage = "report_admit"
 		if err = w.AdmitResponseReportV1(call, auditOwner); err != nil {
 			return responseReportAdmissionErrorV1(err)
 		}
+		stage = "recipient_recheck"
 		fresh, err = w.ReadBlockSignatureRecipientV1(call)
 		if err != nil {
 			return err
 		}
-		return ValidateLockedRecipientCredential(original, fresh, locked, e.now())
+		stage = "credential_recheck"
+		if err := ValidateLockedRecipientCredential(original, fresh, locked, e.now()); err != nil {
+			return err
+		}
+		stage = "mutation_commit"
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	stage = "audit_publish"
 	if !retried {
 		if err = ownedaudit.PublishV1(e.Audit, pending, auditOwner); err != nil {
 			return nil, err
@@ -391,6 +466,7 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 	// The signature transaction and every source/member view have completed their
 	// final use before the separate finalization call graph begins. The request's
 	// original/result CPU loan remains with rc through actual response last use.
+	stage = "operation_close"
 	if err = operation.closeV1(); err != nil {
 		return nil, err
 	}
@@ -398,13 +474,15 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
 	}
 	completionCredential := &completionCredentialCapture{recipientID: rec.ID}
+	stage = "finalize"
 	finalKey, _, _, ferr := e.finalize(ctx, doc.OrgID, doc.ID, completionCredential)
+	stage = "retain_publication"
 	if err := e.retainHistoricalPublicationForRecipientV1(rc, completionCredential); err != nil {
 		return nil, err
 	}
 	if ferr != nil {
 		if !errors.Is(ferr, ErrFinalizeInProgress) && !errors.Is(ferr, ErrDocumentRevisedDuringFinalize) {
-			slog.Error("document finalization failed after signature commit", "document_id", doc.ID, "org_id", doc.OrgID, "err", ferr)
+			slog.Error("document finalization failed after signature commit", "document_id", doc.ID, "org_id", doc.OrgID, "stage", BlockSignatureFailureStageV1(ferr))
 		}
 		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
 	}

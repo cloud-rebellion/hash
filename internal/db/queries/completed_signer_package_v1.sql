@@ -16,7 +16,7 @@ WHERE d.id=sqlc.arg(document_id)::uuid AND d.org_id=sqlc.arg(org_id)::uuid AND d
  AND d.audit_payload_key=sqlc.arg(audit_payload_key)::text AND d.audit_payload_version_id=sqlc.arg(audit_payload_version_id)::text AND d.audit_payload_sha256=sqlc.arg(audit_payload_sha256)::bytea
  AND d.audit_signature_key=sqlc.arg(audit_signature_key)::text AND d.audit_signature_version_id=sqlc.arg(audit_signature_version_id)::text AND d.audit_signature_sha256=sqlc.arg(audit_signature_sha256)::bytea
  AND p.schema_version=d.participant_report_schema
- AND p.schema_version IN ('hash-participant-report-v1','hash-participant-report-v2') AND octet_length(p.report_sha256)=32
+ AND p.schema_version IN ('hash-participant-report-v1','hash-participant-report-v2','hash-participant-report-v3') AND octet_length(p.report_sha256)=32
  AND p.final_pdf_sha256=d.final_pdf_sha AND p.audit_cert_sha256=d.audit_cert_sha256
  AND p.audit_payload_sha256=d.audit_payload_sha256 AND p.audit_signature_sha256=d.audit_signature_sha256
  AND x.package_id=a.package_id AND x.capture_revision=a.capture_revision

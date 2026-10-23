@@ -62,6 +62,7 @@ type ApplicationHTMLAuditEventConsumerV1 struct {
 	session                                             *ApplicationSessionV1
 	member                                              *ApplicationHTMLSendWorkV1
 	documentAI                                          *applicationDocumentAIAuditScopeV1
+	laterAmendment                                      *applicationLaterAmendmentAuditScopeV1
 	physicalDocument                                    uuid.UUID
 	queries                                             *generated.Queries
 	org, document                                       uuid.UUID
@@ -103,7 +104,9 @@ func (h *ApplicationSessionV1) newAutomationHTMLAuditEventV1(ctx context.Context
 func (h *ApplicationSessionV1) newHTMLAuditEventCoreV1(ctx context.Context, purpose HTMLAuditPurposeV1, org, document uuid.UUID, recipient, actor pgtype.UUID, kind, ip, ua string, payload map[string]any, member *ApplicationHTMLSendWorkV1, layoutSlot *applicationPDFLayoutAuditSlotV1, automationSlot *applicationAutomationAuditSlotV1, packageSlot *applicationPackageSendAuditSlotV1, responseWorks ...*ApplicationHTMLSendWorkV1) (*ApplicationHTMLAuditEventConsumerV1, error) {
 	return h.newHTMLAuditEventCoreReminderV1(ctx, purpose, org, document, recipient, actor, kind, ip, ua, payload, member, layoutSlot, automationSlot, packageSlot, nil, responseWorks...)
 }
-func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Context, purpose HTMLAuditPurposeV1, org, document uuid.UUID, recipient, actor pgtype.UUID, kind, ip, ua string, payload map[string]any, member *ApplicationHTMLSendWorkV1, layoutSlot *applicationPDFLayoutAuditSlotV1, automationSlot *applicationAutomationAuditSlotV1, packageSlot *applicationPackageSendAuditSlotV1, reminderSlot *applicationReminderAuditSlotV1, responseWorks ...*ApplicationHTMLSendWorkV1) (*ApplicationHTMLAuditEventConsumerV1, error) {
+func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Context, purpose HTMLAuditPurposeV1, org, document uuid.UUID, recipient, actor pgtype.UUID, kind, ip, ua string, payload map[string]any, member *ApplicationHTMLSendWorkV1, layoutSlot *applicationPDFLayoutAuditSlotV1, automationSlot *applicationAutomationAuditSlotV1, packageSlot *applicationPackageSendAuditSlotV1, reminderSlot *applicationReminderAuditSlotV1, responseWorks ...*ApplicationHTMLSendWorkV1) (consumer *ApplicationHTMLAuditEventConsumerV1, err error) {
+	stage := "prepare_scope"
+	defer func() { err = htmlAuditFailureV1(purpose, stage, err) }()
 	if !applicationContextV1(ctx) {
 		return nil, ErrHTMLAuditEventV1
 	}
@@ -129,7 +132,14 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	if responsePurpose && (member != nil || layoutSlot != nil || automationSlot != nil || packageSlot != nil || !responseWorks[0].packageResponseAuditScopeMatchesV1(ctx, h, purpose, org, document, recipient, actor, payload)) {
 		return nil, ErrHTMLAuditEventV1
 	}
+	laterScope, _ := ctx.Value(laterAmendmentAuditKeyV1{}).(*applicationLaterAmendmentAuditScopeV1)
+	if laterScope != nil && (!laterScope.matchesV1(ctx, h, purpose, org, document, recipient, actor) || member != nil || layoutSlot != nil || automationSlot != nil || packageSlot != nil || reminderSlot != nil || len(responseWorks) != 0) {
+		return nil, ErrHTMLAuditEventV1
+	}
 	physicalDocument := document
+	if laterScope != nil {
+		physicalDocument = h.state.document
+	}
 	if reminderSlot != nil {
 		physicalDocument = h.state.document
 	}
@@ -139,6 +149,7 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 		}
 		physicalDocument = h.state.document
 	}
+	stage = "prepare_shape"
 	shape, err := htmlAuditPayloadShapeV1(ctx, purpose, payload)
 	if err != nil {
 		return nil, err
@@ -152,10 +163,12 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	if err = shape.add(192, 4096, 16); err != nil {
 		return nil, err
 	}
+	stage = "prepare_resources"
 	resources, err := htmlAuditResourcesV1(shape.raw, shape.wire, shape.nodes)
 	if err != nil {
 		return nil, err
 	}
+	stage = "prepare_session"
 	s := h.state
 	p := s.factory
 	if p == nil {
@@ -177,6 +190,7 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 		return nil, ErrHTMLAuditEventV1
 	}
 	p.htmlAdmissions[a] = &applicationHTMLAdmissionRegistrationV1{admission: a}
+	stage = "prepare_loan"
 	var closeConsumer func()
 	if reminderSlot != nil {
 		closeConsumer, err = reminderSlot.acquireV1(ctx, h, purpose, org, document, recipient, actor, kind, ip, ua, shape)
@@ -187,15 +201,24 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	} else if layoutSlot != nil {
 		closeConsumer, err = layoutSlot.acquireV1(ctx, h, purpose, org, document, recipient, actor, kind, ip, ua, shape)
 	} else {
-		closeConsumer, err = a.admit(ctx, ApplicationBudgetV1{Phase: "locked-html-fresh-event", OrgID: org, DocumentID: physicalDocument,
-			HTMLAuditRawBytes: shape.raw, HTMLAuditWireBytes: shape.wire, HTMLAuditNodes: shape.nodes, WorkingBytes: resources.WorkingBytes, DBStagingBytes: resources.DBStagingBytes})
+		budget := ApplicationBudgetV1{Phase: "locked-html-fresh-event", OrgID: org, DocumentID: physicalDocument,
+			HTMLAuditRawBytes: shape.raw, HTMLAuditWireBytes: shape.wire, HTMLAuditNodes: shape.nodes, WorkingBytes: resources.WorkingBytes, DBStagingBytes: resources.DBStagingBytes}
+		if purpose == HTMLAuditPreSignCommittedV1 {
+			var observed htmlAuditLoanObservationV1
+			closeConsumer, err = a.admitHTMLAuditObservedV1(ctx, budget, p.work, &observed)
+			if err != nil {
+				stage = observed.stageV1()
+			}
+		} else {
+			closeConsumer, err = a.admit(ctx, budget)
+		}
 	}
 	s.mu.Unlock()
 	p.mu.Unlock()
 	if err != nil {
 		return nil, errors.Join(ErrHTMLAuditEventV1, err)
 	}
-	out := &ApplicationHTMLAuditEventConsumerV1{session: h, documentAI: aiScope, member: member, physicalDocument: physicalDocument, org: org, document: document, recipient: recipient, actor: actor, purpose: purpose, resources: resources, shape: shape, closeConsumer: closeConsumer}
+	out := &ApplicationHTMLAuditEventConsumerV1{session: h, documentAI: aiScope, laterAmendment: laterScope, member: member, physicalDocument: physicalDocument, org: org, document: document, recipient: recipient, actor: actor, purpose: purpose, resources: resources, shape: shape, closeConsumer: closeConsumer}
 	out.self = out
 	out.queries = generated.New(&applicationOwnedDBTXV1{session: s})
 	// Every post-grant refusal returns the original real consumer closure, never
@@ -203,6 +226,7 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	stage = "prepare_clone"
 	cloned, err := htmlAuditCloneValueV1(ctx, payload, 0)
 	if err != nil {
 		out.CloseConsumerV1()
@@ -217,6 +241,7 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	out.kind = strings.Clone(kind)
 	out.ip = strings.Clone(ip)
 	out.ua = strings.Clone(ua)
+	stage = "prepare_marshal"
 	out.raw, err = json.Marshal(out.payload)
 	if err != nil || ctx.Err() != nil || int64(len(out.raw)) > shape.wire {
 		out.CloseConsumerV1()
@@ -225,7 +250,7 @@ func (h *ApplicationSessionV1) newHTMLAuditEventCoreReminderV1(ctx context.Conte
 	return out, nil
 }
 func (o *ApplicationHTMLAuditEventConsumerV1) valid(ctx context.Context) bool {
-	if o == nil || o.self != o || o.closed || o.session == nil || o.session.state == nil || o.queries == nil || o.closeConsumer == nil || !applicationContextV1(ctx) {
+	if o == nil || o.self != o || o.closed || (o.laterAmendment != nil && !o.laterAmendment.validV1(ctx)) || o.session == nil || o.session.state == nil || o.queries == nil || o.closeConsumer == nil || !applicationContextV1(ctx) {
 		return false
 	}
 	s := o.session.state
@@ -246,7 +271,13 @@ const htmlAuditDocumentScopeSQLV1 = `SELECT d.id,d.org_id FROM documents d WHERE
 // ONLY the existing identity-only insert, exact owned payload and immediate
 // fresh cache derivation. It cannot execute arbitrary SQL, grant another scope,
 // measure an old event or survive this borrow. Unknown mutation is never replayed.
-func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context, consume func(ApplicationHTMLAuditPreparedV1, func(generated.InsertEventIdentityV1Params) (uuid.UUID, error)) error) error {
+func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context, consume func(ApplicationHTMLAuditPreparedV1, func(generated.InsertEventIdentityV1Params) (uuid.UUID, error)) error) (err error) {
+	stage := "append_scope"
+	defer func() {
+		if o != nil {
+			err = htmlAuditFailureV1(o.purpose, stage, err)
+		}
+	}()
 	if o == nil || o.self != o || consume == nil {
 		return ErrHTMLAuditEventV1
 	}
@@ -259,6 +290,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 	// Actual fixed scoped parent proof, without full Document or cache/body
 	// expansion. It runs through THIS tracked native DBTX under the event loan
 	// before org chain acquisition. Session metadata alone is not a row receipt.
+	stage = "append_document"
 	var document, org uuid.UUID
 	db := &applicationOwnedDBTXV1{session: o.session.state}
 	if o.documentAI != nil {
@@ -275,9 +307,11 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 	if document != o.document || org != o.org {
 		return ErrHTMLAuditEventV1
 	}
+	stage = "append_chain"
 	if err := o.queries.AcquireOrgChainLock(ctx, o.org.String()); err != nil {
 		return err
 	}
+	stage = "append_head"
 	head, err := o.queries.GetOwnedHTMLAuditChainHeadV1(ctx, o.org)
 	var previous []byte
 	var stamp pgtype.Timestamptz
@@ -300,6 +334,9 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 	appendOne := func(p generated.InsertEventIdentityV1Params) (uuid.UUID, error) {
 		appendMu.Lock()
 		defer appendMu.Unlock()
+		if active {
+			stage = "append_identity"
+		}
 		if !active || !o.valid(ctx) || o.attempted || p.OrgID != o.org || !p.DocumentID.Valid || uuid.UUID(p.DocumentID.Bytes) != o.document ||
 			p.RecipientID != o.recipient || p.ActorUserID != o.actor || p.Kind != o.kind || p.Ua.Valid != (o.ua != "") || p.Ua.String != o.ua || !bytes.Equal(p.PayloadJson, o.raw) || !bytes.Equal(p.PayloadHashed, o.raw) ||
 			!bytes.Equal(p.PrevHash, previous) || len(p.RowHash) != 32 || !applicationStampV1(p.CreatedAt) {
@@ -313,6 +350,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 			return uuid.Nil, ErrHTMLAuditEventV1
 		}
 		o.attempted = true
+		stage = "append_insert"
 		id, err := o.queries.InsertEventIdentityV1(ctx, p)
 		if err != nil {
 			return uuid.Nil, applicationInternalWriteErrorV1(ctx, applicationAuditIdentityWriteV1, err)
@@ -320,6 +358,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 		if id == uuid.Nil {
 			return uuid.Nil, ErrHTMLAuditEventV1
 		}
+		stage = "append_cache"
 		cache, err := o.queries.MeasureHTMLSnapshotEventPayloadV1(ctx, generated.MeasureHTMLSnapshotEventPayloadV1Params{EventID: id, DocumentID: o.document, OrgID: o.org})
 		if err != nil || cache == nil {
 			return uuid.Nil, errors.Join(ErrHTMLAuditEventV1, err)
@@ -331,6 +370,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 		return id, nil
 	}
 	defer func() { appendMu.Lock(); active = false; appendMu.Unlock() }()
+	stage = "append_callback"
 	err = consume(prepared, appendOne)
 	appendMu.Lock()
 	active = false
@@ -338,6 +378,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) WithPreparedV1(ctx context.Context
 	if err != nil {
 		return err
 	}
+	stage = "append_return"
 	if ctx.Err() != nil || !o.attempted || o.eventID == uuid.Nil {
 		return ErrHTMLAuditEventV1
 	}
@@ -360,6 +401,7 @@ func (o *ApplicationHTMLAuditEventConsumerV1) CloseConsumerV1() {
 	closeConsumer := o.closeConsumer
 	o.closeConsumer = nil
 	o.member = nil
+	o.laterAmendment = nil
 	o.payload = nil
 	o.raw = nil
 	o.parsedIP = nil

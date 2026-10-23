@@ -202,11 +202,11 @@ func oidc439ReadDone(path string) ([]byte, error) {
 	if !before.Mode().IsRegular() || before.Mode().Perm() != 0600 || before.Size() < 0 || before.Size() > 2048 {
 		return nil, os.ErrInvalid
 	}
-	if before.Size() == 0 {
-		return nil, io.ErrUnexpectedEOF
-	}
 	if stat, ok := before.Sys().(*syscall.Stat_t); !ok || stat.Nlink != 1 {
 		return nil, os.ErrInvalid
+	}
+	if before.Size() == 0 {
+		return nil, io.ErrUnexpectedEOF
 	}
 	body, err := io.ReadAll(io.LimitReader(file, 2049))
 	if err != nil {

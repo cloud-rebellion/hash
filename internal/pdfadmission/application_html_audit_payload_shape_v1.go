@@ -73,10 +73,28 @@ const (
 	HTMLAuditSignerAIRequestedV1
 	HTMLAuditSignerAICompletedV1
 	HTMLAuditSignerClarifierAnsweredV1
+	HTMLAuditLaterAmendmentV1
+	HTMLAuditLaterAmendmentNoticeV1
+	HTMLAuditLaterAmendmentAccessRevokedV1
+	HTMLAuditPreSignCommittedV1
+	HTMLAuditPreSignPublishedV1
+	HTMLAuditPreSignSupersededV1
 )
 
 func (p HTMLAuditPurposeV1) KindV1() string {
 	switch p {
+	case HTMLAuditPreSignCommittedV1:
+		return "presign.execution.committed"
+	case HTMLAuditPreSignPublishedV1:
+		return "presign.execution.published"
+	case HTMLAuditPreSignSupersededV1:
+		return "presign.execution.superseded"
+	case HTMLAuditLaterAmendmentAccessRevokedV1:
+		return "document.amendment_notice_access_revoked"
+	case HTMLAuditLaterAmendmentV1:
+		return "document.amendment_linked"
+	case HTMLAuditLaterAmendmentNoticeV1:
+		return "document.amendment_notice_queued"
 	case HTMLAuditSignerClarifierRequestedV1:
 		return "clarifier.requested"
 	case HTMLAuditSignerAIRequestedV1:
@@ -168,6 +186,18 @@ func htmlAuditRootKeyV1(p HTMLAuditPurposeV1, k string) bool {
 	}
 	var fields string
 	switch p {
+	case HTMLAuditPreSignCommittedV1:
+		fields = "|execution_id|execution_sha256|grant_id|grant_revision|use_number|request_id|command_sha256|executor_kind|executor_user_id|executor_credential_id|"
+	case HTMLAuditPreSignPublishedV1:
+		fields = "|execution_id|execution_sha256|visible_pdf_sha256|assets_sha256|customer_recipient_id|retain_until|"
+	case HTMLAuditPreSignSupersededV1:
+		fields = "|prior_execution_id|prior_execution_sha256|prior_document_id|document_id|request_id|source_commitment|"
+	case HTMLAuditLaterAmendmentAccessRevokedV1:
+		fields = "|schema|amendment_id|notice_id|access_id|revoked_at|"
+	case HTMLAuditLaterAmendmentV1:
+		fields = "|schema|amendment_id|amendment_document_id|mode|revision|basis_sha256|file_commitment_sha256|original_pins_sha256|original_document_id|request_id|owner_alert|"
+	case HTMLAuditLaterAmendmentNoticeV1:
+		fields = "|schema|amendment_id|notice_id|notice_sha256|file_commitment_sha256|request_id|recipient_count|owner_alert|"
 	case HTMLAuditSignerClarifierRequestedV1, HTMLAuditSignerAIRequestedV1:
 		fields = "|via|tool|block_id|locale|notice_schema|notice_digest|notice_snapshot|"
 	case HTMLAuditSignerAICompletedV1:

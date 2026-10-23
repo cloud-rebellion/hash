@@ -18,11 +18,12 @@ import (
 // declarations. This is an engineering completeness check, not independent
 // identity, representative-authority, tax or legal validation.
 type ContractProfile struct {
-	ID      string          `json:"id"`
-	Version int             `json:"version"`
-	Kind    string          `json:"kind"`
-	Parties []ContractParty `json:"parties"`
-	Terms   []ContractTerm  `json:"terms"`
+	ID              string             `json:"id"`
+	Version         int                `json:"version"`
+	Kind            string             `json:"kind"`
+	Parties         []ContractParty    `json:"parties"`
+	Terms           []ContractTerm     `json:"terms"`
+	AmendmentPolicy *AmendmentPolicyV1 `json:"amendment_policy,omitempty"`
 }
 
 // ContractParty binds each intended party to required, printed value names.
@@ -87,6 +88,7 @@ func cloneContractProfile(profile *ContractProfile) *ContractProfile {
 	clone := *profile
 	clone.Parties = append([]ContractParty{}, profile.Parties...)
 	clone.Terms = append([]ContractTerm{}, profile.Terms...)
+	clone.AmendmentPolicy = CloneAmendmentPolicyV1(profile.AmendmentPolicy)
 	return &clone
 }
 
@@ -173,6 +175,9 @@ func (c *Compiled) compileContractProfile(master *Master) error {
 			return invalid("contract profile omitted essential term: " + name)
 		}
 	}
+	if err := validateAmendmentPolicyV1(profile); err != nil {
+		return err
+	}
 	sort.Slice(profile.Parties, func(i, j int) bool { return profile.Parties[i].Slot < profile.Parties[j].Slot })
 	sort.Slice(profile.Terms, func(i, j int) bool { return profile.Terms[i].Name < profile.Terms[j].Name })
 	master.ContractProfile = profile
@@ -250,6 +255,9 @@ func (c *Compiled) ContractReadiness(input Input) (ContractReadiness, error) {
 		if sameNonblankIdentity(left.CompanyID, right.CompanyID) {
 			issue("duplicate_company_id", "parties", "Provider and customer company identifiers conflict.")
 		}
+	}
+	if _, err := c.PresentedAmendmentPolicyV1(input); err != nil {
+		issue("amendment_policy", "amendment_policy", "The change-policy reference and effective condition must appear in its printed contract term.")
 	}
 	result.Complete = len(result.Issues) == 0
 	return result, nil

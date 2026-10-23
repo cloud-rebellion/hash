@@ -72,12 +72,14 @@ const finalDocumentHTMLFormatV1 = `<!doctype html>
   %s
   .hash-doc .hash-cert-page table { table-layout: fixed; }
   .hash-doc .hash-cert-page td, .hash-doc .hash-cert-page code { overflow-wrap: anywhere; }
+  /* Both certificate finishers append the crypto footer as the final direct div. */
+  .hash-doc > .hash-cert-page > div:last-child { break-inside: avoid; page-break-inside: avoid; }
   .hash-doc .hash-cert-page > table:first-of-type th:nth-child(1) { width: 12%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(2) { width: 26%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(3) { width: 9%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(2) { width: 23%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(3) { width: 12%%; }
   .hash-doc .hash-cert-page > table:first-of-type th:nth-child(4) { width: 17%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(5) { width: 10%%; }
-  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(6) { width: 26%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(5) { width: 13%%; }
+  .hash-doc .hash-cert-page > table:first-of-type th:nth-child(6) { width: 23%%; }
   %s
   .hash-field--signed { display: inline-block; min-width: 340px; border-bottom: 1.5px solid var(--hash-primary, #18181b); padding: 0.15em 0.4em 0.3em; background: transparent; }
   .hash-field--unsigned { display: inline-block; min-width: 340px; border-bottom: 1.5px dashed var(--hash-accent, #0891B2); padding: 0.5em 0.4em; color: var(--hash-muted, #52525b); font-style: italic; }

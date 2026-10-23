@@ -26,12 +26,15 @@ export interface HTMLContractParty {
   representative_authority: string;
 }
 export interface HTMLContractTerm { name: string; value?: string; section?: string }
+export type HTMLAmendmentMode = 'signature' | 'acknowledgement' | 'agreed_notice';
+export interface HTMLAmendmentPolicy { term: string; clause_reference: string; allowed_modes: HTMLAmendmentMode[]; allowed_channels: 'email'[]; effective_condition: string }
 export interface HTMLContractProfile {
   id: string;
   version: number;
   kind: 'proposal' | 'b2b_services';
   parties: HTMLContractParty[];
   terms: HTMLContractTerm[];
+  amendment_policy?: HTMLAmendmentPolicy;
 }
 export const htmlSigningPagePolicy = 'hash-branded-signing-page-a4-v1' as const;
 export const htmlSigningPageFontSHA256 = '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62' as const;
@@ -165,7 +168,7 @@ export function htmlContractProfile(master: HTMLMaster): HTMLContractProfile | n
   const profile = master.contract_profile;
   if (master.schema_version === 1 && profile === undefined) return null;
   if (![2, 3].includes(master.schema_version) || !profile || typeof profile !== 'object' || Array.isArray(profile)
-      || !onlyKeys(profile, ['id', 'version', 'kind', 'parties', 'terms']) || typeof profile.id !== 'string' || !namePattern.test(profile.id)
+      || !onlyKeys(profile, ['id', 'version', 'kind', 'parties', 'terms', 'amendment_policy']) || typeof profile.id !== 'string' || !namePattern.test(profile.id)
       || !Number.isSafeInteger(profile.version) || profile.version < 1 || profile.version > 1_000_000 || !['proposal', 'b2b_services'].includes(profile.kind)
       || !Array.isArray(profile.parties) || profile.parties.length !== 2 || !Array.isArray(profile.terms) || profile.terms.length > 16) {
     throw new Error('A version 2 or 3 design needs a valid reviewed contract profile with both parties. Version 1 designs cannot contain a contract profile.');
@@ -199,10 +202,37 @@ export function htmlContractProfile(master: HTMLMaster): HTMLContractProfile | n
   }
   const missing = requiredHTMLContractTerms(profile.kind).filter((name) => !terms.has(name));
   if (missing.length) throw new Error(`This ${profile.kind === 'proposal' ? 'proposal' : 'services'} profile needs: ${missing.map((name) => name.replaceAll('_', ' ')).join(', ')}.`);
+  const amendmentPolicy = checkedHTMLAmendmentPolicy(profile);
   return { id: profile.id, version: profile.version, kind: profile.kind,
+    ...(amendmentPolicy ? { amendment_policy: amendmentPolicy } : {}),
     parties: profile.parties.map((party) => ({ slot: party.slot, company_name: party.company_name, company_id: party.company_id,
       representative_name: party.representative_name, representative_email: party.representative_email, representative_authority: party.representative_authority })),
     terms: profile.terms.map((term) => typeof term.value === 'string' ? { name: term.name, value: term.value } : { name: term.name, section: term.section! }) };
+}
+
+// Match the native optional policy declaration. Permission is explicitly owner
+// selected; no legal permission is inferred from a term name or its wording.
+export const htmlAmendmentModes = ['signature', 'acknowledgement', 'agreed_notice'] as const;
+export const htmlAmendmentModeLabels: Record<HTMLAmendmentMode, string> = { signature: 'New signature', acknowledgement: 'Explicit acknowledgement', agreed_notice: 'Agreed notice' };
+export function htmlAmendmentText(value: unknown, maxBytes: number): value is string {
+ return typeof value === 'string' && value.trim() === value && hasContractText(value) && new TextEncoder().encode(value).length <= maxBytes && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replace(/[\t\n]/g, ''));
+}
+export function checkedHTMLAmendmentPolicy(profile: HTMLContractProfile): HTMLAmendmentPolicy | null {
+ const policy = profile.amendment_policy;
+ if (policy === undefined) return null;
+ if (!policy || typeof policy !== 'object' || Array.isArray(policy) || !onlyKeys(policy, ['term', 'clause_reference', 'allowed_modes', 'allowed_channels', 'effective_condition']) || Object.keys(policy).length !== 5 || typeof policy.term !== 'string' || !namePattern.test(policy.term) || profile.terms.filter(term => term.name === policy.term).length !== 1 || !htmlAmendmentText(policy.clause_reference, 512) || !htmlAmendmentText(policy.effective_condition, 2048) || !Array.isArray(policy.allowed_modes) || !policy.allowed_modes.length || policy.allowed_modes.length > 3 || policy.allowed_modes.some(mode => !htmlAmendmentModes.includes(mode)) || new Set(policy.allowed_modes).size !== policy.allowed_modes.length || !Array.isArray(policy.allowed_channels) || (policy.allowed_modes.includes('agreed_notice') ? policy.allowed_channels.length !== 1 || policy.allowed_channels[0] !== 'email' : policy.allowed_channels.length !== 0)) throw new Error('Choose a printed agreement term, permitted processes, required email channel and exact wording references for later changes.');
+ return { term: policy.term, clause_reference: policy.clause_reference, allowed_modes: [...policy.allowed_modes].sort(), allowed_channels: [...policy.allowed_channels], effective_condition: policy.effective_condition };
+}
+export function htmlAmendmentClause(profile: HTMLContractProfile, values: Record<string, string>, sections: Record<string, string>): string | null {
+ const policy = profile.amendment_policy; if (!policy) return null; const matches = profile.terms.filter(term => term.name === policy.term); if (matches.length !== 1) return null; const term = matches[0]; return term.value !== undefined ? values[term.value] ?? null : term.section !== undefined ? sections[term.section] ?? null : null;
+}
+export function htmlAmendmentPolicyIssues(profile: HTMLContractProfile, values: Record<string, string>, sections: Record<string, string>): string[] {
+ if (profile.amendment_policy === undefined) return [];
+ let policy: HTMLAmendmentPolicy | null; try { policy = checkedHTMLAmendmentPolicy(profile); } catch { return ['Review the later-change policy in this design.']; }
+ const clause = htmlAmendmentClause(profile, values, sections);
+ if (!policy || !htmlAmendmentText(clause, 8192)) return ['Enter the actual printed later-change clause within 8192 bytes, without hidden formatting controls.'];
+ if (!clause.includes(policy.clause_reference) || !clause.includes(policy.effective_condition)) return ['The later-change reference and timing conditions must be exact quotations from the selected printed clause.'];
+ return [];
 }
 
 export interface HTMLFormSection extends HTMLSectionDefinition { label: string }
@@ -277,6 +307,7 @@ export function htmlProfileIssues(profile: HTMLContractProfile, values: Record<s
   }
   for (const term of profile.terms) if (term.value && !hasContractText(values[term.value])) issues.push(`Enter ${term.name.replaceAll('_', ' ')}.`);
   for (const term of profile.terms) if (term.section && !hasContractText(sections[term.section])) issues.push(`Enter ${term.name.replaceAll('_', ' ')} wording.`);
+  issues.push(...htmlAmendmentPolicyIssues(profile, values, sections));
   return issues;
 }
 

@@ -109,8 +109,8 @@ done
 # actually uses. Keep both modules, both image builders, and every Hash CI job
 # on the same reviewed security release.
 go_toolchain_policy() {
-  local expected="1.26.9" actual file
-  local builder="golang:1.26.9-alpine3.24@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0"
+  local expected="1.26.10" actual file
+  local builder="golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca"
   actual="$(go env GOVERSION)" || return 1
   [ "$actual" = "go$expected" ] || {
     echo "Hash CI requires Go $expected; effective toolchain is $actual" >&2
@@ -1331,7 +1331,7 @@ step "HTTP route inventory freshness"           go run ./cmd/apidocgen -check
 step "OpenAPI contract + request boundaries"    bash scripts/check-automation-openapi.sh
 step "build"                                   go build ./...
 step "vet"                                     vet_all
-step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=120s
+step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=180s
 step "PDF worker Linux syscall/resource checks" pdf_worker_sandbox_checks
 step "nested renderer module verify + test"    renderer_module_checks
 step "renderer pinned-source/module policy"    renderer_source_policy

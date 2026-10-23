@@ -21,23 +21,38 @@ import (
 )
 
 type Engine struct {
-	pool     *pgxpool.Pool
-	logger   audit.TxAppender
-	receipts *auth.SignedCookie
+	pool           *pgxpool.Pool
+	logger         audit.TxAppender
+	receipts       *auth.SignedCookie
+	executionViews bool
 }
 
 func NewEngine(pool *pgxpool.Pool, logger audit.TxAppender, receipts *auth.SignedCookie) *Engine {
 	return &Engine{pool: pool, logger: logger, receipts: receipts}
 }
 
+// WithExecutionViewsV1 selects truthful UI availability for the explicitly
+// configured complete service. It grants no permission to execute anything;
+// every execution independently repeats the native live authority checks.
+func (e *Engine) WithExecutionViewsV1(available bool) *Engine {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	out.executionViews = available
+	return &out
+}
+
 type transactionState struct {
-	ctx   context.Context
-	tx    pgx.Tx
-	q     *generated.Queries
-	actor SessionActor
-	user  *generated.User
-	final func() error
-	event *audit.Entry
+	executionViews bool
+	ctx            context.Context
+	tx             pgx.Tx
+	q              *generated.Queries
+	actor          SessionActor
+	user           *generated.User
+	final          func() error
+	event          *audit.Entry
+	auditEventID   uuid.UUID
 }
 
 func clock(s *transactionState) (time.Time, error) {
@@ -91,7 +106,7 @@ func (e *Engine) transaction(ctx context.Context, a SessionActor, fn func(*trans
 	if err := a.authorize(ctx, tx, u); err != nil {
 		return err
 	}
-	s := &transactionState{ctx: ctx, tx: tx, q: q, actor: a, user: u}
+	s := &transactionState{ctx: ctx, tx: tx, q: q, actor: a, user: u, executionViews: e.executionViews}
 	if err := fn(s); err != nil {
 		return err
 	}
@@ -104,6 +119,7 @@ func (e *Engine) transaction(ctx context.Context, a SessionActor, fn func(*trans
 		if err != nil {
 			return errors.Join(ErrAudit, err)
 		}
+		s.auditEventID = pending.ID
 	}
 	if s.final != nil {
 		if err := s.final(); err != nil {

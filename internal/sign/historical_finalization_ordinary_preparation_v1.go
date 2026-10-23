@@ -120,10 +120,13 @@ func (e *Engine) ordinaryCertificateInputFrozenV1(ctx context.Context, ref *pdfa
 // engine. Once Stage commits, the existing M46 exact pins/retention/recovery and
 // M108 outbox/report unit remain the sole completion owner.
 func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, ref *pdfadmission.ApplicationHistoricalFinalizationStageReferenceV1, source *ownedHistoricalFinalizationSourceV1, doc *generated.Document, manifest *pdfadmission.ApplicationHistoricalTerminalManifestV1) (retired bool, failure error) {
+	stage := "ordinary_scope"
+	defer func() { failure = blockSignatureDiagnosticV1(stage, failure) }()
 	client, ok := e.Storage.(*storage.Client)
 	if !ok || client == nil || source == nil || source.source == nil || doc == nil {
 		return false, ErrSigningAdmissionUnavailableV1
 	}
+	stage = "ordinary_read"
 	p, err := e.readOrdinaryPreparationV1(ctx, ref)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
@@ -135,6 +138,7 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		}
 	}()
 	refresh := func() error {
+		stage = "ordinary_refresh"
 		next, err := e.readOrdinaryPreparationV1(ctx, ref)
 		if err != nil {
 			return err
@@ -147,10 +151,12 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 	}
 	if p == nil {
 		capture := func(final *pdfadmission.ApplicationHistoricalFinalizationPDFV1) error {
+			stage = "ordinary_final_hash"
 			if _, err := final.CalculateSHA256V1(); err != nil {
 				source.finalError = final
 				return err
 			}
+			stage = "ordinary_final_capture"
 			err := e.ordinaryFinalizationPhaseV1(ctx, ref, func(call context.Context, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
 				return w.CaptureHistoricalOrdinaryFinalPDFV1(call, ref, final)
 			})
@@ -163,15 +169,18 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 			final.CloseConsumerV1()
 			return nil
 		}
+		stage = "ordinary_final_ack"
 		if !doc.RequiresSignature {
 			err = source.source.WithAcknowledgementFinalPDFV1(capture)
 		} else if doc.SourceKind == "blocks" {
 			var final *pdfadmission.ApplicationHistoricalFinalizationPDFV1
+			stage = "ordinary_final_blocks"
 			final, err = source.renderFinalBlocksPDFV1(e)
 			if err == nil {
 				err = capture(final)
 			}
 		} else {
+			stage = "ordinary_final_manual"
 			err = source.stampManualPDFV1(e, capture)
 		}
 		if err != nil {
@@ -182,20 +191,24 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		}
 	}
 	if !p.HasCertificateInputV1() {
+		stage = "ordinary_certificate_snapshot"
 		snapshot, err := e.loadHistoricalCertificateSnapshotOwnedV1(ctx, ref)
 		source.certificateDataError = snapshot
 		if err != nil {
 			return false, err
 		}
+		stage = "ordinary_certificate_claims"
 		if err = snapshot.snapshot.PrepareOrdinaryClaimsV1(source.source, p); err != nil {
 			return false, err
 		}
+		stage = "ordinary_certificate_prepare"
 		certificate, err := source.prepareAuditCertificateV1(e, snapshot.snapshot, manifest)
 		if err != nil {
 			return false, err
 		}
 		source.certificateError = certificate
 		snapshot.retireClaimsV1()
+		stage = "ordinary_certificate_freeze"
 		if err = e.ordinaryFinalizationPhaseV1(ctx, ref, func(call context.Context, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
 			return w.FreezeHistoricalOrdinaryCertificateV1(call, ref, certificate)
 		}); err != nil {
@@ -203,6 +216,7 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		}
 		certificate.CloseConsumerV1()
 		source.certificateError = nil
+		stage = "ordinary_snapshot_close"
 		if err = snapshot.closeV1(); err != nil {
 			return false, err
 		}
@@ -212,10 +226,12 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		}
 	}
 	if !p.HasCertificatePDFV1() {
+		stage = "ordinary_certificate_body"
 		body, err := e.readOrdinaryBodyV1(ctx, ref, p, "render_html")
 		if err != nil {
 			return false, err
 		}
+		stage = "ordinary_certificate_render"
 		rendered, err := body.RenderCertificateV1(e.PDF)
 		retained := &ordinaryFinalizationErrorV1{preparation: p, body: body, rendered: rendered}
 		if err != nil {
@@ -223,6 +239,7 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 			keepPreparation = true
 			return false, fmt.Errorf("render frozen ordinary certificate: %w", err)
 		}
+		stage = "ordinary_certificate_capture"
 		err = e.ordinaryFinalizationPhaseV1(ctx, ref, func(call context.Context, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
 			return w.CaptureHistoricalOrdinaryCertificatePDFV1(call, ref, rendered)
 		})
@@ -238,10 +255,12 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		}
 	}
 	for _, kind := range []string{"final_pdf", "certificate_pdf", "certificate_payload", "certificate_signature"} {
+		stage = "ordinary_output_read"
 		body, err := e.readOrdinaryBodyV1(ctx, ref, p, kind)
 		if err != nil {
 			return false, err
 		}
+		stage = "ordinary_output_store"
 		put, storeErr := body.StoreV1(client)
 		retained := &ordinaryFinalizationErrorV1{preparation: p, body: body, put: put}
 		// Even a late failed PUT can have a positive provider identity. Preserve
@@ -252,10 +271,12 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 		if storeErr != nil {
 			checkpointCtx, stop = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		}
+		stage = "ordinary_output_checkpoint"
 		checkpointErr := e.ordinaryFinalizationPhaseV1(checkpointCtx, ref, func(call context.Context, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
 			return w.CheckpointHistoricalOrdinaryOutputV1(call, ref, body, put)
 		})
 		stop()
+		stage = "ordinary_output_join"
 		if storeErr != nil || checkpointErr != nil {
 			source.ordinaryError = retained
 			keepPreparation = true
@@ -269,10 +290,12 @@ func (e *Engine) prepareOrdinaryHistoricalFinalizationV1(ctx context.Context, re
 	}
 	// All original bodies and provider consumers have joined. The new independent
 	// preparation metadata owns Stage; the old full source ends at this last use.
+	stage = "ordinary_source_close"
 	if err = source.closeV1(); err != nil {
 		return false, err
 	}
 	retired = true
+	stage = "ordinary_stage_intent"
 	err = e.ordinaryFinalizationPhaseV1(ctx, ref, func(call context.Context, w *pdfadmission.ApplicationHTMLSendWorkV1) error {
 		return w.StageHistoricalOrdinaryPreparationV1(call, ref, p)
 	})

@@ -452,7 +452,7 @@ func (w *ApplicationHTMLSendWorkV1) AdmitResponseReportV1(call context.Context, 
 	// though this genuine family freeze has closed native interaction writes.
 	// Reserve its encoding on every sizing projection, while selecting all rows
 	// using only the actual original cutoff above.
-	if err = w.projectParticipantReportForSizingLockedV1(call, cutoff, projection, true); err != nil {
+	if err = w.projectParticipantReportForSizingLockedV1(call, cutoff, projection, true, doc); err != nil {
 		w.mu.Unlock()
 		return err
 	}
@@ -626,7 +626,7 @@ func (w *ApplicationHTMLSendWorkV1) measureResponsePayloadV1(call context.Contex
 	if !htmlInputAddV1(&resource, int64(len(p.reportHTML)), 8) || !htmlInputAddV1(&resource, int64(len(doc.Name)), 48) || !htmlInputAddV1(&resource, int64(len(recs)+len(sigs)), 4096) || (p.reportSchema == render.ParticipantReportSchemaV1 && !htmlInputAddV1(&resource, int64(len(doc.MetadataRedactionReport)), 8192)) {
 		return ErrHTMLSendWorkV1
 	}
-	if p.reportSchema == render.ParticipantReportSchemaV2 && !participantReportParserQuoteV2(&resource, len(p.reportHTML), p.reportRows) {
+	if (p.reportSchema == render.ParticipantReportSchemaV2 || p.reportSchema == render.ParticipantReportSchemaV3) && !participantReportParserQuoteV2(&resource, len(p.reportHTML), p.reportRows) {
 		return ErrHTMLSendWorkV1
 	}
 	for _, r := range recs {
@@ -685,7 +685,7 @@ func (w *ApplicationHTMLSendWorkV1) measureResponsePayloadV1(call context.Contex
 	switch p.reportSchema {
 	case render.ParticipantReportSchemaV1:
 		_, err = render.CertificatePayloadV1(prefix, &copy, fields, claims, manifest)
-	case render.ParticipantReportSchemaV2:
+	case render.ParticipantReportSchemaV2, render.ParticipantReportSchemaV3:
 		_, err = render.CertificatePayloadV2(prefix, &copy, fields, claims, manifest)
 	default:
 		return ErrHTMLSendWorkV1

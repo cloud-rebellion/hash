@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/bright-interaction/hash/internal/amendments"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
+	"github.com/bright-interaction/hash/internal/presignexecute"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"sync"
@@ -43,6 +45,8 @@ type ApplicationSignerReadModelsV1 struct {
 	ControllerOrg           *generated.Org
 	LawfulBasisConfirmation *generated.DocumentLawfulBasisConfirmation
 	Current                 *htmlmaterialization.CurrentReadProjectionV1
+	AmendmentContext        *amendments.SignerContextV1
+	Presign                 *presignexecute.RetainedAssetsV1
 }
 type ApplicationSignerReaderV1 struct {
 	// Only the actual constructor installs this immutable identity. Value
@@ -62,6 +66,7 @@ type ApplicationSignerReaderV1 struct {
 	blockSigningSnapshot                     *applicationBlockSigningReadSnapshotV1
 	blockSigningBorrowers                    int
 	packageMemberBorrowers                   int
+	presignBorrowers                         int
 	creating, read, consumerClosed, released bool
 }
 
@@ -246,6 +251,23 @@ func (r *ApplicationSignerReaderV1) WithModelsV1(ctx context.Context, preflight 
 				}
 			}
 		}
+		// The immutable optional relation is measured under the SAME native
+		// scalar header loan, then funded by this retained body loan before
+		// its name/digest projection is allocated or returned.
+		ah, err := r.signerAmendmentHeaderV1(owned, db)
+		if err != nil {
+			return err
+		}
+		if ah != nil {
+			raw, err = htmlAuthoringSumV1(raw, ah.raw)
+			if err != nil {
+				return ErrSignerReadV1
+			}
+			wire, err = htmlAuthoringSumV1(wire, ah.wire)
+			if err != nil {
+				return ErrSignerReadV1
+			}
+		}
 		r.setModelDiagnosticV1(signerReadModelBodyAdmissionV1, signerReadModelAdmissionErrorV1)
 		bodyClose, err := r.session.acquireSignerReadModelsV1(owned, "locked-signer-read-body", raw, wire, r)
 		if err != nil {
@@ -276,6 +298,10 @@ func (r *ApplicationSignerReaderV1) WithModelsV1(ctx context.Context, preflight 
 			return ErrSignerReadV1
 		}
 		models := &ApplicationSignerReadModelsV1{Document: doc, Recipient: &recipient}
+		models.AmendmentContext, err = r.signerAmendmentBodyV1(owned, db, ah, doc)
+		if err != nil {
+			return err
+		}
 		if ch != nil {
 			r.setModelDiagnosticV1(signerReadModelControllerBodyV1, signerReadModelQueryErrorV1)
 			confirmation, err := q.ReadSignerLawfulBasisConfirmationV1(owned, generated.ReadSignerLawfulBasisConfirmationV1Params{DocumentID: s.document, OrgID: s.org, ExpectedRawTextBytes: ch.ConfirmationRawTextBytes})
@@ -304,6 +330,10 @@ func (r *ApplicationSignerReaderV1) WithModelsV1(ctx context.Context, preflight 
 				return ErrSignerReadV1
 			}
 			models.Current = &htmlmaterialization.CurrentReadProjectionV1{ID: m.ID, DocumentID: m.DocumentID, OrgID: m.OrgID, Sequence: m.Sequence, PageCount: m.PageCount, PdfKey: m.PdfKey, PdfVersionID: m.PdfVersionID, PdfSha256: m.PdfSha256, SourceCommitment: m.SourceCommitment, OriginCommitment: m.OriginCommitment, SourceJson: m.SourceJson, MetadataRedactionReport: m.MetadataRedactionReport}
+		}
+		models.Presign, err = r.readPresignAssetsV1(owned, db)
+		if err != nil {
+			return err
 		}
 		r.setModelDiagnosticV1(signerReadModelBlockSourceV1, signerReadModelBlockSourceErrorV1)
 		if err = r.captureBlockSigningSourceV1(owned, models); err != nil {
@@ -417,7 +447,7 @@ func (r *ApplicationSignerReaderV1) reconcileV1(ctx context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
-	if r.blockSigningBorrowers != 0 || r.packageMemberBorrowers != 0 || r.diagnosticBorrowers != 0 {
+	if r.blockSigningBorrowers != 0 || r.packageMemberBorrowers != 0 || r.presignBorrowers != 0 || r.diagnosticBorrowers != 0 {
 		r.mu.Unlock()
 		return ErrApplicationSessionUnknownV1
 	}

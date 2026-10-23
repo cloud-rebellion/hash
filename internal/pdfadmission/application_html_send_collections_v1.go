@@ -21,26 +21,33 @@ const (
 // Recipient/binding purposes retain all pin/model/raw staging but expand no
 // options, and therefore cannot make an unrelated missing cache win an earlier
 // business decision. Every actual field body still requires its exact cache.
-func (w *ApplicationHTMLSendWorkV1) collectionHeaderAndPinsV1(call context.Context, purpose htmlSendCollectionPurposeV1) (*generated.GetHTMLSendCollectionReadHeaderV1Row, error) {
+func (w *ApplicationHTMLSendWorkV1) collectionHeaderAndPinsV1(call context.Context, purpose htmlSendCollectionPurposeV1) (result *generated.GetHTMLSendCollectionReadHeaderV1Row, failure error) {
+	stage := "publication_fields_header_scope"
+	defer func() { failure = htmlPreSignFieldsFailureV1(w, purpose, stage, failure) }()
 	if !w.valid(call) || w.sourceDocument == nil || w.models == nil || (w.historicalSigningCollectionsV1() && purpose == htmlSendBindingCollectionV1) {
 		return nil, ErrHTMLSendWorkV1
 	}
 	s := w.session.state
+	stage = "publication_fields_header_query"
 	h, err := w.readCollectionHeaderForPurposeV1(call)
 	if err != nil {
 		return nil, err
 	}
+	stage = "publication_fields_header_shape"
 	if h == nil || h.DocumentID != w.logicalDocumentV1() || h.OrgID != s.org || h.ServerVersionNum <= 0 || h.FieldMissingSizeCount < 0 || h.FieldMissingSizeCount > h.FieldCount {
 		return nil, ErrHTMLSendWorkV1
 	}
+	stage = "publication_fields_header_cache"
 	if purpose == htmlSendFieldCollectionV1 && (h.FieldMissingSizeCount != 0 || h.FieldMeasurementServerMismatchCount != 0) {
 		return nil, ErrHTMLSendWorkV1
 	}
+	stage = "publication_fields_loan"
 	closeRows, err := w.holdCollectionV1(call, *h, purpose)
 	if err != nil {
 		return nil, err
 	}
 	w.closes = append(w.closes, closeRows)
+	stage = "publication_fields_lockpins"
 	pins, err := w.lockCollectionRowsForPurposeV1(call)
 	if err != nil {
 		return nil, err
@@ -48,6 +55,7 @@ func (w *ApplicationHTMLSendWorkV1) collectionHeaderAndPinsV1(call context.Conte
 	if pins == nil || pins.DocumentID != w.logicalDocumentV1() || pins.OrgID != s.org || pins.RecipientCount != h.RecipientCount || pins.FieldCount != h.FieldCount || pins.FieldCacheCount != h.FieldCount-h.FieldMissingSizeCount || pins.BindingCount != h.BindingCount {
 		return nil, ErrHTMLSendWorkV1
 	}
+	stage = "publication_fields_fresh"
 	fresh, err := w.readCollectionHeaderForPurposeV1(call)
 	if err != nil {
 		return nil, err
@@ -56,6 +64,7 @@ func (w *ApplicationHTMLSendWorkV1) collectionHeaderAndPinsV1(call context.Conte
 		return nil, ErrHTMLSendWorkV1
 	}
 	if purpose == htmlSendFieldCollectionV1 {
+		stage = "publication_fields_verify"
 		verify, err := w.verifyCollectionHeaderForPurposeV1(call, h)
 		if err != nil {
 			return nil, err
@@ -114,7 +123,9 @@ func (w *ApplicationHTMLSendWorkV1) ReadRecipientsV1(call context.Context) ([]*g
 	w.recipientsRead = true
 	return rows, nil
 }
-func (w *ApplicationHTMLSendWorkV1) ReadFieldsV1(call context.Context) ([]*generated.DocumentField, error) {
+func (w *ApplicationHTMLSendWorkV1) ReadFieldsV1(call context.Context) (result []*generated.DocumentField, failure error) {
+	stage := "publication_fields_scope"
+	defer func() { failure = htmlPreSignFieldsFailureV1(w, htmlSendFieldCollectionV1, stage, failure) }()
 	if w == nil || w.self != w {
 		return nil, ErrHTMLSendWorkV1
 	}
@@ -127,20 +138,25 @@ func (w *ApplicationHTMLSendWorkV1) ReadFieldsV1(call context.Context) ([]*gener
 		return w.models.Fields, nil
 	}
 	if w.fieldsAttempted {
+		stage = "publication_fields_repeat"
 		return nil, ErrHTMLSendWorkV1
 	}
 	w.fieldsAttempted = true
+	stage = "publication_fields_header"
 	h, err := w.collectionHeaderAndPinsV1(call, htmlSendFieldCollectionV1)
 	if err != nil {
 		return nil, err
 	}
+	stage = "publication_fields_rows"
 	rows, err := w.listCollectionFieldsForPurposeV1(call, h)
 	if err != nil {
 		return nil, err
 	}
+	stage = "publication_fields_count"
 	if int64(len(rows)) != h.FieldCount {
 		return nil, ErrHTMLSendWorkV1
 	}
+	stage = "publication_fields_raw_shape"
 	raw, wire := int64(0), int64(0)
 	for _, f := range rows {
 		if f == nil || f.DocumentID != w.logicalDocumentV1() {

@@ -519,6 +519,7 @@ func mCloneContractV1(p *htmlmaster.ContractProfile) *htmlmaster.ContractProfile
 	c := *p
 	c.Parties = slices.Clone(p.Parties)
 	c.Terms = slices.Clone(p.Terms)
+	c.AmendmentPolicy = htmlmaster.CloneAmendmentPolicyV1(p.AmendmentPolicy)
 	return &c
 }
 func cloneRevisionPolicyV1(p *htmlmaster.SigningPagePolicy) *htmlmaster.SigningPagePolicy {

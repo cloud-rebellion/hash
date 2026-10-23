@@ -240,6 +240,15 @@ func (w *ApplicationHTMLSendWorkV1) beginHistoricalFinalizingRowsV1(call context
 			return nil, nil, err
 		}
 	}
+	// Derive the same bounded schema as the actual freeze SQL before trusting
+	// its returned tuple. Delegated publication selects V3; ordinary selects V2.
+	var expectedReportSchema string
+	if err := (&applicationOwnedDBTXV1{session: w.session.state}).QueryRow(call, `SELECT public.hash_presign_report_schema116($1,$2)`, before.OrgID, before.ID).Scan(&expectedReportSchema); err != nil {
+		return nil, nil, err
+	}
+	if expectedReportSchema != "hash-participant-report-v2" && expectedReportSchema != "hash-participant-report-v3" {
+		return nil, nil, ErrHTMLSendWorkV1
+	}
 	row, err := w.queries.BeginDocumentFinalization(call, generated.BeginDocumentFinalizationParams{RetentionYears: article13.RetentionYearsV1, ID: before.ID, OrgID: before.OrgID})
 	if err != nil {
 		return nil, nil, err
@@ -252,6 +261,7 @@ func (w *ApplicationHTMLSendWorkV1) beginHistoricalFinalizingRowsV1(call context
 	expected.CompletionEffectiveAtBound = row.CompletionEffectiveAtBound
 	expected.CompletionEffectiveAt = row.CompletionEffectiveAt
 	expected.FinalizationRetainUntil = row.FinalizationRetainUntil
+	expected.ParticipantReportSchema = expectedReportSchema
 	expected.UpdatedAt = row.UpdatedAt
 	if !w.verifyDocumentReturnV1(row, raw) || row.Status != "finalizing" || !row.CompletionEffectiveAtBound || !row.CompletionEffectiveAt.Valid || !row.FinalizationRetainUntil.Valid || !htmlSendDocumentExactTupleEqualV1(&expected, row) {
 		return nil, nil, ErrHTMLSendWorkV1

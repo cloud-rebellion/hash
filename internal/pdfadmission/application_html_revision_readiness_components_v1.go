@@ -134,6 +134,9 @@ func htmlRevisionReadinessProfileShapeV1(p *htmlmaster.ContractProfile) bool {
 		}
 		return true
 	}
+	if !htmlmaster.AmendmentPolicyShapeV1(p.AmendmentPolicy) {
+		return false
+	}
 	if !name(p.ID) || p.Version < 1 || p.Version > 1000000 || (p.Kind != "proposal" && p.Kind != "b2b_services") || len(p.Parties) != 2 || len(p.Terms) > 16 {
 		return false
 	}
@@ -179,7 +182,23 @@ func htmlRevisionContractReadinessComponentsForV1(master htmlmaster.Master, inpu
 	// Exact validated typed profile ceiling3493 includes id64, version1000000,
 	// kind b2b_services, two parties with five64-byte binding names and16 terms
 	// with64-byte names+one64-byte target. All characters are unescaped ASCII.
-	const profileJSON = 3493
+	profileJSON := int64(3493)
+	if p := master.ContractProfile.AmendmentPolicy; p != nil {
+		// Canonical declaration keys/commas plus maximal JSON escaping of actual
+		// quoted strings; the fixed lists contain at most four known ASCII names.
+		profileJSON += 256 + 6*int64(len(p.Term)+len(p.ClauseReference)+len(p.EffectiveCondition))
+		for _, m := range p.AllowedModes {
+			profileJSON += 6*int64(len(m)) + 3
+		}
+		for _, c := range p.AllowedChannels {
+			profileJSON += 6*int64(len(c)) + 3
+		}
+		// Presented policy projection: one returned value, its clone and bounded
+		// array copies; immutable clause strings alias the owned original source.
+		if !add(2, int64(unsafe.Sizeof(htmlmaster.AmendmentPolicyV1{}))) || !add(1, int64(unsafe.Sizeof(htmlmaster.PresentedAmendmentPolicyV1{}))) || !add(8, 16) || !add(2, 256) {
+			return out, ErrHTMLAuthoringInputV1
+		}
+	}
 	out.profileJSONBytes = profileJSON
 	// json.Marshal's logical geometrically grown encode buffers, returned copy; SHA256
 	// Digest120, block/hash/hex outputs and the fixed domain string conversion.

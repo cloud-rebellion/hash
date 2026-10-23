@@ -37,8 +37,8 @@ export interface SigningGrant {
   signature: SigningStyle; disclosure: SigningCopy; granted_at: string; not_before: string; expires_at: string; max_uses: number;
 }
 export interface SigningWorkflowView { org_id: string; user_id: string; definition: SigningWorkflowDefinition; definition_sha256: string; policy: SigningPolicy; policy_reference: SigningReference; current_revision: number; archived: boolean; retired: boolean }
-export interface SigningGrantView { org_id: string; user_id: string; grant: SigningGrant; reference: SigningReference; current_revision: number; revoked: boolean; revocation_reason?: string; expired: boolean; consumed_uses: number; execution_available: false }
-export interface SigningContext { org_id: string; user_id: string; self: { id: string; name: string; email: string; role: 'owner' | 'sender' | 'viewer' }; execution_available: false; fonts: SigningStyle[]; disclosure: SigningCopy & { text: string } }
+export interface SigningGrantView { org_id: string; user_id: string; grant: SigningGrant; reference: SigningReference; current_revision: number; revoked: boolean; revocation_reason?: string; expired: boolean; consumed_uses: number; execution_available: boolean }
+export interface SigningContext { org_id: string; user_id: string; self: { id: string; name: string; email: string; role: 'owner' | 'sender' | 'viewer' }; execution_available: boolean; fonts: SigningStyle[]; disclosure: SigningCopy & { text: string } }
 export interface SigningTemplateChoice { name: string; template: SigningTemplatePin; values: HTMLValueDefinition[]; sections: HTMLSectionDefinition[]; defaults: Record<string, string>; contract_profile: HTMLContractProfile }
 export interface SigningTemplateCatalog { org_id: string; user_id: string; items: SigningTemplateChoice[]; truncated: boolean }
 export interface SigningWorkflowIntent { request_id: string; expected_org_id: string; expected_user_id: string; expected_revision: number; definition: SigningWorkflowDefinition }
@@ -137,10 +137,10 @@ function copy(v: unknown): SigningCopy { const r = object(v, ['version', 'sha256
 export function checkedSigningContext(v: unknown): SigningContext {
   const r = object(v, ['org_id', 'user_id', 'self', 'execution_available', 'fonts', 'disclosure']); actor(r);
   const self = object(r.self, ['id', 'name', 'email', 'role']);
-  if (self.id !== r.user_id || !bytes(self.name, 4096) || !requiredText(self.email, 1024) || !['owner', 'sender', 'viewer'].includes(self.role as string) || r.execution_available !== false) throw new Error(invalid);
+  if (self.id !== r.user_id || !bytes(self.name, 4096) || !requiredText(self.email, 1024) || !['owner', 'sender', 'viewer'].includes(self.role as string) || typeof r.execution_available !== 'boolean') throw new Error(invalid);
   const fonts = unique(array(r.fonts, 16).map(style), x => x.font);
   const d = object(r.disclosure, ['version', 'sha256', 'text']); const disclosure = { ...copy({ version: d.version, sha256: d.sha256 }), text: d.text as string }; if (!bytes(d.text, 32768) || !d.text.trim()) throw new Error(invalid);
-  return { org_id: r.org_id as string, user_id: r.user_id as string, self: { ...self } as SigningContext['self'], execution_available: false, fonts, disclosure };
+  return { org_id: r.org_id as string, user_id: r.user_id as string, self: { ...self } as SigningContext['self'], execution_available: r.execution_available, fonts, disclosure };
 }
 export function checkedSigningTemplates(v: unknown): SigningTemplateCatalog {
   const r = object(v, ['org_id', 'user_id', 'items', 'truncated']); actor(r); if (typeof r.truncated !== 'boolean') throw new Error(invalid);
@@ -176,7 +176,7 @@ export function checkedSigningGrant(v: unknown): SigningGrantView {
   const g = object(r.grant, ['schema_version', 'id', 'org_id', 'revision', 'policy', 'grantor', 'signature', 'disclosure', 'granted_at', 'not_before', 'expires_at', 'max_uses']);
   const ref = checkedSigningReference(r.reference);
   if (g.schema_version !== 1 || !htmlUUID(g.id) || g.org_id !== r.org_id || !revision(g.revision) || ![g.granted_at, g.not_before, g.expires_at].every(timestamp) || Date.parse(g.expires_at as string) <= Date.parse(g.not_before as string) || !revision(g.max_uses)
-    || !revision(r.current_revision) || (r.current_revision as number) < (g.revision as number) || typeof r.revoked !== 'boolean' || typeof r.expired !== 'boolean' || !Number.isInteger(r.consumed_uses) || (r.consumed_uses as number) < 0 || (r.consumed_uses as number) > (g.max_uses as number) || r.execution_available !== false
+    || !revision(r.current_revision) || (r.current_revision as number) < (g.revision as number) || typeof r.revoked !== 'boolean' || typeof r.expired !== 'boolean' || !Number.isInteger(r.consumed_uses) || (r.consumed_uses as number) < 0 || (r.consumed_uses as number) > (g.max_uses as number) || typeof r.execution_available !== 'boolean'
     || ref.id !== g.id || ref.revision !== g.revision || (Object.hasOwn(r, 'revocation_reason') && !requiredText(r.revocation_reason, 256))) throw new Error(invalid);
   return { ...r, reference: ref, grant: { ...g, policy: checkedSigningReference(g.policy), grantor: representative(g.grantor), signature: style(g.signature), disclosure: copy(g.disclosure) } } as unknown as SigningGrantView;
 }

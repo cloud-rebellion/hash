@@ -66,8 +66,9 @@
 <div class="px-4 sm:px-6 py-10 max-w-4xl mx-auto space-y-6" data-signing-authority>
   <div><p class="page-eyebrow">Settings · Signing</p><h1 class="page-title">My signing authority</h1></div>
   <div class="card p-5 space-y-2 border-l-4 border-warning">
-    <h2 class="font-medium">Pre-sign execution unavailable</h2>
-    <p class="text-sm text-text-secondary">You can record or revoke a named, limited authority. This screen does not sign a document or send an invitation. Existing documents continue through manual signing.</p>
+    <h2 class="font-medium">Named signing authority</h2>
+    <p class="text-sm text-text-secondary">Record or revoke your own named, limited authority. Creating a grant does not sign a document or send an invitation.</p>
+    {#if registryState.context?.execution_available}<p class="text-sm text-text-secondary">Open an eligible agreement to review an exact pre-signing request. A use is recorded only when that request commits.</p>{:else if registryState.context}<p class="text-sm text-text-secondary">Pre-signing is not currently available from this service.</p>{/if}
   </div>
   {#if registryState.error}<p role="alert" class="card p-4 text-danger text-sm">{registryState.error}</p>{/if}
   {#if registryState.notice}<p role="status" class="card p-4 text-sm">{registryState.notice}</p>{/if}
@@ -135,7 +136,7 @@
         <p class="text-sm">{preview.signature.font} · bundled font verified. No document has been signed.</p>
         <p class="text-sm font-medium">Disclosure reserved for a future delegated execution:</p><p class="text-sm whitespace-pre-wrap">{registryState.context.disclosure.text}</p>
         <p class="text-xs text-text-muted">Disclosure version {preview.disclosure.version}. Preview expires {preview.expires_at}. Maximum {preview.intent.max_uses} uses; authority expires {preview.intent.expires_at}.</p>
-        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canCreate} /><span>I authorize this exact named authority, policy, signature style, validity and use limit. I understand that pre-sign execution is currently unavailable.</span></label>
+        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canCreate} /><span>I authorize this exact named authority, policy, signature style, validity and use limit. Each use must match its approved agreement and recipient rules.</span></label>
         <button class="btn btn-primary" disabled={!canConfirm} onclick={() => controller.approve()}>Confirm my signing authority</button>
       </section>
     {/if}

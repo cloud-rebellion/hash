@@ -18,12 +18,12 @@ func parseParticipantReportClaimVersioned(payload []byte, document string) (part
 		return participantReportClaimV1{}, err
 	}
 	if !present || schema == render.ParticipantReportSchemaV1 {
-		if bytes.Contains(payload, []byte(render.ParticipantReportCanonicalCarrierV2)) || bytes.Contains(payload, []byte(render.ParticipantReportHTMLV3Start)) {
+		if bytes.Contains(payload, []byte(render.ParticipantReportCanonicalCarrierV2)) || bytes.Contains(payload, []byte(render.ParticipantReportHTMLV3Start)) || bytes.Contains(payload, []byte(render.ParticipantReportCanonicalCarrierV3)) || bytes.Contains(payload, []byte(render.ParticipantReportHTMLV4Start)) {
 			return participantReportClaimV1{}, errors.New("new participant report lacks its exact signed schema")
 		}
 		return parseParticipantReportClaimV1(payload, document)
 	}
-	if schema != render.ParticipantReportSchemaV2 {
+	if schema != render.ParticipantReportSchemaV2 && schema != render.ParticipantReportSchemaV3 {
 		return participantReportClaimV1{}, errors.New("signed participant report schema is unsupported")
 	}
 	return parseParticipantReportClaimV2(payload, document)
@@ -44,7 +44,11 @@ func parseParticipantReportClaimV2(payload []byte, document string) (participant
 		values[i] = value
 	}
 	startMarker := []byte(`<section class="hash-participant-report">`)
-	if values[0] != render.ParticipantReportSchemaV2 || bytes.Count(payload, startMarker) != 1 || bytes.Count(payload, []byte(render.ParticipantReportCanonicalCarrierV2)) != 1 || bytes.Contains(payload, []byte(`<section class="hash-redaction-report">`)) || bytes.Contains(payload, []byte(`<pre class="hash-participant-report-canonical"`)) {
+	carrier := render.ParticipantReportCanonicalCarrierV2
+	if values[0] == render.ParticipantReportSchemaV3 {
+		carrier = render.ParticipantReportCanonicalCarrierV3
+	}
+	if (values[0] != render.ParticipantReportSchemaV2 && values[0] != render.ParticipantReportSchemaV3) || bytes.Count(payload, startMarker) != 1 || bytes.Count(payload, []byte(carrier)) != 1 || bytes.Contains(payload, []byte(`<section class="hash-redaction-report">`)) || bytes.Contains(payload, []byte(`<pre class="hash-participant-report-canonical"`)) {
 		return zero, errors.New("signed participant report body/version/privacy is inconsistent")
 	}
 	start := bytes.Index(payload, startMarker)
@@ -63,7 +67,7 @@ func parseParticipantReportClaimV2(payload []byte, document string) (participant
 		return zero, err
 	}
 	rows, err := strconv.ParseInt(values[3], 10, 64)
-	if err != nil || rows < 0 || rows > render.MaxParticipantReportRowsV1 || strconv.FormatInt(rows, 10) != values[3] || report.SourceRowsV2() != rows || report.DocumentID != document || report.HistoryScope.RootDocumentID != document || report.HistoryScope.OrgID != org || report.Cutoff != values[2] || digest != values[1] {
+	if err != nil || report.Schema != values[0] || rows < 0 || rows > render.MaxParticipantReportRowsV1 || strconv.FormatInt(rows, 10) != values[3] || report.SourceRowsV2() != rows || report.DocumentID != document || report.HistoryScope.RootDocumentID != document || report.HistoryScope.OrgID != org || report.Cutoff != values[2] || digest != values[1] {
 		return zero, errors.New("signed participant report canonical evidence contradicts its document, organization, cutoff, count or digest claims")
 	}
 	return participantReportClaimV1{schema: values[0], digest: digest, cutoff: values[2], rows: rows}, nil

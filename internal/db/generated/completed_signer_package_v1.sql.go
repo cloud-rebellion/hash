@@ -31,7 +31,7 @@ WHERE d.id=$1::uuid AND d.org_id=$2::uuid AND d.deleted_at IS NULL
  AND d.audit_payload_key=$12::text AND d.audit_payload_version_id=$13::text AND d.audit_payload_sha256=$14::bytea
  AND d.audit_signature_key=$15::text AND d.audit_signature_version_id=$16::text AND d.audit_signature_sha256=$17::bytea
  AND p.schema_version=d.participant_report_schema
- AND p.schema_version IN ('hash-participant-report-v1','hash-participant-report-v2') AND octet_length(p.report_sha256)=32
+ AND p.schema_version IN ('hash-participant-report-v1','hash-participant-report-v2','hash-participant-report-v3') AND octet_length(p.report_sha256)=32
  AND p.final_pdf_sha256=d.final_pdf_sha AND p.audit_cert_sha256=d.audit_cert_sha256
  AND p.audit_payload_sha256=d.audit_payload_sha256 AND p.audit_signature_sha256=d.audit_signature_sha256
  AND x.package_id=a.package_id AND x.capture_revision=a.capture_revision

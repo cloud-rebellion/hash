@@ -1689,6 +1689,10 @@ SELECT EXISTS(
   SELECT 1 FROM documents d WHERE d.id <> $1
     AND $2::text IN (d.pdf_storage_key,d.rendered_pdf_key,d.final_pdf_key,d.audit_cert_key,d.audit_payload_key,d.audit_signature_key)
   UNION ALL
+  SELECT 1 FROM document_amendments_v1 a
+    CROSS JOIN LATERAL jsonb_array_elements(convert_from(a.file_set,'UTF8')::jsonb->'files') f
+    WHERE f->>'key'=$2::text
+  UNION ALL
   SELECT 1 FROM templates t WHERE t.pdf_storage_key = $2::text
   UNION ALL
   SELECT 1 FROM document_finalization_intents i
@@ -1751,6 +1755,10 @@ SELECT EXISTS(
         OR d.audit_cert_key IS NOT NULL OR d.audit_cert_sha256 IS NOT NULL OR d.audit_cert_version_id IS NOT NULL
         OR d.audit_payload_key IS NOT NULL OR d.audit_payload_sha256 IS NOT NULL OR d.audit_payload_version_id IS NOT NULL
         OR d.audit_signature_key IS NOT NULL OR d.audit_signature_sha256 IS NOT NULL OR d.audit_signature_version_id IS NOT NULL)
+  UNION ALL
+  SELECT 1 FROM document_amendments_v1 a WHERE a.org_id=$2::uuid
+    AND (a.original_document_id=$1::uuid OR a.document_id=$1::uuid
+      OR EXISTS(SELECT 1 FROM jsonb_array_elements(convert_from(a.file_set,'UTF8')::jsonb->'files') f WHERE (f->>'document_id')::uuid=$1::uuid))
   UNION ALL
   SELECT 1 FROM document_finalization_intents WHERE document_id = $1::uuid
   UNION ALL

@@ -15,6 +15,7 @@ import (
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
+	"github.com/bright-interaction/hash/internal/presignexecute"
 	"github.com/google/uuid"
 )
 
@@ -31,6 +32,13 @@ type HTMLSendModelsV1 struct {
 // Fixed same-session read work. Original actor/credential/source/CRM/evidence
 // checks remain mandatory in Send. This owner supplies no family authority.
 type ApplicationHTMLSendWorkV1 struct {
+	presignAuthorityAttempted, presignEvidenceAttempted                                               bool
+	presignArtifacts                                                                                  *ApplicationPreSignArtifactsV1
+	presignPublication                                                                                *preSignPublicationV1
+	presignRetention                                                                                  *ApplicationPreSignRetentionV1
+	presignCleanup                                                                                    *ApplicationPreSignCleanupV1
+	presignRetained                                                                                   *presignexecute.RetainedAssetsV1
+	presignRetainedAttempted                                                                          bool
 	reminder                                                                                          *applicationReminderStateV1
 	reminderIdentityAttempted                                                                         bool
 	fieldListRead, fieldListCredentialRead                                                            bool
@@ -192,7 +200,7 @@ func (w *ApplicationHTMLSendWorkV1) ReadModelsV1(ctx context.Context) (*HTMLSend
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.valid(ctx) || w.modelsRead || w.state == nil || (w.state.ParentEnvelopeID.Valid && w.familyRoot == nil && w.stage.purpose != HTMLSignerViewMutationV1 && w.stage.purpose != HTMLSignerFieldsMutationV1 && w.stage.purpose != HTMLSignerCommentMutationV1 && w.stage.purpose != HTMLStaffCommentMutationV1) || (w.familyRoot == nil && w.state.BoundedStatus != "draft" && w.state.BoundedStatus != "sealing" && w.stage.purpose != HTMLBlockSignPreparationV1 && w.stage.purpose != HTMLBlockSignMutationV1 && w.stage.purpose != HTMLHistoricalFinalizationClaimV1 && w.stage.purpose != HTMLHistoricalFinalizationStageV1 && w.stage.purpose != HTMLHistoricalFinalizationResumeV1 && w.stage.purpose != HTMLHistoricalFinalizationPublicationV1 && w.stage.purpose != HTMLHistoricalFinalizationSourceV1 && w.stage.purpose != HTMLAcknowledgementMutationV1 && w.stage.purpose != HTMLSignerViewMutationV1 && w.stage.purpose != HTMLSignerFieldsMutationV1 && w.stage.purpose != HTMLSignerCommentMutationV1 && w.stage.purpose != HTMLStaffCommentMutationV1 && w.stage.purpose != HTMLReminderManualV1 && w.stage.purpose != HTMLReminderScheduledV1) {
+	if !w.valid(ctx) || w.modelsRead || w.state == nil || (w.state.ParentEnvelopeID.Valid && w.familyRoot == nil && w.stage.purpose != HTMLSignerViewMutationV1 && w.stage.purpose != HTMLSignerFieldsMutationV1 && w.stage.purpose != HTMLSignerCommentMutationV1 && w.stage.purpose != HTMLStaffCommentMutationV1) || (w.familyRoot == nil && w.state.BoundedStatus != "draft" && w.state.BoundedStatus != "sealing" && w.stage.purpose != HTMLBlockSignPreparationV1 && w.stage.purpose != HTMLBlockSignMutationV1 && w.stage.purpose != HTMLHistoricalFinalizationClaimV1 && w.stage.purpose != HTMLHistoricalFinalizationStageV1 && w.stage.purpose != HTMLHistoricalFinalizationResumeV1 && w.stage.purpose != HTMLHistoricalFinalizationPublicationV1 && w.stage.purpose != HTMLHistoricalFinalizationSourceV1 && w.stage.purpose != HTMLAcknowledgementMutationV1 && w.stage.purpose != HTMLSignerViewMutationV1 && w.stage.purpose != HTMLSignerFieldsMutationV1 && w.stage.purpose != HTMLSignerCommentMutationV1 && w.stage.purpose != HTMLStaffCommentMutationV1 && w.stage.purpose != HTMLReminderManualV1 && w.stage.purpose != HTMLReminderScheduledV1 && w.stage.purpose != HTMLPreSignReadV1 && w.stage.purpose != HTMLPreSignRecoveryV1) {
 		return nil, ErrHTMLSendWorkV1
 	}
 	w.modelsRead = true
@@ -430,6 +438,8 @@ func (w *ApplicationHTMLSendWorkV1) retireSourcesLockedV1() ([]func(), *Applicat
 	w.call = nil
 	w.confirmedBasis = ""
 	w.completionOutputs = nil
+	w.presignPublication = nil
+	w.presignRetained = nil
 	w.sourceActor = nil
 	w.sourceIntent = nil
 	w.packageCompletion = nil
@@ -463,6 +473,12 @@ func (w *ApplicationHTMLSendWorkV1) CloseConsumerV1() {
 	}
 	w.mu.Lock()
 	w.closed = true
+	presignArtifacts := w.presignArtifacts
+	w.presignArtifacts = nil
+	presignRetention := w.presignRetention
+	w.presignRetention = nil
+	presignCleanup := w.presignCleanup
+	w.presignCleanup = nil
 	reminder := w.reminder
 	members := w.familyMembers
 	finalizationEvidence := w.finalizationEvidence
@@ -487,6 +503,15 @@ func (w *ApplicationHTMLSendWorkV1) CloseConsumerV1() {
 	w.priorPinnedSource = nil
 	closes, actor := w.retireSourcesLockedV1()
 	w.mu.Unlock()
+	if presignArtifacts != nil {
+		presignArtifacts.CloseConsumerV1()
+	}
+	if presignRetention != nil {
+		presignRetention.CloseConsumerV1()
+	}
+	if presignCleanup != nil {
+		presignCleanup.CloseConsumerV1()
+	}
 	if reminder != nil {
 		reminder.closeConsumerV1()
 	}

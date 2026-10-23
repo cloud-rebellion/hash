@@ -78,7 +78,7 @@ WITH finalizing_root AS MATERIALIZED (
 )
 UPDATE documents AS target
 SET status = 'finalizing',
-    participant_report_schema = 'hash-participant-report-v2',
+    participant_report_schema = hash_presign_report_schema116(target.org_id,target.id),
     completion_effective_at_bound = TRUE,
     completion_effective_at = COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
     -- Object Lock timestamps have whole-second precision. Round upward after

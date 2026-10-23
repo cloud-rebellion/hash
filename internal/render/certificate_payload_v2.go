@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // CertificatePayloadV2 is selected only by a genuine persisted native report
@@ -21,11 +22,11 @@ func CertificatePayloadV2(prefix string, doc *generated.Document, fields []*gene
 	if len(prefix) > MaxCertificatePayloadBytesV1 || len(fields) > MaxParticipantReportRowsV1 || !reportInputBytesV2(reflect.ValueOf(claims), new(int)) || (manifestHTML != nil && len(*manifestHTML) > MaxCertificatePayloadBytesV1) {
 		return "", errors.Join(ErrParticipantReportV1, ErrCertificatePayloadCapacityV1)
 	}
-	if doc == nil || !utf8.ValidString(prefix) || claims.ParticipantReportSchema != ParticipantReportSchemaV2 || claims.ParticipantReportHTML == "" || claims.DocumentID != doc.ID.String() || claims.OrgID != doc.OrgID.String() || claims.DocumentEventsScope != documentEventsScopeCeremonyRoot {
+	if doc == nil || !utf8.ValidString(prefix) || (claims.ParticipantReportSchema != ParticipantReportSchemaV2 && claims.ParticipantReportSchema != ParticipantReportSchemaV3) || claims.ParticipantReportHTML == "" || claims.DocumentID != doc.ID.String() || claims.OrgID != doc.OrgID.String() || claims.DocumentEventsScope != documentEventsScopeCeremonyRoot {
 		return "", ErrParticipantReportV1
 	}
 	report, digest, err := ParseParticipantReportHTMLV3(claims.ParticipantReportHTML)
-	if err != nil || report.DocumentID != claims.DocumentID || report.HistoryScope.OrgID != claims.OrgID || digest != claims.ParticipantReportSHA256 || report.Cutoff != claims.ParticipantReportCutoff || report.SourceRowsV2() != claims.ParticipantReportRows {
+	if err != nil || report.Schema != claims.ParticipantReportSchema || report.DocumentID != claims.DocumentID || report.HistoryScope.OrgID != claims.OrgID || digest != claims.ParticipantReportSHA256 || report.Cutoff != claims.ParticipantReportCutoff || report.SourceRowsV2() != claims.ParticipantReportRows {
 		return "", ErrParticipantReportV1
 	}
 	if strings.Contains(prefix, `<section class="hash-redaction-report">`) || (manifestHTML != nil && (len(*manifestHTML) == 0 || len(*manifestHTML) > MaxCertificatePayloadBytesV1 || strings.Contains(*manifestHTML, `<section class="hash-redaction-report">`))) {
@@ -117,13 +118,37 @@ func certificateFieldsV2(w *participantHTMLWriterV3, rows []*generated.DocumentF
 			w.text("… [truncated, full value in document_fields]")
 		}
 		w.write("</td><td>")
-		w.text(certificateFormatNullableTSV1(f.CompletedAt))
+		w.text(certificateFormatNullableTSV2(f.CompletedAt))
 		w.write("</td></tr>")
 	}
 	if started {
 		w.write("</tbody></table>")
 	}
 	return w.err
+}
+
+// Absence is presentation, never an inferred signature or timestamp. Values
+// that exist retain V1's exact escaping/hash/UTC formatting. Archived V1
+// assembly deliberately continues to use its own byte-compatible helpers.
+func certificateSignatureFontOrNAV2(s *generated.Signature) string {
+	if s == nil {
+		return "Not recorded"
+	}
+	return certificateSignatureFontOrNAV1(s)
+}
+
+func certificateSignatureSHAOrNAV2(s *generated.Signature) string {
+	if s == nil {
+		return "Not recorded"
+	}
+	return certificateSignatureSHAOrNAV1(s)
+}
+
+func certificateFormatNullableTSV2(t pgtype.Timestamptz) string {
+	if !t.Valid {
+		return "Not recorded"
+	}
+	return certificateFormatNullableTSV1(t)
 }
 
 func CertificateFinishV2(prefix string, doc *generated.Document, fields []*generated.DocumentField, claims CertificateEvidenceClaimsV1, manifestHTML *string, key *AuditCertificateKeyV1, orgName, baseURL string) (string, string, string, error) {

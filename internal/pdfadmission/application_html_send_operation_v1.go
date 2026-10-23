@@ -170,7 +170,7 @@ func (o *ApplicationHTMLSendOperationV1) RetirePreparationResolversV1() error {
 }
 
 func (o *ApplicationHTMLSendOperationV1) openSQLV1(purpose HTMLSendSQLPurposeV1, source *applicationHTMLSendResolverV1) (*ApplicationHTMLSendSQLStageV1, error) {
-	if o == nil || o.self != o || purpose < HTMLSendPreparationV1 || purpose > HTMLReminderScheduledV1 {
+	if o == nil || o.self != o || purpose < HTMLSendPreparationV1 || purpose > HTMLPreSignRecoveryV1 {
 		return nil, ErrHTMLSendWorkV1
 	}
 	o.mu.Lock()
@@ -200,7 +200,7 @@ func (o *ApplicationHTMLSendOperationV1) openSQLV1(purpose HTMLSendSQLPurposeV1,
 	}
 	var ctx context.Context
 	var cancel context.CancelFunc
-	if purpose == HTMLSendAdmissionV1 {
+	if purpose == HTMLSendAdmissionV1 || purpose == HTMLPreSignCommitV1 {
 		ctx, cancel = context.WithTimeout(o.original, 10*time.Second)
 	} else {
 		ctx, cancel = context.WithCancel(o.original)

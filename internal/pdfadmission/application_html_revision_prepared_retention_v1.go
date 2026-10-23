@@ -39,7 +39,7 @@ func htmlRevisionRetentionFinishV1(n int64) (int64, error) {
 	return rounded / 8192 * 8192, nil
 }
 func htmlRevisionRetentionMasterShapeV1(m htmlmaster.Master) bool {
-	return len(m.Values) <= htmlmaster.MaxDefinitions && len(m.Sections) <= htmlmaster.MaxDefinitions && len(m.Assets) <= htmlmaster.MaxAssets && (m.ContractProfile == nil || (len(m.ContractProfile.Parties) <= 2 && len(m.ContractProfile.Terms) <= 16))
+	return len(m.Values) <= htmlmaster.MaxDefinitions && len(m.Sections) <= htmlmaster.MaxDefinitions && len(m.Assets) <= htmlmaster.MaxAssets && (m.ContractProfile == nil || (len(m.ContractProfile.Parties) <= 2 && len(m.ContractProfile.Terms) <= 16 && htmlmaster.AmendmentPolicyShapeV1(m.ContractProfile.AmendmentPolicy)))
 }
 
 // The fixed typed clone code copies these headers/arrays/profile/policy, but
@@ -57,6 +57,14 @@ func htmlRevisionPreparedMasterProjectionV1(m htmlmaster.Master) (int64, error) 
 	}
 	if p := m.ContractProfile; p != nil {
 		for _, size := range []int64{int64(unsafe.Sizeof(*p)), int64(len(p.Parties)) * int64(unsafe.Sizeof(htmlmaster.ContractParty{})), int64(len(p.Terms)) * int64(unsafe.Sizeof(htmlmaster.ContractTerm{}))} {
+			if !htmlRevisionRetentionAllocV1(&n, size) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+	}
+	if p := m.ContractProfile; p != nil && p.AmendmentPolicy != nil {
+		a := p.AmendmentPolicy
+		for _, size := range []int64{int64(unsafe.Sizeof(*a)), int64(len(a.AllowedModes)+len(a.AllowedChannels)) * 16} {
 			if !htmlRevisionRetentionAllocV1(&n, size) {
 				return 0, ErrHTMLAuthoringInputV1
 			}
@@ -110,6 +118,24 @@ func htmlRevisionPreparedMasterRetentionV1(m htmlmaster.Master) (int64, error) {
 		}
 		for _, term := range p.Terms {
 			if !text(term.Name) || !text(term.Value) || !text(term.Section) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+	}
+	if p := m.ContractProfile; p != nil && p.AmendmentPolicy != nil {
+		a := p.AmendmentPolicy
+		for _, value := range []string{a.Term, a.ClauseReference, a.EffectiveCondition} {
+			if !text(value) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+		for _, value := range a.AllowedModes {
+			if !text(value) {
+				return 0, ErrHTMLAuthoringInputV1
+			}
+		}
+		for _, value := range a.AllowedChannels {
+			if !text(value) {
 				return 0, ErrHTMLAuthoringInputV1
 			}
 		}
@@ -390,7 +416,7 @@ func htmlRevisionPreparedDocumentCloneV1(doc *generated.Document) (int64, error)
 // never a caller count or an operator-configured capacity.
 func htmlRevisionPreparedMasterProjectionCeilingV1() (int64, error) {
 	n := int64(0)
-	for _, size := range [...]int64{int64(unsafe.Sizeof(htmlmaster.Master{})), htmlmaster.MaxDefinitions * int64(unsafe.Sizeof(htmlmaster.Value{})), htmlmaster.MaxDefinitions * int64(unsafe.Sizeof(htmlmaster.Section{})), htmlmaster.MaxAssets * int64(unsafe.Sizeof(htmlmaster.Asset{})), int64(unsafe.Sizeof(htmlmaster.ContractProfile{})), 2 * int64(unsafe.Sizeof(htmlmaster.ContractParty{})), 16 * int64(unsafe.Sizeof(htmlmaster.ContractTerm{})), int64(unsafe.Sizeof(htmlmaster.SigningPagePolicy{}))} {
+	for _, size := range [...]int64{int64(unsafe.Sizeof(htmlmaster.Master{})), htmlmaster.MaxDefinitions * int64(unsafe.Sizeof(htmlmaster.Value{})), htmlmaster.MaxDefinitions * int64(unsafe.Sizeof(htmlmaster.Section{})), htmlmaster.MaxAssets * int64(unsafe.Sizeof(htmlmaster.Asset{})), int64(unsafe.Sizeof(htmlmaster.ContractProfile{})), 2 * int64(unsafe.Sizeof(htmlmaster.ContractParty{})), 16 * int64(unsafe.Sizeof(htmlmaster.ContractTerm{})), int64(unsafe.Sizeof(htmlmaster.SigningPagePolicy{})), int64(unsafe.Sizeof(htmlmaster.AmendmentPolicyV1{})), 4 * 16} {
 		if !htmlRevisionRetentionAllocV1(&n, size) {
 			return 0, ErrHTMLAuthoringInputV1
 		}

@@ -381,6 +381,9 @@ func (op *applicationRequestOperationV1) dataV1() (*generated.ReserveBoundSignat
 	return &metadata, op.context, op.intent, nil
 }
 func (j *applicationRequestJournalV1) prepareV1(ctx context.Context, op *applicationRequestOperationV1, rc *RecipientContext, in SignInput, kind pdfadmission.ApplicationRequestJournalKindV1) (*generated.Queries, pdfadmission.ApplicationScopeV1, error) {
+	if rc != nil && rc.delegated != nil {
+		return nil, pdfadmission.ApplicationScopeV1{}, ErrDelegatedFittedUnsupportedV1
+	}
 	h, err := j.factory.OpenV1(ctx, op.key.org, op.key.document)
 	op.session = h
 	if err != nil {

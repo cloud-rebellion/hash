@@ -15,7 +15,7 @@
   // marketing/login root render standalone with no nav.
   const path = $derived($page.url.pathname);
   const showChrome = $derived(
-    !(path === '/' || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/legal') || path.startsWith('/auth'))
+    !(path === '/' || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/notice/') || path.startsWith('/legal') || path.startsWith('/auth'))
   );
 
   const navItems = [
@@ -32,19 +32,32 @@
 
   onMount(() => {
     const stopFlareCapture = installRuntimeFlareBrowserCapture();
+    return stopFlareCapture;
+  });
 
+  $effect(() => {
+    // The root layout survives client navigation between public and app pages.
+    if (!showChrome) {
+      me = null;
+      return;
+    }
+    const controller = new AbortController();
+    let current = true;
     void (async () => {
-      // Only the app surfaces need the identity; skip the probe on public pages.
-      if (!showChrome) return;
       try {
-        const res = await fetch('/api/v1/me', { credentials: 'include' });
-        if (res.ok) me = await res.json();
+        const res = await fetch('/api/v1/me', {
+          credentials: 'include', cache: 'no-store', signal: controller.signal
+        });
+        const identity = res.ok ? await res.json() : null;
+        if (current) me = identity;
       } catch {
-        // not signed in -> nav still renders; the pages themselves gate.
+        if (current) me = null;
       }
     })();
-
-    return stopFlareCapture;
+    return () => {
+      current = false;
+      controller.abort();
+    };
   });
 </script>
 

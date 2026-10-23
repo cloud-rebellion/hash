@@ -469,8 +469,15 @@ func TestOwnedStaffCommentCanonicalAuthorAfterWaitE2E(t *testing.T) {
 			if !reflect.DeepEqual(before.document, after.document) || !reflect.DeepEqual(before.recipients, after.recipients) {
 				t.Fatal("canonical identity update changed contract/parties")
 			}
+			commentEvents, err := q.f.q.ListEventsByDocumentChronological(q.f.ctx, generated.ListEventsByDocumentChronologicalParams{DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, Limit: 1000})
+			if err != nil {
+				t.Fatal("canonical actor event history unavailable", err)
+			}
+			if rows[0].ID.String() != response.ID || ownedChatCurrentAudit487V1(commentEvents, rows, q.f.org, doc.ID, actor.ID, parties[0].RecipientID, 1, 0) != nil {
+				t.Fatal("canonical actor lost exact current comment schema/body/hash association")
+			}
 			var events, measured, notifications int
-			if err = q.f.pool.QueryRow(q.f.ctx, "SELECT (SELECT count(*)::integer FROM events WHERE document_id=$1 AND actor_user_id=$2 AND kind='document.comment_posted' AND payload_json='{\"side\":\"sender\"}'::jsonb),(SELECT count(*)::integer FROM events e JOIN html_snapshot_event_payload_sizes_v1 m ON m.event_id=e.id AND m.payload_wire_bytes=octet_length(e.payload_json::text) WHERE e.document_id=$1 AND e.kind='document.comment_posted'),(SELECT count(*)::integer FROM email_deliveries WHERE subject=$3 AND strpos(text_body,$4)>0)", doc.ID, actor.ID, "New comment on "+doc.Name, expected).Scan(&events, &measured, &notifications); err != nil || events != 1 || measured != 1 || notifications != 2 {
+			if err = q.f.pool.QueryRow(q.f.ctx, "SELECT (SELECT count(*)::integer FROM events WHERE document_id=$1 AND actor_user_id=$2 AND kind='document.comment_posted' AND recipient_id IS NULL AND payload_json->>'side'='sender'),(SELECT count(*)::integer FROM events e JOIN html_snapshot_event_payload_sizes_v1 m ON m.event_id=e.id AND m.payload_wire_bytes=octet_length(e.payload_json::text) WHERE e.document_id=$1 AND e.kind='document.comment_posted'),(SELECT count(*)::integer FROM email_deliveries WHERE subject=$3 AND strpos(text_body,$4)>0)", doc.ID, actor.ID, "New comment on "+doc.Name, expected).Scan(&events, &measured, &notifications); err != nil || events != 1 || measured != 1 || notifications != 2 {
 				t.Fatal("canonical actor missing from audit/measurement/every notification", err, events, measured, notifications)
 			} //nolint:rawsql -- actual canonical author/evidence/notification projections
 			nativeCommentDrained164V1(t, q)

@@ -39,17 +39,18 @@ type ParticipantReportHistoryScopeV2 struct {
 // Only request/decision variants currently have typed original-payload facts.
 // Other visible events retain their metadata and an explicit unavailable label.
 type ParticipantReportV2 struct {
-	Schema                 string                          `json:"schema"`
-	DocumentID             string                          `json:"document_id"`
-	Cutoff                 string                          `json:"cutoff"`
-	HistoryScope           ParticipantReportHistoryScopeV2 `json:"history_scope"`
-	EventProjectionVersion string                          `json:"event_projection_version"`
-	Events                 []ParticipantEventFactDraft402  `json:"events"`
-	Comments               []ParticipantReportCommentV1    `json:"comments"`
-	Revisions              []ParticipantReportRevisionV1   `json:"revisions"`
-	Proposals              []ParticipantReportProposalV1   `json:"proposals"`
-	Members                []ParticipantReportMemberV1     `json:"members"`
-	Responses              []ParticipantReportResponseV1   `json:"responses"`
+	Schema                 string                           `json:"schema"`
+	DocumentID             string                           `json:"document_id"`
+	Cutoff                 string                           `json:"cutoff"`
+	HistoryScope           ParticipantReportHistoryScopeV2  `json:"history_scope"`
+	EventProjectionVersion string                           `json:"event_projection_version"`
+	Events                 []ParticipantEventFactDraft402   `json:"events"`
+	Comments               []ParticipantReportCommentV1     `json:"comments"`
+	Revisions              []ParticipantReportRevisionV1    `json:"revisions"`
+	Proposals              []ParticipantReportProposalV1    `json:"proposals"`
+	Members                []ParticipantReportMemberV1      `json:"members"`
+	Responses              []ParticipantReportResponseV1    `json:"responses"`
+	DelegatedExecution     *ParticipantDelegatedExecutionV1 `json:"delegated_execution,omitempty"`
 }
 
 // NewParticipantReportV2 must be called within the funded original native
@@ -96,7 +97,11 @@ func NewParticipantReportV2(scope ParticipantNarrativeScopeDraft402, originalEve
 // semantics. Native header cardinality independently includes filtered private
 // source rows; facts/labels never inflate either count or substitute for it.
 func (r ParticipantReportV2) SourceRowsV2() int64 {
-	return int64(len(r.Events)) + int64(len(r.Comments)) + int64(len(r.Revisions)) + int64(len(r.Proposals)) + int64(len(r.Members)) + int64(len(r.Responses))
+	rows := int64(len(r.Events)) + int64(len(r.Comments)) + int64(len(r.Revisions)) + int64(len(r.Proposals)) + int64(len(r.Members)) + int64(len(r.Responses))
+	if r.DelegatedExecution != nil {
+		rows++
+	}
+	return rows
 }
 
 func reportStringV2(value string) bool {
@@ -159,7 +164,8 @@ func (r ParticipantReportV2) validateV2() error {
 	if !reportInputBytesV2(reflect.ValueOf(r), new(int)) {
 		return errors.Join(ErrParticipantReportV1, ErrCertificatePayloadCapacityV1)
 	}
-	if r.Schema != ParticipantReportSchemaV2 || r.EventProjectionVersion != ParticipantEventProjectionVersionV1 || !reportIDV2(r.DocumentID) || len(r.Cutoff) > 40 || r.SourceRowsV2() > MaxParticipantReportRowsV1 || len(r.Members) > 17 {
+	variant := (r.Schema == ParticipantReportSchemaV2 && r.EventProjectionVersion == ParticipantEventProjectionVersionV1 && r.DelegatedExecution == nil) || (r.Schema == ParticipantReportSchemaV3 && r.EventProjectionVersion == ParticipantEventProjectionVersionV2 && r.DelegatedExecution != nil)
+	if !variant || !reportIDV2(r.DocumentID) || len(r.Cutoff) > 40 || r.SourceRowsV2() > MaxParticipantReportRowsV1 || len(r.Members) > 17 {
 		return ErrParticipantReportV1
 	}
 	cutoff, err := time.Parse(time.RFC3339Nano, r.Cutoff)
@@ -177,6 +183,9 @@ func (r ParticipantReportV2) validateV2() error {
 		}
 		documents[id] = true
 	}
+	if r.DelegatedExecution != nil && (len(scope.DocumentIDs) != 1 || r.DelegatedExecution.validateV1(cutoff) != nil) {
+		return ErrParticipantReportV1
+	}
 	if !documents[r.DocumentID] {
 		return ErrParticipantReportV1
 	}
@@ -188,6 +197,9 @@ func (r ParticipantReportV2) validateV2() error {
 			return ErrParticipantReportV1
 		}
 		if _, found := byEvent[e.ID]; found {
+			return ErrParticipantReportV1
+		}
+		if r.DelegatedExecution != nil && r.DelegatedExecution.EventID == e.ID {
 			return ErrParticipantReportV1
 		}
 		byEvent[e.ID] = i
@@ -346,7 +358,13 @@ func VerifyParticipantReportOriginalEventsV2(scope ParticipantNarrativeScopeDraf
 		}
 	}
 	cutoff, _ := time.Parse(time.RFC3339Nano, report.Cutoff)
-	return VerifyParticipantEventNarrativesDraft402(scope, originalEvents, cutoff, report.Events)
+	if err := VerifyParticipantEventNarrativesDraft402(scope, originalEvents, cutoff, report.Events); err != nil {
+		return err
+	}
+	if report.Schema == ParticipantReportSchemaV3 {
+		return verifyDelegatedOriginalEventV3(scope, originalEvents, report)
+	}
+	return nil
 }
 
 // Bounded streaming canonical encoding of the closed public model. There are
@@ -675,10 +693,14 @@ const ParticipantReportCanonicalCarrierV2 = `<pre class="hash-participant-report
 // The surrounding evidence verifier separately binds signed document/org/scalars.
 func ParseParticipantReportHTMLV3(section string) (ParticipantReportV2, string, error) {
 	var zero ParticipantReportV2
-	if len(section) > MaxCertificatePayloadBytesV1 || !strings.HasPrefix(section, ParticipantReportHTMLV3Start) || strings.Count(section, ParticipantReportCanonicalCarrierV2) != 1 {
+	marker, carrier := ParticipantReportHTMLV3Start, ParticipantReportCanonicalCarrierV2
+	if strings.HasPrefix(section, ParticipantReportHTMLV4Start) {
+		marker, carrier = ParticipantReportHTMLV4Start, ParticipantReportCanonicalCarrierV3
+	}
+	if len(section) > MaxCertificatePayloadBytesV1 || !strings.HasPrefix(section, marker) || strings.Count(section, carrier) != 1 {
 		return zero, "", ErrParticipantReportV1
 	}
-	start := strings.Index(section, ParticipantReportCanonicalCarrierV2) + len(ParticipantReportCanonicalCarrierV2)
+	start := strings.Index(section, carrier) + len(carrier)
 	end := strings.Index(section[start:], "</pre>")
 	if end < 0 {
 		return zero, "", ErrParticipantReportV1

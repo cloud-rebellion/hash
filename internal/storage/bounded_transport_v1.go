@@ -23,6 +23,7 @@ var (
 	errBoundedStorageResponseV1       = errors.New("storage response exceeds admitted size")
 	errBoundedStorageResponseClosedV1 = errors.New("storage response is closed")
 	errBoundedStorageRequestV1        = errors.New("storage response admission is invalid")
+	errExactVersionPrefixPageV1       = errors.New("exact-key version listing reached a different key marker")
 )
 
 type boundedStorageFailureV1 struct{ cause error }
@@ -43,6 +44,15 @@ func boundedStorageContextErrorV1(ctx context.Context) error {
 
 type objectResponseLimitKeyV1 struct{}
 type objectResponseLimitV1 struct{ bytes int64 }
+
+type exactVersionPrefixLimitKeyV1 struct{}
+type exactVersionPrefixLimitV1 struct{ key string }
+
+// This private dispatch fence stops the SDK's buffered iterator from sending
+// a page beyond its exact-key history. It is not provider or mutation authority.
+func withExactVersionPrefixLimitV1(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, exactVersionPrefixLimitKeyV1{}, exactVersionPrefixLimitV1{key: key})
+}
 
 // withObjectResponseLimitV1 is private dispatch metadata, not permission or a
 // physical retirement receipt. The exact read caller must first admit its own
@@ -89,6 +99,14 @@ func (t *boundedStorageTransportV1) RoundTrip(r *http.Request) (*http.Response, 
 	ctx := r.Context()
 	if err := boundedStorageContextErrorV1(ctx); err != nil {
 		return nil, err
+	}
+	if scope, exact := ctx.Value(exactVersionPrefixLimitKeyV1{}).(exactVersionPrefixLimitV1); exact && r.Method == http.MethodGet && r.URL != nil {
+		query := r.URL.Query()
+		if query.Has("versions") && query.Get("prefix") == scope.key {
+			if marker := query.Get("key-marker"); marker != "" && marker != scope.key {
+				return nil, errExactVersionPrefixPageV1
+			}
+		}
 	}
 	objectLimit, scoped := ctx.Value(objectResponseLimitKeyV1{}).(objectResponseLimitV1)
 	if scoped && (objectLimit.bytes < 1 || objectLimit.bytes > maxStoredObjectBytes) {

@@ -1117,13 +1117,15 @@ func readBounded(r io.Reader, limit int64) ([]byte, error) {
 
 // scanExactKeyVersions visits only the contiguous exact-key portion of an S3
 // version listing. ListObjects transparently paginates, so MaxKeys alone does
-// not bound work when many longer keys share the requested prefix. Cancelling
-// at the first longer key makes the scan depend only on exact-key history. The
+// not bound work when many longer keys share the requested prefix. The private
+// transport fence prevents the SDK from prefetching a page whose key marker
+// has already left the exact key; the consumer cancels at the first longer key.
+// This makes provider work depend only on exact-key history. The
 // iterator is always drained after cancellation because minio-go sends a final
 // context error before closing its channel; returning without the drain would
 // strand that producer goroutine.
 func scanExactKeyVersions(ctx context.Context, lister exactVersionLister, bucket, key string, maxKeys int, visit func(context.Context, minio.ObjectInfo) (bool, error)) error {
-	listCtx, cancel := context.WithCancel(ctx)
+	listCtx, cancel := context.WithCancel(withExactVersionPrefixLimitV1(ctx, key))
 	versions := lister.ListObjects(listCtx, bucket, minio.ListObjectsOptions{
 		Prefix: key, Recursive: true, WithVersions: true, MaxKeys: maxKeys,
 	})

@@ -310,7 +310,7 @@ func newFakeDataPlaneClient(t *testing.T, fake *fakeVersionedS3) (*Client, []byt
 		Secure:       true,
 		Region:       "eu-central-1",
 		BucketLookup: minio.BucketLookupPath,
-		Transport:    server.Client().Transport,
+		Transport:    &boundedStorageTransportV1{base: server.Client().Transport},
 	})
 	if err != nil {
 		t.Fatal(err)

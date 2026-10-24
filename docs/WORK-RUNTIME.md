@@ -24,6 +24,36 @@ Consumer closure, cancellation and logical commit never authorize a resource ref
 
 No deployment capacity values are supplied by this change. Operator measurement, production lifecycle acceptance, bounded authoring readers and the remaining fitted signing gates must be completed separately.
 
+## Running the synthetic browser stack
+
+The browser CI job includes `docker-compose.browser-e2e.yml` after the base and
+local-MinIO files. This supplies the existing real-render/browser fixture profile
+explicitly to both server and worker. It caps each application pool at 8 and each
+process's total database allocation at 16, so the two processes together have a
+32-connection ceiling. The PostgreSQL instance must accommodate that aggregate
+and its other clients.
+
+For the same controlled local test stack, include the same overlay:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.local-minio.yml \
+  -f docker-compose.browser-e2e.yml up -d --build
+```
+
+This is a synthetic integration-test allocation, not a production deployment
+profile. Production and other workloads still require their own explicit values.
+After seeding its disposable identity, browser CI explicitly prepares only the
+`free` and `enterprise` plans with `scripts/prepare-browser-e2e-catalog.sh`. The
+script checks acknowledged measurements and independently checks for remaining
+maintenance database sessions. It is restricted to the synthetic browser identity;
+other environments follow [catalog maintenance](CATALOG-MAINTENANCE.md).
+
+The unchanged existing browser signing case has passed actual server/worker
+startup, authoring, both signatures and PDF download with this configuration. A
+separate run using a fresh versioned local bucket also passed the strict audit
+verifier and downloaded a PDF matching the stored completion digest. Ordinary
+unversioned development storage does not satisfy that strict release verifier.
+
 ## Supplying per-process values in development Compose
 
 The base `docker-compose.yml` has explicit environment maps and does not forward

@@ -19,27 +19,30 @@ import (
 const heartbeatInterval = 2 * time.Minute
 
 type Lifecycle struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	done             chan struct{}
-	shipper          *logShipper
-	client           *sentry.Client
-	once             sync.Once
-	checkinURL       string
-	checkinKey       string
-	checkinFailures  atomic.Uint64
-	checkinResponses atomic.Uint64
-	checkinProgress  chan struct{}
-	jobDropped       atomic.Uint64
-	jobRejected      atomic.Uint64
-	service          string
-	diagnosticsEpoch time.Time
-	diagnosticsBusy  atomic.Bool
-	jobQueue         chan jobReport
-	jobMu            sync.Mutex
-	jobWindows       [criticalJobCount]jobWindow
-	jobMaxAge        [criticalJobCount]int64
-	jobPolicyInvalid [criticalJobCount]bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	done               chan struct{}
+	shipper            *logShipper
+	client             *sentry.Client
+	once               sync.Once
+	checkinURL         string
+	checkinKey         string
+	checkinFailures    atomic.Uint64
+	checkinResponses   atomic.Uint64
+	checkinProgress    chan struct{}
+	jobDropped         atomic.Uint64
+	jobRejected        atomic.Uint64
+	service            string
+	diagnosticsEpoch   time.Time
+	diagnosticsBusy    atomic.Bool
+	operationalMetrics atomic.Pointer[operationalMetricSampleV1]
+	metricAcknowledged atomic.Uint64
+	metricFailures     atomic.Uint64
+	jobQueue           chan jobReport
+	jobMu              sync.Mutex
+	jobWindows         [criticalJobCount]jobWindow
+	jobMaxAge          [criticalJobCount]int64
+	jobPolicyInvalid   [criticalJobCount]bool
 }
 
 func newLifecycle(parent context.Context, ready <-chan struct{}, service string, client *sentry.Client) *Lifecycle {
@@ -99,6 +102,7 @@ func newLifecycleWithShipper(parent context.Context, ready <-chan struct{}, serv
 				})
 			}
 			owner.checkin(service)
+			owner.emitOperationalMetricsV1()
 		}
 		emit()
 		ticker := time.NewTicker(heartbeatInterval)
@@ -221,6 +225,10 @@ type DeliveryDiagnostics struct {
 	CheckinResponses uint64 `json:"checkin_responses"`
 	JobDropped       uint64 `json:"job_dropped"`
 	JobRejected      uint64 `json:"job_rejected"`
+	// Metric acknowledgements require the native receiver's complete committed
+	// receipt and full point count. Failures also include projection refusals.
+	MetricAcknowledgedBatches uint64 `json:"metric_acknowledged_batches"`
+	MetricFailures            uint64 `json:"metric_failures"`
 }
 
 func (l *Lifecycle) Diagnostics() DeliveryDiagnostics {
@@ -228,6 +236,8 @@ func (l *Lifecycle) Diagnostics() DeliveryDiagnostics {
 		return DeliveryDiagnostics{}
 	}
 	d := DeliveryDiagnostics{CheckinFailures: l.checkinFailures.Load(), CheckinResponses: l.checkinResponses.Load(), JobDropped: l.jobDropped.Load(), JobRejected: l.jobRejected.Load()}
+	d.MetricAcknowledgedBatches = l.metricAcknowledged.Load()
+	d.MetricFailures = l.metricFailures.Load()
 	if l.shipper != nil {
 		d.Dropped = l.shipper.dropped.Load()
 		d.Failed = l.shipper.failed.Load()

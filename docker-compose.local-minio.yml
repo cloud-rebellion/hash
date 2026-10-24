@@ -4,7 +4,10 @@
 # immutable docker-compose.prod.yml storage contract.
 services:
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: hash-minio-dev:release-9e49d5e
+    pull_policy: never
+    build:
+      context: ./docker/minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -26,7 +29,7 @@ services:
         aliases:
           - hash-minio
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 10

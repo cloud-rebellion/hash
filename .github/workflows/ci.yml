@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      COMPOSE_FILE: docker-compose.yml:docker-compose.local-minio.yml
+      COMPOSE_FILE: docker-compose.yml:docker-compose.local-minio.yml:docker-compose.browser-e2e.yml
       HASH_APP_PORT: '8080'
       # Public test-only fixture. CI mints a normal signed cookie and the
       # server reloads the fixed user from Postgres on every session request.
@@ -146,8 +146,8 @@ jobs:
         with:
           bun-version: 1.3.9
 
-      - name: Build the exact app and renderer images once
-        run: docker compose build hash gotenberg
+      - name: Build the app, renderer and local storage images once
+        run: docker compose build hash gotenberg minio
 
       - name: Start the live Hash signing stack without rebuilding
         # Starting server+worker together deliberately exercises the shared
@@ -241,6 +241,9 @@ jobs:
             FROM created_user
             JOIN created_subscription USING (org_id);
           "
+
+      - name: Prepare the two synthetic browser billing plans
+        run: bash scripts/prepare-browser-e2e-catalog.sh
 
       - name: Mint a real signed session cookie for sender-only routes
         run: |

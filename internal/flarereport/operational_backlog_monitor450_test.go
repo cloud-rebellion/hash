@@ -63,7 +63,7 @@ func TestBacklogMonitor450ActualReadySenderFailureAndFreshRemediationPrivacy(t *
 			default:
 			}
 		}
-		if !strings.Contains(r.URL.Path, "/checkins/") && !strings.HasSuffix(r.URL.Path, "/logs") {
+		if !strings.Contains(r.URL.Path, "/checkins/") && !strings.HasSuffix(r.URL.Path, "/logs") && r.URL.Path != "/prefix/api/1/metrics" {
 			t.Error("sampler unexpectedly emitted an SDK exception/event")
 		}
 		mu.Lock()
@@ -80,6 +80,12 @@ func TestBacklogMonitor450ActualReadySenderFailureAndFreshRemediationPrivacy(t *
 				t.Error(err)
 			}
 			json.NewEncoder(w).Encode(map[string]int{"accepted": len(lines)})
+		} else if r.URL.Path == "/prefix/api/1/metrics" {
+			var points []nativeOperationalMetricV1
+			if err := json.Unmarshal(raw, &points); err != nil || len(points) != 23 {
+				t.Error("invalid fixed operational metric projection", err)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"accepted": len(points), "rejected": 0, "dropped": 0, "receipt_id": "fixture-metrics450"})
 		} else {
 			io.WriteString(w, `{}`)
 		}
@@ -133,6 +139,9 @@ func TestBacklogMonitor450ActualReadySenderFailureAndFreshRemediationPrivacy(t *
 	}
 	if sh.failed.Load() != 0 || sh.rejected.Load() != 0 || sh.dropped.Load() != 5 {
 		t.Fatal("native-log admission/response accounting or independent checkins changed", sh.dropped.Load())
+	}
+	if owner.Diagnostics().MetricAcknowledgedBatches != 1 || owner.Diagnostics().MetricFailures != 0 {
+		t.Fatal("initial fixed metrics were not independently acknowledged")
 	}
 	mu.Lock()
 	defer mu.Unlock()

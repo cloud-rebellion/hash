@@ -26,6 +26,8 @@ func TestDeliveryDiagnostics409FixedCountersPrivacyAndResetEpoch(t *testing.T) {
 	l.checkinResponses.Store(5)
 	l.jobDropped.Store(6)
 	l.jobRejected.Store(7)
+	l.metricAcknowledged.Store(8)
+	l.metricFailures.Store(9)
 	l.emitDeliveryDiagnostics409()
 	line := <-sh.ch
 	if line.Body != "Hash telemetry delivery diagnostics" || line.Severity != "info" || len(line.Attributes) > logShipMaxAttrs {
@@ -35,7 +37,7 @@ func TestDeliveryDiagnostics409FixedCountersPrivacyAndResetEpoch(t *testing.T) {
 	if err := json.Unmarshal(line.Attributes, &attrs); err != nil {
 		t.Fatal(err)
 	}
-	if len(attrs) != 15 || attrs["schema"] != "hash-delivery-diagnostics-v1" || attrs["counter_scope"] != "process_local" || attrs["counter_epoch"] != l.diagnosticsEpoch.Format(time.RFC3339Nano) || attrs["log_dropped"] != "9223372036854775807" || attrs["checkin_failures"] != "18446744073709551615" || attrs["checkin_responses"] != "5" || attrs["job_dropped"] != "6" || attrs["sdk_delivery_accounted"] != false || attrs["checkins_configured"] != true {
+	if len(attrs) != 17 || attrs["schema"] != "hash-delivery-diagnostics-v1" || attrs["counter_scope"] != "process_local" || attrs["counter_epoch"] != l.diagnosticsEpoch.Format(time.RFC3339Nano) || attrs["log_dropped"] != "9223372036854775807" || attrs["checkin_failures"] != "18446744073709551615" || attrs["checkin_responses"] != "5" || attrs["job_dropped"] != "6" || attrs["metric_acknowledged_batches"] != "8" || attrs["metric_failures"] != "9" || attrs["sdk_delivery_accounted"] != false || attrs["checkins_configured"] != true {
 		t.Fatal("counter precision/reset/response-only semantics changed", attrs)
 	}
 	for _, key := range []string{"PRIVATE_INGEST_KEY_409", "PRIVATE_ENDPOINT_409", "PRIVATE_MONITOR_409", "https://"} {

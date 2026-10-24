@@ -37,25 +37,28 @@ func (l *Lifecycle) emitDeliveryDiagnostics409() {
 	}
 	d := l.Diagnostics()
 	attrs := struct {
-		Schema               string `json:"schema"`
-		Service              string `json:"service"`
-		Release              string `json:"release"`
-		Environment          string `json:"environment"`
-		CounterScope         string `json:"counter_scope"`
-		CounterEpoch         string `json:"counter_epoch"`
-		LogDropped           string `json:"log_dropped"`
-		LogFailed            string `json:"log_failed"`
-		LogRejected          string `json:"log_rejected"`
-		CheckinFailures      string `json:"checkin_failures"`
-		CheckinResponses     string `json:"checkin_responses"`
-		JobDropped           string `json:"job_dropped"`
-		JobRejected          string `json:"job_rejected"`
-		CheckinsConfigured   bool   `json:"checkins_configured"`
-		SDKDeliveryAccounted bool   `json:"sdk_delivery_accounted"`
+		Schema                    string `json:"schema"`
+		Service                   string `json:"service"`
+		Release                   string `json:"release"`
+		Environment               string `json:"environment"`
+		CounterScope              string `json:"counter_scope"`
+		CounterEpoch              string `json:"counter_epoch"`
+		LogDropped                string `json:"log_dropped"`
+		LogFailed                 string `json:"log_failed"`
+		LogRejected               string `json:"log_rejected"`
+		CheckinFailures           string `json:"checkin_failures"`
+		CheckinResponses          string `json:"checkin_responses"`
+		JobDropped                string `json:"job_dropped"`
+		JobRejected               string `json:"job_rejected"`
+		MetricAcknowledgedBatches string `json:"metric_acknowledged_batches"`
+		MetricFailures            string `json:"metric_failures"`
+		CheckinsConfigured        bool   `json:"checkins_configured"`
+		SDKDeliveryAccounted      bool   `json:"sdk_delivery_accounted"`
 	}{"hash-delivery-diagnostics-v1", sh.service, sh.release, sh.environment, "process_local", epoch,
 		strconv.FormatInt(d.Dropped, 10), strconv.FormatInt(d.Failed, 10), strconv.FormatInt(d.Rejected, 10),
 		strconv.FormatUint(d.CheckinFailures, 10), strconv.FormatUint(d.CheckinResponses, 10),
-		strconv.FormatUint(d.JobDropped, 10), strconv.FormatUint(d.JobRejected, 10), l.checkinURL != "", false}
+		strconv.FormatUint(d.JobDropped, 10), strconv.FormatUint(d.JobRejected, 10),
+		strconv.FormatUint(d.MetricAcknowledgedBatches, 10), strconv.FormatUint(d.MetricFailures, 10), l.checkinURL != "", false}
 	raw, err := json.Marshal(attrs) // closed fixed scalar struct, no caller values/getters
 	if err != nil || len(raw) > logShipMaxAttrs {
 		sh.rejected.Add(1)

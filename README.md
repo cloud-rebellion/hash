@@ -59,9 +59,9 @@ release acceptance.
 
 ## Quick start
 
-Reactor is the intended path for connecting Hash to CRMs through scoped APIs;
-see [API contracts](docs/API.md) for the exposed interfaces. Configured Reactor/CRM
-journeys still require integration acceptance before a release claim.
+Hash runs independently. Reactor and CRM connections are optional integrations
+configured through scoped APIs; see [API contracts](docs/API.md). Verify a connected
+workflow's configuration before using that integration.
 
 For the optional direct BrightCRM connector, organisation owners enroll and
 explicitly confirm their own account in Settings → Integrations. Credentials are
@@ -72,10 +72,23 @@ and acceptance limits.
 
 ```bash
 cp .env.example .env
-# edit .env, then:
+# configure sender OIDC/SMTP and the remaining operator settings, then:
 make docker-up
-# Hash at http://localhost:8080, Postgres at 5432, MinIO at 9000
+# Hash at http://localhost:8080, Postgres at 5433, MinIO at 9000
 ```
+
+`make dev` starts the same complete development stack. These commands explicitly
+build local MinIO from its pinned official source and include the finite server
+and worker work profile in `docker-compose.browser-e2e.yml`. The MinIO build
+context contains no Hash application or environment files. This local profile is
+not a production capacity allocation; production uses its separate storage and
+per-process configuration contracts.
+
+Before creating documents, prepare the selected billing plans using
+[catalog maintenance](docs/CATALOG-MAINTENANCE.md); a fresh database also needs
+this preparation. Browser CI has a separate helper restricted to its synthetic
+identity. See [work configuration](docs/WORK-RUNTIME.md) for the explicit local
+resource profile and requirements for other deployments.
 
 ## Deploy
 

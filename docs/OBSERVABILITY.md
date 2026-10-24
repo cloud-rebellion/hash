@@ -1,6 +1,6 @@
 # Hash observability and Flare acceptance
 
-Status: **source guidance; next-deploy acceptance UNPROVEN** (2026-10-20).
+Status: **source and controlled local qualification; next-deploy acceptance UNPROVEN** (2026-10-24).
 
 This guide defines useful monitoring for the next Hash deployment. It does not
 record a deployment or certify existing telemetry. Consult the current
@@ -32,14 +32,53 @@ poll-to-enqueue flush window. A completed flush still does not prove the collect
 accepted or stored an event, or that an alert was delivered.
 
 Hash uses its own fixed-schema native log shipper. SDK log and metric producers
-are disabled; adding metrics needs explicit safe producers and receiver/export
-qualification. `SnapshotOperations` and `DeliveryDiagnostics` remain local APIs,
-but the lifecycle also exports a fixed 15-scalar native-log projection from the
+remain disabled. The explicit native backlog metric producer below reuses the
+existing sender; it does not enable automatic SDK metrics. `SnapshotOperations`
+and `DeliveryDiagnostics` remain local APIs, but the lifecycle also exports a
+fixed 17-scalar native-log projection from the
 latter every two minutes, with service/release/environment/process epoch and
 `sdk_delivery_accounted=false`. This is not an SDK queue-loss or metrics series.
 A finite close can fail or leave buffered records undelivered; inspect its result
 and reconcile loss with receiver records. Do not infer an SDK idle-worker join
 from flush completion.
+
+## Native backlog metrics
+
+The worker retains a scalar copy of each valid existing durable backlog
+observation independently of native log rate/queue admission. After readiness,
+the existing two-minute heartbeat owner projects 23 fixed gauges under
+`hash.operational_backlog.*` to the DSN-derived native `/metrics` endpoint.
+It uses the existing public ingest key and validated service, release and
+environment labels. No document or recipient data, new sampler, SQL reader,
+application goroutine, timer or retry is added. Native `off` remains off;
+`FLARE_HEARTBEAT=off` continues to suppress only SDK service-up messages.
+
+The gauges expose the existing counts, ages and limit flags, plus sample
+availability, unavailable-read, sample age, stale, read duration and observed row
+limit. Cached sample age advances with elapsed time; sending a new metric does
+not make the underlying sample fresh. No-sample state stays explicitly unknown.
+Counts and oldest ages remain observations capped at 1,000 rows, with explicit
+limit flags, rather than global totals. The 300-second stale threshold remains
+telemetry freshness rather than a delivery SLA. Integer values outside the
+receiver's exact float64 integer range are refused.
+
+A request has a five-second deadline, rejects redirects, and uses a bounded
+response read. Delivery is counted as acknowledged only after HTTP 200, the
+complete exact accepted count, zero rejected/dropped points, a nonempty receipt
+ID, and successful response Close. Separate process-local diagnostic counters
+`metric_acknowledged_batches` and `metric_failures` preserve checkin semantics;
+failures include projection refusals. Lifecycle cancellation and the existing
+owner join include the complete request/read/Close phase. A blocked Close is not
+reported retired merely because cancellation or a caller deadline occurred.
+
+The complete local reporter race suite passed 76 test IDs without failures or
+skips (`hash-flare500-native-metrics1/receipt.json`). This includes actual
+loopback HTTP wire/privacy checks, malformed/partial receipts, response failures,
+readiness, cancellation and blocked-Close ownership. It proves the producer and
+controlled peer contract. Real configured Flare receipt/storage readback,
+release identity, signal-silence monitoring and delivered failure/recovery alert
+acceptance remain required. Native metrics do not update release heartbeat
+freshness or prove business completion.
 
 ## What counts as monitored
 

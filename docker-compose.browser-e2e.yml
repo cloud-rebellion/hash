@@ -1,0 +1,29 @@
+# Synthetic browser/development test allocation; not a production capacity claim.
+# The existing real-render/browser integration fixtures exercise this vector.
+# Each process owns its own allocation: two pools + direct sessions total 32
+# maximum PostgreSQL connections across the server and worker.
+x-browser-work-runtime: &browser-work-runtime
+  HASH_DB_URL: "postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable&pool_max_conns=8"
+  HASH_WORK_GLOBAL_PARENT_BYTES: '2147483648'
+  HASH_WORK_GLOBAL_DB_STAGING_BYTES: '402653184'
+  HASH_WORK_GLOBAL_CHILD_ADDRESS_BYTES: '0'
+  HASH_WORK_GLOBAL_PDF_WORKERS: '0'
+  HASH_WORK_GLOBAL_SQL_SESSIONS: '8'
+  HASH_WORK_GLOBAL_PROVIDER_STREAMS: '1'
+  HASH_WORK_GLOBAL_RENDERER_REQUESTS: '0'
+  HASH_WORK_ORG_PARENT_BYTES: '2147483648'
+  HASH_WORK_ORG_DB_STAGING_BYTES: '402653184'
+  HASH_WORK_ORG_CHILD_ADDRESS_BYTES: '0'
+  HASH_WORK_ORG_PDF_WORKERS: '0'
+  HASH_WORK_ORG_SQL_SESSIONS: '4'
+  HASH_WORK_ORG_PROVIDER_STREAMS: '1'
+  HASH_WORK_ORG_RENDERER_REQUESTS: '0'
+  HASH_WORK_MAX_GRANTS: '128'
+  HASH_WORK_MAX_ORG_GRANTS: '64'
+  HASH_WORK_DB_CONNECTION_ALLOCATION: '16'
+
+services:
+  hash:
+    environment: *browser-work-runtime
+  worker:
+    environment: *browser-work-runtime

@@ -1,10 +1,10 @@
 .PHONY: help dev build frontend-build frontend-embed test test-go test-e2e lint vet clean migrate sqlc docker-up docker-down
 
-LOCAL_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.local-minio.yml
+LOCAL_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.local-minio.yml -f docker-compose.browser-e2e.yml
 
 help:
 	@echo "Hash - common commands"
-	@echo "  make dev           start the opt-in local postgres+minio stack, run server"
+	@echo "  make dev           start the complete local development stack"
 	@echo "  make build         build server + worker with embedded frontend"
 	@echo "  make test          run all tests (Go unit + Playwright e2e)"
 	@echo "  make test-go       run Go unit tests only"
@@ -17,9 +17,7 @@ help:
 	@echo "  make docker-down   stop and remove containers"
 	@echo "  make clean         remove build artifacts"
 
-dev:
-	$(LOCAL_COMPOSE) up -d postgres minio
-	go run ./cmd/server
+dev: docker-up
 
 frontend-build:
 	cd frontend && bun install --frozen-lockfile && bun run build

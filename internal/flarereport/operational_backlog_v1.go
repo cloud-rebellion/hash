@@ -84,6 +84,9 @@ func (l *Lifecycle) RecordOperationalBacklogV1(ctx context.Context, s Operationa
 		sh.rejected.Add(1)
 		return
 	}
+	// Keep only the validated scalar observation for the existing ready sender.
+	// Native-log rate or queue saturation must not suppress the metric sample.
+	l.retainOperationalMetricsV1(s)
 	// Checkin status follows the actual durable observation, independently of
 	// the native-log rate/queue. Existing off/role/cancel/validation gates hold.
 	l.recordOperationalBacklogHealthV1(s)

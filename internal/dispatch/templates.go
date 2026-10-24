@@ -326,12 +326,12 @@ func localizedText(kind string, ctx TemplateContext) string {
 	}
 	extra := ""
 	if kind == KindCompletedSigner && ctx.AuditCertURL != "" {
-		extra = fmt.Sprintf("%s: %s\\n\\n", i18n.T(loc, prefix+".auditCta", p), ctx.AuditCertURL)
+		extra = fmt.Sprintf("%s: %s\n\n", i18n.T(loc, prefix+".auditCta", p), ctx.AuditCertURL)
 	}
 	if kind == KindCompletedSigner && ctx.PackagePortalURL != "" {
 		extra += fmt.Sprintf("Download original contract files: %s\n\n", ctx.PackagePortalURL)
 	}
-	return fmt.Sprintf("%s\\n\\n%s\\n\\n%s: %s\\n\\n%s%s\\n", heading, body, cta, url, extra, footer)
+	return fmt.Sprintf("%s\n\n%s\n\n%s: %s\n\n%s%s\n", heading, body, cta, url, extra, footer)
 }
 
 func htmlFor(kind string) string {

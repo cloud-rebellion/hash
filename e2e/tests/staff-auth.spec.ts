@@ -370,3 +370,247 @@ test.describe('native staff account browser journey', () => {
     }
   });
 });
+
+
+// Native owner sales acceptance with the ordinary measured free plan.
+// Reuse real browser sessions, local SMTP and the existing signer ceremony.
+
+async function salesJSON504(page: Page, origin: string, path: string, method = 'GET', body?: unknown, expected = 200): Promise<any> {
+  const response = await page.evaluate(async ({ url, method, body, expected }) => {
+    const result = await fetch(url, { method, mode: 'cors', credentials: 'include', cache: 'no-store', redirect: 'error',
+      headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    if (result.status !== expected) { await result.body?.cancel(); return { status: result.status, value: null }; }
+    return { status: result.status, value: await result.json() };
+  }, { url: origin + path, method, body, expected });
+  requireCheck(response.status === expected, 'Ordinary sales API request was refused with status ' + response.status);
+  return response.value;
+}
+
+async function salesPDF504(page: Page, url: string, session: boolean): Promise<{ status: number; valid: boolean; bytes: number; sha256: string }> {
+  return page.evaluate(async ({ url, session }) => {
+    const response = await fetch(url, { credentials: session ? 'include' : 'omit', cache: 'no-store', redirect: 'error' });
+    if (response.status !== 200) { await response.body?.cancel(); return { status: response.status, valid: false, bytes: 0, sha256: '' }; }
+    const reader = response.body?.getReader();
+    if (!reader) return { status: 200, valid: false, bytes: 0, sha256: '' };
+    const chunks: Uint8Array[] = []; let length = 0;
+    try {
+      while (true) {
+        const part = await reader.read(); if (part.done) break;
+        length += part.value.byteLength;
+        if (length > (16 << 20)) return { status: 200, valid: false, bytes: length, sha256: '' };
+        chunks.push(part.value);
+      }
+    } finally { await reader.cancel(); reader.releaseLock(); }
+    const bytes = new Uint8Array(length); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const valid = (response.headers.get('Content-Type') ?? '').includes('application/pdf') && length > 100 && new TextDecoder().decode(bytes.subarray(0, 5)) === '%PDF-';
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return { status: 200, valid, bytes: length, sha256: Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') };
+  }, { url, session });
+}
+
+// Require the actual unique message recipient AND this contract's unique name.
+// Link values stay in memory. An invitation returned by Send is insufficient:
+// only the existing worker's delivered MailHog message can supply a ceremony.
+async function salesMailLink504(request: APIRequestContext, recipient: string, origin: string, contractName: string, path: RegExp): Promise<string> {
+  const mailbox = new URL(mailboxURL), deadline = Date.now() + 30_000;
+  requireCheck(['http:', 'https:'].includes(mailbox.protocol) && !mailbox.username && !mailbox.password && !mailbox.search && !mailbox.hash && mailbox.pathname === '/', 'Explicit MailHog origin required');
+  const expectedOrigin = new URL(origin);
+  const diagnostics = { ...mailDiagnostics(), urlParseRejects: 0, originRejects: 0, schemeRejects: 0, hostnameRejects: 0, portRejects: 0,
+    queryRejects: 0, hashRejects: 0, pathPatternRejects: 0, signShape43: 0, signShapeOther: 0,
+    completedShape43: 0, otherPathShape: 0, htmlEntityCandidates: 0, trailingDelimiterCandidates: 0, percentEncodedPathCandidates: 0 };
+  while (Date.now() < deadline) {
+    diagnostics.polls++;
+    const response = await request.get(mailbox.origin + '/api/v2/messages?limit=100', { timeout: 5_000, maxRedirects: 0 });
+    requireCheck(response.status() === 200, 'Sales MailHog receiver unavailable');
+    const bytes = await response.body();
+    requireCheck(bytes.byteLength <= (4 << 20), 'Sales mailbox exceeded its bounded fixture size');
+    const payload = JSON.parse(bytes.toString('utf8'));
+    requireCheck(Array.isArray(payload.items) && payload.items.length <= 100, 'Sales mailbox message list is invalid');
+    diagnostics.messagesScanned += payload.items.length;
+    for (const item of payload.items) {
+      const recipients = [
+        ...(Array.isArray(item.Raw?.To) ? item.Raw.To.filter((value: unknown) => typeof value === 'string') : []),
+        ...(Array.isArray(item.To) ? item.To.filter((value: any) => typeof value?.Mailbox === 'string' && typeof value?.Domain === 'string').map((value: any) => value.Mailbox + '@' + value.Domain) : [])
+      ];
+      if (!recipients.includes(recipient)) continue;
+      diagnostics.recipientMatches++;
+      const found = new Set<string>();
+      for (const text of authMailTexts(item, diagnostics)) {
+        if (!text.includes(contractName)) continue;
+        for (const word of text.match(/https?:\/\/[^\s"'<>]+/g) ?? []) {
+          diagnostics.urlCandidates++;
+          let candidate: URL; try { candidate = new URL(word); } catch { diagnostics.urlParseRejects++; continue; }
+          if (word.includes('&#') || word.includes('&amp;')) diagnostics.htmlEntityCandidates++;
+          if (/[)\],.;]$/.test(word)) diagnostics.trailingDelimiterCandidates++;
+          if (candidate.pathname.includes('%')) diagnostics.percentEncodedPathCandidates++;
+          if (/^\/sign\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname)) diagnostics.signShape43++;
+          else if (candidate.pathname.startsWith('/sign/')) diagnostics.signShapeOther++;
+          else if (/^\/completed\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname)) diagnostics.completedShape43++;
+          else diagnostics.otherPathShape++;
+          if (candidate.origin !== origin) {
+            diagnostics.originRejects++;
+            if (candidate.protocol !== expectedOrigin.protocol) diagnostics.schemeRejects++;
+            if (candidate.hostname !== expectedOrigin.hostname) diagnostics.hostnameRejects++;
+            if (candidate.port !== expectedOrigin.port) diagnostics.portRejects++;
+            continue;
+          }
+          if (candidate.search) { diagnostics.queryRejects++; continue; }
+          if (candidate.hash) { diagnostics.hashRejects++; continue; }
+          if (!path.test(candidate.pathname)) { diagnostics.pathPatternRejects++; continue; }
+          diagnostics.pathCandidates++; found.add(candidate.href);
+        }
+      }
+      requireCheck(found.size <= 1, 'Conflicting sales links appeared in one message');
+      if (found.size === 1) return [...found][0];
+    }
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  throw new MailboxTimeout(diagnostics);
+}
+
+// Same ceremony as signing.spec.ts: real Article13 acknowledgement, typed-name
+// adoption and explicit confirmation. No sign endpoint is invoked by the test.
+async function salesSign504(page: Page, link: string, typedName: string): Promise<void> {
+  await page.goto(link);
+  const notice = page.getByRole('dialog', { name: 'Before you respond: how we handle your data', exact: true });
+  await notice.waitFor({ state: 'visible' });
+  requireCheck((await notice.innerText()).includes('fixed 7-year evidence-retention policy'), 'Signer disclosure was not visible');
+  await notice.getByRole('button', { name: 'I understand, continue', exact: true }).click();
+  await notice.waitFor({ state: 'hidden' });
+  requireCheck(await page.getByPlaceholder('Type your full name').inputValue() === typedName, 'Signer identity was not prefilled');
+  await page.getByRole('button', { name: 'Adopt and sign', exact: true }).click();
+  await page.getByRole('heading', { name: 'Adopt your signature', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Sign with this signature', exact: true }).click();
+  await page.getByRole('heading', { name: 'Signed', exact: true }).waitFor({ timeout: 45_000 });
+}
+
+test.describe('native staff sales journey', () => {
+  test.describe.configure({ retries: 0 });
+  // The containing file's existing top-level trace/screenshot/video-off policy
+  // applies. This is intentionally a third test with a fresh native account.
+  test('native owner creates and sends two-party contract; both parties sign and receive final evidence', async ({ browser, request, baseURL }, testInfo) => {
+    test.setTimeout(180_000);
+    const contexts: BrowserContext[] = [];
+    let stage = 'sales origin preflight';
+    let privacyViolation = false;
+    const id = randomUUID(), ownerEmail = `sales-owner-${id}@example.test`, ownerPassword = 'Native sales passphrase ' + id;
+    const contractName = 'Synthetic two-party contract ' + id;
+    const parties = [
+      { role: 'signer', name: 'Synthetic Customer', email: `sales-customer-${id}@example.test` },
+      { role: 'approver', name: 'Synthetic Provider', email: `sales-provider-${id}@example.test` }
+    ];
+    try {
+      requireCheck(typeof baseURL === 'string', 'Explicit Hash origin required');
+      const base = new URL(baseURL), origin = base.origin, localhostHTTP = base.protocol === 'http:' && base.hostname === 'localhost';
+      requireCheck(!base.username && !base.password && !base.search && !base.hash && base.pathname === '/' && (base.protocol === 'https:' || localhostHTTP), 'Sales qualification requires HTTPS or exact localhost development');
+      const health = await request.get(origin + '/health');
+      requireCheck(health.status() === 200 && (!localhostHTTP || health.headers()['x-hash-environment'] === 'development'), 'Ordinary Hash dependencies/profile are not ready');
+      const fresh = async () => {
+        const context = await browser.newContext({ baseURL: origin }); contexts.push(context);
+        await context.route('**/*', async route => {
+          if (new URL(route.request().url()).origin !== origin) { privacyViolation = true; await route.abort(); }
+          else await route.continue();
+        });
+        return context;
+      };
+      const owner = await fresh(), page = await owner.newPage();
+      stage = 'native owner registration and delivered mailbox proof';
+      await page.goto('/register');
+      await page.getByLabel('Your name', { exact: true }).fill('Synthetic Sales Owner');
+      await page.getByLabel('Company name', { exact: true }).fill('Synthetic Sales Company');
+      await page.getByLabel('Email', { exact: true }).fill(ownerEmail);
+      await page.getByLabel('New password', { exact: true }).fill(ownerPassword);
+      await page.getByLabel('Confirm password', { exact: true }).fill(ownerPassword);
+      await postByButton(page, '/api/v1/auth/register', 'Create workspace', 202);
+      const verification = await mailboxLink(request, ownerEmail, origin, '/verify-email');
+      await page.goto(verification.href); await page.waitForFunction(() => location.hash === '');
+      await page.getByLabel('Password', { exact: true }).fill(ownerPassword);
+      await postByButton(page, '/api/v1/auth/verify-email', 'Verify email', 200);
+      await atPath(page, '/dashboard'); await hasSessionCookie(owner, origin);
+      const account = await identity(page, origin);
+      requireCheck(account.role === 'owner', 'Native sales account is not an owner');
+
+      stage = 'ordinary free-plan entitlement and measured catalog preconditions';
+      const subscription = await salesJSON504(page, origin, '/api/v1/billing/subscription');
+      requireCheck(subscription.billing_enabled === true && subscription.plan?.slug === 'free' && subscription.plan.document_quota_monthly >= 1 && subscription.plan.recipient_quota_monthly >= 2 && subscription.plan.features?.evidence_bundle === false, 'Ordinary measured free entitlement is required; do not upgrade or bypass it for this proof');
+
+      stage = 'cookie-authenticated contract creation';
+      const document = await salesJSON504(page, origin, '/api/v1/documents', 'POST', {
+        name: contractName, source_kind: 'blocks', variables_json: {}, blocks_json: { version: 1, blocks: [
+          { id: 'title', type: 'heading', attrs: { level: 1 }, text: 'Synthetic services agreement' },
+          { id: 'terms', type: 'paragraph', text: 'Synthetic Customer and Synthetic Provider agree to the described test services. Both parties must sign this exact contract.' },
+          { id: 'customer-signature', type: 'signature_field', attrs: { recipient_role: 'signer', label: 'Customer signature' } },
+          { id: 'provider-signature', type: 'signature_field', attrs: { recipient_role: 'approver', label: 'Provider signature' } }
+        ] }
+      }, 201);
+      requireCheck(/^[a-f0-9-]{36}$/i.test(document.id) && document.org_id === account.org_id && document.status === 'draft' && document.source_kind === 'blocks' && document.requires_signature !== false, 'Created contract lost native tenant/draft/signature identity');
+      const path = '/api/v1/documents/' + document.id;
+      const recipients: any[] = [];
+      for (const party of parties) {
+        const recipient = await salesJSON504(page, origin, path + '/recipients', 'POST', { ...party, order_index: 0, locale: 'en' }, 201);
+        requireCheck(recipient.document_id === document.id && recipient.role === party.role && recipient.email === party.email, 'Persisted signing party differs from the declared party'); recipients.push(recipient);
+      }
+
+      stage = 'ordinary send and two actually delivered invitations';
+      const sent = await salesJSON504(page, origin, path + '/send', 'POST', { lawful_basis: 'contract' });
+      requireCheck(sent.status === 'sent' && Array.isArray(sent.links) && sent.links.length === 2, 'Send did not activate both required parties');
+      const sendShape = { ...mailDiagnostics(), sentURLParseRejects: 0, sentOriginRejects: 0, sentQueryRejects: 0, sentHashRejects: 0, sentPathRejects: 0, sentRecipientRejects: 0 };
+      for (const link of sent.links) {
+        let candidate: URL;
+        try { candidate = new URL(link.url); } catch { sendShape.sentURLParseRejects++; continue; }
+        if (candidate.origin !== origin) sendShape.sentOriginRejects++;
+        if (candidate.search) sendShape.sentQueryRejects++;
+        if (candidate.hash) sendShape.sentHashRejects++;
+        if (!/^\/sign\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname)) sendShape.sentPathRejects++;
+        if (!parties.some(party => party.email === link.email && party.role === link.role)) sendShape.sentRecipientRejects++;
+      }
+      if (sendShape.sentURLParseRejects || sendShape.sentOriginRejects || sendShape.sentQueryRejects || sendShape.sentHashRejects || sendShape.sentPathRejects || sendShape.sentRecipientRejects) throw new MailboxTimeout(sendShape);
+      const invitationPaths: string[] = [];
+      for (const party of parties) invitationPaths.push(await salesMailLink504(request, party.email, origin, contractName, /^\/sign\/[A-Za-z0-9_-]+$/));
+      requireCheck(invitationPaths[0] !== invitationPaths[1], 'Required parties shared a ceremony credential');
+      const customer = await fresh(), customerPage = await customer.newPage();
+      const provider = await fresh(), providerPage = await provider.newPage();
+
+      stage = 'first actual browser signature cannot finalize the agreement';
+      await salesSign504(customerPage, invitationPaths[0], parties[0].name);
+      await customerPage.getByText('Your signature is recorded. The document will finalise once all parties have signed.', { exact: true }).waitFor();
+      requireCheck((await salesJSON504(page, origin, path)).status === 'in_progress', 'Contract finalized before the other required party signed');
+      requireCheck((await salesPDF504(page, origin + path + '/final-pdf', true)).status === 404, 'A final contract was available after only one signature');
+
+      stage = 'second actual browser signature and final artifacts';
+      await salesSign504(providerPage, invitationPaths[1], parties[1].name);
+      const finalLink = providerPage.getByRole('link', { name: 'Download signed PDF', exact: true });
+      const certificateLink = providerPage.getByRole('link', { name: 'Download audit certificate', exact: true });
+      await finalLink.waitFor({ timeout: 45_000 }); await certificateLink.waitFor();
+      const finalHref = await finalLink.getAttribute('href'), certificateHref = await certificateLink.getAttribute('href');
+      requireCheck(typeof finalHref === 'string' && /^\/sign\/[A-Za-z0-9_-]+\/final-pdf$/.test(finalHref) && typeof certificateHref === 'string' && /^\/sign\/[A-Za-z0-9_-]+\/audit-cert$/.test(certificateHref), 'Fresh bounded artifact links are missing');
+      const completed = await salesJSON504(page, origin, path);
+      const finalRecipients = await salesJSON504(page, origin, path + '/recipients');
+      requireCheck(completed.status === 'completed' && completed.org_id === account.org_id && finalRecipients.recipients?.length === 2 && recipients.every(party => finalRecipients.recipients.some((row: any) => row.id === party.id && row.status === 'signed' && typeof row.signed_at === 'string')), 'Completed document does not retain both actual signatures');
+      const ownerPDF = await salesPDF504(page, origin + path + '/final-pdf', true), ownerCertificate = await salesPDF504(page, origin + path + '/audit-cert', true);
+      const partyPDF = await salesPDF504(providerPage, origin + finalHref, false), partyCertificate = await salesPDF504(providerPage, origin + certificateHref, false);
+      requireCheck(ownerPDF.valid && ownerCertificate.valid && partyPDF.valid && partyCertificate.valid && ownerPDF.sha256 === partyPDF.sha256 && ownerCertificate.sha256 === partyCertificate.sha256, 'Sender and recipient final contract/evidence artifacts differ');
+      for (let index = 0; index < invitationPaths.length; index++) requireCheck((await salesPDF504(index ? providerPage : customerPage, invitationPaths[index] + '/final-pdf', false)).status === 404, 'An original mutation credential still downloads completed artifacts');
+
+      stage = 'two-party signing evidence and real completion email';
+      const timeline = await salesJSON504(page, origin, path + '/timeline?group=false&emails=false&limit=200');
+      const signed = timeline.entries?.filter((entry: any) => entry.kind === 'document.signed') ?? [];
+      requireCheck(signed.length === 2 && recipients.every(party => signed.some((entry: any) => entry.recipient_id === party.id)) && timeline.entries.some((entry: any) => entry.kind === 'document.sent') && timeline.entries.some((entry: any) => entry.kind === 'document.completed'), 'Timeline lacks the two distinct signatures and completion');
+      await salesMailLink504(request, ownerEmail, origin, contractName, new RegExp('^/api/v1/documents/' + document.id + '/final-pdf$'));
+      for (const party of parties) await salesMailLink504(request, party.email, origin, contractName, /^\/completed\/[A-Za-z0-9_-]+$/);
+      await noStoredSecrets(page, [ownerPassword, verification.token]);
+      requireCheck(!privacyViolation, 'Sales browser attempted external network disclosure');
+      await testInfo.attach('native-sales-qualification', { contentType: 'application/json', body: Buffer.from(JSON.stringify({
+        schema: 'hash-native-sales-browser-v1', verified: true, plan: 'free', required_parties: 2, actual_browser_signatures: 2,
+        final_pdf_bytes: ownerPDF.bytes, final_pdf_sha256: ownerPDF.sha256, certificate_pdf_bytes: ownerCertificate.bytes,
+        certificate_pdf_sha256: ownerCertificate.sha256, real_local_completion_mail_recipients: 3,
+        qualification: 'cookie-authenticated REST authoring plus actual browser ceremonies and local SMTP; no independent cryptographic verification or production-provider acceptance'
+      })) });
+    } catch (failure) {
+      const counts = failure instanceof MailboxTimeout ? ' mailbox_counts=' + JSON.stringify(failure.diagnostics) : '';
+      throw new Error('Native sales qualification failed at: ' + stage + counts);
+    } finally { await Promise.allSettled(contexts.map(context => context.close())); }
+  });
+});

@@ -491,10 +491,13 @@ standalone_renderer_documentation_policy() {
 # Release-critical test services execute code on CI and deployment runners.
 # Pinning only the application/toolchain still permits an upstream service tag
 # to move between two runs of the same commit, so keep every canonical
-# Postgres/MinIO dependency (and the browser suite's auxiliary services) bound
-# to a registry digest. The human-readable tag remains for upgrade clarity.
+# registry dependency (including restore/Go-E2E MinIO fixtures) bound to a
+# digest. The opt-in development MinIO instead uses its reviewed source recipe:
+# its retired upstream container is unavailable, and a mutable registry fallback
+# must not replace the exact official source and immutable build/runtime bases.
 dependency_image_policy() {
   local compose="docker-compose.yml" minio_compose="docker-compose.local-minio.yml"
+  local minio_dockerfile="docker/minio/Dockerfile" required
   local drill="scripts/backup-restore-drill.sh"
   local root_workflow="../.github/workflows/hash-ci.yml" ref
   local postgres_ref="postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
@@ -508,10 +511,35 @@ dependency_image_policy() {
       return 1
     }
   done
-  grep -Fq "image: $minio_ref" "$minio_compose" || {
-    echo "$minio_compose must pin dependency image $minio_ref" >&2
-    return 1
-  }
+  for required in \
+    'image: hash-minio-dev:release-9e49d5e' \
+    'pull_policy: never' \
+    'context: ./docker/minio'; do
+    grep -Fq "$required" "$minio_compose" || {
+      echo "$minio_compose must use the explicit source-built development MinIO: missing $required" >&2
+      return 1
+    }
+  done
+  for required in \
+    '# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e' \
+    'FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build' \
+    'GOTOOLCHAIN=local' \
+    'CGO_ENABLED=0' \
+    'GOPROXY=https://proxy.golang.org' \
+    'GOSUMDB=sum.golang.org' \
+    'GOBIN=/out go install -trimpath -p=1 github.com/minio/minio@v0.0.0-20251015172955-9e49d5e7a648' \
+    'go version -m /out/minio' \
+    'cp /go/pkg/mod/github.com/minio/minio@v0.0.0-20251015172955-9e49d5e7a648/LICENSE /out/LICENSE.minio' \
+    'FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b' \
+    'org.opencontainers.image.revision="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"' \
+    'COPY --from=build /out/LICENSE.minio /usr/share/licenses/minio/LICENSE' \
+    'USER 1000:1000' \
+    'ENTRYPOINT ["/usr/bin/minio"]'; do
+    grep -Fq "$required" "$minio_dockerfile" || {
+      echo "$minio_dockerfile must preserve the reviewed development MinIO source recipe: missing $required" >&2
+      return 1
+    }
+  done
   for ref in "$postgres_ref" "$minio_ref"; do
     grep -Fq "$ref" "$drill" || {
       echo "$drill must default to dependency image $ref" >&2
@@ -538,7 +566,7 @@ dependency_image_policy() {
       }
     done
   fi
-  echo "canonical Hash service dependencies are pinned by registry digest"
+  echo "canonical Hash registry dependencies are digest-pinned; development MinIO uses its pinned source recipe"
   echo "canonical browser CI scans the exact app and renderer image IDs"
 }
 

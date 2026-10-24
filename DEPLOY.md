@@ -760,9 +760,17 @@ address `37.187.155.214`, Tailscale address `100.118.61.16`) and is operated by
 `tom@cloudrebellion.se`. The production origin is:
 
 ```text
-HASH_PUBLIC_URL=https://hash.cloudrebellion.tech
-HASH_OIDC_REDIRECT_URL=https://hash.cloudrebellion.tech/auth/callback
+HASH_PUBLIC_URL=https://esign.cloudrebellion.tech
+HASH_OIDC_ISSUER=
+HASH_OIDC_CLIENT_ID=
+HASH_OIDC_CLIENT_SECRET=
+HASH_OIDC_REDIRECT_URL=
 ```
+
+Email/password is the primary staff login; see [staff login](docs/STAFF-LOGIN.md).
+Keep all four OIDC settings empty unless an optional provider is deliberately
+configured. That provider's registered callback must then be
+`https://esign.cloudrebellion.tech/auth/callback`.
 
 This profile is a fresh Hash instance: use a new Hash database and a distinct
 Object-Locked storage scope. Do not point it at Stage, Dockyard, or Mesh data,

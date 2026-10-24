@@ -109,17 +109,17 @@ func decodeStored(row *generated.PresignExecution, p presign.Policy, g presign.G
 	if err != nil {
 		return Record{}, ErrIntegrity
 	}
-	x, s := e.Snapshot(), c.Snapshot()
+	x, commandSnapshot := e.Snapshot(), c.Snapshot()
 	if row.OrgID != x.OrgID || row.ID != x.ID || row.DocumentID != x.Document.ID || row.GrantID != x.Grant.ID ||
 		row.GrantRevision != x.Grant.Revision || row.PolicyID != x.Policy.ID || row.PolicyRevision != x.Policy.Revision ||
 		row.ExecutorKind != x.Executor.Kind || row.ExecutorUserID != x.Executor.UserID || row.ExecutorCredentialID != x.Executor.CredentialID ||
-		row.RequestID != s.RequestID || row.SignatureID != x.Signature.ID || row.ProviderRecipientID != x.Signature.RecipientID ||
+		row.RequestID != commandSnapshot.RequestID || row.SignatureID != x.Signature.ID || row.ProviderRecipientID != x.Signature.RecipientID ||
 		row.ProviderFieldID != x.Signature.FieldID || row.MaterializationID != x.Document.Materialization.ID || row.UseNumber != x.UseNumber ||
 		!row.CeremonyEpoch.Valid || !row.ExecutedAt.Valid || !row.CeremonyEpoch.Time.Equal(x.CeremonyEpoch) || !row.ExecutedAt.Time.Equal(x.ExecutedAt) ||
 		hex.EncodeToString(row.GrantSha256) != g.Commitment() || hex.EncodeToString(row.PolicySha256) != p.Commitment() ||
 		hex.EncodeToString(row.ExecutionSha256) != e.Commitment() || hex.EncodeToString(row.CommandSha256) != c.Commitment() ||
-		hex.EncodeToString(row.AdmissionSha256) != a.Commitment() || hex.EncodeToString(row.SourceCommitment) != s.SourceCommitment ||
-		hex.EncodeToString(row.OriginalCredentialSha256) != s.OriginalCredentialSHA256 {
+		hex.EncodeToString(row.AdmissionSha256) != a.Commitment() || hex.EncodeToString(row.SourceCommitment) != commandSnapshot.SourceCommitment ||
+		hex.EncodeToString(row.OriginalCredentialSha256) != commandSnapshot.OriginalCredentialSHA256 {
 		return Record{}, ErrIntegrity
 	}
 	return r, nil

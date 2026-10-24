@@ -140,6 +140,8 @@ append_hex_bytes() {
 decode_base64() {
   if [[ "$base64_decoder" == "gnu" ]]; then
     base64 --decode
+  elif [[ "$base64_decoder" == "portable" ]]; then
+    base64 -d
   else
     base64 -D
   fi
@@ -305,6 +307,9 @@ if printf '' | base64 --decode >/dev/null 2>&1; then
   base64_decoder="gnu"
 elif printf '' | base64 -D >/dev/null 2>&1; then
   base64_decoder="bsd"
+elif printf '' | base64 -d >/dev/null 2>&1; then
+  # BusyBox accepts the portable short option, not the GNU/BSD forms above.
+  base64_decoder="portable"
 else
   die "base64 decoder is unavailable"
 fi

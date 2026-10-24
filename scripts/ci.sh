@@ -226,11 +226,39 @@ frontend_checks() {
 }
 
 frontend_dependency_audit() {
+  local report rc bun_version
   command -v bun >/dev/null 2>&1 || {
     echo "bun is required to audit the frontend dependency lockfile" >&2
     return 1
   }
-  (cd frontend && bun audit)
+  report="$(mktemp)" || return 1
+  (cd frontend && bun audit --json) >"$report"
+  rc=$?
+  printf 'frontend audit: native Bun audit exit=%s\n' "$rc"
+  cat -- "$report"
+  if [ "$rc" -eq 0 ]; then
+    rm -f -- "$report"
+    return 0
+  fi
+  if [ "$rc" -ne 1 ]; then
+    rm -f -- "$report"
+    echo "frontend audit failed operationally; no reconciliation is permitted" >&2
+    return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    rm -f -- "$report"
+    echo "python3 is required to verify the exact frontend advisory review" >&2
+    return 1
+  }
+  bun_version="$(bun --version)" || {
+    rm -f -- "$report"
+    return 1
+  }
+  python3 scripts/reconcile-frontend-audit.py --root . --report "$report" \
+    --audit-exit-code "$rc" --bun-version "$bun_version"
+  rc=$?
+  rm -f -- "$report"
+  return "$rc"
 }
 
 # The renderer is an intentionally separate Go module so the application does
@@ -261,7 +289,7 @@ renderer_module_checks() {
 # a routine dependency tidy cannot silently change the audited upstream or add
 # back the LibreOffice/pdfcpu module surfaces removed from Hash's binary.
 renderer_source_policy() {
-  local expected_imports actual_imports banned_deps file
+  local expected_imports actual_imports all_imports banned_deps file
   if grep -Eq '^[[:space:]]*(replace|exclude)([[:space:](]|$)' gotenberg/go.mod; then
     echo "renderer go.mod must not replace or exclude checksum-pinned dependencies" >&2
     return 1
@@ -279,11 +307,16 @@ renderer_source_policy() {
     return 1
   }
   expected_imports="$(printf '%s\n' \
-    github.com/gotenberg/gotenberg/v8/pkg/modules/api \
-    github.com/gotenberg/gotenberg/v8/pkg/modules/chromium)"
-  actual_imports="$(grep -Eo 'github.com/gotenberg/gotenberg/v8/pkg/modules/[[:alnum:]_-]+' gotenberg/main.go | LC_ALL=C sort -u)"
+    github.com/bright-interaction/hash/gotenberg/internal/chromium \
+    github.com/bright-interaction/hash/gotenberg/internal/hashapi)"
+  # Read the real main-package imports, including build constraints. A failed
+  # Go query is an operational failure, never an empty/partially accepted graph.
+  all_imports="$(cd gotenberg && GOWORK=off go list -f '{{range .Imports}}{{println .}}{{end}}' .)" || return 1
+  actual_imports="$(printf '%s\n' "$all_imports" \
+    | grep -E '^(github.com/bright-interaction/hash/gotenberg/internal/|github.com/gotenberg/gotenberg/v8/pkg/modules/)' \
+    | LC_ALL=C sort -u)"
   [ "$actual_imports" = "$expected_imports" ] || {
-    echo "renderer must link exactly the Gotenberg API and Chromium modules" >&2
+    echo "renderer must link exactly the reviewed Hash-local API and Chromium modules" >&2
     printf 'actual module imports:\n%s\n' "$actual_imports" >&2
     return 1
   }
@@ -943,9 +976,9 @@ cutover_smoke_identity_policy() {
   echo "production cutover smoke requires the exact release and production runtime identity"
 }
 
-# Every file the mirror publishes is under the Hash Sustainable Use License, and the
-# header is how a reader (and a downstream packager) knows it. A .go file without one is
-# an unlicensed contribution in a fair-code repo.
+# Hash-owned Go files require the Hash SPDX header. Copied or adapted upstream
+# MIT files retain their original license and closed source-provenance records;
+# the checker validates that distinction instead of relabeling upstream code.
 #
 # Go only, deliberately. The .sql, .ts and .svelte files here do not carry headers yet,
 # and a gate that is red on the day it lands teaches everyone to ignore it. Widen the
@@ -955,24 +988,11 @@ cutover_smoke_identity_policy() {
 # internal/db/generated/ without the SPDX prelude. `make sqlc` uses the canonical
 # wrapper that restores it; this gate catches bypasses and stale generated trees.
 license_headers() {
-  local missing
   if [ "$HAVE_GIT" != "1" ]; then
     echo "not run: needs a git checkout to enumerate tracked files"
     return 99
   fi
-  missing=$(git ls-files -z '*.go' | while IFS= read -r -d '' f; do
-    awk 'NR<=5 && /SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License/ { found=1; exit } END { exit !found }' "$f" \
-      || printf '%s\n' "$f"
-  done)
-  if [ -n "$missing" ]; then
-    echo "These Go files lack the Hash SPDX header in their first 5 lines:" >&2
-    echo "$missing" >&2
-    echo "Add these two lines at the top of the file:" >&2
-    echo "  // SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License" >&2
-    echo "  // Copyright (c) Bright Interaction" >&2
-    return 1
-  fi
-  echo "every tracked Go file carries the Hash SPDX header"
+  bash scripts/check-license-headers.sh
 }
 
 # No hand-written SQL in this project: queries live in internal/db/queries/*.sql and

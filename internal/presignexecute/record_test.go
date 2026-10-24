@@ -70,7 +70,7 @@ func TestExecutionCommandIndependentCanonicalVector(t *testing.T) {
 	}
 	for _, changed := range []func(*CommandSnapshot){
 		func(s *CommandSnapshot) { s.RequestID = uuid.New() },
-		func(s *CommandSnapshot) { s.OriginalCredentialSHA256 = strings.Repeat("a", 64) },
+		func(snapshot *CommandSnapshot) { snapshot.OriginalCredentialSHA256 = strings.Repeat("a", 64) },
 		func(s *CommandSnapshot) { s.Document.Materialization.ID = uuid.New() },
 		func(s *CommandSnapshot) { s.Document.Fields[1].ID = uuid.New() },
 	} {
@@ -159,7 +159,9 @@ func TestStoredExecutionRejectsEveryDenormalizedBinding(t *testing.T) {
 		"field":           func(s *generated.PresignExecution) { s.ProviderFieldID = uuid.New() },
 		"materialization": func(s *generated.PresignExecution) { s.MaterializationID = uuid.New() },
 		"use":             func(s *generated.PresignExecution) { s.UseNumber++ },
-		"credential":      func(s *generated.PresignExecution) { s.OriginalCredentialSha256 = unhex(strings.Repeat("f", 64)) },
+		"credential": func(snapshot *generated.PresignExecution) {
+			snapshot.OriginalCredentialSha256 = unhex(strings.Repeat("f", 64))
+		},
 		"canonical": func(s *generated.PresignExecution) {
 			s.CanonicalExecution = append([]byte(" "), s.CanonicalExecution...)
 		},

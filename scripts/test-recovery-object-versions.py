@@ -261,6 +261,13 @@ class RecoveryVerifierProtocol479(unittest.TestCase):
             return result
         except BaseException as exc:
             result['exception_type']=type(exc).__name__
+            if (isinstance(exc,FileNotFoundError) and process is not None and
+                    exc.filename==str(root/'evidence/recovery-object-verification-report.txt')):
+                add_note=getattr(exc,'add_note',None)
+                if add_note is not None:
+                    add_note('controlled verifier exited before final report: exit_code='+
+                             str(process.returncode)+'; stderr_first4096='+repr(stderr[:4096])+
+                             '; stderr_truncated='+str(len(stderr)>4096))
             raise
         finally:
             try:

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT AND LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Julien Neuhart
+// Copyright (c) Bright Interaction
+// The retained upstream helper is MIT; Hash-authored regressions use the Hash license.
+
 package chromium
 
 import (

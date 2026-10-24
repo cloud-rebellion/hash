@@ -76,6 +76,26 @@ function browserFixture() {
 }
 
 async function settle() { await new Promise(resolve => setTimeout(resolve, 0)); }
+
+test('native account pages never initialize telemetry or emit through already-installed callbacks', async () => {
+  for (const path of ['/login', '/register', '/verify-email', '/forgot-password', '/reset-password']) {
+    const browser = browserFixture();
+    try {
+      browser.capture(); // an app-layout listener may survive client navigation
+      browser.setPath(path);
+      const requests = browser.requests.length;
+      browser.runtime();
+      browser.capture();
+      browser.emit('error', { error: new Error('PRIVATE PASSWORD TOKEN') });
+      browser.emit('unhandledrejection', { reason: new Error('PRIVATE PASSWORD TOKEN') });
+      captureFlarePDFViewError();
+      expect(handleError(privateHookInput().input)).toBeUndefined();
+      await settle();
+      expect(browser.requests).toHaveLength(requests);
+      expect(browser.events).toHaveLength(0);
+    } finally { browser.close(); }
+  }
+});
 async function waitFor(condition: () => boolean) {
   for (let i = 0; i < 100 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 2));
   expect(condition()).toBe(true);

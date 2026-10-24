@@ -5,6 +5,7 @@
   import { FileSignature, LayoutDashboard, FileText, LayoutTemplate, Settings, ShieldCheck } from 'lucide-svelte';
   import { installRuntimeFlareBrowserCapture } from '$lib/flare-client';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
+  import { isStaffAuthPath } from '$lib/staffAuth';
 
   let { children } = $props();
 
@@ -15,7 +16,7 @@
   // marketing/login root render standalone with no nav.
   const path = $derived($page.url.pathname);
   const showChrome = $derived(
-    !(path === '/' || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/notice/') || path.startsWith('/legal') || path.startsWith('/auth'))
+    !(path === '/' || isStaffAuthPath(path) || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/notice/') || path.startsWith('/legal') || path.startsWith('/auth'))
   );
 
   const navItems = [

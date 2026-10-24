@@ -26,7 +26,7 @@ RETURNING d.*;
 
 -- name: MarkEmailDeliverySent :exec
 UPDATE email_deliveries
-SET status = 'sent', sent_at = now(), last_error = ''
+SET status = 'sent', sent_at = now(), last_error = '', staff_auth_ciphertext = NULL
 WHERE id = $1;
 
 -- name: MarkEmailDeliveryRetrying :exec

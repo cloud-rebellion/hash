@@ -887,6 +887,34 @@ export interface Member {
   created_at: string;
 }
 
+export type MemberRole = 'owner' | 'sender' | 'viewer';
+export interface MemberInvitationInput { email: string; name: string; role: MemberRole }
+
+// A 202 acknowledges only the request. It does not disclose whether an account
+// was created, was already present, or belongs to another organization.
+export async function inviteMember(input: MemberInvitationInput, signal: AbortSignal): Promise<void> {
+  if (!input.email.trim() || !input.name.trim() || !['owner', 'sender', 'viewer'].includes(input.role)) {
+    throw new APIError(400, 'Enter an email, name and valid member role.');
+  }
+  let response: Response;
+  try {
+    if (signal.aborted) throw new Error('aborted');
+    response = await fetch('/api/v1/members', {
+      method: 'POST', mode: 'cors', credentials: 'include', cache: 'no-store', redirect: 'error', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: input.email.trim(), name: input.name.trim(), role: input.role })
+    });
+  } catch { throw new APIError(0, 'The invitation request could not be confirmed. Please try again.'); }
+  await response.body?.cancel().catch(() => {});
+  if (response.status !== 202 || signal.aborted) {
+    const message = response.status === 403 ? 'Only workspace owners can invite members.'
+      : response.status === 400 ? 'Check the email, name and selected member role.'
+      : response.status === 429 ? 'Too many invitation requests. Please wait before trying again.'
+      : 'The invitation request could not be confirmed. Please try again.';
+    throw new APIError(response.status, message);
+  }
+}
+
 export async function listMembers(): Promise<Member[]> {
   const res = await request<{ members: Member[] }>('GET', '/api/v1/members');
   return res.members ?? [];

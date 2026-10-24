@@ -33,7 +33,7 @@
         <a class="btn btn-secondary" href="/dashboard">Dashboard</a>
         <LogoutButton />
       {:else}
-        <a class="btn btn-primary" href="/auth/login">Sign in</a>
+        <a class="btn btn-primary" href="/login">Sign in</a>
       {/if}
     </nav>
   </header>
@@ -49,7 +49,8 @@
       {#if user}
         <a class="btn btn-primary" href="/dashboard">Go to dashboard</a>
       {:else}
-        <a class="btn btn-primary" href="/auth/login">Sign in</a>
+        <a class="btn btn-primary" href="/login">Sign in</a>
+        <a class="btn btn-secondary" href="/register">Create workspace</a>
       {/if}
       <a class="btn btn-secondary" href="https://github.com/bright-interaction/hash" rel="noreferrer" target="_blank">
         Source

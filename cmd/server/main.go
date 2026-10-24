@@ -178,6 +178,10 @@ func run() (runErr error) {
 	}
 
 	queries := generated.New(pool)
+	staffAuthMailBox, err := dispatch.NewStaffAuthMailBox(cfg.WebhookEncryptionKey, cfg.WebhookEncryptionKeyPrevious)
+	if err != nil {
+		return fmt.Errorf("staff authentication mail encryption: %w", err)
+	}
 	webhookKeys, err := webhooksecret.NewKeyringHex(
 		cfg.WebhookEncryptionKey, cfg.WebhookEncryptionKeyPrevious,
 	)
@@ -232,7 +236,7 @@ func run() (runErr error) {
 		RedirectURL:  cfg.OIDCRedirectURL,
 		Cookies:      cookies,
 	})
-	if err != nil {
+	if err != nil && cfg.OIDCIssuer != "" {
 		// Come up anyway: an IdP that is down must not stop hash from booting.
 		//
 		// KEEP the returned value. It used to be discarded (`oidc = nil`), which
@@ -533,6 +537,7 @@ func run() (runErr error) {
 		Storage:                    store,
 		Audit:                      auditLog,
 		OIDC:                       oidc,
+		StaffAuthMailBox:           staffAuthMailBox,
 		Cookies:                    cookies,
 		APIKeys:                    apiKeys,
 		MCP:                        mcpServer,

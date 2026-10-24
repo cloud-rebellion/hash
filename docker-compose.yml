@@ -136,10 +136,10 @@ services:
       HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
       HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:-}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
-      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
-      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
-      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
-      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-}
+      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-}
+      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-}
+      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-}
       # Deterministic public test fixtures. They are valid 32-byte hex keys so
       # local boot exercises the real parsers; production MUST override them.
       HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
@@ -197,10 +197,10 @@ services:
       HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
       HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:-}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
-      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
-      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
-      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
-      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-}
+      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-}
+      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-}
+      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-}
       # Deterministic public test fixtures. They are valid 32-byte hex keys so
       # local boot exercises the real parsers; production MUST override them.
       HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}

@@ -22,7 +22,8 @@ no public endpoint and does not enable that mode.
 
 | Surface | Authentication | Contract |
 | --- | --- | --- |
-| `/api/v1/*`, except the purpose-only notice routes below | Sender session cookie from OIDC login | Browser API. API keys do not replace the cookie on this tree. Current membership, tenant and role are loaded on each request. |
+| `/api/v1/*`, except the public auth and purpose-only notice routes below | Sender session cookie from native password login or optional OIDC | Browser API. API keys do not replace the cookie on this tree. Current membership, tenant and role are loaded on each request. |
+| `/api/v1/auth/*` | Public, with exact Origin on POST | Native registration, mailbox verification, login and recovery. No browser bearer token is returned. |
 | `/api/v1/notices/{notice_id}` and its documented access/file routes | Notice capability exchange, then a purpose-specific HttpOnly Secure cookie | Read-only exact notice/file access; no sender/signature/acknowledgement grant. See [later amendments](LATER-AMENDMENTS-API.md#public-notice-access-and-exact-downloads). |
 | `/api/automation/v1/signature-requests` | Organization-wide API key | Dedicated sender/owner key with both `write:authoring` and `write:workflow`; stable `Idempotency-Key`. See [Automation API](AUTOMATION-API.md). |
 | `/mcp` | API key, including supported document-scoped credentials | MCP entitlement, role, tool scopes and document scope apply independently. Discover actual tools and input schemas through MCP `tools/list`. |
@@ -30,10 +31,9 @@ no public endpoint and does not enable that mode.
 | `/webhooks/brightcrm` | Legacy receiver, disabled in production wiring | Requires a reviewed tenant-bound producer protocol before activation; current BrightCRM does not emit the expected deal/contact CRUD callbacks. |
 | `/api/verify`, `/api/verify-bundle` | Anonymous through trusted production ingress | Verification does not authorize document access. Payload limits and verification rate limits apply. |
 
-Sender login starts at `GET /auth/login` and returns through
-`GET /auth/callback`. OIDC verifies the identity provider's claims; provider
-configuration and allowed tenant membership must be correct before login can
-work. The signed `hash_session` cookie lasts 24 hours and is `HttpOnly`,
+Native staff login uses the endpoints below. Optional OIDC starts at
+`GET /auth/login` and returns through `GET /auth/callback`; its configured
+provider verifies identity claims. The signed `hash_session` cookie lasts 24 hours and is `HttpOnly`,
 `Secure`, and `SameSite=Strict`. Handshake cookies use their own short-lived
 OIDC policy. `POST /auth/logout` requires a current session and advances the
 account's database revocation generation, invalidating every existing Hash
@@ -50,6 +50,42 @@ the `HttpOnly` session cookie without exposing it to JavaScript. Preserve the
 normal same-origin mutation/CSRF guard rather than forging an Origin, reading
 the cookie or relying on the Referer header. A failed or lost response is not
 a confirmed revocation receipt.
+
+### Native staff authentication
+
+Every POST requires JSON, the application's exact `Origin`, and a body no larger
+than 16 KiB. Global and per-IP limits apply, with additional bounded account and
+Argon2id work limits. Use same-origin cookies; no browser bearer is returned.
+
+| Method/path | JSON input | Success |
+| --- | --- | --- |
+| GET `/api/v1/auth/status` | None | 200 `{"password_enabled":true,"oidc_enabled":false}`; OIDC flag reflects configuration |
+| POST `/api/v1/auth/register` | `email,name,company_name,password` | Generic202; verification email queued when applicable |
+| POST `/api/v1/auth/verify-email` | `token,password` | 200; requires mailbox proof and the original registration password, installs credential and mints the session cookie |
+| POST `/api/v1/auth/login` | `email,password` | 200 and session cookie; incorrect/missing accounts share generic401 |
+| POST `/api/v1/auth/forgot-password` | `email` | Generic202 for existing and unknown addresses |
+| POST `/api/v1/auth/reset-password` | `token,password` | 200; invalidates older browser sessions and links; requires a new login |
+| POST `/api/v1/members` | `email,name,role` | Owner-only, current session required; generic202 and transactional setup mail |
+
+New passwords require at least 12 Unicode code points and at most 1024 UTF-8
+bytes, without trimming. Pending registration stores a salted Argon2id hash
+and one-way token hash. Successful mailbox verification also requires the
+original registration password; opening the email alone cannot activate an
+attacker-preselected password. Only successful verification creates a new
+isolated starter organization and its owner. Existing users retain their
+organization, role, name and optional OIDC subject; existing accounts without
+a password receive a setup link requiring their own password choice.
+Registration never replaces an existing password or attaches a preselected
+password to an account created after that registration request.
+Owner invitations never choose the recipient's password.
+
+Registration/setup links expire after 24 hours; reset links after 30 minutes.
+Links are one-use and replacement requests invalidate earlier links. Mail uses
+`/verify-email#token=...` or `/reset-password#token=...`; the frontend clears
+the fragment and submits the token in the POST body. Fixed request paths keep
+private tokens out of HTTP access URLs. Auth mail bodies are sealed in the
+durable queue using the existing authenticated-encryption envelope and cleared
+after delivery acknowledgement. Queued mail is not proof of mailbox delivery.
 
 Use HTTPS and same-origin browser requests. The browser mutation guard also
 protects against requests from sibling subdomains. Supply the app's exact

@@ -2,6 +2,7 @@
 // deployed server, not an ingest key or release baked into a previous SPA build.
 // Only fixed failure categories and same-origin compiled-code locations leave
 // the page. Error text, rejection values, resource URLs and user state do not.
+import { isStaffAuthPath } from './staffAuth';
 
 export interface FlareBrowserCaptureOptions {
 	dsn?: string;
@@ -77,10 +78,10 @@ function eventID(): string {
 }
 
 // Route classes are fixed. Neither raw path segments nor a page URL are sent.
-// Capability entry pages never initialize or emit browser telemetry.
+// Capability entry and native account pages never initialize or emit telemetry.
 // Check pathname only: never inspect the credential fragment.
 function noticeCapabilityPage(): boolean {
-	return typeof location !== 'undefined' && location.pathname.startsWith('/notice/');
+	return typeof location !== 'undefined' && (location.pathname.startsWith('/notice/') || isStaffAuthPath(location.pathname));
 }
 
 function pageCategory(): string {

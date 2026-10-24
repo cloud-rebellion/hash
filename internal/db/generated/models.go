@@ -1062,20 +1062,21 @@ type EidasRuleWireSizesV1 struct {
 }
 
 type EmailDelivery struct {
-	ID            uuid.UUID          `json:"id"`
-	ToEmail       string             `json:"to_email"`
-	Subject       string             `json:"subject"`
-	HtmlBody      string             `json:"html_body"`
-	TextBody      string             `json:"text_body"`
-	ReplyTo       string             `json:"reply_to"`
-	FromName      string             `json:"from_name"`
-	HeadersJson   json.RawMessage    `json:"headers_json"`
-	Status        string             `json:"status"`
-	Attempts      int32              `json:"attempts"`
-	LastError     string             `json:"last_error"`
-	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	SentAt        pgtype.Timestamptz `json:"sent_at"`
+	ID                  uuid.UUID          `json:"id"`
+	ToEmail             string             `json:"to_email"`
+	Subject             string             `json:"subject"`
+	HtmlBody            string             `json:"html_body"`
+	TextBody            string             `json:"text_body"`
+	ReplyTo             string             `json:"reply_to"`
+	FromName            string             `json:"from_name"`
+	HeadersJson         json.RawMessage    `json:"headers_json"`
+	Status              string             `json:"status"`
+	Attempts            int32              `json:"attempts"`
+	LastError           string             `json:"last_error"`
+	NextAttemptAt       pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	SentAt              pgtype.Timestamptz `json:"sent_at"`
+	StaffAuthCiphertext []byte             `json:"staff_auth_ciphertext"`
 }
 
 type Event struct {
@@ -1941,6 +1942,27 @@ type SigningResourceInventorySnapshot struct {
 	UnknownProviderDebt   bool               `json:"unknown_provider_debt"`
 	CapturedAt            pgtype.Timestamptz `json:"captured_at"`
 	CapturedTransactionID pgtype.Uint64      `json:"captured_transaction_id"`
+}
+
+type StaffAuthRequest struct {
+	ID                uuid.UUID          `json:"id"`
+	Email             string             `json:"email"`
+	Purpose           string             `json:"purpose"`
+	UserID            pgtype.UUID        `json:"user_id"`
+	SessionGeneration pgtype.Int8        `json:"session_generation"`
+	Name              string             `json:"name"`
+	CompanyName       string             `json:"company_name"`
+	PasswordHash      pgtype.Text        `json:"password_hash"`
+	TokenHash         []byte             `json:"token_hash"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt        pgtype.Timestamptz `json:"consumed_at"`
+}
+
+type StaffPasswordCredential struct {
+	UserID       uuid.UUID          `json:"user_id"`
+	PasswordHash string             `json:"password_hash"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type TelemetryEvent struct {

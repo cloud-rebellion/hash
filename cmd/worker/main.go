@@ -33,6 +33,7 @@ import (
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/secretbox"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -203,6 +204,11 @@ func runWorkerMain() (exitCode int) {
 	// instead of dropping the message. `mailer` above is the real SMTP sender,
 	// reused by that loop.
 	queueMailer := dispatch.QueueingMailer{Q: queries}
+	staffAuthMailBox, err := dispatch.NewStaffAuthMailBox(cfg.WebhookEncryptionKey, cfg.WebhookEncryptionKeyPrevious)
+	if err != nil {
+		slog.Error("staff authentication mail encryption unavailable")
+		return 1
+	}
 
 	// Endpoint secrets are resolved and authenticated by webhookSecrets. Keep the
 	// dispatcher's legacy instance fallback empty so no future call can silently
@@ -354,6 +360,7 @@ func runWorkerMain() (exitCode int) {
 		audit:             auditLog,
 		mailer:            queueMailer,
 		emailSender:       mailer,
+		staffAuthMailBox:  staffAuthMailBox,
 		dispatcher:        dispatcher,
 		webhookSecrets:    webhookSecrets,
 		signEngine:        signEngine,
@@ -516,7 +523,8 @@ type worker struct {
 	audit                     *audit.Logger
 	mailer                    dispatch.Mailer // queue-backed: enqueues into email_deliveries
 	emailSender               dispatch.Mailer // real SMTP, used only by loopEmailDispatch
-	emailDrainFailed          bool            // owned exclusively by the email dispatch loop
+	staffAuthMailBox          *secretbox.Box
+	emailDrainFailed          bool // owned exclusively by the email dispatch loop
 	dispatcher                *dispatch.Dispatcher
 	webhookSecrets            *webhooksecret.Manager
 	// signEngine drives the finalize-retry loop. nil when storage init failed
@@ -853,11 +861,18 @@ func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDel
 			return emailFailureAcknowledged, nil
 		}
 	}
-	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err := w.emailSender.Send(sctx, dispatch.Message{
+	message := dispatch.Message{
 		To: d.ToEmail, Subject: d.Subject, HTML: d.HtmlBody, Text: d.TextBody,
 		ReplyTo: d.ReplyTo, FromName: d.FromName, Headers: headers,
-	})
+	}
+	var err error
+	if d.StaffAuthCiphertext != nil {
+		message, err = dispatch.OpenStaffAuthEmail(w.staffAuthMailBox, d.ID, d.ToEmail, d.Subject, d.StaffAuthCiphertext)
+	}
+	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if err == nil {
+		err = w.emailSender.Send(sctx, message)
+	}
 	cancel()
 	if err == nil {
 		if err := w.queries.MarkEmailDeliverySent(ctx, d.ID); err != nil {

@@ -48,6 +48,7 @@ import (
 	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/secretbox"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -101,6 +102,8 @@ type Server struct {
 	Storage                *storage.Client
 	Audit                  *audit.Logger
 	OIDC                   *auth.OIDC
+	StaffAuthMailBox       *secretbox.Box
+	staffAuthLimits        nativeStaffAuthLimits
 	Cookies                *auth.SignedCookie
 	APIKeys                auth.APIKeyVerifier
 	MCP                    *mcp.Server
@@ -296,6 +299,17 @@ func (s *Server) Routes() http.Handler {
 
 	r.Get("/api/telemetry/config", s.handleFlareConfiguration)
 	r.Get("/health", s.handleHealth) // never rate-limited: liveness probes
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Use(s.requireStaffAuthOrigin)
+		r.Use(staffAuthGlobalRateLimit())
+		r.Use(httprate.LimitByIP(20, time.Minute))
+		r.Get("/status", s.handleStaffAuthStatus)
+		r.Post("/register", s.handleStaffRegister)
+		r.Post("/verify-email", s.handleStaffVerifyEmail)
+		r.Post("/login", s.handleStaffPasswordLogin)
+		r.Post("/forgot-password", s.handleStaffForgotPassword)
+		r.Post("/reset-password", s.handleStaffResetPassword)
+	})
 
 	// Auth endpoints: tight per-IP cap against credential/callback abuse.
 	r.Group(func(r chi.Router) {
@@ -526,6 +540,7 @@ func (s *Server) Routes() http.Handler {
 		// owner can change a member's role.
 		r.Route("/members", func(r chi.Router) {
 			r.Get("/", s.handleListMembers)
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/", s.handleCreateStaffMember)
 			r.With(auth.RequireRole(auth.RoleOwner)).Patch("/{id}/role", s.handleUpdateMemberRole)
 		})
 

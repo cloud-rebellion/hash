@@ -17,12 +17,14 @@ the supplied certificate or evidence bundle; it is not an offline verifier.
   retention, and legal-hold APIs Hash requires in non-local deployments
 - An SMTP submission server that supports STARTTLS on a plain SMTP connection (implicit-TLS-only
   endpoints are not supported)
-- Any OIDC provider for sender SSO (Zitadel, Keycloak, Auth0, ...)
+- Email/password staff accounts, using the existing secure session cookie
+- An optional OIDC provider for staff SSO
 - Gotenberg for HTML→PDF rendering
 - pdfcpu for PDF signature/field stamping
 
-(The Bright Interaction instance uses MinIO, Postal, and Zitadel. Alternatives must satisfy the
-runtime contracts above and the OIDC claim requirements enforced at boot/login.)
+Storage and mail providers must satisfy the runtime contracts above. Staff
+email/password login does not require an OIDC application registration. Optional
+SSO providers must satisfy Hash's verified-identity requirements.
 
 Hetzner **Object Storage** can be evaluated as an S3 backend with Hash's `sse-c`
 mode; a Hetzner **Storage Box** cannot be used as primary object storage because
@@ -72,7 +74,7 @@ and acceptance limits.
 
 ```bash
 cp .env.example .env
-# configure sender OIDC/SMTP and the remaining operator settings, then:
+# configure SMTP, storage and the remaining operator settings, then:
 make docker-up
 # Hash at http://localhost:8080, Postgres at 5433, MinIO at 9000
 ```
@@ -83,6 +85,13 @@ and worker work profile in `docker-compose.browser-e2e.yml`. The MinIO build
 context contains no Hash application or environment files. This local profile is
 not a production capacity allocation; production uses its separate storage and
 per-process configuration contracts.
+
+Open `/login` to sign in with email and password. Create a workspace through
+`/register`, verify the emailed link, and invite colleagues into that workspace.
+Password recovery is available from the login page. Development mail is captured
+by the bundled MailHog service. Signing recipients continue to use their emailed
+document links without creating staff accounts. See [staff login](docs/STAFF-LOGIN.md)
+for setup and recovery.
 
 Before creating documents, prepare the selected billing plans using
 [catalog maintenance](docs/CATALOG-MAINTENANCE.md); a fresh database also needs

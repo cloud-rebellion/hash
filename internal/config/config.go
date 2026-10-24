@@ -330,12 +330,14 @@ func Load() (*Config, error) {
 	require("HASH_S3_ENDPOINT", c.S3Endpoint)
 	require("HASH_S3_ACCESS_KEY", c.S3AccessKey)
 	require("HASH_S3_SECRET_KEY", c.S3SecretKey)
-	require("HASH_OIDC_ISSUER", c.OIDCIssuer)
-	require("HASH_OIDC_CLIENT_ID", c.OIDCClientID)
+	if c.OIDCIssuer != "" || c.OIDCClientID != "" || c.OIDCClientSecret != "" || c.OIDCRedirectURL != "" {
+		require("HASH_OIDC_ISSUER", c.OIDCIssuer)
+		require("HASH_OIDC_CLIENT_ID", c.OIDCClientID)
+		require("HASH_OIDC_REDIRECT_URL", c.OIDCRedirectURL)
+	}
 	// HASH_OIDC_CLIENT_SECRET is optional: the login flow uses PKCE, so a public
 	// OIDC client (no secret, the estate's Zitadel pattern) is supported; a
 	// confidential deployment may still set a secret and it will be used.
-	require("HASH_OIDC_REDIRECT_URL", c.OIDCRedirectURL)
 	require("HASH_SIGNER_TOKEN_KEY", c.SignerTokenKey)
 	require("HASH_SESSION_KEY", c.SessionKey)
 	require("HASH_WEBHOOK_ENCRYPTION_KEY", c.WebhookEncryptionKey)
@@ -685,6 +687,17 @@ func validateRuntimeURLs(c *Config) error {
 	if publicURL.RawQuery != "" || publicURL.Fragment != "" || (publicURL.Path != "" && publicURL.Path != "/") {
 		return errors.New("HASH_PUBLIC_URL must be an origin only (no path, query, or fragment)")
 	}
+	development := c.Environment == "development"
+	if !development && publicURL.Scheme != "https" {
+		return errors.New("HASH_PUBLIC_URL must use https outside local development")
+	}
+	if development && publicURL.Scheme != "http" && publicURL.Scheme != "https" {
+		return errors.New("HASH_PUBLIC_URL must use http or https in local development")
+	}
+	if c.OIDCIssuer == "" && c.OIDCClientID == "" && c.OIDCClientSecret == "" && c.OIDCRedirectURL == "" {
+		c.PublicURL = strings.TrimSuffix(c.PublicURL, "/")
+		return nil
+	}
 
 	issuerURL, err := parseAbsoluteRuntimeURL("HASH_OIDC_ISSUER", c.OIDCIssuer)
 	if err != nil {
@@ -702,7 +715,6 @@ func validateRuntimeURLs(c *Config) error {
 		return errors.New("HASH_OIDC_REDIRECT_URL must use the exact /auth/callback path with no query or fragment")
 	}
 
-	development := c.Environment == "development"
 	if !development {
 		if publicURL.Scheme != "https" {
 			return errors.New("HASH_PUBLIC_URL must use https outside local development")

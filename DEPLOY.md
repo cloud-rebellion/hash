@@ -36,7 +36,13 @@ acceptance. No shared global CRM bearer or webhook-secret fallback is restored.
 | Contract-tested S3 storage | signed PDFs, audit certs, uploads | must pass Hash's exact-VersionId, version-listing, encryption, and seven-year COMPLIANCE Object Lock conformance suite; generic “S3 compatible” branding is insufficient |
 | Hash renderer (Gotenberg API 8.36.0 + Chromium) | HTML -> PDF rendering | build `gotenberg/Dockerfile`; deploy its immutable image digest/ID |
 | SMTP server | outbound email | required for the worker; bundled development uses MailHog, non-development uses STARTTLS |
-| OIDC provider | sender login | any OIDC IdP: Zitadel, Keycloak, Auth0, ... |
+| Staff accounts | email/password login | existing secure sessions; verification, invitations and recovery use SMTP |
+| OIDC provider | optional staff SSO | not required for email/password login |
+
+Staff use `/login`; account creation, verification and recovery are described in
+[staff login](docs/STAFF-LOGIN.md). Configure working outbound SMTP and preserve
+the existing encryption and session keys across server and worker restarts.
+An OIDC app registration is needed only when enabling optional SSO.
 
 The renderer is a separate, minimal Go module and container containing only the
 Gotenberg API and Chromium modules required by Hash. It deliberately excludes

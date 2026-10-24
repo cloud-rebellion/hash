@@ -31,7 +31,7 @@ SET status = 'retrying',
     next_attempt_at = now() + interval '5 minutes'
 FROM due
 WHERE d.id = due.id
-RETURNING d.id, d.to_email, d.subject, d.html_body, d.text_body, d.reply_to, d.from_name, d.headers_json, d.status, d.attempts, d.last_error, d.next_attempt_at, d.created_at, d.sent_at
+RETURNING d.id, d.to_email, d.subject, d.html_body, d.text_body, d.reply_to, d.from_name, d.headers_json, d.status, d.attempts, d.last_error, d.next_attempt_at, d.created_at, d.sent_at, d.staff_auth_ciphertext
 `
 
 // Atomically lease a batch before SMTP I/O. Multiple workers use SKIP LOCKED,
@@ -62,6 +62,7 @@ func (q *Queries) ClaimDueEmailDeliveries(ctx context.Context, limit int32) ([]*
 			&i.NextAttemptAt,
 			&i.CreatedAt,
 			&i.SentAt,
+			&i.StaffAuthCiphertext,
 		); err != nil {
 			return nil, err
 		}
@@ -76,7 +77,7 @@ func (q *Queries) ClaimDueEmailDeliveries(ctx context.Context, limit int32) ([]*
 const enqueueEmailDelivery = `-- name: EnqueueEmailDelivery :one
 INSERT INTO email_deliveries (to_email, subject, html_body, text_body, reply_to, from_name, headers_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at
+RETURNING id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at, staff_auth_ciphertext
 `
 
 type EnqueueEmailDeliveryParams struct {
@@ -115,6 +116,7 @@ func (q *Queries) EnqueueEmailDelivery(ctx context.Context, arg EnqueueEmailDeli
 		&i.NextAttemptAt,
 		&i.CreatedAt,
 		&i.SentAt,
+		&i.StaffAuthCiphertext,
 	)
 	return &i, err
 }
@@ -159,7 +161,7 @@ func (q *Queries) MarkEmailDeliveryRetrying(ctx context.Context, arg MarkEmailDe
 
 const markEmailDeliverySent = `-- name: MarkEmailDeliverySent :exec
 UPDATE email_deliveries
-SET status = 'sent', sent_at = now(), last_error = ''
+SET status = 'sent', sent_at = now(), last_error = '', staff_auth_ciphertext = NULL
 WHERE id = $1
 `
 

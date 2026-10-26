@@ -15,12 +15,14 @@ bundles, eIDAS routing rules with an SES-only fail-closed production guard,
 templates, comments, webhooks, the agent-native MCP surface, and the
 billing/entitlement engine.
 
-Nothing here is feature-gated behind a separate source package. Local
-development may run with the mock billing provider, but every non-local
-deployment deliberately fail-closes unless Mollie and its webhook secret are
-configured. Self-hosters therefore need their own supported payment-provider
-configuration and plan catalog before production boot; this repository does
-not promise an unmetered or provider-free production mode.
+Nothing here is feature-gated behind a separate source package. Production
+self-hosters can use operator-managed entitlements with explicit organization
+bindings to active, finite plans; no payment-provider account is required for
+that mode. Mollie is optional for deployments that enable subscription billing.
+Both modes require the selected plan catalog and work allocations to be
+prepared as described in [the deployment guide](DEPLOY.md). Mock billing is
+restricted to local development. These runtime settings do not change the
+license permissions below.
 
 This is a [fair-code](https://faircode.io) license, not an OSI "open source"
 license. The one limit: you may not resell Hash or run it as a hosted e-sign

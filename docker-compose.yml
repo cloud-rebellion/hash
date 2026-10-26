@@ -39,6 +39,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    environment:
+      # Project only this private-route credential; never pass the app env file.
+      # Empty keeps fitted preparation unavailable until explicitly configured.
+      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:-}
     command:
       - "gotenberg"
       - "--api-port=3000"
@@ -48,6 +52,8 @@ services:
       # change accidentally makes either surface available.
       - "--api-disable-download-from=true"
       - "--pdfengines-disable-routes=true"
+      # Private page preparation refuses a JavaScript-enabled browser.
+      - "--chromium-disable-javascript=true"
       # Render bundles are hermetic: refuse public destinations as well as
       # internal ones. Keep this explicit even though the image also sets the
       # matching environment default, so Compose policy is independently clear.
@@ -151,6 +157,7 @@ services:
       HASH_AUDIT_PRIVATE_KEY: ${HASH_AUDIT_PRIVATE_KEY:-aGFzaC1kZXZlbG9wbWVudC1hdWRpdC1zZWVkLTAwMDE=}
       HASH_AUDIT_TRUSTED_PUBLIC_KEYS: ${HASH_AUDIT_TRUSTED_PUBLIC_KEYS:-}
       HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
+      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:-}
       HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
       HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
       HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
@@ -215,6 +222,7 @@ services:
       HASH_AUDIT_PRIVATE_KEY: ${HASH_AUDIT_PRIVATE_KEY:-aGFzaC1kZXZlbG9wbWVudC1hdWRpdC1zZWVkLTAwMDE=}
       HASH_AUDIT_TRUSTED_PUBLIC_KEYS: ${HASH_AUDIT_TRUSTED_PUBLIC_KEYS:-}
       HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
+      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:-}
       HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
       HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
       HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}

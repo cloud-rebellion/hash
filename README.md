@@ -1,5 +1,7 @@
 # Hash
 
+Published by Cloud Rebellion.
+
 Deployment-controlled, self-hosted document creation + e-signing platform. Agent-native
 authoring via MCP. The name comes from the product's spine: every signing event
 lands in a hash-chained audit timeline. Completed documents receive a final PDF
@@ -32,9 +34,10 @@ it does not provide the S3 VersionId, exact-version read, and Object Lock APIs
 that Hash's evidence model requires. Storage Box remains suitable only as a
 separately verified encrypted backup target.
 
-The built-in legal pages are Bright Interaction draft templates, not reusable operator terms. A
-self-hosting operator must replace or obtain approval for its own notices, DPA, sub-processor and
-retention schedules before processing customer data.
+The built-in legal pages explain the instance operator's responsibilities; they
+are not the operator's terms or privacy policy. Configure your actual operator
+and privacy contact, and publish notices, any applicable DPA, sub-processor and
+retention schedules for your deployment.
 
 ## Reusable HTML designs
 
@@ -101,6 +104,9 @@ resource profile and requirements for other deployments.
 
 ## Deploy
 
+- **[docker-compose.selfhost.yml](./docker-compose.selfhost.yml)**: standalone
+  production profile for your own domain and services; start with the
+  [portable deployment guide](./DEPLOY.md#portable-production-compose).
 - **[DEPLOY.md](./DEPLOY.md)**: generic, CI- and host-neutral deployment
   (Docker / Compose / Kubernetes; GitHub Actions, GitLab CI, or any pipeline).
 - **[ops/BACKUP-RESTORE.md](./ops/BACKUP-RESTORE.md)**: coupled PostgreSQL + S3

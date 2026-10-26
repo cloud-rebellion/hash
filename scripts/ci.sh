@@ -350,6 +350,10 @@ renderer_source_policy() {
     echo "renderer must start Chromium before API readiness can go green" >&2
     return 1
   }
+  grep -Fq 'CHROMIUM_DISABLE_JAVASCRIPT=true' gotenberg/Dockerfile || {
+    echo "renderer image must disable JavaScript by default" >&2
+    return 1
+  }
   echo "renderer source/image provenance is checksum-pinned to Gotenberg v8.36.0; banned converter modules are absent"
 }
 
@@ -359,11 +363,13 @@ renderer_source_policy() {
 # Keep that local scheme available while preserving both resolution-based
 # private-IP blocking and the explicit internal HTTP(S) deny-list.
 renderer_network_policy() {
-  local file service block deny required
+  local file service block deny required token_entry projected app_services app_service app_block
   for file in docker-compose.yml docker-compose.prod.yml; do
     [ -f "$file" ] || continue
     if [ "$file" = "docker-compose.yml" ]; then
       service="gotenberg"
+      app_services="hash worker"
+      token_entry='      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:-}'
       grep -Fq 'dockerfile: gotenberg/Dockerfile' "$file" || {
         echo "$file must build the Hash renderer with gotenberg/Dockerfile" >&2
         return 1
@@ -374,6 +380,8 @@ renderer_network_policy() {
       }
     else
       service="hash-gotenberg"
+      app_services="hash hash-worker"
+      token_entry='      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:?set HASH_SIGNATURE_FIT_TOKEN to the private renderer credential}'
     fi
     block="$(awk -v service="$service" '
       $0 == "  " service ":" { in_service=1; next }
@@ -387,10 +395,35 @@ renderer_network_policy() {
     for required in \
       'read_only: true' 'cap_drop:' '- ALL' 'no-new-privileges:true' \
       '/tmp:rw,noexec,nosuid,nodev,size=' '--api-disable-download-from=true' \
-      '--pdfengines-disable-routes=true' '- hash-renderer' 'CMD-SHELL' \
+      '--pdfengines-disable-routes=true' '--chromium-disable-javascript=true' \
+      '- hash-renderer' 'CMD-SHELL' \
       'command -v wget' 'command -v curl'; do
       printf '%s\n' "$block" | grep -Fq -- "$required" || {
         echo "$file renderer is missing required isolation control: $required" >&2
+        return 1
+      }
+    done
+    if printf '%s\n' "$block" | grep -Eq '^    env_file:'; then
+      echo "$file renderer must not inherit an application env file" >&2
+      return 1
+    fi
+    projected="$(printf '%s\n' "$block" | awk '
+      /^    environment:$/ { in_environment=1; next }
+      in_environment && /^    [[:alnum:]_-]+:/ { exit }
+      in_environment && /^      [[:alnum:]_-]+:/ { print }
+    ')"
+    [ "$projected" = "$token_entry" ] || {
+      echo "$file renderer must receive only the narrowly projected private-route credential" >&2
+      return 1
+    }
+    for app_service in $app_services; do
+      app_block="$(awk -v service="$app_service" '
+        $0 == "  " service ":" { in_service=1; next }
+        in_service && /^  [[:alnum:]_-]+:$/ { exit }
+        in_service { print }
+      ' "$file")"
+      [ -n "$app_block" ] && printf '%s\n' "$app_block" | grep -Fxq "$token_entry" || {
+        echo "$file app and worker must project the same renderer credential" >&2
         return 1
       }
     done
@@ -476,6 +509,8 @@ standalone_renderer_documentation_policy() {
     'docker network create --internal hash-renderer' \
     '--read-only --cap-drop ALL --security-opt no-new-privileges:true' \
     '--chromium-deny-list=^https?://.*' \
+    '--chromium-disable-javascript=true' \
+    '-e HASH_SIGNATURE_FIT_TOKEN' \
     'HASH_GOTENBERG_URL=http://hash-gotenberg:3000' \
     'docker network connect hash-renderer hash' \
     'docker network connect hash-renderer hash-worker' \

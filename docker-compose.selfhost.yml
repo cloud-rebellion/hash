@@ -1,0 +1,130 @@
+# Portable production profile: no bundled database, storage, mail or proxy.
+# Provision those services yourself, configure .env and the two work profiles,
+# then follow DEPLOY.md. This file is complete; no private Compose file is used.
+x-hash-environment: &hash-environment
+  HASH_PORT: "8080"
+  HASH_ENVIRONMENT: production
+  HASH_RELEASE: ${HASH_RELEASE:?set the full approved Git commit}
+  HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:?set your canonical HTTPS URL}
+  HASH_PROXY_AUTH: ${HASH_PROXY_AUTH:?set your independent proxy credential}
+  HASH_OPERATOR_NAME: ${HASH_OPERATOR_NAME:?set the factual instance operator}
+  HASH_PRIVACY_CONTACT: ${HASH_PRIVACY_CONTACT:?set a monitored privacy mailbox}
+  HASH_SUPERVISORY_AUTHORITY: ${HASH_SUPERVISORY_AUTHORITY:?set the applicable authority}
+  HASH_PRIVACY_POLICY_URL: ${HASH_PRIVACY_POLICY_URL:?set the operator HTTPS privacy policy}
+  HASH_DB_URL: ${HASH_DB_URL:?set your PostgreSQL URL including pool_max_conns}
+  HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:?set your external S3 endpoint without scheme}
+  HASH_S3_REGION: ${HASH_S3_REGION:?set your S3 region}
+  HASH_S3_BUCKET: ${HASH_S3_BUCKET:?set your versioned Object-Locked bucket}
+  HASH_S3_ACCESS_KEY: ${HASH_S3_ACCESS_KEY:?set the scoped application storage identity}
+  HASH_S3_SECRET_KEY: ${HASH_S3_SECRET_KEY:?set the scoped storage credential}
+  HASH_S3_USE_SSL: "true"
+  HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-path}
+  HASH_S3_SSE_MODE: ${HASH_S3_SSE_MODE:-sse-s3}
+  HASH_SMTP_HOST: ${HASH_SMTP_HOST:?set your STARTTLS submission host}
+  HASH_SMTP_PORT: ${HASH_SMTP_PORT:-587}
+  HASH_SMTP_FROM: ${HASH_SMTP_FROM:?set your verified sender mailbox}
+  HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:?set an independent signer key}
+  HASH_SESSION_KEY: ${HASH_SESSION_KEY:?set an independent session key}
+  HASH_WEBHOOK_ENCRYPTION_KEY: ${HASH_WEBHOOK_ENCRYPTION_KEY:?set an independent webhook encryption key}
+  HASH_AUDIT_PRIVATE_KEY: ${HASH_AUDIT_PRIVATE_KEY:?set the stable Ed25519 seed}
+  HASH_GOTENBERG_URL: http://renderer:3000
+  HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:?set the private renderer credential}
+  HASH_MALWARE_SOCKET: /run/hash-malware/clamd.sock
+  HASH_BILLING_PROVIDER: operator
+  HASH_OPERATOR_ENTITLEMENTS: ${HASH_OPERATOR_ENTITLEMENTS:?set reviewed org_id plan_slug review_ref bindings}
+
+services:
+  hash:
+    image: ${HASH_IMAGE:?pin the approved application image ID or digest}
+    restart: unless-stopped
+    stop_grace_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - ${HASH_ENV_FILE:-.env}
+      - ${HASH_SERVER_WORK_ENV_FILE:?set the server work-allocation file}
+    environment: *hash-environment
+    volumes:
+      - type: bind
+        source: ${HASH_MALWARE_SOCKET_DIR:?set your private directory containing clamd.sock}
+        target: /run/hash-malware
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${HASH_HTTP_PORT:-8080}:8080"
+    depends_on:
+      renderer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    networks:
+      - hash-runtime
+      - hash-renderer
+
+  worker:
+    image: ${HASH_IMAGE:?pin the approved application image ID or digest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/usr/local/bin/hash-worker"]
+    env_file:
+      - ${HASH_ENV_FILE:-.env}
+      - ${HASH_WORKER_WORK_ENV_FILE:?set the worker work-allocation file}
+    environment: *hash-environment
+    depends_on:
+      renderer:
+        condition: service_healthy
+    networks:
+      - hash-runtime
+      - hash-renderer
+
+  renderer:
+    image: ${HASH_GOTENBERG_IMAGE:?pin the approved renderer image ID or digest}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HASH_SIGNATURE_FIT_TOKEN: ${HASH_SIGNATURE_FIT_TOKEN:?set the private renderer credential}
+    command:
+      - gotenberg
+      - --api-port=3000
+      - --api-timeout=60s
+      - --api-disable-download-from=true
+      - --pdfengines-disable-routes=true
+      - --chromium-disable-javascript=true
+      - --chromium-deny-public-ips=true
+      - --chromium-deny-private-ips=true
+      - '--chromium-deny-list=^https?://.*'
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v wget >/dev/null 2>&1; then exec wget -q -O /dev/null http://127.0.0.1:3000/health; elif command -v curl >/dev/null 2>&1; then exec curl --fail --silent --show-error -o /dev/null http://127.0.0.1:3000/health; else exit 127; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - hash-renderer
+
+networks:
+  hash-runtime: {}
+  hash-renderer:
+    internal: true

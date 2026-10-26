@@ -5,10 +5,170 @@ built from one container image**, plus a few standard backing services. There
 is no dependency on any particular CI system or host: anything that can build a
 container and run it (Docker Compose, Kubernetes, a plain VM) works.
 
-> Bright Interaction's own instance is deployed with its in-house CI. Nothing
-> below requires it.
-> GitHub Actions, GitLab CI, Jenkins, Drone, or a manual `docker build` are all
-> equally fine.
+GitHub Actions, GitLab CI, Jenkins, Drone, or a manual `docker build` are all
+equally suitable. No vendor account, domain, CRM or release service is required.
+
+## Portable production Compose
+
+Use **`docker-compose.selfhost.yml` on its own**. It defines the server, worker
+and private renderer. It does not include a private production file or start a
+database, object store, SMTP server or proxy. The older
+`docker-compose.prod.yml`, when present in a private checkout, is an
+installation-specific compatibility profile and is not needed or shipped for
+this public deployment path. The development `docker-compose.yml` is a separate
+profile; do not use its public fixture credentials for production.
+
+Build and independently test the application and renderer from this repository
+as described below, then select their exact image IDs/digests in `HASH_IMAGE` and
+`HASH_GOTENBERG_IMAGE`. Configure your own HTTPS hostname, PostgreSQL connection,
+scoped storage identity, STARTTLS SMTP submission account and private ClamD
+socket directory in a protected copy of `.env.example`. Keep .env and work files
+mode 0600. Do not commit them. Supply every independent key in its documented
+format; no working production keys are bundled. `HASH_ENVIRONMENT` remains
+production, external S3 uses TLS, and proxy authentication, SSE, audit signing and
+malware checks remain enabled. Native password login needs no OIDC registration;
+leave all four OIDC settings unset unless deliberately enabling optional SSO.
+
+Provision a dedicated PostgreSQL 16+ database/role and a versioned S3 bucket with
+Object Lock enabled. Use no bucket default retention: final signed evidence gets
+explicit COMPLIANCE retention of at least seven years, while drafts and exact
+compensation/DSR deletes must remain possible. Use the storage permissions,
+encryption/canary and coupled recovery procedures below. Keep the renderer
+unpublished and connected only to its internal network. ClamD must meet
+[the socket/signature/stream-size contract](docs/MALWARE-SCANNING.md); the profile
+binds only the chosen host directory read-only at `/run/hash-malware` and refuses
+to create a missing host path. Never expose its socket to tenants.
+
+### Explicit process allocations
+
+Create `.env.work-runtime.server` and `.env.work-runtime.worker` (or set their
+paths in `.env`) with all 17 keys each. The following is a finite starting
+**example to review and qualify**, not measured capacity or a promise that any
+document fits. It uses the existing browser fixture's parent/staging/SQL/grant
+ceilings, plus one PDF child charged at the actual 2GiB virtual-address cost in
+`internal/pdfadmission/work_admission_v1.go` and one renderer request. No RSS,
+fitted-signing readiness or spare-machine-capacity inference follows.
+
+```dotenv
+HASH_WORK_GLOBAL_PARENT_BYTES=2147483648
+HASH_WORK_GLOBAL_DB_STAGING_BYTES=402653184
+HASH_WORK_GLOBAL_CHILD_ADDRESS_BYTES=2147483648
+HASH_WORK_GLOBAL_PDF_WORKERS=1
+HASH_WORK_GLOBAL_SQL_SESSIONS=8
+HASH_WORK_GLOBAL_PROVIDER_STREAMS=1
+HASH_WORK_GLOBAL_RENDERER_REQUESTS=1
+HASH_WORK_ORG_PARENT_BYTES=2147483648
+HASH_WORK_ORG_DB_STAGING_BYTES=402653184
+HASH_WORK_ORG_CHILD_ADDRESS_BYTES=2147483648
+HASH_WORK_ORG_PDF_WORKERS=1
+HASH_WORK_ORG_SQL_SESSIONS=4
+HASH_WORK_ORG_PROVIDER_STREAMS=1
+HASH_WORK_ORG_RENDERER_REQUESTS=1
+HASH_WORK_MAX_GRANTS=128
+HASH_WORK_MAX_ORG_GRANTS=64
+HASH_WORK_DB_CONNECTION_ALLOCATION=16
+```
+
+Review server and worker allocations separately. With `pool_max_conns=8`, each
+pool plus its eight direct sessions fits 16 assigned connections; both processes
+have a combined 32-connection ceiling. Account for other services and independently
+allocated maintenance processes. Use a separate reviewed profile for catalog
+maintenance; do not borrow imaginary spare serving capacity. Inspect
+[work configuration](docs/WORK-RUNTIME.md) before changing these values.
+
+### First installation and first owner
+
+Plan one new organization UUID and keep it unchanged through reconciliation.
+Set `HASH_BILLING_PROVIDER=operator` and `HASH_OPERATOR_ENTITLEMENTS` to a reviewed
+single binding with that UUID, `plan_slug:"pro"` and your review reference. `pro`
+is an actual seeded plan: 50 documents/200 recipients monthly, MCP, branding and
+evidence. It is an operator entitlement, not a paid subscription. The seeded
+unlimited `enterprise` plan is not valid for this finite operator mode.
+
+Before starting either writer, use the exact approved application image:
+
+```sh
+docker compose --env-file .env -f docker-compose.selfhost.yml \
+  run --rm --no-deps --entrypoint /usr/local/bin/hash-config-check hash
+docker compose --env-file .env -f docker-compose.selfhost.yml \
+  run --rm --no-deps --entrypoint /usr/local/bin/hash-migrate hash
+docker compose --env-file .env -f docker-compose.selfhost.yml \
+  run --rm --no-deps --entrypoint /usr/local/bin/hash-bootstrapowner hash \
+  --org-id "$HASH_ORG_ID" --company "$HASH_COMPANY" \
+  --owner-name "$HASH_OWNER_NAME" --owner-email "$HASH_OWNER_EMAIL" \
+  --review-ref "$HASH_REVIEW_REF"
+```
+
+The five shell variables are explicit nonsecret operator inputs you set before
+the command; they are not credentials or application configuration. Company is
+the workspace display name. Bootstrap checks empty installation state or its
+exact original replay, records one pending owner and returns a provisioning
+receipt. It does not set a password, send mail, prove mailbox ownership or name a
+contract signer. Keep the original image/UUID/inputs after any uncertain outcome;
+reconcile its immutable audit rather than retrying with a different identity.
+
+M95 intentionally does not prepare seeded plans. Use your approved database
+query interface to resolve exactly the selected `pro` plan UUID, then follow
+[catalog maintenance](docs/CATALOG-MAINTENANCE.md), using the actual command
+`/usr/local/bin/hash-catalogmeasure --kind plan --id <approved-plan-uuid>`.
+Give that DB-only maintenance container only its reviewed database env and all 17
+maintenance allocation keys. It has no slug/`--all` selector. The source procedure
+currently requires PostgreSQL 16.15, UTF8 and direct uncompressed JSONB; it refuses
+unsupported catalogs. Verify its documented read-only gate before authoring;
+startup and `/health` do not prove M95 readiness. Do not automatically approve
+every catalog row or rewrite a plan to force the gate green.
+
+Run the exact image's storage canary and all-org audit verifier as documented
+below, then start the complete profile:
+
+```sh
+docker compose --env-file .env -f docker-compose.selfhost.yml up -d --no-build
+```
+
+Verify exact release/dependencies, then use `/forgot-password` with the actual
+bootstrap owner's mailbox. The worker queues/sends a setup-purpose link for an
+owner without a credential; finish `/reset-password` and sign in at `/login`.
+Verify real SMTP delivery, one intended workspace/owner, both-party signing,
+webhooks, immutable evidence and restore separately. New contract parties,
+representative authority and terms must be explicit reviewed template values;
+the instance operator/workspace brand is not a default contract party.
+
+### Your reverse proxy
+
+The server is published only on loopback (default 127.0.0.1:8080). A host-owned
+Caddy instance can terminate TLS for your chosen hostname:
+
+```caddyfile
+contracts.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Hash-Proxy-Auth {$HASH_PROXY_AUTH}
+        header_up X-Hash-Client-IP {remote_host}
+    }
+}
+```
+
+Provide Caddy the same private proxy credential through its protected process
+environment. These setters replace client-supplied headers. This direct-origin
+example uses the actual connection peer IP, not an untrusted forwarding header.
+If another load balancer/CDN is in front, explicitly trust only its authenticated
+address ranges and configure real-client-IP extraction; never accept an arbitrary
+`X-Forwarded-For` chain. Keep Host/HTTPS forwarding correct, `HASH_PUBLIC_URL`
+equal to your canonical HTTPS origin, and the app port inaccessible remotely.
+Caddy's reverse proxy supports WebSocket upgrades, so use this route for
+collaboration as well as API/portal traffic; do not add an unauthenticated WSS
+bypass. Verify cookie, client-IP and WSS behavior against your deployed proxy.
+
+### Configuration-only regression
+
+`python3 scripts/test-selfhost-compose.py` resolves a synthetic custom-domain
+configuration, checks hardening/token isolation and confirms it works with no
+private production file. When that private file is present it also checks
+security parity. Run `python3 scripts/test-selfhost-compose.py --require-public`
+from the actual filtered public export before publication: it additionally
+refuses private artifacts or missing shipped docs/helpers. A local isolated-YAML
+check is not evidence that the real export or GitHub mirror was updated.
+No daemon/services/provider traffic or real env files are used. These checks
+prove configuration only, not deployment or successful rendering.
 
 ## Private BrightCRM connectivity
 
@@ -53,6 +213,32 @@ worker, and Compose intentionally publishes no renderer host port. Render input
 is self-contained, so Chromium has no need for public,
 PostgreSQL, object-storage, SMTP, or CRM network access. This architecture is
 the same for standalone, webhook-driven, and CRM-integrated deployments.
+
+Set an independent `HASH_SIGNATURE_FIT_TOKEN` before enabling fitted ordinary or
+signature-page preparation. Its format is 32–128 printable nonspace ASCII
+characters; 32 random bytes encoded as 64 hexadecimal characters are suitable.
+Keep the value private and stable, and supply the same value to the Hash server,
+worker and renderer. The development and both production Compose profiles disable Chromium JavaScript
+and project only this credential into the renderer; do not give it the application
+env file, database, storage, SMTP, session or audit keys. Production Compose refuses
+a missing or empty token before creating services. The development `docker-compose.yml` permits an
+empty token for existing local authoring setups, but private fitted preparation
+then remains unavailable. Outside Compose, explicitly apply the same token and
+`--chromium-disable-javascript=true` to the renderer. This wiring does not itself
+activate signing policy or prove a complete signing journey.
+
+Use `http://gotenberg:3000` with development Compose. Public production
+`docker-compose.selfhost.yml` forces `http://renderer:3000`; the private legacy
+production topology uses `http://hash-gotenberg:3000` for `HASH_GOTENBERG_URL`.
+The two production profiles require a nonempty token and are independent of the
+development profile. The renderer remains unpublished on the host.
+With Docker Compose installed, `python3 scripts/test-renderer-compose.py` checks
+two development cases and, only when the private compatibility file is shipped,
+three additional private-production cases. Its absence is reported explicitly,
+never counted as three passing tests. Public production is checked separately by
+`scripts/test-selfhost-compose.py`. These use synthetic values without reading
+runtime env files or starting services; the renderer check requires Compose's
+`--no-env-resolution` option.
 
 Production supports exactly one `hash` HTTP-server replica. A production server
 holds a database-scoped singleton lease for its full lifetime, so a second
@@ -228,7 +414,8 @@ identical. Do not add `docker-compose.local-minio.yml` to either external-S3
 command: that development-only overlay is the sole definition of the bundled
 MinIO service and its startup dependencies.
 
-The production Compose files are CI-managed. Do not invoke them
+The private legacy production Compose files are installation-managed and are
+not required by `docker-compose.selfhost.yml`. Do not invoke those private files
 directly: they intentionally require `HASH_DEPLOY_S3_ENDPOINT`,
 `HASH_DEPLOY_S3_REGION`, `HASH_DEPLOY_S3_BUCKET`, `HASH_DEPLOY_S3_USE_SSL`,
 `HASH_DEPLOY_S3_BUCKET_LOOKUP`, and `HASH_DEPLOY_S3_SSE_MODE` values that the
@@ -607,14 +794,20 @@ if [[ -n "${HASH_S3_SSE_C_KEY_HOST_FILE:-}" ]]; then
   )
 fi
 
+# Load the reviewed private token into this process environment without printing
+# it. Passing its name below avoids putting the value in command arguments.
+: "${HASH_SIGNATURE_FIT_TOKEN:?provide the private renderer credential}"
+
 docker network create hash-runtime
 docker network create --internal hash-renderer
 
 docker run -d --name hash-gotenberg --restart unless-stopped --network hash-renderer \
+  -e HASH_SIGNATURE_FIT_TOKEN \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
   "$HASH_GOTENBERG_IMAGE" gotenberg --api-port=3000 --api-timeout=60s \
   --api-disable-download-from=true --pdfengines-disable-routes=true \
+  --chromium-disable-javascript=true \
   --chromium-deny-public-ips=true --chromium-deny-private-ips=true \
   '--chromium-deny-list=^https?://.*'
 
@@ -627,6 +820,7 @@ done
 # Server: normal runtime network for configured services/egress, plus the
 # isolated renderer network. Only the application port is published.
 docker create --name hash --restart unless-stopped --env-file .env \
+  -e HASH_SIGNATURE_FIT_TOKEN \
   -e HASH_GOTENBERG_URL=http://hash-gotenberg:3000 \
   --network hash-runtime --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
@@ -637,6 +831,7 @@ docker start hash
 
 # Worker: the same two networks and environment, with no published port.
 docker create --name hash-worker --restart unless-stopped --env-file .env \
+  -e HASH_SIGNATURE_FIT_TOKEN \
   -e HASH_GOTENBERG_URL=http://hash-gotenberg:3000 \
   --network hash-runtime --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
@@ -752,40 +947,6 @@ audit verification key is served at
 `HASH_EVIDENCE_OTS_ENABLED` is an explicit local-development experiment only.
 The built-in verifier does not validate OpenTimestamps calendar proofs, so
 staging/production reject it and no timestamp-authority claim should rely on it.
-
-## CloudRebellion production profile
-
-The Cloud Rebellion instance uses the OVH host `core-prod-gra1-01` (public
-address `37.187.155.214`, Tailscale address `100.118.61.16`) and is operated by
-`tom@cloudrebellion.se`. The production origin is:
-
-```text
-HASH_PUBLIC_URL=https://esign.cloudrebellion.tech
-HASH_OIDC_ISSUER=
-HASH_OIDC_CLIENT_ID=
-HASH_OIDC_CLIENT_SECRET=
-HASH_OIDC_REDIRECT_URL=
-```
-
-Email/password is the primary staff login; see [staff login](docs/STAFF-LOGIN.md).
-Keep all four OIDC settings empty unless an optional provider is deliberately
-configured. That provider's registered callback must then be
-`https://esign.cloudrebellion.tech/auth/callback`.
-
-This profile is a fresh Hash instance: use a new Hash database and a distinct
-Object-Locked storage scope. Do not point it at Stage, Dockyard, or Mesh data,
-and do not reuse their credentials, indexes, or signing keys. Keep the existing
-`hash.brightinteraction.com` service available until the new origin has passed
-deep health, browser sign/send/finalize, webhook, audit-verification, and
-coupled restore checks.
-
-The new origin is private/internal. Its nginx vhost must listen only on
-`100.118.61.16:443` and proxy through the managed CloudRebellion Caddy route to
-`hash:8080`. That route must overwrite exactly one `X-Hash-Proxy-Auth` and one
-authenticated `X-Hash-Client-IP`; never add a direct public listener or reload
-the shared proxy by hand. Promote the exact staging-attested image pair through
-the managed CI workflow and retain the release, backup, Object Lock
-proof, and rollback receipts with the deployment record.
 
 ## 5. Continuous deployment (any CI)
 

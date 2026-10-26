@@ -3,7 +3,7 @@
   "info": {
     "title": "Hash automation API",
     "version": "1",
-    "description": "Machine integration contract for CRM/Reactor signature-request creation. Covers this endpoint only; see API-ROUTES.md for other surfaces."
+    "description": "Vendor-neutral organization machine API for prepared documents, signature requests, lifecycle status and completed artifacts. No CRM, Reactor, browser session or MCP connection is required. See AUTOMATION-API.md for lifecycle and reconciliation rules."
   },
   "servers": [
     {
@@ -194,6 +194,1117 @@
           }
         }
       }
+    },
+    "/api/automation/v1/documents": {
+      "get": {
+        "operationId": "listDocuments",
+        "summary": "List organization documents",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "List organization documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/v1/documents/{id}": {
+      "get": {
+        "operationId": "getDocument",
+        "summary": "Read current document metadata and status",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read current document metadata and status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentMetadata"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/pdf": {
+      "get": {
+        "operationId": "getDocumentSourcePDF",
+        "summary": "Read saved source PDF; not the executed contract",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read saved source PDF; not the executed contract",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/final-pdf": {
+      "get": {
+        "operationId": "getDocumentFinalPDF",
+        "summary": "Read exact completed final PDF",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read exact completed final PDF",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/audit-cert": {
+      "get": {
+        "operationId": "getDocumentAuditCertificate",
+        "summary": "Read completed audit certificate",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read completed audit certificate",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/attachments": {
+      "get": {
+        "operationId": "getDocumentAttachments",
+        "summary": "Read exact attachment/package observation",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read exact attachment/package observation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentInventory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/send-attempts/{attempt_id}": {
+      "get": {
+        "operationId": "getDocumentSendAttempt",
+        "summary": "Inspect an existing package Send attempt",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Inspect an existing package Send attempt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendAttempt"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "in": "path",
+          "name": "attempt_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/templates": {
+      "get": {
+        "operationId": "listTemplates",
+        "summary": "List organization templates",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "List organization templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/v1/templates/{id}": {
+      "get": {
+        "operationId": "getTemplate",
+        "summary": "Read template and current pins",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "read"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read template and current pins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateMetadata"
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ]
+    },
+    "/api/automation/v1/documents/{id}/send": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "sendPreparedDocument",
+        "summary": "Send an existing reviewed document",
+        "description": "Sender/owner organization key with explicit write:workflow. Strict UTF-8 JSON <=8KiB. Read the same document/attempt after a timeout; ordinary repeats after Send return409. This operation does not create a template-command Idempotency-Key record. Native content/package/evidence/credential controls apply. No signer bearer links are returned.",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "x-required-scopes": [
+          "write:workflow"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreparedDocumentSend"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient live role, literal scope or credential boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No accessible object or artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lifecycle/source conflict; inspect the same document/attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit; respect Retry-After.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required dependency or exact artifact temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Prepared document sent; no signer bearer links returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedDocumentSendResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Package sealing is pending; inspect the exact attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedDocumentSendResult"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -366,6 +1477,215 @@
         },
         "additionalProperties": true,
         "description": "Some errors also include supported_tier or upgrade_url. Middleware may return a non-JSON error body; clients must handle status before decoding."
+      },
+      "PreparedDocumentSend": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "lawful_basis"
+        ],
+        "properties": {
+          "lawful_basis": {
+            "type": "string",
+            "enum": [
+              "contract"
+            ]
+          },
+          "package_send": {
+            "$ref": "#/components/schemas/PackageSendObservation"
+          }
+        }
+      },
+      "PackageSendObservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "expected_updated_at",
+          "package_id",
+          "generation"
+        ],
+        "properties": {
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exact observed UTC timestamp; never derive a replacement."
+          },
+          "package_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,18}$",
+            "description": "Exact observed decimal generation, not a JSON number."
+          }
+        }
+      },
+      "PackageSendOutcome": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attempt_id",
+          "outcome",
+          "reconciliation_required"
+        ],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "unknown"
+            ]
+          },
+          "reconciliation_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PreparedDocumentSendResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "document_id",
+          "status"
+        ],
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "package_send": {
+            "$ref": "#/components/schemas/PackageSendOutcome"
+          }
+        },
+        "description": "Contains no signer bearer links. sealing is pending, not sent/completed."
+      },
+      "DocumentMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "description": "Current lifecycle state; consumers must not infer completion from an unfamiliar state."
+          }
+        },
+        "additionalProperties": true,
+        "description": "Document metadata uses the existing organization document response. Additional authored, source and lifecycle fields are extensible."
+      },
+      "TemplateMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "source_kind",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "content_sha256": {
+            "type": "string",
+            "description": "Canonical content pin when present for the source kind; required by the blocks-template signature-request command."
+          }
+        },
+        "additionalProperties": true
+      },
+      "DocumentList": {
+        "type": "object",
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentMetadata"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "TemplateList": {
+        "type": "object",
+        "properties": {
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateMetadata"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AttachmentInventory": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Exact native attachment inventory. Use its reviewed package observation with Send; see DOCUMENT-ATTACHMENTS-API.md."
+      },
+      "SendAttempt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attempt_id",
+          "outcome",
+          "retry_authorized"
+        ],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "aborted",
+              "not_recorded"
+            ]
+          },
+          "retry_authorized": {
+            "type": "boolean",
+            "const": false
+          }
+        }
       }
     }
   }

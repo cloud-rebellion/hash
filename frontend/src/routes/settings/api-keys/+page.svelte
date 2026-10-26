@@ -10,7 +10,7 @@
   let showCreate = $state(false);
   let newName = $state('');
   let scopes = $state<{ read: boolean; authoring: boolean; workflow: boolean }>({
-    read: true, authoring: true, workflow: true
+    read: true, authoring: true, workflow: false
   });
   let creating = $state(false);
   let mintedPlaintext = $state<string | null>(null);
@@ -31,6 +31,10 @@
 
   async function create() {
     if (!newName.trim()) return;
+    if (!scopes.read && !scopes.authoring && !scopes.workflow) {
+      error = 'Choose at least one permission.';
+      return;
+    }
     creating = true;
     error = null;
     try {
@@ -41,6 +45,7 @@
       const res = await createAPIKey({ name: newName.trim(), scopes: selected });
       mintedPlaintext = res.plaintext ?? null;
       newName = '';
+      scopes = { read: true, authoring: true, workflow: false };
       await refresh();
     } catch (e) {
       error = (e as Error).message;
@@ -76,10 +81,8 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Hash API keys authenticate the standalone e-signature endpoint at
-    <code class="font-mono text-xs">/api/automation/v1/signature-requests</code> and, when your plan includes it,
-    the MCP endpoint at <code class="font-mono text-xs">/mcp</code>. Automation signature requests require both
-    <code class="font-mono text-xs">write:authoring</code> and <code class="font-mono text-xs">write:workflow</code>.
+    Connect another application through the REST API, or use MCP for AI document authoring.
+    New keys can read and author documents. Enable sending access only for integrations that need it.
   </p>
 
   {#if error}
@@ -108,7 +111,7 @@
       <input
         type="text"
         bind:value={newName}
-        placeholder="Name (e.g. Reactor bridge)"
+        placeholder="Name (e.g. Sales assistant)"
         class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm mb-4"
       />
       <div class="space-y-2 mb-4">
@@ -116,21 +119,25 @@
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" bind:checked={scopes.read} />
           <span>read</span>
-          <span class="text-text-muted text-xs">(list/get documents, templates, events)</span>
+          <span class="text-text-muted text-xs">(read documents, templates and status)</span>
         </label>
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" bind:checked={scopes.authoring} />
           <span>write:authoring</span>
-          <span class="text-text-muted text-xs">(create documents; required for automation)</span>
+          <span class="text-text-muted text-xs">(create and edit documents)</span>
         </label>
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" bind:checked={scopes.workflow} />
           <span>write:workflow</span>
-          <span class="text-text-muted text-xs">(send documents; required for automation)</span>
+          <span class="text-text-muted text-xs">(allow an integration to send documents)</span>
         </label>
+        <p class="text-xs text-text-muted leading-relaxed">
+          AI authoring uses the default read and authoring permissions. Sending signature requests
+          through the API also requires workflow access. MCP access depends on your plan.
+        </p>
       </div>
       <div class="flex gap-2">
-        <button class="btn btn-primary" onclick={create} disabled={creating || !newName.trim()}>
+        <button class="btn btn-primary" onclick={create} disabled={creating || !newName.trim() || (!scopes.read && !scopes.authoring && !scopes.workflow)}>
           {creating ? 'Minting…' : 'Mint key'}
         </button>
         <button class="btn btn-secondary" onclick={() => (showCreate = false)}>Cancel</button>

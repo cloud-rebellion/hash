@@ -38,6 +38,10 @@ func TestAutomationOpenAPIWireFields(t *testing.T) {
 		{"SignatureRequest", automationSignatureRequestInput{}, "template_id,template_version,template_content_sha256,name,recipients,lawful_basis"},
 		{"Recipient", automationSignatureRecipientInput{}, "email,name"},
 		{"SignatureRequestResult", automationSignatureRequestResponse{}, "automation_request_id,document_id,status,replayed"},
+		{"PreparedDocumentSend", sendDocumentInput{}, "lawful_basis"},
+		{"PreparedDocumentSendResult", automationDocumentSendResponse{}, "document_id,status"},
+		{"PackageSendObservation", packageSendInputV1{}, "expected_updated_at,package_id,generation"},
+		{"PackageSendOutcome", packageSendResponseV1{}, "attempt_id,outcome,reconciliation_required"},
 	}
 	for _, c := range cases {
 		schema, ok := spec.Components.Schemas[c.schema]

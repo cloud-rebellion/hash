@@ -319,34 +319,21 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		s.readOwnedPDFTemplateV1(w, r, u, id)
 		return
 	}
-	t, err := s.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{ID: id, OrgID: u.OrgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "template not found")
+	if header.SourceKind != "html" {
+		writeError(w, http.StatusServiceUnavailable, "template source is unavailable")
 		return
 	}
+	authorize, ok := s.sessionMutationAuthorization(w, r, u)
+	if !ok {
+		return
+	}
+	response, closeConsumer, err := s.readHTMLTemplateDetailOwnedV1(r.Context(), u.OrgID, u.UserID, id, authorize)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get template failed")
+		s.writeHTMLTemplateError(w, "get template failed", err)
 		return
 	}
-	if t.SourceKind == "html" {
-		revision, err := s.Queries.GetHTMLTemplateRevision(r.Context(), generated.GetHTMLTemplateRevisionParams{TemplateID: t.ID, OrgID: u.OrgID, Version: t.Version})
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "template revision not found")
-			return
-		}
-		if err != nil {
-			writeInternalErrorMsg(w, "load template approval failed", err)
-			return
-		}
-		response, err := toHTMLTemplateDetailResponse(t, revision)
-		if err != nil {
-			writeInternalErrorMsg(w, "template approval is invalid", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-	writeTemplateResponse(w, http.StatusOK, t)
+	defer closeConsumer()
+	writeJSON(w, http.StatusOK, response)
 }
 
 type updateTemplateInput struct {

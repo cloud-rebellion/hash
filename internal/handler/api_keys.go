@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -62,9 +63,29 @@ func toAPIKeyResponse(r *generated.ListAPIKeysByUserRow) apiKeyResponse {
 }
 
 type createAPIKeyInput struct {
-	Name      string   `json:"name"`
-	Scopes    []string `json:"scopes"`
-	ExpiresAt string   `json:"expires_at,omitempty"`
+	Name string `json:"name"`
+	// Omission selects authoring defaults; an explicit null/empty array must
+	// never be expanded into write permissions by a len(scopes)==0 fallback.
+	Scopes    json.RawMessage `json:"scopes"`
+	ExpiresAt string          `json:"expires_at,omitempty"`
+}
+
+func apiKeyCreationScopes(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return []string{"read", "write:authoring"}, nil
+	}
+	var scopes []string
+	if err := json.Unmarshal(raw, &scopes); err != nil || len(scopes) == 0 {
+		return nil, errors.New("scopes must be a nonempty array of permissions")
+	}
+	for _, scope := range scopes {
+		switch scope {
+		case "read", "write:authoring", "write:workflow":
+		default:
+			return nil, errors.New("scopes must be a subset of [read, write:authoring, write:workflow]")
+		}
+	}
+	return scopes, nil
 }
 
 // handleCreateAPIKey mints a fresh `mth_<prefix>_<secret>` key, hashes it,
@@ -81,7 +102,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// its own feature gate on every use, while the same credential remains valid
 	// for /api/automation/v1/signature-requests when it has both write scopes.
 	var in createAPIKeyInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -89,19 +110,10 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	scopes := in.Scopes
-	if len(scopes) == 0 {
-		// Default to full write-by-default to preserve prior behaviour; a
-		// read-only key is now an explicit opt-in (pass scopes: ["read"]).
-		scopes = []string{"read", "write:authoring", "write:workflow"}
-	}
-	for _, sc := range scopes {
-		switch sc {
-		case "read", "write:authoring", "write:workflow":
-		default:
-			writeError(w, http.StatusBadRequest, "invalid scope: "+sc)
-			return
-		}
+	scopes, err := apiKeyCreationScopes(in.Scopes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	var expires pgtype.Timestamptz
 	if in.ExpiresAt != "" {

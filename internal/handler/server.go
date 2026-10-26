@@ -414,15 +414,33 @@ func (s *Server) Routes() http.Handler {
 	}
 
 	// Standalone machine API. It deliberately lives outside the session-only
-	// /api/v1 tree: an authenticated CRM, Reactor workflow, or Google-hosted
-	// producer can create and send a complete request without browser cookies.
-	// The handler additionally requires both authoring and workflow scopes and
-	// rejects document-scoped agent credentials.
+	// /api/v1 tree. Any authorized product can read prepared documents, send
+	// signature requests and query lifecycle state without browser cookies or
+	// MCP. Each operation requires its own scopes; document-agent credentials
+	// cannot acquire this organization-wide integration surface.
 	if s.APIKeys != nil {
 		r.Route("/api/automation/v1", func(r chi.Router) {
 			r.Use(httprate.LimitByIP(automationGlobalIPPerMinute, time.Minute))
 			r.Use(auth.RequireAPIKey(s.APIKeys))
 			r.Use(automationOrgRateLimit(automationOrgRequestsPerMinute))
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireRole(auth.RoleViewer))
+				r.Use(requireAutomationDocumentRead)
+				r.Get("/documents", s.handleAutomationListDocuments)
+				r.Get("/documents/{id}", s.handleAutomationGetDocument)
+				r.Get("/documents/{id}/pdf", s.handleAutomationDocumentPDF)
+				r.Get("/documents/{id}/final-pdf", s.handleAutomationFinalPDF)
+				r.Get("/documents/{id}/audit-cert", s.handleAutomationAuditCert)
+				r.Get("/documents/{id}/attachments", s.handleAutomationDocumentAttachments)
+				r.Get("/documents/{id}/send-attempts/{attempt_id}", s.handleAutomationSendAttempt)
+				r.Get("/templates", s.handleAutomationListTemplates)
+				r.Get("/templates/{id}", s.handleAutomationGetTemplate)
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireRole(auth.RoleSender))
+				r.Use(requireAutomationDocumentWorkflow)
+				r.Post("/documents/{id}/send", s.handleAutomationSendDocument)
+			})
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireRole(auth.RoleSender))
 				r.Use(requireAutomationSignatureRequestScope)

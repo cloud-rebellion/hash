@@ -82,10 +82,21 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, err := s.Send.Send(r.Context(), send.Actor{
+	s.dispatchDocumentSend(w, r, docID, send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
 		LawfulBasis: in.LawfulBasis, Authorize: authorize, PackageSend: selection,
-	}, docID)
+	}, false)
+}
+
+// Both HTTP transports enter the same lifecycle engine and retain its native
+// result until serialization finishes. Machine responses never disclose signer
+// bearer links; browser responses preserve the existing sender UI contract.
+func (s *Server) dispatchDocumentSend(w http.ResponseWriter, r *http.Request, docID uuid.UUID, actor send.Actor, machine bool) {
+	if s.Send == nil {
+		writeError(w, http.StatusServiceUnavailable, "Send is temporarily unavailable")
+		return
+	}
+	res, err := s.Send.Send(r.Context(), actor, docID)
 	defer res.CloseConsumerV1()
 	if err != nil {
 		if res.PackageAttemptID != uuid.Nil {
@@ -99,9 +110,12 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 		s.writeSendError(w, err)
 		return
 	}
-	out := sendDocumentResponse{Status: res.Status, Links: make([]signingLink, 0, len(res.Links))}
-	for _, l := range res.Links {
-		out.Links = append(out.Links, signingLink{RecipientID: l.RecipientID, Email: l.Email, Name: l.Name, Role: l.Role, URL: l.URL})
+	out := sendDocumentResponse{Status: res.Status}
+	if !machine {
+		out.Links = make([]signingLink, 0, len(res.Links))
+		for _, l := range res.Links {
+			out.Links = append(out.Links, signingLink{RecipientID: l.RecipientID, Email: l.Email, Name: l.Name, Role: l.Role, URL: l.URL})
+		}
 	}
 	code := http.StatusOK
 	if res.PackageAttemptID != uuid.Nil {
@@ -112,6 +126,11 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 		}
 		out.PackageSend = &packageSendResponseV1{res.PackageAttemptID.String(), outcome, res.Status == "sealing"}
 		w.Header().Set("Cache-Control", "no-store")
+	}
+	if machine {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, code, automationDocumentSendResponse{DocumentID: docID, Status: out.Status, PackageSend: out.PackageSend})
+		return
 	}
 	writeJSON(w, code, out)
 }

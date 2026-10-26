@@ -1,5 +1,10 @@
 # Hash API guide
 
+Hash is a standalone e-signature product for any authorized external application.
+Its API and lifecycle events do not require CloudRebellion, a particular CRM,
+Reactor, or an AI provider. MCP serves AI document/settings authoring; other
+products integrate through the machine HTTP API and signed webhooks.
+
 Hash exposes separate browser, machine, signer, and webhook boundaries. Use the
 [HTTP route inventory](API-ROUTES.md) to find every registered endpoint, handler,
 middleware, and conditional dependency. The inventory is generated from the
@@ -26,6 +31,7 @@ no public endpoint and does not enable that mode.
 | `/api/v1/auth/*` | Public, with exact Origin on POST | Native registration, mailbox verification, login and recovery. No browser bearer token is returned. |
 | `/api/v1/notices/{notice_id}` and its documented access/file routes | Notice capability exchange, then a purpose-specific HttpOnly Secure cookie | Read-only exact notice/file access; no sender/signature/acknowledgement grant. See [later amendments](LATER-AMENDMENTS-API.md#public-notice-access-and-exact-downloads). |
 | `/api/automation/v1/signature-requests` | Organization-wide API key | Dedicated sender/owner key with both `write:authoring` and `write:workflow`; stable `Idempotency-Key`. See [Automation API](AUTOMATION-API.md). |
+| `/api/automation/v1/documents/*` and `/api/automation/v1/templates/*` | Organization-wide API key | Explicit `read` for discovery/status/files; `write:workflow` plus sender/owner role for sending a prepared document. No browser cookie or MCP entitlement is required. Document-scoped agent tokens are refused. |
 | `/mcp` | API key, including supported document-scoped credentials | MCP entitlement, role, tool scopes and document scope apply independently. Discover actual tools and input schemas through MCP `tools/list`. |
 | `/sign/{token}/*` | Recipient magic link | The URL token is a bearer credential bound to a recipient and ceremony. It does not grant sender or administrative access. |
 | `/webhooks/brightcrm` | Legacy receiver, disabled in production wiring | Requires a reviewed tenant-bound producer protocol before activation; current BrightCRM does not emit the expected deal/contact CRUD callbacks. |
@@ -241,6 +247,15 @@ tenant's document. A machine key's scopes narrow its role, and a document-scoped
 credential narrows its target further. Missing scopes do not inherit full access.
 See [role checks](../internal/auth/rbac.go) and
 [MCP tool scopes](../internal/mcp/scope.go).
+
+New API keys with omitted scopes default to `read` and `write:authoring`, suitable
+for AI document/settings configuration. Sending, reminders and other outward
+workflow actions require an explicit `write:workflow` grant; existing stored keys
+retain their scopes. Explicit empty or null scope arrays are rejected. A key for
+the prepared-document integration normally selects `read` and `write:workflow`;
+creating a signature request from a template additionally needs `write:authoring`.
+Keep API keys on the integrating application's server, and use a separate key per
+organization/integration. An API key alone does not authorize signing as a customer.
 
 `POST /api/v1/documents` and MCP `create_document` retain the original signed
 session or organization-wide `write:authoring` key through quota, template,

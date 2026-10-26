@@ -1,18 +1,97 @@
 # Hash standalone automation API
 
-Hash can create and send a signature request without a browser session or a
-live CRM connection. A CRM, Reactor workflow, Google-hosted producer, or other
-integration sends already-normalized customer data to one provider-neutral
-command. Hash copies the selected template and variables into the document;
-the resulting signing ceremony does not depend on the source system remaining
-available.
+Hash operates independently and accepts integrations from any authorized product.
+Its machine API supports reading a prepared document, sending it to its configured
+recipients, querying status, and downloading completed files. Another application
+can also create and send from an approved template. These operations do not
+require browser cookies, MCP, CloudRebellion, a CRM, or Reactor. Customer-specific
+record mappings belong in the integrating application or an optional adapter.
 
-This command remains limited to pinned blocks templates. It has no attachment
+MCP serves AI document/settings authoring. A CRM, workflow service or other
+product calls the HTTP API and consumes Hash's signed lifecycle webhooks. Hash
+owns the document snapshot, customer invitation, signing ceremony and evidence;
+the source system need not remain available for signing.
+
+## Prepared documents and status
+
+Use an organization-wide key with explicit `read` for discovery and downloads,
+and explicit `write:workflow` for Send. The issuer must currently have the
+appropriate Hash role. Document-scoped agent tokens cannot use this machine API.
+New keys default to read/authoring; enable workflow permission deliberately for
+an integration that sends documents. Existing keys are not rewritten.
+
+| Method | Path under `/api/automation/v1` | Result |
+| --- | --- | --- |
+| GET | `/documents` | Organization document list; normal pagination/filter rules apply. |
+| GET | `/documents/{id}` | Current document metadata, including lifecycle `status`. |
+| GET | `/documents/{id}/pdf` | Saved source PDF; this is not the executed final contract. |
+| GET | `/documents/{id}/attachments` | Saved attachment inventory and current package observation. |
+| POST | `/documents/{id}/send` | Send an already prepared document through the normal signing engine. |
+| GET | `/documents/{id}/send-attempts/{attempt_id}` | Inspect a package Send outcome without dispatching another ceremony. |
+| GET | `/documents/{id}/final-pdf` | Exact completed PDF; an unfinished document returns 409. |
+| GET | `/documents/{id}/audit-cert` | Completed audit certificate; an unfinished document returns409. |
+| GET | `/templates` | Organization template list. |
+| GET | `/templates/{id}` | Template content and current version/digest pins. |
+
+These routes apply tenant/credential authorization and the existing artifact
+version/digest checks. They return no storage credentials or customer signing
+links. Delegated/pre-sign source documents keep their separate purpose-specific
+access rules. The source PDF endpoint can report unavailability when a document
+has no saved PDF source; metadata alone does not prove a downloadable PDF exists.
+
+Send requires `Content-Type: application/json` and one strict UTF-8 JSON object,
+limited to 8 KiB. Unknown/duplicate fields, trailing values and explicit null
+inputs are rejected. For an ordinary document:
+
+```http
+POST /api/automation/v1/documents/09bc3de6-931a-4b7c-a3ec-07f6fd8b103b/send
+Authorization: Bearer mth_<prefix>_<secret>
+Content-Type: application/json
+
+{"lawful_basis":"contract"}
+```
+
+Use the exact reviewed `package_send` observation from the attachment inventory
+for a saved nonempty package; see [package Send](DOCUMENT-ATTACHMENTS-API.md).
+Do not derive or increment its timestamp, package UUID or generation. Send uses
+the same role, quota, content-review, signature-field, immutable snapshot,
+attachment, audit and invitation controls as the Hash application.
+
+A confirmed ordinary result is 200 with `document_id` and `status`. Package Send
+can return 202 with `status:"sealing"` and
+`package_send:{attempt_id,outcome:"active",reconciliation_required:true}`.
+Sealing is pending work, not proof that invitations were sent. A 503 containing
+an attempt ID requires inspection of that exact attempt. Signing URLs are never
+returned by this machine operation; Hash delivers the customer invitations.
+
+The existing document UUID is the target of this operation; this route does not
+create an idempotency-key record or accept the template command's replay contract.
+An ordinary repeat after Send returns 409 instead of sending twice. After a lost
+response, read the same document's status and, for a package, inspect the returned
+attempt. Do not create a replacement document or blindly retry an uncertain
+ceremony. `retry_authorized:false` in inspection is not permission to resubmit.
+An attempt's `outcome:"completed"` means Send finished; it does not mean the
+contract has been signed. Use the document status and completion event below.
+
+Consume `document.signed` for individual signing progress and
+`document.completed` for the completed ceremony, correlating by document UUID.
+For signature requests, completion awaits all required signers and finalization.
+Other ceremony types retain their own acknowledgement/acceptance meaning; do not
+interpret an acknowledgement as a signature. Fetch final files only when the
+document is completed. Webhook consumers verify the signature, deduplicate by
+event UUID, and reconcile current status through GET when events are delayed,
+duplicated or arrive out of order. A receiver updates its own product through
+that product's API; Hash does not assume a CRM-specific record schema.
+
+The existing IP/organization automation rate limits also cover these routes.
+Respect429 and `Retry-After`; PDF/evidence resource admission can independently
+return temporary unavailability. See [rate limits](API.md#rate-limits).
+
+The template creation command below remains limited to pinned blocks templates. It has no attachment
 selection or `package_send` input; those fields are rejected, rather than ignored.
-A nonempty saved package cannot use ordinary legacy Send without its explicit
-reviewed package observation. Agents can author/select/review a package and use
-[MCP package Send](DOCUMENT-ATTACHMENTS-API.md#mcp-package-send-and-inspection)
-instead. This API does not execute delegated/pre-sign package signatures.
+A nonempty saved package requires its explicit reviewed package observation.
+Prepare and review it in Hash, then use the prepared-document Send route above.
+This template command does not execute delegated/pre-sign package signatures.
 
 ## Create a signature request
 
@@ -52,7 +131,7 @@ legacy form of this command. From an authenticated template read, copy the
 blocks template's `version` and `content_sha256` into the trusted integration
 configuration:
 
-`GET /api/v1/templates/44bf21a1-26f8-4d85-a444-968649ba891d`
+`GET /api/automation/v1/templates/44bf21a1-26f8-4d85-a444-968649ba891d`
 
 ```json
 {
@@ -63,7 +142,7 @@ configuration:
 }
 ```
 
-The authenticated `GET /api/v1/templates` list exposes the same fields. Review
+The authenticated `GET /api/automation/v1/templates` list exposes the same fields. Review
 the returned block content and default variables before approving those pins;
 do not let webhook or customer input select them. A later template edit always
 increments `version`. Even if an edit produces the same content digest, the old

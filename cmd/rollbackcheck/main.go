@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bright-interaction/hash/internal/bootstrapowner"
 	hashdb "github.com/bright-interaction/hash/internal/db"
 )
 
@@ -215,7 +216,8 @@ WHERE n.nspname = 'public'
 // bootstrap contract. Goose must record precisely the migrations embedded in
 // this exact image and that tree must match the release-manifest digest. Before
 // first candidate startup, every application table must also remain empty
-// except the migration ledger and three billing-plan seeds. After the durable
+// except the migration ledger, three billing-plan seeds and the exact unused
+// resource-control rows installed by migration 89. After the durable
 // exact-candidate-cutover phase, requireEmptyEstate is false: legitimate rows
 // are preserved and the deployment re-runs its lawful-basis and audit gates
 // before restarting the same exact lifecycle contract.
@@ -307,9 +309,8 @@ ORDER BY c.relname`
 	}
 	tableRows.Close()
 	for _, tableName := range tableNames {
-		query := "SELECT EXISTS (SELECT 1 FROM " + pgx.Identifier{"public", tableName}.Sanitize() + " LIMIT 1)"
-		var nonempty bool
-		if err := tx.QueryRow(ctx, query).Scan(&nonempty); err != nil { //nolint:rawsql -- identifier is pgx-quoted catalog output
+		nonempty, err := bootstrapowner.TableHasBusinessRows(ctx, tx, tableName)
+		if err != nil {
 			return result, err
 		}
 		if nonempty {

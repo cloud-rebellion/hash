@@ -52,3 +52,44 @@ queue and cleared after delivery. Old or already used links cannot be replayed.
 The native account routes require migration 117. A downgrade refuses while
 credential, account-request or sealed account-mail data remains; use the
 reviewed restore procedure rather than deleting authentication records.
+
+### First internal workspace
+
+A fresh operator-mode installation needs a real organization before its
+nonempty `HASH_OPERATOR_ENTITLEMENTS` binding can pass startup validation. Use
+the exact release image's maintenance command to create the first workspace
+and its pending owner atomically:
+
+```sh
+hash-bootstrapowner --org-id "$HASH_INITIAL_ORG_ID" --company 'Example Company' \
+  --owner-name 'Example Owner' --owner-email owner@example.com \
+  --review-ref approved-first-workspace
+```
+
+Select a new non-nil organization UUID for `HASH_INITIAL_ORG_ID` in the reviewed
+installation request and bind that same identity in the planned operator
+configuration. The command creates that real organization; it cannot take over
+an unrelated existing identity. `HASH_INITIAL_ORG_ID` is a shell input for this
+example, not an additional application setting.
+
+Supply `HASH_DB_URL` through the managed private configuration, never command
+arguments. This operation requires migration 117 and the existing maintenance,
+source and physical database fences. During a managed first installation, run
+it only after the genuine `exact-candidate-cutover` phase is persisted. The
+earlier `schema-applied-empty-estate` phase requires an unused business estate.
+The command alone does not establish those deployment prerequisites or start
+the application.
+
+Retain the returned organization, owner and audit identities and verify that
+the created organization matches the planned operator binding. Server and
+worker must use that real organization and the same approved finite plan.
+Prepare the selected plan through the existing catalog maintenance process.
+Do not change a validated environment snapshot in the middle of a deployment.
+
+The owner then uses **Forgot password** on the intended HTTPS origin and follows
+the setup email to choose their password. No password, verified mailbox claim,
+OIDC subject, API key, session or subscription is created by the command.
+An exact retry recognizes the original audited initialization and returns its
+identities without replacing later account state. Unrelated existing workspaces
+or a conflicting initialization refuse. SMTP and inbox delivery still require
+the normal deployed acceptance checks.

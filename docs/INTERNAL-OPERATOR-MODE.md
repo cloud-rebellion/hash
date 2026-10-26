@@ -1,7 +1,7 @@
 # Production internal-operator mode
 
 `HASH_BILLING_PROVIDER=operator` runs Hash for approved internal organizations
-without collecting payments. It is a production mode: OIDC, secure cookies,
+without collecting payments. It is a production mode: staff authentication, secure cookies,
 proxy authentication, stable audit keys, scanner, storage, capability checks and
 all other production requirements remain mandatory. Unset or mock billing is
 still rejected outside loopback development.
@@ -36,6 +36,12 @@ Unknown fields, duplicate fields and trailing input are rejected. Unassigned
 organizations have no entitlement; existing payment subscriptions do not grant
 access in this mode. Server and worker verify all assigned organizations and
 plans before starting. Do not set this variable in Mollie mode.
+
+For a fresh installation, establish the real first workspace and pending owner
+with the exact image's `hash-bootstrapowner` maintenance command before starting
+operator mode; see [staff login](STAFF-LOGIN.md#first-internal-workspace). Bind
+the returned organization UUID through managed configuration. The command does
+not grant a plan or create a password, session or payment subscription.
 
 Quota usage counts actual authoring documents and recipients, serialized at the
 existing transactional authoring boundary and checked again at send. Internal

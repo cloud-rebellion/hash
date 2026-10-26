@@ -278,7 +278,7 @@ func TestFirstInstallSchemaProofBindsExactMigrationsAndEmptyEstate(t *testing.T)
 		"pgx.RepeatableRead", "pgx.ReadOnly",
 		"DISTINCT ON (version_id)", "equalMigrationVersions(appliedVersions, embeddedVersions)",
 		"c.relname NOT IN ('goose_db_version', 'billing_plans')",
-		"pgx.Identifier{\"public\", tableName}.Sanitize()",
+		"bootstrapowner.TableHasBusinessRows(ctx, tx, tableName)",
 		"result.NonemptyBusinessTables++",
 		"send_sealing_intents", "document_finalization_intents",
 		"result.NonemptyBusinessTables == 0 && result.LifecycleIntents == 0",

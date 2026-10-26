@@ -3,9 +3,9 @@
 
 // Package auth provides sender-session and signer-token helpers.
 //
-// Senders authenticate via Zitadel OIDC; the resulting session is a signed
-// cookie we mint server-side. Signers use magic links ,  a UUID + HMAC stored
-// hashed in the recipients table.
+// Senders authenticate with email/password or optional OIDC; the resulting
+// session is a signed cookie we mint server-side. Signers use magic links:
+// a UUID + HMAC stored hashed in the recipients table.
 package auth
 
 import (

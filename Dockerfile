@@ -35,7 +35,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/audit-verify ./cmd/auditverify && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/rollback-check ./cmd/rollbackcheck && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate && \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/catalogmeasure ./cmd/catalogmeasure
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/catalogmeasure ./cmd/catalogmeasure && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/bootstrapowner ./cmd/bootstrapowner
 
 # Stage 3: runtime image. Distroless-static would be tighter but alpine
 # stays consistent with brightcrm and gives us a shell for emergency debug.
@@ -57,6 +58,7 @@ COPY --from=backend /out/audit-verify /usr/local/bin/hash-audit-verify
 COPY --from=backend /out/rollback-check /usr/local/bin/hash-rollback-check
 COPY --from=backend /out/migrate /usr/local/bin/hash-migrate
 COPY --from=backend /out/catalogmeasure /usr/local/bin/hash-catalogmeasure
+COPY --from=backend /out/bootstrapowner /usr/local/bin/hash-bootstrapowner
 EXPOSE 8080
 USER hash:hash
 ENTRYPOINT ["/usr/local/bin/hash-server"]

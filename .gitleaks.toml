@@ -92,3 +92,22 @@ condition = "AND"
 paths = ['''^internal/config/crm_test\.go$''', '''^internal/handler/crm_connection_e2e_test\.go$''']
 regexTarget = "secret"
 regexes = ['''^\x61\x62\x63\x64\x65\x66\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x61\x62\x63\x64\x65\x66\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x61\x62\x63\x64\x65\x66\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x61\x62\x63\x64\x65\x66\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39$''']
+
+# Checkpoint532: historical Go field selectors, not Vault credentials.
+# Provenance: 878b2651056565492673d3c3623ff3412d003174; exact paths AND extracted values only.
+[[rules]]
+id = "vault-service-token"
+
+[[rules.allowlists]]
+description = "Reviewed Go hash selector 1: record corruption tests or decoder comparison; no credential literal"
+condition = "AND"
+paths = ['''^internal/presignexecute/record_test\.go$''', '''^internal/presignexecute/store\.go$''']
+regexTarget = "secret"
+regexes = ['''^s\.OriginalCredentialSHA256$''']
+
+[[rules.allowlists]]
+description = "Reviewed Go hash selector 2: record corruption tests or decoder comparison; no credential literal"
+condition = "AND"
+paths = ['''^internal/presignexecute/record_test\.go$''']
+regexTarget = "secret"
+regexes = ['''^s\.OriginalCredentialSha256$''']

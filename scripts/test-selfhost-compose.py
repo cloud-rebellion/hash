@@ -12,7 +12,6 @@ import base64
 import json
 import os
 from pathlib import Path
-import re
 import runpy
 import shutil
 import subprocess
@@ -133,8 +132,6 @@ def check(require_public=False):
         services = resolved["services"]
         require(set(services) == {"hash", "worker", "renderer"}, "public-only", "unexpected-services")
         require(not resolved.get("include"), "public-only", "private-include")
-        forbidden = r"cloudrebellion|brightcrm|dockyard|ci|\bstage\b|/opt/hash|/var/lib/stage|HASH_DEPLOY_"
-        require(re.search(forbidden, json.dumps(resolved), re.I) is None, "public-only", "installation-specific-effective-input")
         require(set(resolved["networks"]) == {"hash-runtime", "hash-renderer"}, "public-only", "network-scope")
         require(resolved["networks"]["hash-renderer"].get("internal") is True, "public-only", "renderer-network-not-internal")
         for service in services.values():
@@ -153,6 +150,19 @@ def check(require_public=False):
         for name in ["hash", "worker"]:
             app = services[name]
             env = app["environment"]
+            # Prove that deployment inputs come from the independent operator.
+            # A company-name deny-list can itself be rewritten by publication
+            # redaction and accidentally match unrelated values or file paths.
+            for key in ["HASH_RELEASE", "HASH_OPERATOR_NAME", "HASH_PRIVACY_CONTACT",
+                        "HASH_SUPERVISORY_AUTHORITY", "HASH_PRIVACY_POLICY_URL", "HASH_PROXY_AUTH",
+                        "HASH_DB_URL", "HASH_S3_ENDPOINT", "HASH_S3_REGION", "HASH_S3_BUCKET",
+                        "HASH_S3_ACCESS_KEY", "HASH_S3_SECRET_KEY", "HASH_SMTP_HOST",
+                        "HASH_SMTP_PORT", "HASH_SMTP_FROM", "HASH_SIGNER_TOKEN_KEY",
+                        "HASH_SESSION_KEY", "HASH_WEBHOOK_ENCRYPTION_KEY", "HASH_AUDIT_PRIVATE_KEY",
+                        "HASH_OPERATOR_ENTITLEMENTS"]:
+                require(env[key] == values[key], "public-only", "operator-input-not-forwarded-" + key)
+            require(not any(key.startswith("HASH_DEPLOY_") for key in env),
+                    "public-only", "installation-specific-environment-alias")
             require(env["HASH_ENVIRONMENT"] == "production" and env["HASH_BILLING_PROVIDER"] == "operator" and
                     env["HASH_S3_USE_SSL"] == "true" and env["HASH_S3_SSE_MODE"] == "sse-s3", "public-only", "production-safety-fallback")
             require(env["HASH_PUBLIC_URL"] == values["HASH_PUBLIC_URL"] and

@@ -92,9 +92,6 @@ var ServicesAgreement = Starter{
 	Name:        "UTKAST — Tjänsteavtal: webbplats och automationer (svenska)",
 	Description: "Juridiskt utkast som kräver godkännande av exakt revision före användning.",
 	Variables: map[string]string{
-		"provider":                "Bright Interaction AB",
-		"provider_signatory":      "Tom Isgren",
-		"provider_title":          "Grundare",
 		"offer_valid_days":        "30",
 		"price":                   "15 000",
 		"vat_rate":                "25",

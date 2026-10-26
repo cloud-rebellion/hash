@@ -196,6 +196,11 @@ func demoContract() (blocksJSON, varsJSON []byte) {
 	for k, v := range agreement.ServicesAgreement.Variables {
 		vars[k] = v
 	}
+	// Provider identity belongs to this explicit demo fixture, never to the
+	// reusable starter defaults copied into another organisation's contracts.
+	vars["provider"] = "Bright Interaction AB"
+	vars["provider_signatory"] = "Tom Isgren"
+	vars["provider_title"] = "Grundare"
 	vars["client"] = "Demobolaget AB"
 	vars["client_orgnr"] = "5566XX-XXXX"
 	vars["client_signatory"] = "Anna Exempel"

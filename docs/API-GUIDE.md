@@ -398,7 +398,7 @@ capacity refuses work. This is not a default throughput guarantee. The retained
 legacy accounting API still requires at least two pooled connections.
 
 Configured-provider delivery, production throughput and billing reconciliation
-require acceptance in the target deployment. See [completion status](COMPLETION-STATUS.md)
+require acceptance in the target deployment. See [readiness](READINESS.md)
 for current qualification and remaining gates.
 
 ## MCP envelope authoring
@@ -678,7 +678,8 @@ create/edit calls, canceled discard, preview and URL draft retention with no
 browser exceptions. Its receipt is
 `/private/tmp/hash-browser-sender-panel-receipt.json`; it performs no send or SMTP
 operation. That earlier frontend checkpoint passed 126 tests and check/build;
-later source-unit results are recorded in [completion status](COMPLETION-STATUS.md).
+later source-unit results remain in the operator's qualification record. See
+[readiness](READINESS.md) for supported scope and deployment acceptance.
 Real OIDC, SMTP inbox receipt, CRM/Reactor integration, ClamAV scanning, storage
 retention/restore, deployment, workload capacity and broader signing acceptance
 remain separate gates. These results are not compliance certification.

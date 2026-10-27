@@ -59,7 +59,7 @@ Resizing the view retains the saved PDF coordinates. Generated signing-page fiel
 keep their protected layout. PDF history updates as the source changes; opening
 an earlier revision is read-only and does not restore, approve or send it.
 See [HTML design API](docs/API.md#html-design-draft-api)
-and [completion status](docs/COMPLETION-STATUS.md) for contracts and remaining
+and [readiness and limits](docs/READINESS.md) for contracts and remaining
 release acceptance.
 
 ## Quick start

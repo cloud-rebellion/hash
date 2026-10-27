@@ -511,10 +511,12 @@ audit without claiming delivery. Direct-message rendering errors refuse before
 commit. No successful reminder response promises inbox delivery; configured
 SMTP and outage/retry acceptance remain release gates.
 
-Machine-readable request/response contracts for the automation command are in
+Machine-readable request/response contracts for the standalone automation API are in
 [openapi-automation.json](openapi-automation.json), using
 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html). They cover the
-signature-request command only. UTF-8 byte limits are described and annotated
+11 path entries: the signature-request command, prepared-document discovery,
+status/source/completed-file reads, attachments and Send-attempt inspection,
+template reads, and Send of an existing document. UTF-8 byte limits are described and annotated
 with `x-maxUtf8Bytes`; generic schema tooling does not enforce these extensions
 or dynamic template, role, expiry and lifecycle rules. Server validation remains
 authoritative. The Go contract test guards property/required-field drift.
@@ -1221,8 +1223,8 @@ No history is silently dropped and the existing limits are unchanged.
 The final required response atomically freezes the actual locked family before
 committing. Its original deadline/credential is rechecked after admission work.
 This boundary does not reserve future report headroom after partial responses;
-later-writer admission and configured/browser qualification remain tracked in
-`COMPLETION-STATUS.md`. A successful acknowledgement's cleanup checks its own
+later-writer admission and configured/browser qualification remain deployment-specific;
+see [readiness](READINESS.md). A successful acknowledgement's cleanup checks its own
 operation; unrelated pending consumers retain their resources independently.
 
 
@@ -1283,4 +1285,4 @@ The active `/package` routes retain their active-only guards. These terminal
 routes grant no Send authority. Native package Send requires the exact reviewed
 capture, intent and retained completion guarded by migration110; legacy Send
 cannot bypass that lifecycle. Current browser, configured-service and release
-qualification is tracked separately in `COMPLETION-STATUS.md`.
+qualification remains deployment-specific; see [readiness](READINESS.md).

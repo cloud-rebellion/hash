@@ -32,10 +32,11 @@ def require(condition, case, classification):
 
 def check(require_public=False):
     if require_public:
-        for name in ["docker-compose.prod.yml", "PRODUCTION-CUTOVER.md", "PLAN.md"]:
+        for name in ["docker-compose.prod.yml", "PRODUCTION-CUTOVER.md", "PLAN.md", "docs/COMPLETION-STATUS.md",
+                     "ops/INGRESS-RATE-LIMIT.md"]:
             require(not (ROOT / name).exists(), "actual-public-export", "private-artifact-present")
         for name in ["docker-compose.yml", "docker-compose.selfhost.yml", "DEPLOY.md", ".env.example", "README.md",
-                     "scripts/test-renderer-compose.py", "scripts/test-selfhost-compose.py"]:
+                     "docs/READINESS.md", "scripts/test-renderer-compose.py", "scripts/test-selfhost-compose.py"]:
             require((ROOT / name).is_file(), "actual-public-export", "missing-shipped-file")
         print("PASS case=actual-public-export-inventory")
     with tempfile.TemporaryDirectory(prefix="hash-selfhost-compose-") as temporary:

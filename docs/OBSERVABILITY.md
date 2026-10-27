@@ -4,17 +4,17 @@ Status: **source and controlled local qualification; next-deploy acceptance UNPR
 
 This guide defines useful monitoring for the next Hash deployment. It does not
 record a deployment or certify existing telemetry. Consult the current
-[completion status](COMPLETION-STATUS.md) for exact local application qualification;
-that is separate from configured dependencies, browser acceptance, managed release
-and Flare delivery. Historical completion recaps retain their own evidence and dates.
+[readiness](READINESS.md) for supported scope and deployment acceptance. Exact
+qualification receipts remain in the operator's release record, separate from
+configured dependencies, browser acceptance, managed release and Flare delivery.
 
 The original source/privacy audit baseline is dated 2026-10-19. The matrix below
 now distinguishes the applied central source foundation from its remaining gaps:
 runtime public browser configuration, direct credential-free ingestion, fixed
 safe signals, explicit identity and process-bound telemetry lifecycle are present
 in the selected source. This guide is not a local qualification receipt; exact
-local results remain in [completion status](COMPLETION-STATUS.md) after the selected
-checks are reconciled. No browser ingest relay or Stage change is added. A fixed
+local results remain in the operator's qualification record after the selected
+checks are reconciled. See [readiness](READINESS.md) for remaining acceptance. No browser ingest relay or Stage change is added. A fixed
 12-slot worker observation inventory and parent PDF attempt observations extend
 the central foundation. Ten slots report invocation state; the original email
 and finalizer slots retain their selected-row sample contract. A fixed safe native delivery-diagnostics projection, typed OIDC outcomes and

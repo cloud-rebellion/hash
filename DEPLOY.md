@@ -685,12 +685,15 @@ which is trusted only under the current signer's public key;
 the factual instance identity `HASH_OPERATOR_NAME`, one plain-email
 `HASH_PRIVACY_CONTACT`, and the deployment's applicable
 `HASH_SUPERVISORY_AUTHORITY`, plus the operator's absolute HTTPS
-`HASH_PRIVACY_POLICY_URL` (these values are rendered to every signer; the
-software does not assume Bright Interaction owns a self-hosted instance or
-link self-hosted signers to Bright Interaction's policy);
-`HASH_QES_PROVIDER` left unset (AES/QES are fail-closed), a real fully keyed
-`HASH_BILLING_PROVIDER=mollie` configuration (unset or `mock` is development-only); and -- if any AI provider key
-is set -- a 64-hex `HASH_AI_SHIELD_KEY` with an EU provider host.
+`HASH_PRIVACY_POLICY_URL` (these values are rendered to every signer and must
+describe the actual deployment operator and its own privacy policy);
+`HASH_QES_PROVIDER` left unset (AES/QES are fail-closed), plus either reviewed
+`HASH_BILLING_PROVIDER=operator` entitlements in `HASH_OPERATOR_ENTITLEMENTS`
+for actual organizations and active plans with positive finite document and
+recipient quotas (see [operator mode](docs/INTERNAL-OPERATOR-MODE.md)), or a fully
+keyed `HASH_BILLING_PROVIDER=mollie` configuration for paid billing (unset or
+`mock` is development-only); and -- if any AI provider key is set -- a 64-hex
+`HASH_AI_SHIELD_KEY` with an EU provider host.
 See the "Production boot guards" list in `.env.example`.
 
 `HASH_WEBHOOK_ENCRYPTION_KEY` is a dedicated AES-256-GCM key and is required

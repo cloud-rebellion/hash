@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 # Copyright (c) Bright Interaction
-"""Reconcile only the two reviewed Kit findings; never execute project code."""
+"""Reconcile three exact static/build-only findings; never execute project code."""
 
 import argparse
 import datetime
@@ -22,10 +22,23 @@ INTEGRITY = "sha512-UDvEYuZqAMbfB/oXIoqKvbKcb7YczK5zYrzmsGV1zRJk03jntwp8dXiYoIJo
 LOCK_SHA256 = "c1e7b5e13f679b3ee7341d6ae1e192e3c5beb4feb6e0a406ca3fe918494df3d3"
 LOCK_BYTES = 55105
 KNOWN = {1243067: "GHSA-pfhg-q3qv-9q6r", 1243076: "GHSA-27mw-82g8-phjj"}
+BUILD_PACKAGE = "deepmerge"
+BUILD_VERSION = "4.3.1"
+BUILD_INTEGRITY = "sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A=="
+BUILD_KNOWN = {1243505: "GHSA-gcqx-w48m-w2h4"}
+BUILD_PINS = {
+    "frontend/vite.config.ts": (359, "29d90b8be4608102abf8e56f2e8178d9ab20cf7e91587626b76b0026159bc2e9"),
+    "frontend/node_modules/@sveltejs/vite-plugin-svelte/src/utils/options.js":
+        (22347, "d4b27fdc5d4580b2023a1a8c69aa9ad670375bcf6132d72b9fb73e36249e9447"),
+    "frontend/node_modules/@sveltejs/vite-plugin-svelte/src/utils/load-svelte-config.js":
+        (3650, "c70f865d8a634a308c8d2e73d69fb660a3144aab42294cc1c550ffe893ffed29"),
+    "frontend/node_modules/deepmerge/dist/cjs.js":
+        (4048, "2e5160f84a1141bd927264afe4d15766f1e6cf07daef182b37ff53fea121de7d"),
+}
 REVIEW_KEYS = {
     "schema", "package", "version", "integrity", "lock_sha256", "lock_bytes",
     "bun_version", "adapter", "adapter_version", "profile", "reviewed_on",
-    "review_expires_on", "advisories",
+    "review_expires_on", "advisories", "build_dependency",
 }
 AUDIT_KEYS = {"id", "url", "title", "severity", "vulnerable_versions", "cwe", "cvss"}
 STATIC_CONFIG = """import adapter from '@sveltejs/adapter-static';
@@ -84,13 +97,15 @@ def read_json(path, limit=1 << 20):
                       object_pairs_hook=unique_object, parse_constant=reject_constant)
 
 
-def audit_record(value):
+def audit_record(value, package=PACKAGE):
     require(type(value) is dict and set(value) == AUDIT_KEYS, "unreviewed audit record shape")
     identity = value["id"]
-    require(type(identity) is int and identity in KNOWN, "unreviewed advisory ID")
-    require(value["url"] == "https://github.com/advisories/" + KNOWN[identity]
+    known = {PACKAGE: KNOWN, BUILD_PACKAGE: BUILD_KNOWN}.get(package, {})
+    require(type(identity) is int and identity in known, "unreviewed advisory ID")
+    affected = "<3.0.0" if package == PACKAGE else ">=4.2.0 <=4.3.1"
+    require(value["url"] == "https://github.com/advisories/" + known[identity]
             and type(value["title"]) is str and 0 < len(value["title"]) < 512
-            and value["severity"] == "low" and value["vulnerable_versions"] == "<3.0.0",
+            and value["severity"] == "low" and value["vulnerable_versions"] == affected,
             "advisory identity, severity or affected range changed")
     require(type(value["cwe"]) is list and len(value["cwe"]) == 1
             and type(value["cwe"][0]) is str, "unreviewed CWE shape")
@@ -132,6 +147,25 @@ def validate_review(root, bun_version):
                 "review advisory disposition changed")
         approved[identity] = entry["audit"]
     require(set(approved) == set(KNOWN), "review advisory set changed")
+    build = review["build_dependency"]
+    require(type(build) is dict and set(build) == {
+        "package", "version", "integrity", "dependency_path", "reviewed_on", "review_expires_on", "advisory"},
+        "build dependency review shape changed")
+    require(build["package"] == BUILD_PACKAGE and build["version"] == BUILD_VERSION
+            and build["integrity"] == BUILD_INTEGRITY
+            and build["dependency_path"] == ["@sveltejs/vite-plugin-svelte@5.1.1", "deepmerge@4.3.1"]
+            and build["reviewed_on"] == "2026-10-28"
+            and build["review_expires_on"] == "2026-11-07"
+            and datetime.date.fromisoformat(build["reviewed_on"]) <= today <= expires,
+            "reviewed build dependency identity changed")
+    entry = build["advisory"]
+    require(type(entry) is dict and set(entry) == {"audit", "primary_url", "status", "justification"},
+            "build advisory review shape changed")
+    identity = audit_record(entry["audit"], BUILD_PACKAGE)
+    require(entry["status"] == "not_affected"
+            and entry["primary_url"] == "https://github.com/advisories/" + BUILD_KNOWN[identity]
+            and type(entry["justification"]) is str and len(entry["justification"]) >= 40,
+            "build advisory disposition changed")
     lock = read_file(root / "frontend/bun.lock", 1 << 20)
     require(len(lock) == LOCK_BYTES and hashlib.sha256(lock).hexdigest() == LOCK_SHA256,
             "reviewed frozen lock changed")
@@ -144,7 +178,35 @@ def validate_review(root, bun_version):
         installed = read_json(root / "frontend/node_modules" / name / "package.json")
         require(type(installed) is dict and installed.get("name") == name
                 and installed.get("version") == version, "installed package or adapter version changed")
-    return approved, expires
+    return {PACKAGE: approved, BUILD_PACKAGE: {identity: entry["audit"]}}, expires
+
+
+def build_dependency_profile(root):
+    package = read_json(root / "frontend/package.json")
+    require(package["devDependencies"].get("@sveltejs/vite-plugin-svelte") == "^5.1.1"
+            and type(package.get("scripts")) is dict
+            and package["scripts"].get("build") == "vite build"
+            and all(type(package.get(kind, {})) is dict for kind in
+                    ("dependencies", "optionalDependencies", "peerDependencies"))
+            and all(BUILD_PACKAGE not in package.get(kind, {}) for kind in
+                    ("dependencies", "optionalDependencies", "peerDependencies")),
+            "deepmerge is no longer solely the reviewed build dependency")
+    for name, version in (("@sveltejs/vite-plugin-svelte", "5.1.1"), (BUILD_PACKAGE, BUILD_VERSION)):
+        installed = read_json(root / "frontend/node_modules" / name / "package.json")
+        require(type(installed) is dict and installed.get("name") == name and installed.get("version") == version,
+                "installed build dependency changed")
+        if name == "@sveltejs/vite-plugin-svelte":
+            require(installed.get("dependencies", {}).get(BUILD_PACKAGE) == "^4.3.1",
+                    "reviewed build dependency path changed")
+        else:
+            require(installed.get("main") == "dist/cjs.js", "deepmerge entry point changed")
+    for relative, (size, digest) in BUILD_PINS.items():
+        raw = read_file(root / relative, 128 << 10)
+        require(len(raw) == size and hashlib.sha256(raw).hexdigest() == digest,
+                "reviewed build configuration or merge consumer changed: " + relative)
+    for prefix, expected in (("vite.config.", "vite.config.ts"), ("svelte.config.", "svelte.config.js")):
+        require({path.name for path in (root / "frontend").glob(prefix + "*")} == {expected},
+                "alternate build configuration requires review")
 
 
 def source_profile(root):
@@ -177,6 +239,9 @@ def source_profile(root):
         total += len(raw)
         require(total <= 32 << 20, "frontend source exceeds review bound")
         text = raw.decode("utf-8")
+        require(all(name not in text for name in
+                    (BUILD_PACKAGE, "@sveltejs/vite-plugin-svelte", "@sveltejs/kit/vite")),
+                "deepmerge or its build consumer runtime import requires review")
         require("$app/forms" not in text and "setHeaders" not in text
                 and re.search(r"use\s*:\s*enhance\b", text) is None
                 and re.search(r"\bexport\s+(?:const|let|var)\s+prerender\b", text) is None,
@@ -206,6 +271,22 @@ def source_profile(root):
                     for line in final if line.startswith("COPY "))
             and not re.search(r'\b(?:node|nodejs|bun|npm|npx|deno|svelte-kit|vite)\b', "\n".join(final)),
             "production image is no longer the reviewed Go-only frontend server")
+    build_dependency_profile(root)
+
+
+def validate_report(report, approved):
+    require(type(report) is dict and set(report) == {PACKAGE, BUILD_PACKAGE},
+            "audit contains unreviewed packages")
+    for package, findings in report.items():
+        require(type(findings) is list and len(findings) == len(approved[package]),
+                "audit finding count changed")
+        observed = set()
+        for finding in findings:
+            identity = audit_record(finding, package)
+            require(identity not in observed and finding == approved[package][identity],
+                    "audit finding is duplicated or its reviewed metadata changed")
+            observed.add(identity)
+        require(observed == set(approved[package]), "audit advisory set changed")
 
 
 class StaticIndex(HTMLParser):
@@ -268,24 +349,15 @@ def main():
         require(args.audit_exit_code == 1, "only native Bun audit exit 1 can be reconciled")
         approved, expires = validate_review(args.root, args.bun_version)
         report = read_json(args.report)
-        require(type(report) is dict and set(report) == {PACKAGE}
-                and type(report[PACKAGE]) is list and len(report[PACKAGE]) == 2,
-                "audit contains unreviewed packages or finding count")
-        observed = {}
-        for finding in report[PACKAGE]:
-            identity = audit_record(finding)
-            require(identity not in observed and finding == approved[identity],
-                    "audit finding is duplicated or its reviewed metadata changed")
-            observed[identity] = finding
-        require(set(observed) == set(KNOWN), "audit advisory set changed")
+        validate_report(report, approved)
         source_profile(args.root)
         built_index(args.root)
     except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError) as error:
         print("frontend audit reconciliation REFUSED: " + str(error), file=sys.stderr)
         return 1
-    print("frontend audit: native Bun audit exit=1; two low findings remain reported; "
-          "exact @sveltejs/kit@2.70.3 findings reviewed not_affected for the verified static profile "
-          "through " + expires.isoformat() + ": " + ", ".join(KNOWN.values()))
+    print("frontend audit: native Bun audit exit=1; three low findings remain reported; "
+          "exact Kit/static and deepmerge/build-only findings reviewed not_affected "
+          "through " + expires.isoformat() + ": " + ", ".join([*KNOWN.values(), *BUILD_KNOWN.values()]))
     return 0
 
 

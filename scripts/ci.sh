@@ -254,6 +254,10 @@ frontend_dependency_audit() {
     rm -f -- "$report"
     return 1
   }
+  python3 scripts/test-frontend-audit.py || {
+    rm -f -- "$report"
+    return 1
+  }
   python3 scripts/reconcile-frontend-audit.py --root . --report "$report" \
     --audit-exit-code "$rc" --bun-version "$bun_version"
   rc=$?

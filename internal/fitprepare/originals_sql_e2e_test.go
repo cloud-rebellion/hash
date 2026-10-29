@@ -25,8 +25,9 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// Real public constructor, normal embedded migrations and actual guarded85/87
-// preparation. Synthetic source/geometry/packages/storage isolate the original
+// Real public constructor, caller-pinned current embedded migrations and actual
+// guarded preparation/original protocols introduced in85/87. Synthetic
+// source/geometry/packages/storage isolate the original
 // capture and recovery protocol; this is not renderer, provider or live Sign
 // acceptance and does not simulate a successful COMMIT with a lost ACK.
 type originalPGFixtureV1 struct {
@@ -65,8 +66,9 @@ func originalPGSetupV1(t *testing.T) *originalPGFixtureV1 {
 	}
 	digest, versions, err := db.EmbeddedMigrationsIdentity()
 	originalPGMustV1(t, "embedded original capture identity", err)
-	if digest != os.Getenv("HASH_E2E_EXPECT_MIGRATIONS_SHA256") || len(versions) != 87 {
-		t.Fatal("root must pin exact contiguous87 migration tree")
+	want := os.Getenv("HASH_E2E_EXPECT_MIGRATIONS_SHA256")
+	if want == "" || digest != want || len(versions) < 87 {
+		t.Fatal("root must pin the exact current embedded release including migration87")
 	}
 	for i, n := range versions {
 		if n != int64(i+1) {
@@ -75,51 +77,71 @@ func originalPGSetupV1(t *testing.T) *originalPGFixtureV1 {
 	}
 	v := &originalPGFixtureV1{f: protocolFixtureV1(t, "v1-case-1.fit", 1)}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	t.Cleanup(cancel)
 	v.ctx = ctx
 	config, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 	originalPGMustV1(t, "parse private owned database configuration", err)
 	admin, err := pgx.ConnectConfig(ctx, config.Copy())
 	originalPGMustV1(t, "connect owned synthetic parent", err)
-	database := "hash_original87_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
-	originalPGMustV1(t, "create exact owned original database", err)
-	config.Database = database
-	migrator := stdlib.OpenDB(*config.Copy())
-	originalPGMustV1(t, "apply normal embedded87 migrations", db.RunMigrations(migrator))
-	originalPGMustV1(t, "close owned migrator", migrator.Close())
-	observerConfig := config.Copy()
-	observerConfig.RuntimeParams["application_name"] = "hash-original87-observer"
-	v.observer, err = pgx.ConnectConfig(ctx, observerConfig)
-	originalPGMustV1(t, "connect independent observer", err)
-	v.q = generated.New(v.observer)
-	poolConfig, err := pgxpool.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
-	originalPGMustV1(t, "parse owned writer pool", err)
-	poolConfig.ConnConfig = config.Copy()
-	poolConfig.ConnConfig.RuntimeParams["application_name"] = "hash-original87-writer"
-	poolConfig.ConnConfig.Tracer = originalPGTracerV1{v}
-	poolConfig.MaxConns = 2
-	poolConfig.MinConns = 0
-	poolConfig.MinIdleConns = 0
-	v.pool, err = pgxpool.NewWithConfig(ctx, poolConfig)
-	originalPGMustV1(t, "create owned writer pool", err)
+	database := "hash_fit_original_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	created := false
+	var migration interface{ Close() error }
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		if v.j != nil && v.j.CloseV1(cleanup) != nil {
 			t.Error("join original adapter shutdown")
 		}
-		v.pool.Close()
-		if v.observer.Close(cleanup) != nil {
+		if v.pool != nil {
+			v.pool.Close()
+		}
+		if migration != nil && migration.Close() != nil {
+			t.Error("close original fixture migrator")
+		}
+		if v.observer != nil && v.observer.Close(cleanup) != nil {
 			t.Error("close original observer")
 		}
-		if _, e := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); e != nil {
-			t.Error("drop exact owned original database")
+		if created {
+			if _, e := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); e != nil {
+				t.Error("drop exact owned original database")
+			}
 		}
 		if admin.Close(cleanup) != nil {
 			t.Error("close original fixture admin")
 		}
-		cancel()
 	})
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	originalPGMustV1(t, "create exact owned original database", err)
+	created = true
+	config.Database = database
+	migrator := stdlib.OpenDB(*config.Copy())
+	migration = migrator
+	originalPGMustV1(t, "apply exact current embedded migrations", db.RunMigrationsContext(ctx, migrator))
+	originalPGMustV1(t, "close owned migrator", migrator.Close())
+	migration = nil
+	observerConfig := config.Copy()
+	observerConfig.RuntimeParams["application_name"] = "hash-fit-original-observer"
+	v.observer, err = pgx.ConnectConfig(ctx, observerConfig)
+	originalPGMustV1(t, "connect independent observer", err)
+	var count, distinct, latest int64
+	var applied bool
+	wantHistoryRows := int64(len(versions) + 1)
+	err = v.observer.QueryRow(ctx, "SELECT count(*),count(DISTINCT version_id),max(version_id),bool_and(is_applied) FROM goose_db_version").Scan(&count, &distinct, &latest, &applied)
+	originalPGMustV1(t, "read exact current migration history", err)
+	if count != wantHistoryRows || distinct != wantHistoryRows || latest != versions[len(versions)-1] || !applied {
+		t.Fatal("normal original fixture history differs from the exact compiled release")
+	}
+	v.q = generated.New(v.observer)
+	poolConfig, err := pgxpool.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
+	originalPGMustV1(t, "parse owned writer pool", err)
+	poolConfig.ConnConfig = config.Copy()
+	poolConfig.ConnConfig.RuntimeParams["application_name"] = "hash-fit-original-writer"
+	poolConfig.ConnConfig.Tracer = originalPGTracerV1{v}
+	poolConfig.MaxConns = 2
+	poolConfig.MinConns = 0
+	poolConfig.MinIdleConns = 0
+	v.pool, err = pgxpool.NewWithConfig(ctx, poolConfig)
+	originalPGMustV1(t, "create owned writer pool", err)
 	in := v.f.request.Authority.Input()
 	user := uuid.New()
 	source := v.f.objects.source
@@ -130,9 +152,9 @@ func originalPGSetupV1(t *testing.T) *originalPGFixtureV1 {
 		sql  string
 		args []any
 	}{
-		{"INSERT INTO orgs(id,name) VALUES($1,'synthetic original87')", []any{in.OrgID}},
+		{"INSERT INTO orgs(id,name) VALUES($1,'synthetic current original')", []any{in.OrgID}},
 		{"INSERT INTO users(id,org_id,email,name,role) VALUES($1,$2,$3,'Synthetic Owner','owner')", []any{user, in.OrgID, user.String() + "@invalid.example"}},
-		{"INSERT INTO documents(id,org_id,name,status,source_kind,sender_id,pdf_storage_key,pdf_sha256,pdf_storage_version_id,evidence_version_pins_required) VALUES($1,$2,'original87 protocol source','draft','pdf',$3,$4,$5,$6,true)", []any{in.DocumentID, in.OrgID, user, source.Key, digestBytesV1(source.SHA256), source.VersionID}},
+		{"INSERT INTO documents(id,org_id,name,status,source_kind,sender_id,pdf_storage_key,pdf_sha256,pdf_storage_version_id,evidence_version_pins_required) VALUES($1,$2,'current original protocol source','draft','pdf',$3,$4,$5,$6,true)", []any{in.DocumentID, in.OrgID, user, source.Key, digestBytesV1(source.SHA256), source.VersionID}},
 		{"INSERT INTO document_branding_override(document_id,primary_hex,accent_hex,surface_hex,text_hex,muted_hex,logo_url,logo_alt,font_heading,font_body,signature_color) VALUES($1,'#0F172A','#3B82F6','#FFFFFF','#0F172A','#64748B','','','Inter','Inter','#0F172A')", []any{in.DocumentID}},
 		{"INSERT INTO recipients(id,document_id,email,name,role,magic_token_hash) VALUES($1,$2,'synthetic.original@invalid.example','Synthetic Customer','customer',$3)", []any{in.RecipientID, in.DocumentID, digestBytesV1(digestV1([]byte("synthetic original credential")))}},
 	} {
@@ -143,7 +165,7 @@ func originalPGSetupV1(t *testing.T) *originalPGFixtureV1 {
 		_, err = tx.Exec(ctx, "INSERT INTO document_fields(id,document_id,recipient_id,type,page,x_pct,y_pct,w_pct,h_pct) VALUES($1,$2,$3,'signature',$4,$5::numeric,$6::numeric,$7::numeric,$8::numeric)", target.ID, in.DocumentID, in.RecipientID, target.Page, target.X, target.Y, target.W, target.H)
 		originalPGMustV1(t, "seed exact synthetic original target", err)
 	}
-	_, err = tx.Exec(ctx, "INSERT INTO send_sealing_intents(document_id,org_id,actor_user_id,actor_email,actor_ip,via,tool,article13_notice_epoch_at,retain_until) VALUES($1,$2,$3,'synthetic.owner@invalid.example','127.0.0.1','e2e','original87-fixture',$4,hash_evidence_retain_until($4,7))", in.DocumentID, in.OrgID, user, in.CeremonyEpoch)
+	_, err = tx.Exec(ctx, "INSERT INTO send_sealing_intents(document_id,org_id,actor_user_id,actor_email,actor_ip,via,tool,article13_notice_epoch_at,retain_until) VALUES($1,$2,$3,'synthetic.owner@invalid.example','127.0.0.1','e2e','current-original-fixture',$4,hash_evidence_retain_until($4,7))", in.DocumentID, in.OrgID, user, in.CeremonyEpoch)
 	originalPGMustV1(t, "allocate guarded original ceremony", err)
 	q := generated.New(tx)
 	_, err = q.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: in.DocumentID, OrgID: in.OrgID})
@@ -388,7 +410,7 @@ func TestOriginalJournalBlockedCancellationJoinsPhysicalE2E(t *testing.T) {
 	p := v.row(t)
 	barrierConfig := v.pool.Config().ConnConfig.Copy()
 	barrierConfig.Tracer = nil
-	barrierConfig.RuntimeParams["application_name"] = "hash-original87-barrier"
+	barrierConfig.RuntimeParams["application_name"] = "hash-fit-original-barrier"
 	barrierConn, err := pgx.ConnectConfig(v.ctx, barrierConfig)
 	originalPGMustV1(t, "connect independent document barrier", err)
 	defer func() {
@@ -422,7 +444,7 @@ func TestOriginalJournalBlockedCancellationJoinsPhysicalE2E(t *testing.T) {
 			t.Fatal("original loader returned before the expected document lock wait")
 		default:
 		}
-		err = v.observer.QueryRow(v.ctx, "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='hash-original87-writer' AND cardinality(pg_blocking_pids(pid))>0 LIMIT 1").Scan(&pid)
+		err = v.observer.QueryRow(v.ctx, "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name='hash-fit-original-writer' AND cardinality(pg_blocking_pids(pid))>0 LIMIT 1").Scan(&pid)
 		if err == nil {
 			break
 		}
@@ -454,5 +476,5 @@ func TestOriginalJournalBlockedCancellationJoinsPhysicalE2E(t *testing.T) {
 		t.Fatal("original backend/resources/body work survived cancellation")
 	}
 	originalPGMustV1(t, "retire actual barrier after physical join", barrier.Rollback(v.ctx))
-	t.Log("original87 cancellation: actual lock wait, backend absent, CleanupDone joined, no body retrieval; no lost-commit-ack claim")
+	t.Log("current-release original cancellation: actual lock wait, backend absent, CleanupDone joined, no body retrieval; no lost-commit-ack claim")
 }

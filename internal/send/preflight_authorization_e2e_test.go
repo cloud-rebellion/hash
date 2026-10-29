@@ -3,17 +3,20 @@
 // SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 // Copyright (c) Bright Interaction
 
-package send
+package send_test
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,12 +28,20 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/docintake"
 	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
 	"github.com/bright-interaction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/sanitize"
+	sendengine "github.com/bright-interaction/hash/internal/send"
+	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/workguard"
 )
 
 // These tests use only synthetic PostgreSQL rows, in-process CRM sources and
@@ -52,37 +63,64 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 					return "", ctx.Err()
 				}
 			}}
-			f.engine.Resolver = resolver.New(f.q, source)
+			f.engine.Resolver = f.resolver(t, source.fetch)
 			actor := f.actor()
+			var credentialRevoked atomic.Bool
 			actor.Authorize = func(context.Context, pgx.Tx, *generated.User) error {
-				if scenario == "credential_revoked" {
+				if credentialRevoked.Load() {
 					return auth.ErrMutationPermissionRevoked
 				}
 				return nil
 			}
 			ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
 			defer cancel()
+			if scenario != "credential_revoked" {
+				f.trace.arm(doc.ID)
+				defer f.trace.unblock()
+			}
 			done := make(chan error, 1)
-			go func() { _, err := f.engine.Send(ctx, actor, doc.ID); done <- err }()
+			go func() {
+				result, err := f.engine.Send(ctx, actor, doc.ID)
+				result.CloseConsumerV1()
+				done <- err
+			}()
 			select {
 			case <-entered:
+			case err := <-done:
+				t.Fatalf("send finished before CRM preflight reached the held source: %v", err)
 			case <-ctx.Done():
 				t.Fatal("CRM preflight did not reach the held source")
 			}
 			f.assertSnapshot(t, before, doc.ID)
+			// Native preparation holds the original source/member locks through
+			// the HTTP read. Release that read, then pause the actual admission
+			// query after preparation commits; queued writers can now change the
+			// source without a test-induced lock/fetch deadlock.
+			if scenario != "credential_revoked" {
+				close(release)
+				select {
+				case <-f.trace.reached:
+				case err := <-done:
+					t.Fatalf("send finished before its native admission boundary: %v", err)
+				case <-ctx.Done():
+					t.Fatal("send did not reach its native admission boundary")
+				}
+			}
 			want := error(auth.ErrMutationPermissionRevoked)
 			switch scenario {
+			case "credential_revoked":
+				credentialRevoked.Store(true)
 			case "member_demoted":
 				_, err := f.pool.Exec(f.ctx, `UPDATE users SET role='viewer' WHERE id=$1`, f.user.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
 			case "document_edited":
-				_, err := f.pool.Exec(f.ctx, `UPDATE documents SET name='Edited while CRM was loading',updated_at=clock_timestamp() WHERE id=$1`, doc.ID)
+				_, err := f.pool.Exec(f.ctx, `UPDATE documents SET name='Edited after CRM loading, before admission',updated_at=clock_timestamp() WHERE id=$1`, doc.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				want = ErrDraftChangedDuringSend
+				want = sendengine.ErrDraftChangedDuringSend
 			case "binding_edited":
 				_, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{
 					DocumentID: doc.ID, VariableName: "amount", SourceKind: "crm.deal", SourceRef: "changed-deal", SourcePath: "amount",
@@ -90,10 +128,14 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				want = ErrDraftChangedDuringSend
+				want = sendengine.ErrDraftChangedDuringSend
 			}
 			expected := f.snapshot(t, doc.ID)
-			close(release)
+			if scenario == "credential_revoked" {
+				close(release)
+			} else {
+				f.trace.unblock()
+			}
 			select {
 			case err := <-done:
 				if !errors.Is(err, want) {
@@ -109,30 +151,21 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 
 func TestSendEnvelopePreparationFailureLeavesEveryDraftUnchangedE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
-	root, _ := f.blocksDocument(t, false)
-	var err error
-	root, err = f.q.MarkAsEnvelope(f.ctx, generated.MarkAsEnvelopeParams{ID: root.ID, OrgID: f.orgID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := f.envelopeDocument(t)
 	first, _ := f.blocksDocument(t, true)
 	second, _ := f.blocksDocument(t, true)
 	for i, child := range []*generated.Document{first, second} {
-		if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{
-			ID: child.ID, ParentEnvelopeID: pgtype.UUID{Bytes: root.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: int32(i + 1), Valid: true}, OrgID: f.orgID,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		f.attach(t, root.ID, child.ID, int32(i+1))
 	}
 	before := f.snapshot(t, root.ID, first.ID, second.ID)
-	f.engine.Resolver = resolver.New(f.q, sendAdmissionSource{fetch: func(_ context.Context, ref resolver.Ref) (string, error) {
+	f.engine.Resolver = f.resolver(t, func(_ context.Context, ref resolver.Ref) (string, error) {
 		if ref.DocID == second.ID {
 			return "", resolver.ErrNotFound
 		}
 		return "4200", nil
-	}})
-	_, err = f.engine.Send(f.ctx, f.actor(), root.ID)
-	if !errors.Is(err, ErrUnresolvedVariables) {
+	})
+	_, err := f.send(t, f.ctx, f.actor(), root.ID)
+	if !errors.Is(err, sendengine.ErrUnresolvedVariables) {
 		t.Fatalf("send error=%v, want unresolved variables", err)
 	}
 	f.assertSnapshot(t, before, root.ID, first.ID, second.ID)
@@ -141,7 +174,7 @@ func TestSendEnvelopePreparationFailureLeavesEveryDraftUnchangedE2E(t *testing.T
 func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	doc, recipient := f.blocksDocument(t, true)
-	f.engine.Resolver = resolver.New(f.q, sendAdmissionSource{fetch: func(context.Context, resolver.Ref) (string, error) { return "4200", nil }})
+	f.engine.Resolver = f.resolver(t, func(context.Context, resolver.Ref) (string, error) { return "4200", nil })
 	before := f.snapshot(t, doc.ID)
 	actor := f.actor()
 	checks := 0
@@ -150,7 +183,7 @@ func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 		if user.ID != f.user.ID || user.Email != f.user.Email {
 			t.Error("callback did not receive the live canonical user")
 		}
-		if checks == 2 {
+		if checks == 4 {
 			var status, amount string
 			if err := tx.QueryRow(ctx, `SELECT status,variables_json->>'amount' FROM documents WHERE id=$1`, doc.ID).Scan(&status, &amount); err != nil {
 				return err
@@ -162,21 +195,21 @@ func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := f.engine.Send(f.ctx, actor, doc.ID); !errors.Is(err, auth.ErrMutationCredentialExpired) {
+	if _, err := f.send(t, f.ctx, actor, doc.ID); !errors.Is(err, auth.ErrMutationCredentialExpired) {
 		t.Fatalf("send error=%v", err)
 	}
-	if checks != 2 {
-		t.Fatalf("send authorization checks=%d, want 2", checks)
+	if checks != 4 {
+		t.Fatalf("send authorization checks=%d, want 4 (preparation entry/exit, admission entry/final)", checks)
 	}
 	f.assertSnapshot(t, before, doc.ID)
 
 	checks = 0
 	actor.Authorize = func(context.Context, pgx.Tx, *generated.User) error { checks++; return nil }
-	result, err := f.engine.Send(f.ctx, actor, doc.ID)
+	result, err := f.send(t, f.ctx, actor, doc.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "sent" || len(result.Links) != 1 || checks != 2 {
+	if result.Status != "sent" || len(result.Links) != 1 || checks != 4 {
 		t.Fatalf("successful send status/links/checks=%s/%d/%d", result.Status, len(result.Links), checks)
 	}
 	var replyTo, deliveryStatus string
@@ -232,23 +265,21 @@ func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 func TestSendPDFWithResolverFreezesVariablesWithoutBlockUpdateE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	pdf := onePageSendPDF(t)
-	digest := sha256.Sum256(pdf)
-	doc, err := f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{
-		OrgID: f.orgID, Name: "Synthetic PDF acknowledgement", SenderID: f.user.ID,
-		PdfStorageKey: pgtype.Text{String: f.orgID.String() + "/fixture/source.pdf", Valid: true}, PdfSha256: digest[:],
-		PdfStorageVersionID: pgtype.Text{String: "synthetic-pinned-source-version", Valid: true}, EvidenceVersionPinsRequired: true,
-	})
-	if err != nil {
-		t.Fatal(err)
+	requiresSignature := false
+	created, err := docintake.CreateOwnedPDFSourceDocumentV1(f.ctx, docintake.OwnedPDFDependenciesV1{Sessions: f.engine.WorkRuntime.SessionsV1(), Audit: f.engine.Audit, Store: f.engine.Storage.(*storage.Client)}, docintake.OwnedPDFActorV1{OrgID: f.orgID, UserID: f.user.ID, Authorize: f.authorize, Via: "rest"}, "Synthetic PDF acknowledgement", pdf, &requiresSignature)
+	if created != nil {
+		defer created.CloseConsumerV1()
 	}
-	if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET requires_signature=false WHERE id=$1`, doc.ID); err != nil {
-		t.Fatal(err)
+	if err != nil || created == nil || created.Document == nil {
+		t.Fatal("actual native acknowledgement intake", err)
 	}
+	docID := created.Document.ID
+	created.CloseConsumerV1()
+	doc := f.document(t, docID)
 	f.recipient(t, doc.ID)
 	f.binding(t, doc.ID)
-	f.engine.Resolver = resolver.New(f.q, sendAdmissionSource{fetch: func(context.Context, resolver.Ref) (string, error) { return "4200", nil }})
-	f.engine.Storage = &fakePDFEvidenceStorage{body: pdf}
-	result, err := f.engine.Send(f.ctx, f.actor(), doc.ID)
+	f.engine.Resolver = f.resolver(t, func(context.Context, resolver.Ref) (string, error) { return "4200", nil })
+	result, err := f.send(t, f.ctx, f.actor(), doc.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,30 +301,21 @@ func TestSendPDFWithResolverFreezesVariablesWithoutBlockUpdateE2E(t *testing.T) 
 
 func TestSendEnvelopeFinalAuthorizationRollsBackFrozenFamilyE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
-	root, _ := f.blocksDocument(t, false)
-	var err error
-	root, err = f.q.MarkAsEnvelope(f.ctx, generated.MarkAsEnvelopeParams{ID: root.ID, OrgID: f.orgID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := f.envelopeDocument(t)
 	children := make([]uuid.UUID, 0, 2)
 	for i := 0; i < 2; i++ {
 		child, _ := f.blocksDocument(t, true)
-		if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{
-			ID: child.ID, ParentEnvelopeID: pgtype.UUID{Bytes: root.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: int32(i + 1), Valid: true}, OrgID: f.orgID,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		f.attach(t, root.ID, child.ID, int32(i+1))
 		children = append(children, child.ID)
 	}
 	ids := append([]uuid.UUID{root.ID}, children...)
 	before := f.snapshot(t, ids...)
-	f.engine.Resolver = resolver.New(f.q, sendAdmissionSource{fetch: func(context.Context, resolver.Ref) (string, error) { return "4200", nil }})
+	f.engine.Resolver = f.resolver(t, func(context.Context, resolver.Ref) (string, error) { return "4200", nil })
 	actor := f.actor()
 	checks := 0
 	actor.Authorize = func(ctx context.Context, tx pgx.Tx, _ *generated.User) error {
 		checks++
-		if checks == 2 {
+		if checks == 4 {
 			var sealing, frozenChildren int
 			if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status='sealing'), count(*) FILTER (WHERE parent_envelope_id=$1 AND variables_json->>'amount'='4200') FROM documents WHERE id=$1 OR parent_envelope_id=$1`, root.ID).Scan(&sealing, &frozenChildren); err != nil {
 				return err
@@ -305,11 +327,11 @@ func TestSendEnvelopeFinalAuthorizationRollsBackFrozenFamilyE2E(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := f.engine.Send(f.ctx, actor, root.ID); !errors.Is(err, auth.ErrMutationCredentialExpired) {
+	if _, err := f.send(t, f.ctx, actor, root.ID); !errors.Is(err, auth.ErrMutationCredentialExpired) {
 		t.Fatalf("envelope send error=%v", err)
 	}
-	if checks != 2 {
-		t.Fatalf("envelope authorization checks=%d", checks)
+	if checks != 4 {
+		t.Fatalf("envelope authorization checks=%d, want preparation and admission entry/final checks", checks)
 	}
 	f.assertSnapshot(t, before, ids...)
 }
@@ -322,7 +344,7 @@ func TestSendFinalAdmissionDeadlineRollsBackFrozenValuesE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.snapshot(t, doc.ID)
-	f.engine.Resolver = resolver.New(f.q, sendAdmissionSource{fetch: func(context.Context, resolver.Ref) (string, error) { return "4200", nil }})
+	f.engine.Resolver = f.resolver(t, func(context.Context, resolver.Ref) (string, error) { return "4200", nil })
 	reads := 0
 	f.engine.Now = func() time.Time {
 		reads++
@@ -331,7 +353,7 @@ func TestSendFinalAdmissionDeadlineRollsBackFrozenValuesE2E(t *testing.T) {
 		}
 		return base
 	}
-	if _, err := f.engine.Send(f.ctx, f.actor(), doc.ID); !errors.Is(err, ErrExpiryTooSoon) {
+	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); !errors.Is(err, sendengine.ErrExpiryTooSoon) {
 		t.Fatalf("send error=%v, want final deadline rejection", err)
 	}
 	if reads != 3 {
@@ -344,14 +366,14 @@ func TestLifecycleAdmissionRequiresLiveActorAndExternalCredentialE2E(t *testing.
 	f := setupSendAdmissionE2E(t)
 	doc, _ := f.blocksDocument(t, false)
 	before := f.snapshot(t, doc.ID)
-	actors := []Actor{
+	actors := []sendengine.Actor{
 		{OrgID: f.orgID, Via: "worker"},
 		{UserID: &f.user.ID, OrgID: f.orgID, Via: "rest"},
 		{UserID: &f.user.ID, OrgID: f.orgID, Via: "mcp"},
 		{UserID: &f.user.ID, OrgID: f.orgID, Via: "automation"},
 	}
 	for _, actor := range actors {
-		if _, err := f.engine.Send(f.ctx, actor, doc.ID); !errors.Is(err, auth.ErrMutationPermissionRevoked) {
+		if _, err := f.send(t, f.ctx, actor, doc.ID); !errors.Is(err, auth.ErrMutationPermissionRevoked) {
 			t.Errorf("send missing identity/credential via=%s error=%v", actor.Via, err)
 		}
 		if err := f.engine.Void(f.ctx, actor, doc.ID, "Synthetic denied request"); !errors.Is(err, auth.ErrMutationPermissionRevoked) {
@@ -367,7 +389,7 @@ func TestLifecycleAdmissionRequiresLiveActorAndExternalCredentialE2E(t *testing.
 func TestManualReminderFinalAuthorizationRollsBackCeremonyArtifactsE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	doc, recipient := f.blocksDocument(t, false)
-	if _, err := f.engine.Send(f.ctx, f.actor(), doc.ID); err != nil {
+	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
 	before := f.snapshot(t, doc.ID)
@@ -433,13 +455,13 @@ func TestManualReminderFinalAuthorizationRollsBackCeremonyArtifactsE2E(t *testin
 func TestAutomaticReminderKeepsLockedScheduleAuthorityWithoutActorE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	doc, recipient := f.blocksDocument(t, false)
-	if _, err := f.engine.Send(f.ctx, f.actor(), doc.ID); err != nil {
+	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.pool.Exec(f.ctx, `UPDATE reminders SET next_fire_at=clock_timestamp()-interval '1 minute' WHERE document_id=$1`, doc.ID); err != nil {
 		t.Fatal(err)
 	}
-	worker := Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return auth.ErrMutationPermissionRevoked }}
+	worker := sendengine.Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return auth.ErrMutationPermissionRevoked }}
 	type result struct {
 		count int
 		err   error
@@ -487,7 +509,7 @@ func TestAutomaticReminderKeepsLockedScheduleAuthorityWithoutActorE2E(t *testing
 func TestManualReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	doc, _ := f.blocksDocument(t, false)
-	if _, err := f.engine.Send(f.ctx, f.actor(), doc.ID); err != nil {
+	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
 	base := time.Now().UTC()
@@ -506,7 +528,7 @@ func TestManualReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.T) 
 		}
 		return nil
 	}
-	if _, err := f.engine.Remind(f.ctx, actor, doc.ID, false); !errors.Is(err, ErrNotRemindable) {
+	if _, err := f.engine.Remind(f.ctx, actor, doc.ID, false); !errors.Is(err, sendengine.ErrNotRemindable) {
 		t.Fatalf("manual reminder error=%v, want final document expiry rejection", err)
 	}
 	if checks != 2 {
@@ -518,7 +540,7 @@ func TestManualReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.T) 
 func TestAutomaticReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.T) {
 	f := setupSendAdmissionE2E(t)
 	doc, _ := f.blocksDocument(t, false)
-	if _, err := f.engine.Send(f.ctx, f.actor(), doc.ID); err != nil {
+	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
 	base := time.Now().UTC()
@@ -539,9 +561,9 @@ func TestAutomaticReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.
 		}
 		return base
 	}
-	worker := Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker"}
+	worker := sendengine.Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker"}
 	count, err := f.engine.Remind(f.ctx, worker, doc.ID, true)
-	if count != 0 || !errors.Is(err, ErrNotRemindable) {
+	if count != 0 || !errors.Is(err, sendengine.ErrNotRemindable) {
 		t.Fatalf("automatic reminder=%d, %v, want no fire and final document expiry rejection", count, err)
 	}
 	if reads != 4 {
@@ -554,18 +576,14 @@ type sendAdmissionSource struct {
 	fetch func(context.Context, resolver.Ref) (string, error)
 }
 
-func (sendAdmissionSource) Kind() resolver.SourceKind { return resolver.SourceCRMDeal }
-func (s sendAdmissionSource) Fetch(ctx context.Context, ref resolver.Ref) (string, error) {
-	return s.fetch(ctx, ref)
-}
-
 type sendAdmissionFixture struct {
 	ctx    context.Context
 	pool   *pgxpool.Pool
 	q      *generated.Queries
-	engine *Engine
+	engine *sendengine.Engine
 	orgID  uuid.UUID
 	user   *generated.User
+	trace  *sendAdmissionTrace
 }
 
 func setupSendAdmissionE2E(t *testing.T) *sendAdmissionFixture {
@@ -574,7 +592,10 @@ func setupSendAdmissionE2E(t *testing.T) *sendAdmissionFixture {
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL to run")
 	}
-	ctx := context.Background()
+	// Send owns source/model borrowers until the caller closes its result. Use
+	// the same finite entry lifetime and process runtime as application callers.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -584,7 +605,9 @@ func setupSendAdmissionE2E(t *testing.T) *sendAdmissionFixture {
 		t.Fatalf("migrate: %v", err)
 	}
 	_ = migrationDB.Close()
-	pool, err := pgxpool.New(ctx, dsn)
+	trace := &sendAdmissionTrace{}
+	config.ConnConfig.Tracer = trace
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,12 +621,145 @@ func setupSendAdmissionE2E(t *testing.T) *sendAdmissionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := &Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool), Mailer: dispatch.QueueingMailer{Q: q}, Envelopes: envelopes.New(q), PublicURL: "https://hash.example.test", OrgName: org.Name}
-	return &sendAdmissionFixture{ctx: ctx, pool: pool, q: q, engine: engine, orgID: org.ID, user: user}
+	// These are bounded logical admission caps for this synthetic integration
+	// process, not a physical provider or PostgreSQL capacity claim.
+	limits := workguard.LimitsV1{Global: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 8, ProviderStreams: 1}, Organisation: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 4, ProviderStreams: 1}, MaxGrants: 128, MaxOrganisationGrants: 64}
+	runtime, err := pdfadmission.NewWorkRuntimeV1(pool, limits, int64(pool.Config().MaxConns)+8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		observers := runtime.SessionsV1().PendingV1().ObserverSessions
+		err := runtime.CloseV1(cleanup)
+		pending := runtime.SessionsV1().PendingV1()
+		if pending.WorkSessions != 0 || pending.UnknownStarts != 0 || pending.HTMLAdmissions != 0 || pending.SignerScopes != 0 || pending.SignerReaders != 0 || pending.ObserverSessions != observers {
+			t.Errorf("send runtime retained non-observer work: %+v", pending)
+		}
+		if observers > 0 && !errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1) {
+			t.Errorf("observer cleanup debt falsely resolved: %v", err)
+		} else if observers == 0 && err != nil {
+			t.Error(err)
+		}
+		snapshot, snapshotErr := runtime.SnapshotV1(org.ID)
+		if snapshotErr != nil || snapshot.Global != (workguard.VectorV1{SQLSessions: int64(observers)}) || snapshot.GlobalGrants != int64(observers) {
+			t.Errorf("send work leaked or observer debt lost: %+v, err=%v", snapshot, snapshotErr)
+		}
+	})
+	t.Cleanup(trace.unblock)
+	if worker := os.Getenv("HASH_E2E_PDF_WORKER_PATH"); worker != "" {
+		if err := sanitize.ConfigurePDFWorker(ctx, worker, "production"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := sanitize.ConfigurePDFWorker(context.Background(), "", "development"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	engine := &sendengine.Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Audit: audit.New(q, pool), Mailer: dispatch.QueueingMailer{Q: q}, Envelopes: envelopes.New(q), PublicURL: "https://hash.example.test", OrgName: org.Name}
+	f := &sendAdmissionFixture{ctx: ctx, pool: pool, q: q, engine: engine, orgID: org.ID, user: user, trace: trace}
+	engine.Storage = f.evidenceClient(t)
+	return f
 }
 
-func (f *sendAdmissionFixture) actor() Actor {
-	return Actor{UserID: &f.user.ID, OrgID: f.orgID, Email: "stale-transport-email@example.test", Via: "rest", LawfulBasis: "contract", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return nil }}
+func (f *sendAdmissionFixture) send(t *testing.T, ctx context.Context, actor sendengine.Actor, document uuid.UUID) (sendengine.SendResult, error) {
+	t.Helper()
+	result, err := f.engine.Send(ctx, actor, document)
+	// Error results can also retain source owners. Keep every result alive
+	// through the test's final assertions, then close it before the runtime.
+	t.Cleanup(result.CloseConsumerV1)
+	return result, err
+}
+
+func (f *sendAdmissionFixture) document(t *testing.T, id uuid.UUID) *generated.Document {
+	t.Helper()
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: id, OrgID: f.orgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func (f *sendAdmissionFixture) authorize(_ context.Context, _ pgx.Tx, user *generated.User) error {
+	if user == nil || user.ID != f.user.ID || user.OrgID != f.orgID || user.Role != "owner" {
+		return auth.ErrMutationPermissionRevoked
+	}
+	return nil
+}
+
+func (f *sendAdmissionFixture) createBlocks(t *testing.T, name string, raw []byte) *generated.Document {
+	t.Helper()
+	created, err := blockauthoring.CreateV1(f.ctx, blockauthoring.DependenciesV1{Sessions: f.engine.WorkRuntime.SessionsV1(), Audit: f.engine.Audit}, blockauthoring.ActorV1{OrgID: f.orgID, UserID: f.user.ID, Authorize: f.authorize, Via: "rest", Tool: "create_document"}, blockauthoring.CreateInputV1{Name: name, BlocksJSON: raw, VariablesJSON: json.RawMessage(`{}`)})
+	if created != nil {
+		defer created.CloseConsumerV1()
+	}
+	if err != nil || created == nil || created.Document == nil {
+		t.Fatal("actual native block creation", err)
+	}
+	id := created.Document.ID
+	created.CloseConsumerV1()
+	return f.document(t, id)
+}
+
+func (f *sendAdmissionFixture) envelopeDocument(t *testing.T) *generated.Document {
+	t.Helper()
+	doc := f.createBlocks(t, "Synthetic admission envelope", []byte(`{"version":1,"blocks":[]}`))
+	f.topology(t, blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopePromoteV1, Root: doc.ID})
+	f.recipient(t, doc.ID)
+	return f.document(t, doc.ID)
+}
+
+func (f *sendAdmissionFixture) attach(t *testing.T, root, child uuid.UUID, position int32) {
+	t.Helper()
+	f.topology(t, blockauthoring.EnvelopeInputV1{Operation: blockauthoring.EnvelopeAttachV1, Root: root, Children: []uuid.UUID{child}, Position: position})
+}
+
+func (f *sendAdmissionFixture) topology(t *testing.T, input blockauthoring.EnvelopeInputV1) {
+	t.Helper()
+	result, err := blockauthoring.EnvelopeV1(f.ctx, blockauthoring.DependenciesV1{Sessions: f.engine.WorkRuntime.SessionsV1(), Audit: f.engine.Audit}, blockauthoring.ActorV1{OrgID: f.orgID, UserID: f.user.ID, Authorize: f.authorize, Via: "rest", Tool: "fixture_envelope"}, input)
+	if result != nil {
+		result.CloseConsumerV1()
+	}
+	if err != nil {
+		t.Fatal("actual native envelope topology", err)
+	}
+}
+
+func (f *sendAdmissionFixture) resolver(t *testing.T, fetch func(context.Context, resolver.Ref) (string, error)) *resolver.Resolver {
+	t.Helper()
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(strings.TrimPrefix(r.URL.Path, "/api/v1/deals/"))
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/api/v1/deals/") || err != nil || r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer synthetic-send-crm" {
+			t.Error("unexpected synthetic CRM request")
+			http.Error(w, "unexpected synthetic CRM request", http.StatusBadRequest)
+			return
+		}
+		value, err := fetch(r.Context(), resolver.Ref{OrgID: f.orgID, DocID: id, Source: id.String(), Path: "amount"})
+		if errors.Is(err, resolver.ErrNotFound) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"amount": value})
+	}))
+	t.Cleanup(peer.Close)
+	source := resolver.NewCRMDealSource(peer.URL, "synthetic-send-crm", true)
+	client, ok := source.Client.(*http.Client)
+	if !ok {
+		t.Fatal("actual first-party CRM HTTP client unavailable")
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	return resolver.New(f.q, source)
+}
+
+func (f *sendAdmissionFixture) actor() sendengine.Actor {
+	return sendengine.Actor{UserID: &f.user.ID, OrgID: f.orgID, Email: "stale-transport-email@example.test", Via: "rest", LawfulBasis: "contract", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return nil }}
 }
 
 func (f *sendAdmissionFixture) blocksDocument(t *testing.T, bound bool) (*generated.Document, *generated.Recipient) {
@@ -619,10 +775,7 @@ func (f *sendAdmissionFixture) blocksDocument(t *testing.T, bound bool) (*genera
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.orgID, Name: "Synthetic admission agreement", BlocksJson: raw, VariablesJson: json.RawMessage(`{}`), SenderID: f.user.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc := f.createBlocks(t, "Synthetic admission agreement", raw)
 	rec := f.recipient(t, doc.ID)
 	if bound {
 		f.binding(t, doc.ID)
@@ -632,7 +785,17 @@ func (f *sendAdmissionFixture) blocksDocument(t *testing.T, bound bool) (*genera
 
 func (f *sendAdmissionFixture) recipient(t *testing.T, docID uuid.UUID) *generated.Recipient {
 	t.Helper()
-	rec, err := f.q.CreateRecipient(f.ctx, generated.CreateRecipientParams{DocumentID: docID, Role: "signer", Email: uuid.NewString() + "@recipient.test", Name: "Synthetic recipient", OrderIndex: 0, MagicTokenHash: make([]byte, 32), MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en"})
+	engine := &recipientauthoring.MutationEngine{Pool: f.pool, Audit: f.engine.Audit}
+	result, err := engine.CreateOwnedV1(f.ctx, f.engine.WorkRuntime.SessionsV1(), f.q, recipientauthoring.MutationActor{OrgID: f.orgID, UserID: f.user.ID, Authorize: f.authorize, Via: "rest", Tool: "add_recipient"}, docID, recipientauthoring.Values{Role: "signer", Email: uuid.NewString() + "@recipient.test", Name: "Synthetic recipient", Locale: "en"})
+	if result != nil {
+		defer result.CloseConsumerV1()
+	}
+	if err != nil || result == nil || result.Recipient == nil {
+		t.Fatal("actual native recipient creation", err)
+	}
+	id := result.Recipient.ID
+	result.CloseConsumerV1()
+	rec, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: id, OrgID: f.orgID})
 	if err != nil {
 		t.Fatal(err)
 	}

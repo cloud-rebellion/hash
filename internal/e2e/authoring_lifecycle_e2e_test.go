@@ -7,7 +7,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -490,6 +489,9 @@ func TestLegacyActiveEvidencePinsBeforeFinalizationAreOneWay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if claimed.Status != "finalizing" {
+		t.Fatal("active source pin fixture did not reach finalizing")
+	}
 	if _, err := q.PinDocumentSendEvidenceVersions(ctx, generated.PinDocumentSendEvidenceVersionsParams{
 		PdfStorageVersionID: pgtype.Text{String: sourceVersion, Valid: true}, ID: doc.ID, OrgID: org.ID,
 	}); err != nil {
@@ -517,28 +519,16 @@ func TestLegacyActiveEvidencePinsBeforeFinalizationAreOneWay(t *testing.T) {
 		t.Fatalf("signature VersionId replacement = %v, want pgx.ErrNoRows", err)
 	}
 
-	artifactDir := "org/" + org.ID.String() + "/documents/" + doc.ID.String() + "/"
-	digestHex := hex.EncodeToString(digest)
-	if _, err := pool.Exec(ctx, `INSERT INTO document_finalization_intents (
-		document_id, org_id, mode, completion_effective_at, retain_until,
-		final_pdf_key, final_pdf_sha256,
-		audit_cert_key, audit_cert_sha256,
-		audit_payload_key, audit_payload_sha256,
-		audit_signature_key, audit_signature_sha256,
-		evidence_version_pins_required
-	) VALUES ($1, $2, 'signature', $3, $4, $5, $6, $7, $6, $8, $6, $9, $6, FALSE)`,
-		doc.ID, org.ID, claimed.CompletionEffectiveAt, claimed.FinalizationRetainUntil,
-		artifactDir+"final-"+digestHex+".pdf", digest, artifactDir+"audit-"+digestHex+".pdf",
-		artifactDir+"audit-payload-"+digestHex+".txt", artifactDir+"audit-signature-"+digestHex+".txt"); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
+	// Legacy intent exemptions are created only by their actual migration
+	// cutovers in a separate owned database, not by a new current intent.
+	intentQ, intentDocumentID, intentOrgID := historicalAuthoringIntentE2E(t)
 	intentVersions := []string{"version-final", "version-cert", "version-payload", "version-signature"}
-	pinnedIntent, err := q.PinLegacyDocumentFinalizationIntentVersions(ctx, generated.PinLegacyDocumentFinalizationIntentVersionsParams{
+	pinnedIntent, err := intentQ.PinLegacyDocumentFinalizationIntentVersions(ctx, generated.PinLegacyDocumentFinalizationIntentVersionsParams{
 		FinalPdfVersionID:       pgtype.Text{String: intentVersions[0], Valid: true},
 		AuditCertVersionID:      pgtype.Text{String: intentVersions[1], Valid: true},
 		AuditPayloadVersionID:   pgtype.Text{String: intentVersions[2], Valid: true},
 		AuditSignatureVersionID: pgtype.Text{String: intentVersions[3], Valid: true},
-		DocumentID:              doc.ID, OrgID: org.ID,
+		DocumentID:              intentDocumentID, OrgID: intentOrgID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -550,12 +540,12 @@ func TestLegacyActiveEvidencePinsBeforeFinalizationAreOneWay(t *testing.T) {
 		pinnedIntent.AuditSignatureVersionID.String != intentVersions[3] {
 		t.Fatal("legacy finalization intent did not pin all artifact VersionIds atomically")
 	}
-	if _, err := q.PinLegacyDocumentFinalizationIntentVersions(ctx, generated.PinLegacyDocumentFinalizationIntentVersionsParams{
+	if _, err := intentQ.PinLegacyDocumentFinalizationIntentVersions(ctx, generated.PinLegacyDocumentFinalizationIntentVersionsParams{
 		FinalPdfVersionID:       pgtype.Text{String: "conflicting-final", Valid: true},
 		AuditCertVersionID:      pgtype.Text{String: intentVersions[1], Valid: true},
 		AuditPayloadVersionID:   pgtype.Text{String: intentVersions[2], Valid: true},
 		AuditSignatureVersionID: pgtype.Text{String: intentVersions[3], Valid: true},
-		DocumentID:              doc.ID, OrgID: org.ID,
+		DocumentID:              intentDocumentID, OrgID: intentOrgID,
 	}); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("finalization intent VersionId replacement = %v, want pgx.ErrNoRows", err)
 	}
@@ -759,25 +749,7 @@ func completeAuthoringDocumentE2E(
 	if !claimed.CompletionEffectiveAtBound || !claimed.CompletionEffectiveAt.Valid || !claimed.FinalizationRetainUntil.Valid {
 		t.Fatalf("incomplete finalization commitment: %+v", claimed)
 	}
-	digest := make([]byte, 32)
-	digest[0] = 2
-	digestHex := hex.EncodeToString(digest)
-	artifactDir := "org/" + doc.OrgID.String() + "/documents/" + doc.ID.String() + "/"
-	intent, err := q.CreateDocumentFinalizationIntent(ctx, generated.CreateDocumentFinalizationIntentParams{
-		DocumentID: doc.ID, OrgID: doc.OrgID, Mode: "signature",
-		CompletionEffectiveAt: claimed.CompletionEffectiveAt, RetainUntil: claimed.FinalizationRetainUntil,
-		FinalPdfKey: artifactDir + "final-" + digestHex + ".pdf", FinalPdfSha256: digest,
-		FinalPdfVersionID: pgtype.Text{String: "authoring-final-version-1", Valid: true},
-		AuditCertKey:      artifactDir + "audit-" + digestHex + ".pdf", AuditCertSha256: digest,
-		AuditCertVersionID: pgtype.Text{String: "authoring-cert-version-1", Valid: true},
-		AuditPayloadKey:    artifactDir + "audit-payload-" + digestHex + ".txt", AuditPayloadSha256: digest,
-		AuditPayloadVersionID: pgtype.Text{String: "authoring-payload-version-1", Valid: true},
-		AuditSignatureKey:     artifactDir + "audit-signature-" + digestHex + ".txt", AuditSignatureSha256: digest,
-		AuditSignatureVersionID: pgtype.Text{String: "authoring-audit-signature-version-1", Valid: true},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	intent := stageAuthoringFinalizationE2E(t, ctx, pool, q, claimed)
 	rows, err := q.MarkDocumentFinalizationRetentionStarted(ctx, generated.MarkDocumentFinalizationRetentionStartedParams{
 		DocumentID: doc.ID, OrgID: doc.OrgID,
 	})
@@ -810,6 +782,7 @@ func completeAuthoringDocumentE2E(
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishAuthoringFinalizationE2E(t, ctx, txq, completed)
 	pending, err := audit.New(q, pool).LogTx(ctx, tx, audit.Entry{
 		OrgID: doc.OrgID, DocumentID: &doc.ID, Kind: audit.KindDocumentCompleted,
 		Payload: map[string]any{"fixture": "authoring-lifecycle"},

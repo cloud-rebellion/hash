@@ -9,9 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,7 +27,10 @@ import (
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/send"
+	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/workguard"
 )
 
 func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T) {
@@ -32,7 +38,8 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL to run")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +54,7 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	q := generated.New(pool)
 
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{
@@ -70,8 +77,51 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The real concrete client and same-pool runtime admit the actual Send
+	// path. Any evidence IO would cross the boundary these refusals protect.
+	const bucket = "disclosure-preflight-fixture"
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == "/"+bucket+"/" && r.URL.RawQuery == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		t.Errorf("disclosure refusal reached evidence IO: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "synthetic evidence must remain untouched", http.StatusBadRequest)
+	}))
+	t.Cleanup(peer.Close)
+	client, err := storage.New(ctx, storage.Config{Endpoint: strings.TrimPrefix(peer.URL, "http://"), Region: "us-east-1", Bucket: bucket,
+		AccessKey: "synthetic-disclosure", SecretKey: "synthetic-disclosure-secret", BucketLookup: "path",
+		AllowInsecureDevelopmentEndpoint: true, RequireExistingBucket: true, SkipTransientLifecycle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := workguard.LimitsV1{Global: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 8, ProviderStreams: 1}, Organisation: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 4, ProviderStreams: 1}, MaxGrants: 128, MaxOrganisationGrants: 64}
+	runtime, err := pdfadmission.NewWorkRuntimeV1(pool, limits, int64(pool.Config().MaxConns)+8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		observers := runtime.SessionsV1().PendingV1().ObserverSessions
+		err := runtime.CloseV1(cleanup)
+		pending := runtime.SessionsV1().PendingV1()
+		if pending.WorkSessions != 0 || pending.UnknownStarts != 0 || pending.HTMLAdmissions != 0 || pending.SignerScopes != 0 || pending.SignerReaders != 0 || pending.DocumentPackageOperations != 0 || pending.ObserverSessions != observers {
+			t.Errorf("disclosure fixture retained non-observer work: %+v", pending)
+		}
+		if observers > 0 && !errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1) {
+			t.Errorf("disclosure fixture observer cleanup debt falsely resolved: %v", err)
+		} else if observers == 0 && err != nil {
+			t.Error("close disclosure fixture runtime", err)
+		}
+		snapshot, snapshotErr := runtime.SnapshotV1(org.ID)
+		if snapshotErr != nil || snapshot.Global != (workguard.VectorV1{SQLSessions: int64(observers)}) || snapshot.GlobalGrants != int64(observers) {
+			t.Errorf("disclosure fixture leaked work or lost observer debt: %+v error=%v", snapshot, snapshotErr)
+		}
+	})
 	engine := &send.Engine{
 		Pool: pool, Queries: q, Audit: audit.New(q, pool), Mailer: dispatch.NoopMailer{},
+		WorkRuntime: runtime, Storage: client,
 		PublicURL: "http://localhost:8080", OrgName: "E2E",
 	}
 
@@ -141,10 +191,11 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := createDraft(t, test.documentName, test.user.ID)
-			_, err := engine.Send(ctx, send.Actor{
+			result, err := engine.Send(ctx, send.Actor{
 				UserID: &test.user.ID, OrgID: org.ID, Email: test.user.Email,
 				Via: "test", LawfulBasis: "contract",
 			}, doc.ID)
+			t.Cleanup(result.CloseConsumerV1)
 			if !errors.Is(err, send.ErrInvalidSignerDisclosure) {
 				t.Fatalf("Send() error = %v, want ErrInvalidSignerDisclosure", err)
 			}
@@ -174,7 +225,8 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 			t.Fatal(err)
 		}
 
-		_, err := engine.ResumeSendSealing(ctx, doc.ID, org.ID)
+		result, err := engine.ResumeSendSealing(ctx, doc.ID, org.ID)
+		t.Cleanup(result.CloseConsumerV1)
 		if !errors.Is(err, send.ErrInvalidSignerDisclosure) {
 			t.Fatalf("ResumeSendSealing() error = %v, want ErrInvalidSignerDisclosure", err)
 		}

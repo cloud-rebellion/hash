@@ -8,6 +8,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,10 +18,15 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/config"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -31,21 +37,56 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	t.Cleanup(cancel)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := stdlib.OpenDB(*cfg.ConnConfig)
-	if err := mdb.RunMigrations(db); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	pool, err := pgxpool.New(ctx, dsn)
+	// Native authoring creates immutable history. Own a complete disposable
+	// database so teardown never deletes history or touches another package's
+	// fixture rows in the supplied parent database.
+	parent := cfg.ConnConfig.Copy()
+	admin, err := pgx.ConnectConfig(ctx, parent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	database := "hash_mcp_revision_e2e_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil { //nolint:rawsql -- exact unique synthetic database
+		_ = admin.Close(ctx)
+		t.Fatal(err)
+	}
+	if err := admin.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		admin, err := pgx.ConnectConfig(cleanup, parent)
+		if err != nil {
+			t.Error("connect revision fixture teardown", err)
+			return
+		}
+		defer admin.Close(cleanup)
+		if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); err != nil { //nolint:rawsql -- exact database created above, after runtime and pool close
+			t.Error("drop revision fixture database", err)
+		}
+	})
+	cfg.ConnConfig.Database = database
+	cfg.ConnConfig.RuntimeParams["application_name"] = "hash_mcp_revision_" + uuid.NewString()
+	db := stdlib.OpenDB(*cfg.ConnConfig)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := mdb.RunMigrationsContext(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	q := generated.New(pool)
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "MCP revision", Plan: "pro"})
 	if err != nil {
@@ -55,23 +96,61 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org.ID, SenderID: user.ID, Name: "MCP", BlocksJson: tree, VariablesJson: json.RawMessage(`{}`)})
+	limits := workguard.LimitsV1{Global: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 8}, Organisation: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 4}, MaxGrants: 128, MaxOrganisationGrants: 64}
+	runtime, err := pdfadmission.NewWorkRuntimeV1(pool, limits, int64(pool.Config().MaxConns)+8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: org.ID, Name: doc.Name, SourceKind: doc.SourceKind, BlocksJSON: tree, VariablesJS: doc.VariablesJson, CreatedBy: &user.ID, Via: versions.ViaHuman})
-	if err != nil {
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		observers := runtime.SessionsV1().PendingV1().ObserverSessions
+		err := runtime.CloseV1(cleanup)
+		pending := runtime.SessionsV1().PendingV1()
+		if pending.WorkSessions != 0 || pending.UnknownStarts != 0 || pending.HTMLAdmissions != 0 || pending.HTMLInputProducers != 0 || pending.HTMLCanonicalConsumers != 0 || pending.CatalogMaintenance != 0 || pending.ObserverSessions != observers {
+			t.Errorf("revision runtime retained work: %+v", pending)
+		}
+		if observers > 0 && !errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1) {
+			t.Errorf("revision observer cleanup debt falsely resolved: %v", err)
+		} else if observers == 0 && err != nil {
+			t.Error(err)
+		}
+		snapshot, snapshotErr := runtime.SnapshotV1(org.ID)
+		if snapshotErr != nil || snapshot.Global != (workguard.VectorV1{SQLSessions: int64(observers)}) || snapshot.GlobalGrants != int64(observers) {
+			t.Errorf("revision work leaked or observer debt lost: %+v err=%v", snapshot, snapshotErr)
+		}
+	})
+	// Explicitly prepare only the seeded operator plan through its real M95
+	// producer. No fixture inserts or repairs measurement/authority rows.
+	var plan uuid.UUID
+	var serverVersion int32
+	if err := pool.QueryRow(ctx, "SELECT id,current_setting('server_version_num')::integer FROM billing_plans WHERE slug='pro'").Scan(&plan, &serverVersion); err != nil {
 		t.Fatal(err)
 	}
-	old := doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)
-	if _, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org.ID, BlocksJson: tree, VariablesJson: json.RawMessage(`{"state":"new"}`)}); err != nil {
-		t.Fatal(err)
+	owner, err := runtime.SessionsV1().ControlledMeasurePlanSourceV1(ctx, plan)
+	if owner != nil {
+		t.Cleanup(func() {
+			owner.CloseConsumerV1()
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := owner.CloseV1(cleanup); err != nil {
+				t.Error("revision plan source cleanup", err)
+			}
+		})
 	}
-	server := NewServer()
-	deps := Deps{Pool: pool, Queries: q, Audit: audit.New(q, pool), Versions: versions.New(q)}
-	registerAuthoringTools(server, deps)
-	registerVersionTools(server, deps)
+	if err != nil || owner == nil {
+		t.Fatal("actual revision plan preparation", err)
+	}
+	receipt, err := owner.ReceiptV1()
+	if err != nil || receipt.Kind != "plan" || receipt.SourceID != plan || receipt.OrgID != uuid.Nil || receipt.WireBytes <= 0 || receipt.ServerVersionNum != serverVersion || !receipt.CreatedAt.Valid || !receipt.MeasuredAt.Valid {
+		t.Fatal("actual revision plan measurement receipt", err)
+	}
+	owner.CloseConsumerV1()
+	if err := owner.CloseV1(ctx); err != nil {
+		t.Fatal("actual revision plan owner close", err)
+	}
+	deps := Deps{Pool: pool, Queries: q, Audit: audit.New(q, pool), Versions: versions.New(q), PDFCreationSessions: runtime.SessionsV1(), Billing: billing.NewOperator(q, []config.OperatorEntitlement{{OrgID: org.ID, PlanSlug: "pro", ReviewRef: "synthetic revision qualification"}})}
+	server := New(deps)
 	mint, err := auth.MintAPIKey()
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +161,7 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 	// Admit through genuine PgVerifier middleware. Public context identity is
 	// insufficient for the original transaction receipt required by authoring.
 	admitted := auth.RequireAPIKey(&auth.PgVerifier{Queries: q})(server.Handler())
-	call := func(t *testing.T, name string, args map[string]any, wantError bool) {
+	call := func(t *testing.T, name string, args map[string]any, wantError bool) json.RawMessage {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
 		if err != nil {
@@ -95,14 +174,33 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 		admitted.ServeHTTP(response, req)
 		var reply struct {
 			Result struct {
-				IsError bool `json:"isError"`
+				IsError bool                    `json:"isError"`
+				Content []struct{ Text string } `json:"content"`
 			} `json:"result"`
 			Error json.RawMessage `json:"error"`
 		}
 		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &reply) != nil || len(reply.Error) != 0 || reply.Result.IsError != wantError {
 			t.Fatalf("tool %s status=%d wantError=%v %s", name, response.Code, wantError, response.Body.String())
 		}
+		if !wantError && len(reply.Result.Content) != 1 {
+			t.Fatalf("tool %s returned no single actual result: %s", name, response.Body.String())
+		}
+		if wantError {
+			return nil
+		}
+		return json.RawMessage(reply.Result.Content[0].Text)
 	}
+	tree := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
+	var doc generated.Document
+	if err := json.Unmarshal(call(t, "create_document", map[string]any{"name": "MCP", "source_kind": "blocks", "blocks_json": tree, "variables_json": map[string]string{}}, false), &doc); err != nil || doc.ID == uuid.Nil {
+		t.Fatal("actual native revision document creation", err)
+	}
+	targetVersion, err := q.GetLatestDocumentVersionNo(ctx, doc.ID)
+	if err != nil || targetVersion != 1 {
+		t.Fatal("actual native creation snapshot missing", err)
+	}
+	old := doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)
+	call(t, "set_variables", map[string]any{"document_id": doc.ID.String(), "expected_updated_at": old, "variables": map[string]string{"state": "new"}}, false)
 	cases := map[string]map[string]any{
 		"append_block":             {"block": map[string]string{"id": "q", "type": "paragraph", "text": "appended"}},
 		"reorder_blocks":           {"block_ids": []string{"q", "p"}},
@@ -113,7 +211,7 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 		"import_html":              {"html": "<p>Imported</p>"},
 		"import_markdown":          {"markdown": "Imported"},
 		"set_variables":            {"variables": map[string]string{"state": "replacement"}},
-		"restore_document_version": {"target_version": target.VersionNo},
+		"restore_document_version": {"target_version": targetVersion},
 	}
 	for _, name := range []string{"set_document_blocks", "import_html", "import_markdown", "set_variables", "restore_document_version", "update_block", "append_block", "reorder_blocks", "add_signature_field", "delete_block"} {
 		args := cases[name]

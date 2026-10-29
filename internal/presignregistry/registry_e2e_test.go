@@ -59,6 +59,12 @@ func registrySession(t testing.TB, f registryFixture, id uuid.UUID, generation i
 
 func setupRegistryE2E(t testing.TB) registryFixture {
 	t.Helper()
+	ctx, pool := setupRegistryDatabaseE2E(t)
+	return newRegistryFixtureE2E(t, ctx, pool)
+}
+
+func setupRegistryDatabaseE2E(t testing.TB) (context.Context, *pgxpool.Pool) {
+	t.Helper()
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {
 		t.Skip("HASH_E2E_DB_URL is required for actual registry PostgreSQL")
@@ -82,11 +88,21 @@ func setupRegistryE2E(t testing.TB) registryFixture {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil { //nolint:rawsql -- exact database created above
-			t.Error("drop isolated registry fixture database")
+		// Cleanup must not depend on a parent connection left idle throughout
+		// migrations, expiry waits and actual concurrent authority mutations.
+		cleanupAdmin, err := pgx.Connect(cleanupCtx, dsn)
+		if err != nil {
+			t.Error("connect registry fixture parent for disposal", err)
+			return
 		}
-		_ = admin.Close(cleanupCtx)
+		defer cleanupAdmin.Close(cleanupCtx)
+		if _, err := cleanupAdmin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil { //nolint:rawsql -- exact database created above
+			t.Error("drop isolated registry fixture database", err)
+		}
 	})
+	if err := admin.Close(adminCtx); err != nil {
+		t.Fatal("close registry fixture parent PostgreSQL", err)
+	}
 	u.Path = "/" + name
 	u.RawPath = ""
 	cfg, err := pgx.ParseConfig(u.String())
@@ -109,11 +125,17 @@ func setupRegistryE2E(t testing.TB) registryFixture {
 		t.Fatal("connect registry fixture PostgreSQL")
 	}
 	t.Cleanup(pool.Close)
+	return ctx, pool
+}
+
+func newRegistryFixtureE2E(t testing.TB, ctx context.Context, pool *pgxpool.Pool) registryFixture {
+	t.Helper()
 	f := registryFixture{ctx: ctx, pool: pool, q: generated.New(pool), org: uuid.New(), ownerID: uuid.New(), grantorID: uuid.New()}
-	f.cookies, err = auth.NewSignedCookie(strings.Repeat("c4", 32))
+	cookies, err := auth.NewSignedCookie(strings.Repeat("c4", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.cookies = cookies
 	if _, err := pool.Exec(ctx, `INSERT INTO orgs(id,name) VALUES($1,'Synthetic pre-sign registry fixture');`, f.org); err != nil {
 		t.Fatal("seed registry organization")
 	}
@@ -249,9 +271,13 @@ func TestPresignRegistryApprovedDataRulePersistenceE2E(t *testing.T) {
 }
 
 func TestPresignRegistryStickyAuthorityTransitionsE2E(t *testing.T) {
+	// These transitions each receive fresh organization/actor/nonce state in
+	// one owned database. Reapplying the same migration tree for every case
+	// adds no authority coverage and competes with other integration packages.
+	ctx, pool := setupRegistryDatabaseE2E(t)
 	for _, name := range []string{"role_loss", "name_restore", "email_restore", "organization_change", "member_removed", "session_only", "eligible_role"} {
 		t.Run(name, func(t *testing.T) {
-			f := setupRegistryE2E(t)
+			f := newRegistryFixtureE2E(t, ctx, pool)
 			approveRegistryE2E(t, &f)
 			in, out := createRegistryGrantE2E(t, f)
 			var before []byte
@@ -356,9 +382,10 @@ func TestPresignRegistryAuditFailureRollsBackConsentAndOutcomeE2E(t *testing.T) 
 }
 
 func TestPresignRegistryNaturalDeadlineAfterActualAuditLockWaitE2E(t *testing.T) {
+	ctx, pool := setupRegistryDatabaseE2E(t)
 	for _, name := range []string{"grant_expiry", "original_session", "api_executor"} {
 		t.Run(name, func(t *testing.T) {
-			f := setupRegistryE2E(t)
+			f := newRegistryFixtureE2E(t, ctx, pool)
 			var submit func() error
 			deadline := time.Now().Add(3 * time.Second)
 			if name == "api_executor" {

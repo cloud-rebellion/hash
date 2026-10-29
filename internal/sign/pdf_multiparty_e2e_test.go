@@ -45,7 +45,8 @@ import (
 )
 
 // PostgreSQL and all lifecycle engines are real. Evidence storage is a strict
-// exact-version synthetic adapter. HASH_E2E_GOTENBERG_URL optionally forwards
+// exact-version S3 protocol peer behind the real storage client.
+// HASH_E2E_GOTENBERG_URL optionally forwards
 // rendering to a disposable real Chromium renderer; otherwise the HTTP
 // renderer adapter returns valid PDF fixtures for the transaction tests.
 func TestNamedPartyPDFSignsBothPartiesAndProducesBoundArtifactsE2E(t *testing.T) {
@@ -402,12 +403,23 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 		t.Fatal(err)
 	}
 	store := &multipartyVersionStore{objects: make(map[string]multipartyVersionObject)}
+	objectServer := httptest.NewServer(store)
+	t.Cleanup(objectServer.Close)
+	client, err := storage.New(ctx, storage.Config{
+		Endpoint: strings.TrimPrefix(objectServer.URL, "http://"), Region: "us-east-1", Bucket: "hash-sign-fixture",
+		AccessKey: "synthetic-sign-access", SecretKey: "synthetic-sign-secret", BucketLookup: "path",
+		AllowInsecureDevelopmentEndpoint: true, SkipTransientLifecycle: true, RequireObjectLock: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := signingWorkRuntimeE2E(t, pool)
 	body := multipartySourcePDF(t, "A4", 0)
 	if len(sourceBodies) > 0 {
 		body = sourceBodies[0]
 	}
 	key := "org/" + org.ID.String() + "/source.pdf"
-	ref, err := store.PutEvidenceVersioned(ctx, key, "application/pdf", body, time.Now().UTC().AddDate(7, 0, 0))
+	ref, err := client.PutEvidenceVersioned(ctx, key, "application/pdf", body, storage.EvidenceRetentionDeadline(time.Now(), 7))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +429,13 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 		t.Fatal(err)
 	}
 	f := &multipartyPDFFixture{ctx: ctx, pool: pool, q: q, orgID: org.ID, docID: doc.ID, names: []string{"Customer Test Person", "Provider Test Person"}, store: store, sourceKey: key, source: ref}
+	// The injected outage targets retention after the real durable intent, as
+	// the original recovery invariant requires. Initial evidence PUT/readback
+	// succeeds; this independent fixture observation grants no app authority.
+	store.finalizationIntentPresent = func() bool {
+		_, err := q.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{DocumentID: doc.ID, OrgID: doc.OrgID})
+		return err == nil
+	}
 	roles := []string{"customer", "provider"}
 	if legacy {
 		roles = []string{"signer"}
@@ -452,14 +471,16 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 		doc = prepare(f, doc)
 	}
 	logger := audit.New(q, pool)
-	sender := &sendengine.Engine{Pool: pool, Queries: q, Storage: store, Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", OrgName: org.Name}
+	sender := &sendengine.Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Storage: client, Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", OrgName: org.Name}
 	result, err := sender.Send(ctx, sendengine.Actor{UserID: &user.ID, OrgID: org.ID, Via: "rest", LawfulBasis: "contract", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return nil }}, doc.ID)
+	t.Cleanup(result.CloseConsumerV1)
 	if err != nil || result.Status != "sent" || len(result.Links) != len(roles) {
 		t.Fatalf("send result=%+v error=%v", result, err)
 	}
 	for _, link := range result.Links {
-		f.tokens = append(f.tokens, link.URL[strings.LastIndex(link.URL, "/")+1:])
+		f.tokens = append(f.tokens, strings.Clone(link.URL[strings.LastIndex(link.URL, "/")+1:]))
 	}
+	result.CloseConsumerV1()
 	fixturePDF := onePagePDF(t, "Synthetic renderer fixture")
 	target := strings.TrimRight(os.Getenv("HASH_E2E_GOTENBERG_URL"), "/")
 	renderer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -512,7 +533,8 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.engine = &Engine{Pool: pool, Queries: q, Storage: store, PDF: render.NewGotenberg(renderer.URL), Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, Signer: signer, BaseURL: "https://hash.example.test", OrgName: "Synthetic operator"}
+	f.engine = &Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Storage: client, PDF: render.NewGotenberg(renderer.URL), Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, Signer: signer, BaseURL: "https://hash.example.test", OrgName: "Synthetic operator"}
+	bindSigningWorkRuntimeE2E(t, f.engine)
 	return f
 }
 
@@ -661,15 +683,18 @@ func (f *multipartyPDFFixture) snapshot(t *testing.T) string {
 }
 
 type multipartyVersionObject struct {
-	body    []byte
-	version string
-	digest  [32]byte
+	body        []byte
+	version     string
+	digest      [32]byte
+	contentType string
+	retainUntil time.Time
 }
 
 type multipartyVersionStore struct {
-	mu                 sync.Mutex
-	objects            map[string]multipartyVersionObject
-	failFinalRetention atomic.Bool
+	mu                        sync.Mutex
+	objects                   map[string]multipartyVersionObject
+	failFinalRetention        atomic.Bool
+	finalizationIntentPresent func() bool
 }
 
 func (s *multipartyVersionStore) GetVerifiedVersion(_ context.Context, key, version string, expected []byte) ([]byte, error) {

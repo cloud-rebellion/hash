@@ -88,11 +88,20 @@ func isolatedExecutionDB(t testing.TB) (context.Context, *pgxpool.Pool) {
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			t.Error("drop exact owned execution DB")
+		// The pool's local Close can precede PostgreSQL backend retirement.
+		// Independently observe this exact, uniquely owned database before DROP;
+		// never terminate an uncertain connection or disguise it with FORCE.
+		if executionDatabaseRetired(t, ctx, admin, name) {
+			if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+				executionCleanupError(t, "drop exact owned execution DB", err)
+			}
 		}
-		_ = admin.Close(ctx)
+		cancel()
+		closeCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err := admin.Close(closeCtx); err != nil {
+			executionCleanupError(t, "close owned execution administrator", err)
+		}
 	})
 	u.Path = "/" + name
 	u.RawPath = ""
@@ -115,8 +124,44 @@ func isolatedExecutionDB(t testing.TB) (context.Context, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal("connect owned execution DB")
 	}
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() {
+		stop()
+		pool.Close()
+	})
 	return ctx, pool
+}
+
+func executionCleanupError(t testing.TB, phase string, err error) {
+	t.Helper()
+	state := "none"
+	var postgres *pgconn.PgError
+	if errors.As(err, &postgres) {
+		state = postgres.Code
+	}
+	// SQLSTATE/type are useful diagnostics without private DSN/SQL row text.
+	t.Errorf("%s (type=%T sqlstate=%s cancelled=%t deadline=%t)", phase, err, state, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded))
+}
+
+func executionDatabaseRetired(t testing.TB, ctx context.Context, admin *pgx.Conn, database string) bool {
+	t.Helper()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var remaining int64
+		if err := admin.QueryRow(ctx, "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=$1", database).Scan(&remaining); err != nil {
+			executionCleanupError(t, "observe owned execution database backend retirement", err)
+			return false
+		}
+		if remaining == 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			t.Errorf("owned execution fixture retained %d database backends after pool close", remaining)
+			return false
+		case <-tick.C:
+		}
+	}
 }
 func setupExecutionE2E(t testing.TB) *executionFixture {
 	t.Helper()

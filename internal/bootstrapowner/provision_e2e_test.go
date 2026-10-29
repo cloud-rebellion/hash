@@ -8,6 +8,8 @@ package bootstrapowner
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/bright-interaction/hash/internal/passwordhash"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -37,26 +40,37 @@ func bootstrapScratch(t *testing.T) (context.Context, *pgx.Conn, *pgx.ConnConfig
 	t.Cleanup(cancel)
 	cfg, err := pgx.ParseConfig(dsn)
 	bootstrapMust(t, err, "parse private PostgreSQL fixture configuration")
-	admin, err := pgx.ConnectConfig(ctx, cfg)
+	adminConfig := cfg.Copy()
+	adminConfig.RuntimeParams["application_name"] = "hash-bootstrap-fixture-admin"
+	admin, err := pgx.ConnectConfig(ctx, adminConfig)
 	bootstrapMust(t, err, "connect fixture database administrator")
 	name := "hash_bootstrap_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	var conn *pgx.Conn
 	created := false
 	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
 		if conn != nil {
+			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := conn.Close(cleanup); err != nil {
-				t.Error("close owned bootstrap connection")
+				t.Errorf("close owned bootstrap connection (%s)", bootstrapErrorDiagnostic(err))
 			}
+			stop()
 		}
 		if created {
-			if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-				t.Error("drop owned bootstrap fixture database")
+			// A successful local Close is not PostgreSQL backend retirement.
+			// Observe this uniquely owned database independently before DROP;
+			// never terminate sessions or force-drop an uncertain connection.
+			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			if bootstrapObserveDatabaseRetired(t, cleanup, admin, name) {
+				if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+					t.Errorf("drop owned bootstrap fixture database (%s)", bootstrapErrorDiagnostic(err))
+				}
 			}
+			stop()
 		}
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
 		if err := admin.Close(cleanup); err != nil {
-			t.Error("close bootstrap fixture administrator")
+			t.Errorf("close bootstrap fixture administrator (%s)", bootstrapErrorDiagnostic(err))
 		}
 	})
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
@@ -64,7 +78,10 @@ func bootstrapScratch(t *testing.T) (context.Context, *pgx.Conn, *pgx.ConnConfig
 	created = true
 	scratch := cfg.Copy()
 	scratch.Database = name
-	migration := stdlib.OpenDB(*scratch)
+	scratch.RuntimeParams["application_name"] = "hash-bootstrap-fixture-client"
+	migrationConfig := scratch.Copy()
+	migrationConfig.RuntimeParams["application_name"] = "hash-bootstrap-fixture-migration"
+	migration := stdlib.OpenDB(*migrationConfig)
 	migration.SetMaxOpenConns(1)
 	migration.SetMaxIdleConns(1)
 	err = hashdb.RunMigrationsContext(ctx, migration)
@@ -79,8 +96,40 @@ func bootstrapScratch(t *testing.T) (context.Context, *pgx.Conn, *pgx.ConnConfig
 func bootstrapMust(t *testing.T, err error, phase string) {
 	t.Helper()
 	if err != nil {
-		// Connection and SQL errors are deliberately not interpolated.
-		t.Fatal(phase)
+		// Report only type/SQLSTATE/context classification. Raw connection and
+		// SQL errors may include private configuration or row values.
+		t.Fatalf("%s (%s)", phase, bootstrapErrorDiagnostic(err))
+	}
+}
+
+func bootstrapErrorDiagnostic(err error) string {
+	state := "none"
+	var postgres *pgconn.PgError
+	if errors.As(err, &postgres) {
+		state = postgres.Code
+	}
+	return fmt.Sprintf("type=%T sqlstate=%s cancelled=%t deadline=%t", err, state, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded))
+}
+
+func bootstrapObserveDatabaseRetired(t *testing.T, ctx context.Context, admin *pgx.Conn, database string) bool {
+	t.Helper()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var remaining int64
+		if err := admin.QueryRow(ctx, "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=$1", database).Scan(&remaining); err != nil {
+			t.Errorf("observe owned bootstrap database backend retirement (%s)", bootstrapErrorDiagnostic(err))
+			return false
+		}
+		if remaining == 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			t.Errorf("owned bootstrap fixture retained %d database backends after connection close", remaining)
+			return false
+		case <-tick.C:
+		}
 	}
 }
 

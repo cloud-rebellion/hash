@@ -86,6 +86,9 @@ func ownedChatReadDone169V1(path string) (ownedChatDone169V1, bool, error) {
 
 // Separate chat qualification; the original all-party four-artifact oracle is untouched.
 func TestOwnedCommentHistoryPortalsWithExternalBrowserE2E(t *testing.T) {
+	if os.Getenv("HASH_BROWSER_E2E") == "" {
+		t.Skip("set HASH_BROWSER_E2E=1 with the external owned comment-history browser runner")
+	}
 	if os.Getenv("HASH_BROWSER_E2E") != "1" {
 		t.Fatal("explicit owned browser runner required")
 	}

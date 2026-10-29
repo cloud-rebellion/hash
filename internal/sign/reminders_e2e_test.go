@@ -43,7 +43,7 @@ func TestAutomaticReminderRollbackAndConcurrentWorkersE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	q := generated.New(pool)
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "reminder acceptance", Plan: "pro"})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestAutomaticReminderRollbackAndConcurrentWorkersE2E(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO reminders(document_id,schedule_json,next_fire_at,fires_remaining) VALUES($1,'[{"days_after_send":3},{"days_after_send":7}]',$2,2)`, doc.ID, doc.SentAt.Time.Add(3*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	engine := &send.Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool), Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", Now: func() time.Time { return doc.SentAt.Time.Add(3*24*time.Hour + time.Minute) }}
+	engine := &send.Engine{Pool: pool, Queries: q, WorkRuntime: signingWorkRuntimeE2E(t, pool), Audit: audit.New(q, pool), Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", Now: func() time.Time { return doc.SentAt.Time.Add(3*24*time.Hour + time.Minute) }}
 	actor := send.Actor{OrgID: org.ID, Email: user.Email, Via: "worker"}
 	// Reject only this recipient's insert, after schedule advancement and rotation.
 	constraint := "reminder_test_" + uuid.NewString()[:8]

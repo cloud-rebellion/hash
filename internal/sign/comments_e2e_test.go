@@ -21,6 +21,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
@@ -38,7 +39,8 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set HASH_E2E_DB_URL to run")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -52,9 +54,10 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	q := generated.New(pool)
 	engine := &Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool)}
+	bindSigningWorkRuntimeE2E(t, engine)
 
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "notice epoch " + uuid.NewString(), Plan: "pro"})
 	if err != nil {
@@ -74,21 +77,19 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, tokenHash, err := auth.MintMagicToken()
+	if err != nil {
+		t.Fatal(err)
+	}
 	recipient, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{
 		DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.epoch.test", Name: "Recipient", OrderIndex: 0,
-		MagicTokenHash: []byte(uuid.NewString()), MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
+		MagicTokenHash: tokenHash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, recipient)
-	rc := &RecipientContext{
-		Document: doc,
-		Recipient: &generated.GetRecipientByTokenHashRow{
-			ID: recipient.ID, DocumentID: doc.ID, Role: recipient.Role, Status: recipient.Status,
-			Email: recipient.Email, Name: recipient.Name, DocOrgID: org.ID,
-		},
-	}
+	rc := lookupSigningViewE2E(t, ctx, engine, tokenHash)
 	evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
 
 	if _, err := q.RequestChangesOnDocument(ctx, generated.RequestChangesOnDocumentParams{ID: doc.ID, OrgID: org.ID}); err != nil {
@@ -152,6 +153,12 @@ func completeDurableSendSignE2E(
 	recipient *generated.Recipient,
 ) *generated.Document {
 	t.Helper()
+	if _, err := q.ConfirmDocumentLawfulBasis(ctx, generated.ConfirmDocumentLawfulBasisParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID, LawfulBasis: "contract",
+		ConfirmedBy: pgtype.UUID{Bytes: doc.SenderID, Valid: true}, Via: "test",
+	}); err != nil {
+		t.Fatalf("confirm synthetic ceremony disclosure: %v", err)
+	}
 	seedCompleteFrozenBrandingSignE2E(t, ctx, pool, doc.ID)
 
 	sealingTx, err := pool.Begin(ctx)
@@ -265,7 +272,7 @@ func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer pool.Close()
+			t.Cleanup(pool.Close)
 			q := generated.New(pool)
 			org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "expiry lock " + uuid.NewString(), Plan: "pro"})
 			if err != nil {
@@ -279,6 +286,7 @@ func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
 			var clock atomic.Int64
 			clock.Store(base.UnixNano())
 			engine := &Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool), Now: func() time.Time { return time.Unix(0, clock.Load()).UTC() }}
+			bindSigningWorkRuntimeE2E(t, engine)
 			params := generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "expiry boundary", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), SenderID: user.ID}
 			if deadlineKind == "document" {
 				params.ExpiresAt = pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true}
@@ -291,12 +299,16 @@ func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
 			if deadlineKind == "recipient" {
 				tokenDeadline = base.Add(time.Second)
 			}
-			rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.expiry.test", Name: "Recipient", MagicTokenHash: []byte(uuid.NewString()), MagicTokenExpiresAt: pgtype.Timestamptz{Time: tokenDeadline, Valid: true}, Locale: "en"})
+			_, tokenHash, err := auth.MintMagicToken()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.expiry.test", Name: "Recipient", MagicTokenHash: tokenHash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: tokenDeadline, Valid: true}, Locale: "en"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, rec)
-			rc := &RecipientContext{Document: doc, Recipient: &generated.GetRecipientByTokenHashRow{ID: rec.ID, DocumentID: doc.ID, DocOrgID: org.ID, Role: rec.Role, Status: rec.Status, Email: rec.Email, Name: rec.Name, MagicTokenExpiresAt: rec.MagicTokenExpiresAt}}
+			rc := lookupSigningViewE2E(t, ctx, engine, tokenHash)
 			evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
 			if err := checkMagicLinkExpiry(rc.Recipient, doc, engine.now()); err != nil {
 				t.Fatalf("admission already expired: %v", err)

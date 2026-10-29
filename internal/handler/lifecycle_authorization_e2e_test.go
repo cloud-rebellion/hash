@@ -153,7 +153,7 @@ func (f lifecycleAuthorizationFixture) submit(operation, cookie string) *httptes
 	} else if operation == "void" {
 		body = `{"reason":"Lifecycle fixture close"}`
 	}
-	return submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/"+operation, body, cookie)
+	return submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/"+operation, body, cookie)
 }
 
 func (f lifecycleAuthorizationFixture) snapshot(t *testing.T) string {
@@ -292,7 +292,7 @@ func TestLifecycleVoidSenderAndOwnerCommitFamilyAtomicallyE2E(t *testing.T) {
 
 func (f lifecycleAuthorizationFixture) enableMCP() {
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, PublicURL: f.s.PublicURL})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, Billing: f.s.Billing, PDFCreationSessions: f.s.HTMLCreationSessions, PublicURL: f.s.PublicURL})
 }
 
 func (f lifecycleAuthorizationFixture) submitMCPVoid(key string) *httptest.ResponseRecorder {
@@ -308,7 +308,7 @@ func (f lifecycleAuthorizationFixture) submitMCPLifecycle(tool, key string) *htt
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": tool, "arguments": arguments},
 	})
-	request := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", strings.NewReader(string(body)))
+	request := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", strings.NewReader(string(body))).WithContext(f.ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+key)
 	response := httptest.NewRecorder()

@@ -25,7 +25,8 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// This executes real service/generated SQL/migration85/physical-session paths.
+// This executes the real service/generated SQL/physical-session paths against
+// the caller-pinned current embedded release, including the migration85 protocol.
 // Object bytes are explicitly INTEGRITY-ONLY metadata-rebound archive fixtures;
 // retention is a test provider, not Object Lock or accepted legal policy.
 type postgresSelectionFixtureV1 struct {
@@ -46,12 +47,12 @@ func actualSelectionFixtureV1(t *testing.T) *postgresSelectionFixtureV1 {
 	}
 	got, versions, err := db.EmbeddedMigrationsIdentity()
 	want := os.Getenv("HASH_E2E_EXPECT_MIGRATIONS_SHA256")
-	if err != nil || want == "" || got != want || len(versions) != 85 {
-		t.Fatal("root must pin exact85 embedded release identity")
+	if err != nil || want == "" || got != want || len(versions) < 85 {
+		t.Fatal("root must pin the exact current embedded release including migration85")
 	}
 	for i, v := range versions {
 		if v != int64(i+1) {
-			t.Fatal("compiled85 migrations are not contiguous")
+			t.Fatal("compiled release migrations are not contiguous")
 		}
 	}
 	config, err := pgx.ParseConfig(dsn)
@@ -114,6 +115,10 @@ func actualSelectionFixtureV1(t *testing.T) *postgresSelectionFixtureV1 {
 	if err = db.RunMigrations(migration); err != nil {
 		t.Fatal("apply exact embedded migrations through normal runner")
 	}
+	if err = migration.Close(); err != nil {
+		t.Fatal("close exact owned migration pool before actual service sessions")
+	}
+	migrationPool = nil
 	observerCfg := own.Copy()
 	observerCfg.RuntimeParams["application_name"] = "hash-fitselect-owned-observer"
 	f.observer, err = pgx.ConnectConfig(ctx, observerCfg)
@@ -122,8 +127,9 @@ func actualSelectionFixtureV1(t *testing.T) *postgresSelectionFixtureV1 {
 	}
 	var count, distinct, latest int64
 	var applied bool
-	if err = f.observer.QueryRow(ctx, "SELECT count(*),count(DISTINCT version_id),max(version_id),bool_and(is_applied) FROM goose_db_version").Scan(&count, &distinct, &latest, &applied); err != nil || count != 86 || distinct != 86 || latest != 85 || !applied {
-		t.Fatal("normal85 migration history differs from compiled release")
+	wantHistoryRows := int64(len(versions) + 1) // Goose's initial version0 plus this exact release.
+	if err = f.observer.QueryRow(ctx, "SELECT count(*),count(DISTINCT version_id),max(version_id),bool_and(is_applied) FROM goose_db_version").Scan(&count, &distinct, &latest, &applied); err != nil || count != wantHistoryRows || distinct != wantHistoryRows || latest != versions[len(versions)-1] || !applied {
+		t.Fatal("normal migration history differs from the exact compiled release")
 	}
 	poolConfig, err := pgxpool.ParseConfig(own.ConnString())
 	if err != nil {

@@ -28,26 +28,66 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type blockAuthorizationFixture struct{ lifecycleAuthorizationFixture }
+type blockAuthorizationFixture struct {
+	lifecycleAuthorizationFixture
+	originalEvents         map[uuid.UUID]string
+	originalVersions       int
+	originalDocumentEvents int
+}
 
 var blockRESTOperationsE2E = []string{"append", "update", "delete", "reorder", "import-html", "import-md"}
 
 func setupBlockAuthorizationE2E(t *testing.T, role string) blockAuthorizationFixture {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, role, false, false)
+	// Current routes require the original native creator/recipient measurements,
+	// not an unmeasured SQL row with a runtime attached afterward. Keep the same
+	// agreement IDs/roles while using the actual supported lifecycle producer.
+	f := setupNativeLifecycleAuthorization256(t, role, false, false)
 	f.s.Versions = versions.New(f.q)
-	if _, err := f.q.CreateDraftField(f.ctx, generated.CreateDraftFieldParams{
-		DocumentID: f.doc.ID, OrgID: f.org, RecipientID: pgtype.UUID{Bytes: f.recipient.ID, Valid: true}, Type: "text", Page: 1,
-		XPct: pctToNumeric(0), YPct: pctToNumeric(0), WPct: pctToNumeric(15), HPct: pctToNumeric(4), OptionsJson: json.RawMessage(`{}`),
-	}); err != nil {
+	body, err := json.Marshal(addFieldInput{RecipientID: f.recipient.ID.String(), Type: "text", Page: 1, WPct: 15, HPct: 4})
+	if err != nil {
 		t.Fatal(err)
 	}
-	return blockAuthorizationFixture{f}
+	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/fields", string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("actual block fixture field creation=%d %s", response.Code, response.Body.String())
+	}
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := blockAuthorizationFixture{lifecycleAuthorizationFixture: f, originalEvents: blockOriginalEventsE2E(t, f)}
+	if err := f.pool.QueryRow(f.ctx, "SELECT (SELECT count(*) FROM document_versions WHERE document_id=$1),(SELECT count(*) FROM events WHERE document_id=$1)", f.doc.ID).Scan(&fixture.originalVersions, &fixture.originalDocumentEvents); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
 }
 
 func (f blockAuthorizationFixture) enableMCP() {
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Versions: f.s.Versions, PublicURL: f.s.PublicURL})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Versions: f.s.Versions, Billing: f.s.Billing, PDFCreationSessions: f.s.HTMLCreationSessions, PublicURL: f.s.PublicURL})
+}
+
+func blockOriginalEventsE2E(t *testing.T, f lifecycleAuthorizationFixture) map[uuid.UUID]string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx, "SELECT id,encode(sha256(convert_to(to_jsonb(e)::text,'UTF8')),'hex') FROM events e WHERE org_id=$1", f.org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	events := make(map[uuid.UUID]string)
+	for rows.Next() {
+		var id uuid.UUID
+		var digest string
+		if err := rows.Scan(&id, &digest); err != nil {
+			t.Fatal(err)
+		}
+		events[id] = digest
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
 }
 
 func blockRESTInputE2E(docID uuid.UUID, operation, stamp string) (string, string, map[string]any) {
@@ -80,7 +120,7 @@ func blockRESTInputE2E(docID uuid.UUID, operation, stamp string) (string, string
 func (f blockAuthorizationFixture) submit(operation, cookie, stamp string) *httptest.ResponseRecorder {
 	method, path, input := blockRESTInputE2E(f.doc.ID, operation, stamp)
 	body, _ := json.Marshal(input)
-	return submitSessionOperationE2E(f.s, method, path, string(body), cookie)
+	return submitSessionOperationContextE2E(f.ctx, f.s, method, path, string(body), cookie)
 }
 
 // Capture through either the pool or a held parent transaction. In particular,
@@ -126,6 +166,11 @@ func (f blockAuthorizationFixture) assertUnchanged(t *testing.T, before string) 
 // response explicitly. An unrelated blocked query cannot satisfy the proof.
 func blockAwaitLockE2E(t *testing.T, f blockAuthorizationFixture, held pgx.Tx, result <-chan *httptest.ResponseRecorder, query, event string) {
 	t.Helper()
+	if query == "-- name: GetDocumentForUpdate" {
+		// The native header locks this same parent before loading its measured
+		// body and actor. Attribute the original wait to its current statement.
+		query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
+	}
 	var holderPID int32
 	if err := held.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil { //nolint:rawsql -- fixture connection identity
 		t.Fatal(err)
@@ -169,8 +214,14 @@ func (f blockAuthorizationFixture) assertCommit(t *testing.T, tool, via string) 
 		f.doc.ID, f.user.ID, via, tool).Scan(&versionCount, &exactVersions, &eventCount, &exactEvents, &outboxCount); err != nil { //nolint:rawsql
 		t.Fatal(err)
 	}
-	if versionCount != 1 || exactVersions != 1 || eventCount != 1 || exactEvents != 1 || outboxCount != 0 {
-		t.Fatalf("block commit versions/exact/events/exact/outbox=%d/%d/%d/%d/%d want1/1/1/1/0", versionCount, exactVersions, eventCount, exactEvents, outboxCount)
+	currentEvents := blockOriginalEventsE2E(t, f.lifecycleAuthorizationFixture)
+	for id, digest := range f.originalEvents {
+		if currentEvents[id] != digest {
+			t.Fatal("block mutation changed original native creation/recipient/field history")
+		}
+	}
+	if versionCount != f.originalVersions+1 || exactVersions != 1 || eventCount != f.originalDocumentEvents+1 || exactEvents != 1 || outboxCount != 0 || len(currentEvents) != len(f.originalEvents)+1 {
+		t.Fatalf("block commit versions/exact/events/exact/outbox=%d/%d/%d/%d/%d; original versions/events=%d/%d", versionCount, exactVersions, eventCount, exactEvents, outboxCount, f.originalVersions, f.originalDocumentEvents)
 	}
 	rows, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 	if err != nil {
@@ -178,7 +229,7 @@ func (f blockAuthorizationFixture) assertCommit(t *testing.T, tool, via string) 
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(rows)
-	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != 1 {
+	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != len(f.originalEvents)+1 {
 		t.Fatalf("block authoring audit chain invalid: %+v", result)
 	}
 	return doc

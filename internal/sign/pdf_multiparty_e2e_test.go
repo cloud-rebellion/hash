@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -31,7 +30,11 @@ import (
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/docintake"
+	fieldmutations "github.com/bright-interaction/hash/internal/fields"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
 	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	sendengine "github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/google/uuid"
@@ -418,16 +421,42 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 	if len(sourceBodies) > 0 {
 		body = sourceBodies[0]
 	}
-	key := "org/" + org.ID.String() + "/source.pdf"
-	ref, err := client.PutEvidenceVersioned(ctx, key, "application/pdf", body, storage.EvidenceRetentionDeadline(time.Now(), 7))
-	if err != nil {
-		t.Fatal(err)
+	if worker := os.Getenv("HASH_E2E_PDF_WORKER_PATH"); worker != "" {
+		if err := sanitize.ConfigurePDFWorker(ctx, worker, "production"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := sanitize.ConfigurePDFWorker(context.Background(), "", "development"); err != nil {
+				t.Error(err)
+			}
+		})
 	}
-	doc, err := q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{OrgID: org.ID, SenderID: user.ID, Name: "PDF two party " + uuid.NewString(), PdfStorageKey: pgtype.Text{String: key, Valid: true},
-		PdfSha256: ref.SHA256[:], PdfStorageVersionID: pgtype.Text{String: ref.VersionID, Valid: true}, EvidenceVersionPinsRequired: true})
-	if err != nil {
-		t.Fatal(err)
+	logger := audit.New(q, pool)
+	authorize := func(_ context.Context, _ pgx.Tx, canonical *generated.User) error {
+		if canonical == nil || canonical.ID != user.ID || canonical.OrgID != org.ID || canonical.Role != "owner" {
+			return auth.ErrMutationPermissionRevoked
+		}
+		return nil
 	}
+	// The supported intake owns sanitization, the actual uploaded version and
+	// its fresh document/policy/report measurements. No SQL-created PDF row or
+	// retroactive measurement is promoted to native source authority.
+	created, err := docintake.CreateOwnedPDFSourceDocumentV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: runtime.SessionsV1(), Audit: logger, Store: client}, docintake.OwnedPDFActorV1{OrgID: org.ID, UserID: user.ID, Authorize: authorize, Via: "rest"}, "PDF two party "+uuid.NewString(), body, nil)
+	if created != nil {
+		defer created.CloseConsumerV1()
+	}
+	if err != nil || created == nil || created.Document == nil {
+		t.Fatal("actual native multiparty PDF intake", err)
+	}
+	documentID := created.Document.ID
+	created.CloseConsumerV1()
+	doc, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: documentID, OrgID: org.ID})
+	if err != nil || doc == nil || !doc.PdfStorageKey.Valid || !doc.PdfStorageVersionID.Valid || len(doc.PdfSha256) != sha256.Size {
+		t.Fatal("actual native source identity missing", err)
+	}
+	key := doc.PdfStorageKey.String
+	ref := storage.StoredObject{VersionID: doc.PdfStorageVersionID.String}
+	copy(ref.SHA256[:], doc.PdfSha256)
 	f := &multipartyPDFFixture{ctx: ctx, pool: pool, q: q, orgID: org.ID, docID: doc.ID, names: []string{"Customer Test Person", "Provider Test Person"}, store: store, sourceKey: key, source: ref}
 	// The injected outage targets retention after the real durable intent, as
 	// the original recovery invariant requires. Initial evidence PUT/readback
@@ -441,38 +470,48 @@ func newMultipartyPDFE2EWithDraft(t *testing.T, legacy bool, prepare func(*multi
 		roles = []string{"signer"}
 		f.names = f.names[:1]
 	}
-	num := func(value int64) pgtype.Numeric { return pgtype.Numeric{Int: big.NewInt(value), Valid: true} }
+	recipientEngine := &recipientauthoring.MutationEngine{Pool: pool, Audit: logger}
+	fieldEngine := &fieldmutations.MutationEngine{Pool: pool, Audit: logger}
 	for i, role := range roles {
-		_, hash, err := auth.MintMagicToken()
-		if err != nil {
-			t.Fatal(err)
+		recipient, err := recipientEngine.CreateOwnedV1(ctx, runtime.SessionsV1(), q, recipientauthoring.MutationActor{OrgID: org.ID, UserID: user.ID, Authorize: authorize, Via: "rest", Tool: "add_recipient"}, doc.ID, recipientauthoring.Values{Role: role, Name: f.names[i], Email: uuid.NewString() + "@pdf-recipient.test", Locale: "en", OrderIndex: int32(i)})
+		if recipient != nil {
+			defer recipient.CloseConsumerV1()
 		}
-		row, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: role, Name: f.names[i], Email: uuid.NewString() + "@pdf-recipient.test", Locale: "en", OrderIndex: int32(i), MagicTokenHash: hash,
-			MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}})
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || recipient == nil || recipient.Recipient == nil {
+			t.Fatal("actual native multiparty recipient", err)
 		}
-		if _, err := q.CreateDraftField(ctx, generated.CreateDraftFieldParams{DocumentID: doc.ID, OrgID: org.ID, RecipientID: pgtype.UUID{Bytes: row.ID, Valid: true}, Type: "signature", Page: 1,
-			XPct: num(10), YPct: num(55 + int64(i)*15), WPct: num(60), HPct: num(10), Required: true, Label: pgtype.Text{String: role + " signature", Valid: true}, OptionsJson: []byte(`{}`)}); err != nil {
-			t.Fatal(err)
+		recipientID := recipient.Recipient.ID
+		recipient.CloseConsumerV1()
+		createField := func(input fieldmutations.CreateInput) uuid.UUID {
+			input.RecipientID = &recipientID
+			field, err := fieldEngine.CreateOwnedV1(ctx, runtime.SessionsV1(), fieldmutations.Actor{OrgID: org.ID, UserID: user.ID, Authorize: authorize, Via: "rest", Tool: "add_document_field"}, doc.ID, input)
+			if field != nil {
+				defer field.CloseConsumerV1()
+			}
+			if err != nil || field == nil || field.Field == nil {
+				t.Fatal("actual native multiparty field", err)
+			}
+			return field.Field.ID
 		}
+		createField(fieldmutations.CreateInput{Type: "signature", Page: 1, XPct: 10, YPct: float64(55 + i*15), WPct: 60, HPct: 10, Required: true, Label: role + " signature", Options: []byte(`{}`)})
 		if legacy {
-			field, err := q.CreateDraftField(ctx, generated.CreateDraftFieldParams{DocumentID: doc.ID, OrgID: org.ID, RecipientID: pgtype.UUID{Bytes: row.ID, Valid: true}, Type: "text", Page: 1,
-				XPct: num(10), YPct: num(35), WPct: num(40), HPct: num(5), Required: true, Label: pgtype.Text{String: "Reference", Valid: true}, OptionsJson: []byte(`{}`)})
-			if err != nil {
+			fieldID := createField(fieldmutations.CreateInput{Type: "text", Page: 1, XPct: 10, YPct: 35, WPct: 40, HPct: 5, Required: true, Label: "Reference", Options: []byte(`{}`)})
+			// Preserve the existing historical prefilled-text stimulus. It grants
+			// no source/policy/audit measurement or signature authority.
+			if _, err := pool.Exec(ctx, `UPDATE document_fields SET value='Reviewed reference',completed_at=clock_timestamp() WHERE id=$1`, fieldID); err != nil {
 				t.Fatal(err)
-			}
-			if _, err := pool.Exec(ctx, `UPDATE document_fields SET value='Reviewed reference',completed_at=clock_timestamp() WHERE id=$1`, field.ID); err != nil { //nolint:rawsql
-				t.Fatal(err)
-			}
+			} //nolint:rawsql -- intentional synthetic legacy field shape
 		}
+	}
+	doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if prepare != nil {
 		doc = prepare(f, doc)
 	}
-	logger := audit.New(q, pool)
 	sender := &sendengine.Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Storage: client, Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", OrgName: org.Name}
-	result, err := sender.Send(ctx, sendengine.Actor{UserID: &user.ID, OrgID: org.ID, Via: "rest", LawfulBasis: "contract", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return nil }}, doc.ID)
+	result, err := sender.Send(ctx, sendengine.Actor{UserID: &user.ID, OrgID: org.ID, Via: "rest", LawfulBasis: "contract", Authorize: authorize}, doc.ID)
 	t.Cleanup(result.CloseConsumerV1)
 	if err != nil || result.Status != "sent" || len(result.Links) != len(roles) {
 		t.Fatalf("send result=%+v error=%v", result, err)

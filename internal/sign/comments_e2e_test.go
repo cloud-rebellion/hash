@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -22,8 +23,11 @@ import (
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
+	"github.com/bright-interaction/hash/internal/recipients"
 )
 
 // Current comment atomicity/finalizing guarantees use genuine native HTTP
@@ -70,24 +74,15 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
+	doc := createSigningBlocksE2E(t, ctx, engine, generated.CreateBlocksDocumentParams{
 		OrgID: org.ID, Name: "notice epoch", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`),
 		VariablesJson: json.RawMessage(`{}`), SenderID: user.ID,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, tokenHash, err := auth.MintMagicToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	recipient, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{
+	recipient := createSigningRecipientE2E(t, ctx, engine, user.ID, generated.CreateRecipientParams{
 		DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.epoch.test", Name: "Recipient", OrderIndex: 0,
-		MagicTokenHash: tokenHash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
+		MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tokenHash := recipient.MagicTokenHash
 	doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, recipient)
 	rc := lookupSigningViewE2E(t, ctx, engine, tokenHash)
 	evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
@@ -123,6 +118,73 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	}
 	if viewedEvents != 0 {
 		t.Fatalf("stale epoch emitted %d viewed events", viewedEvents)
+	}
+}
+
+// These original native producers own their freshly measured document and
+// recipient inputs. A cache retrofit onto a raw fixture row is not equivalent.
+func createSigningBlocksE2E(t *testing.T, ctx context.Context, engine *Engine, params generated.CreateBlocksDocumentParams) *generated.Document {
+	t.Helper()
+	result, err := blockauthoring.CreateV1(ctx, blockauthoring.DependenciesV1{Sessions: engine.WorkRuntime.SessionsV1(), Audit: engine.Audit},
+		blockauthoring.ActorV1{OrgID: params.OrgID, UserID: params.SenderID, Via: "rest", Authorize: signingFixtureAuthorizerE2E(params.OrgID, params.SenderID)},
+		blockauthoring.CreateInputV1{Name: params.Name, BlocksJSON: params.BlocksJson, VariablesJSON: params.VariablesJson, ExpiresAt: params.ExpiresAt})
+	if result != nil {
+		t.Cleanup(result.CloseConsumerV1)
+	}
+	if err != nil || result == nil || result.Document == nil {
+		t.Fatal("create genuinely measured signing draft", err)
+	}
+	id := result.Document.ID
+	result.CloseConsumerV1()
+	doc, err := engine.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: id, OrgID: params.OrgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func createSigningRecipientE2E(t *testing.T, ctx context.Context, engine *Engine, user uuid.UUID, params generated.CreateRecipientParams) *generated.Recipient {
+	t.Helper()
+	doc, err := engine.Queries.GetDocumentByID(ctx, params.DocumentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutator := &recipientauthoring.MutationEngine{Pool: engine.Pool, Audit: engine.Audit}
+	result, err := mutator.CreateOwnedV1(ctx, engine.WorkRuntime.SessionsV1(), engine.Queries,
+		recipientauthoring.MutationActor{OrgID: doc.OrgID, UserID: user, Via: "rest", Authorize: signingFixtureAuthorizerE2E(doc.OrgID, user)}, doc.ID,
+		recipients.Values{Email: params.Email, Name: params.Name, Role: params.Role, OrderIndex: params.OrderIndex, Locale: params.Locale})
+	if result != nil {
+		t.Cleanup(result.CloseConsumerV1)
+	}
+	if err != nil || result == nil || result.Recipient == nil {
+		t.Fatal("create genuine signing fixture recipient", err)
+	}
+	id := result.Recipient.ID
+	result.CloseConsumerV1()
+	row, err := engine.Queries.GetRecipient(ctx, generated.GetRecipientParams{ID: id, OrgID: doc.OrgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The race tests choose independent finite deadlines through the actual
+	// root-locking token query, retaining the credential minted by the producer.
+	if params.MagicTokenExpiresAt.Valid {
+		if err := engine.Queries.RotateRecipientMagicToken(ctx, generated.RotateRecipientMagicTokenParams{ID: id, DocumentID: doc.ID, MagicTokenHash: row.MagicTokenHash, MagicTokenExpiresAt: params.MagicTokenExpiresAt}); err != nil {
+			t.Fatal(err)
+		}
+		row, err = engine.Queries.GetRecipient(ctx, generated.GetRecipientParams{ID: id, OrgID: doc.OrgID})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return row
+}
+
+func signingFixtureAuthorizerE2E(org, user uuid.UUID) auth.TransactionAuthorization {
+	return func(_ context.Context, _ pgx.Tx, member *generated.User) error {
+		if member == nil || member.ID != user || member.OrgID != org || member.Role != "owner" {
+			return auth.ErrMutationPermissionRevoked
+		}
+		return nil
 	}
 }
 
@@ -289,24 +351,15 @@ func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
 			bindSigningWorkRuntimeE2E(t, engine)
 			params := generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "expiry boundary", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), SenderID: user.ID}
 			if deadlineKind == "document" {
-				params.ExpiresAt = pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true}
+				params.ExpiresAt = pgtype.Timestamptz{Time: base.Add(time.Minute), Valid: true}
 			}
-			doc, err := q.CreateBlocksDocument(ctx, params)
-			if err != nil {
-				t.Fatal(err)
-			}
+			doc := createSigningBlocksE2E(t, ctx, engine, params)
 			tokenDeadline := base.Add(time.Hour)
 			if deadlineKind == "recipient" {
-				tokenDeadline = base.Add(time.Second)
+				tokenDeadline = base.Add(time.Minute)
 			}
-			_, tokenHash, err := auth.MintMagicToken()
-			if err != nil {
-				t.Fatal(err)
-			}
-			rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.expiry.test", Name: "Recipient", MagicTokenHash: tokenHash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: tokenDeadline, Valid: true}, Locale: "en"})
-			if err != nil {
-				t.Fatal(err)
-			}
+			rec := createSigningRecipientE2E(t, ctx, engine, user.ID, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.expiry.test", Name: "Recipient", MagicTokenExpiresAt: pgtype.Timestamptz{Time: tokenDeadline, Valid: true}, Locale: "en"})
+			tokenHash := rec.MagicTokenHash
 			doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, rec)
 			rc := lookupSigningViewE2E(t, ctx, engine, tokenHash)
 			evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
@@ -328,7 +381,7 @@ func TestMarkViewedRechecksDeadlineAfterDocumentLockE2E(t *testing.T) {
 				t.Fatalf("mutation did not wait for the document lock: %v", err)
 			case <-time.After(50 * time.Millisecond):
 			}
-			clock.Store(base.Add(2 * time.Second).UnixNano())
+			clock.Store(base.Add(2 * time.Minute).UnixNano())
 			if err := lockTx.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}

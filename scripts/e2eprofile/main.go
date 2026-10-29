@@ -111,15 +111,16 @@ func inspectDatabase(parent context.Context, env, prefix string) (string, error)
 		_ = conn.Close(cleanup)
 	}()
 	var database, address string
-	var port int32
+	var port, serverVersion int32
 	var writable, createdb, empty bool
 	err = conn.QueryRow(ctx, `SELECT current_database(),coalesce(inet_server_addr()::text,''),
+ current_setting('server_version_num')::integer,
  coalesce(inet_server_port(),0),NOT pg_is_in_recovery() AND current_setting('transaction_read_only')='off',
  (SELECT rolcreatedb OR rolsuper FROM pg_roles WHERE rolname=current_user),
  NOT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
- WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S'))`).Scan(&database, &address, &port, &writable, &createdb, &empty)
-	if err != nil || database != config.Database || !writable || !createdb || !empty {
-		return "", fmt.Errorf("require the exact fresh writable fixture and database-creation authority")
+ WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S'))`).Scan(&database, &address, &serverVersion, &port, &writable, &createdb, &empty)
+	if err != nil || database != config.Database || serverVersion != 160015 || !writable || !createdb || !empty {
+		return "", fmt.Errorf("require the exact fresh writable PostgreSQL 16.15 fixture and database-creation authority")
 	}
 	return fmt.Sprintf("%s:%d/%s", address, port, database), nil
 }

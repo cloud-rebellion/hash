@@ -1,7 +1,9 @@
 # Disposable integration profiles
 
 Run `sh scripts/test-e2e-profiles.sh` from a Linux environment with the source's
-Go toolchain and caller-owned PostgreSQL, S3-compatible storage and Gotenberg.
+Go toolchain and caller-owned PostgreSQL 16.15, S3-compatible storage and Gotenberg.
+The native measurement protocol currently supports PostgreSQL `160015`; preflight
+checks the live server version as well as the supplied database identity.
 The runner builds the real isolated PDF worker before starting timed tests.
 Its two temporary binaries and package lists live in one `TMPDIR` child and are
 removed on exit. It preserves the normal Go build and module caches.
@@ -29,7 +31,7 @@ at an application, production, retained or shared developer database.
 | `HASH_E2E_OWNED_PG`, `HASH_E2E_BACKLOG_OWNED_PG`, `HASH_E2E_RECIPIENT_LOCK_OWNED_PG`, `HASH_E2E_ORIGINALS_OWNED_PG` | Explicit caller acknowledgements, each `1`, after establishing disposable ownership. Names and acknowledgements alone do not establish ownership. |
 | `HASH_E2E_EXPECT_MIGRATIONS_SHA256` | Caller-pinned full current migration-tree SHA-256. The helper compares it with both compiled migrations and current files, requiring contiguous versions. |
 | `HASH_E2E_S3_ENDPOINT`, `HASH_E2E_S3_ACCESS_KEY`, `HASH_E2E_S3_SECRET_KEY` | Existing disposable storage service settings. Preserve the normal SSE/Object Lock configuration. The usual ephemeral fixture also supplies `HASH_E2E_S3_EPHEMERAL_BUCKET=true`. |
-| `HASH_E2E_GOTENBERG_URL` | Existing confined renderer's origin. |
+| `HASH_E2E_GOTENBERG_URL`, `HASH_E2E_RENDERER_URL` | Existing confined renderer's origin, also supplied to ordinary branded-page fixtures. |
 
 Migration hashing uses SQL filenames sorted lexically, each followed by NUL,
 its exact bytes and another NUL. Pin this digest from the reviewed source before

@@ -11,7 +11,7 @@ cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
 command -v go >/dev/null 2>&1 || fail 'Go is required'
 for prerequisite in HASH_E2E_DB_URL HASH_E2E_BACKLOG_DB_URL HASH_E2E_RECIPIENT_LOCK_DB_URL \
   HASH_E2E_EXPECT_MIGRATIONS_SHA256 HASH_E2E_S3_ENDPOINT HASH_E2E_S3_ACCESS_KEY \
-  HASH_E2E_S3_SECRET_KEY HASH_E2E_GOTENBERG_URL; do
+  HASH_E2E_S3_SECRET_KEY HASH_E2E_GOTENBERG_URL HASH_E2E_RENDERER_URL; do
   # Indirection names come only from the fixed list above; values stay private.
   eval 'value=${'"$prerequisite"'-}'
   [ -n "$value" ] || fail "missing prerequisite: $prerequisite"

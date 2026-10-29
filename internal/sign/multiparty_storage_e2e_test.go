@@ -90,8 +90,18 @@ func (s *multipartyVersionStore) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
-		until, err := time.Parse(time.RFC3339, r.Header.Get("X-Amz-Object-Lock-Retain-Until-Date"))
-		if err != nil || r.Header.Get("X-Amz-Object-Lock-Mode") != "COMPLIANCE" || !until.After(time.Now()) {
+		var until time.Time
+		mode, deadline := r.Header.Get("X-Amz-Object-Lock-Mode"), r.Header.Get("X-Amz-Object-Lock-Retain-Until-Date")
+		if mode != "" || deadline != "" {
+			until, err = time.Parse(time.RFC3339, deadline)
+			if err != nil || mode != "COMPLIANCE" || !until.After(time.Now()) {
+				http.Error(w, "invalid synthetic COMPLIANCE write deadline", http.StatusBadRequest)
+				return
+			}
+		} else if !multipartyDraftIntakeKeyE2E(key) {
+			// Native PDF intake writes an initially mutable draft source. Send
+			// must later apply and verify retention on this exact version.
+			// Final/certificate/signature evidence still requires COMPLIANCE.
 			http.Error(w, "missing synthetic COMPLIANCE write deadline", http.StatusBadRequest)
 			return
 		}
@@ -128,6 +138,10 @@ func (s *multipartyVersionStore) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.URL.Query().Has("retention") {
 		w.Header().Set("Content-Type", "application/xml")
 		if r.Method == http.MethodGet {
+			if row.retainUntil.IsZero() {
+				fmt.Fprint(w, `<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`)
+				return
+			}
 			fmt.Fprintf(w, `<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Mode>COMPLIANCE</Mode><RetainUntilDate>%s</RetainUntilDate></Retention>`, row.retainUntil.UTC().Format(time.RFC3339))
 			return
 		}
@@ -135,7 +149,7 @@ func (s *multipartyVersionStore) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			Mode            string
 			RetainUntilDate time.Time
 		}
-		if r.Method != http.MethodPut || xml.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&request) != nil || request.Mode != "COMPLIANCE" || request.RetainUntilDate.Before(row.retainUntil) {
+		if r.Method != http.MethodPut || xml.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&request) != nil || request.Mode != "COMPLIANCE" || !request.RetainUntilDate.After(time.Now()) || request.RetainUntilDate.Before(row.retainUntil) {
 			http.Error(w, "invalid synthetic retention extension", http.StatusBadRequest)
 			return
 		}
@@ -157,4 +171,14 @@ func (s *multipartyVersionStore) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == http.MethodGet {
 		_, _ = w.Write(row.body)
 	}
+}
+
+func multipartyDraftIntakeKeyE2E(key string) bool {
+	parts := strings.Split(key, "/")
+	if len(parts) != 4 || parts[0] != "org" || parts[2] != "documents" || !strings.HasSuffix(parts[3], ".pdf") {
+		return false
+	}
+	org, orgErr := uuid.Parse(parts[1])
+	source, sourceErr := uuid.Parse(strings.TrimSuffix(parts[3], ".pdf"))
+	return orgErr == nil && sourceErr == nil && org != uuid.Nil && source != uuid.Nil
 }

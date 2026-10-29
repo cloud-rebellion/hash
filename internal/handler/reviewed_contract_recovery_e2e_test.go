@@ -113,6 +113,7 @@ type reviewedContractRecoveryFixtureE2E struct {
 	orgID, docID                      uuid.UUID
 	original                          *generated.Document
 	names, tokens                     []string
+	finalizationRenderStart           int
 	storageRequests, rendererRequests atomic.Int64
 	rendererFail, retentionFail       atomic.Bool
 }
@@ -168,6 +169,9 @@ func newReviewedContractRecoveryE2E(t *testing.T, withIntent bool) *reviewedCont
 		f.names = append(f.names, party.Name)
 		f.tokens = append(f.tokens, party.Token)
 	}
+	// Preview and document creation already render the printed party names.
+	// Only later sources can establish the finalization renderer assertion.
+	f.finalizationRenderStart = len(native.renderer.protocol.sources())
 	if result, err := ordinaryPreparationSign249(t, native, parties[0].Token, parties[0].Name); err != nil || result == nil || result.Completed {
 		t.Fatalf("first reviewed party result=%+v error=%v", result, err)
 	}
@@ -278,7 +282,11 @@ func (f *reviewedContractRecoveryFixtureE2E) assertCompleted(t *testing.T, label
 	if err != nil || !strings.Contains(string(bodies[2]), claims.HTML()) {
 		t.Fatal("signed certificate does not bind exact artifact and pre-completion ledger", err)
 	}
-	rendered := strings.Join(f.native.renderer.protocol.sources(), "\n")
+	sources := f.native.renderer.protocol.sources()
+	if len(sources) <= f.finalizationRenderStart {
+		t.Fatal("completed recovery omitted a finalization render source")
+	}
+	rendered := strings.Join(sources[f.finalizationRenderStart:], "\n")
 	for _, name := range f.names {
 		if !strings.Contains(rendered, name) {
 			t.Fatalf("final rendering omitted party %q", name)

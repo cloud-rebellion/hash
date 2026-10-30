@@ -308,7 +308,7 @@ jobs:
       - name: Full live browser and API regression suite
         env:
           CI: '1'
-          HASH_E2E_URL: http://127.0.0.1:8080
+          HASH_E2E_URL: http://localhost:8080
           HASH_E2E_API_KEY: mth_deadbeef_TESTKEYFORINTEGRATIONTESTINGONLY12345AAAAAAA
           HASH_LANDING: '1'
         run: bun run test

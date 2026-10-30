@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -199,6 +200,14 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 	if err != nil || targetVersion != 1 {
 		t.Fatal("actual native creation snapshot missing", err)
 	}
+	target, err := q.GetDocumentVersionByNo(ctx, generated.GetDocumentVersionByNoParams{DocumentID: doc.ID, VersionNo: targetVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uncompressed bool
+	if err := pool.QueryRow(ctx, "SELECT pg_column_compression(block_tree_json) IS NULL AND pg_column_compression(variables_json) IS NULL FROM document_versions WHERE id=$1", target.ID).Scan(&uncompressed); err != nil || !uncompressed {
+		t.Fatal("positive restore target must be an actual uncompressed native version", err)
+	}
 	old := doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)
 	call(t, "set_variables", map[string]any{"document_id": doc.ID.String(), "expected_updated_at": old, "variables": map[string]string{"state": "new"}}, false)
 	cases := map[string]map[string]any{
@@ -228,6 +237,10 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 				return v, e
 			}
 			v, e := counts()
+			previousVersion, err := q.GetLatestDocumentVersionIdentityV1(ctx, doc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			args["document_id"] = doc.ID.String()
 			args["expected_updated_at"] = old
 			call(t, name, args, true)
@@ -245,6 +258,86 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 			if av <= v || ae <= e {
 				t.Fatal("fresh tool missing evidence")
 			}
+			if name == "restore_document_version" {
+				latest, err := q.GetLatestDocumentVersion(ctx, doc.ID)
+				after, readErr := q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
+				if err != nil || readErr != nil || av != v+1 || ae != e+1 || latest.CreatedVia != "restore" || latest.Summary != fmt.Sprintf("restored from v%d", targetVersion) || latest.Name != target.Name || !latest.ParentID.Valid || uuid.UUID(latest.ParentID.Bytes) != previousVersion || string(after.BlocksJson) != string(target.BlockTreeJson) || string(after.VariablesJson) != string(target.VariablesJson) || after.Name != current.Name {
+					t.Fatal("restore changed historical content/provenance or emitted duplicate evidence", err, readErr)
+				}
+				var payload json.RawMessage
+				if err := pool.QueryRow(ctx, "SELECT payload_json FROM events WHERE document_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1", doc.ID).Scan(&payload); err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if json.Unmarshal(payload, &fields) != nil || len(fields) != 3 || string(fields["via"]) != `"mcp"` || string(fields["tool"]) != `"restore_document_version"` || string(fields["restored_from_v"]) != fmt.Sprint(targetVersion) {
+					t.Fatal("restore audit payload lost its exact original schema")
+				}
+			}
 		})
 	}
+
+	// The following stimuli use the same genuine current document and admitted
+	// API credential. A legacy compressed history row is intentionally synthetic;
+	// it cannot become an owned source or repair the current measured document.
+	state := func(t *testing.T) string {
+		t.Helper()
+		var state string
+		if err := pool.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'document',(SELECT to_jsonb(d) FROM documents d WHERE id=$1),
+ 'versions',(SELECT jsonb_agg(to_jsonb(v) ORDER BY version_no) FROM document_versions v WHERE document_id=$1),
+ 'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY created_at,id) FROM events e WHERE document_id=$1),
+ 'policy',(SELECT to_jsonb(p) FROM document_signing_policy_sizes_v1 p WHERE document_id=$1),
+ 'response',(SELECT to_jsonb(p) FROM html_creation_response_sizes_v1 p WHERE document_id=$1),
+ 'report',(SELECT to_jsonb(p) FROM document_read_report_sizes_v1 p WHERE document_id=$1))::text`, doc.ID).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	t.Run("restore_audit_failure_rolls_back_source_history_and_measurements", func(t *testing.T) {
+		_, err := pool.Exec(ctx, fmt.Sprintf(`CREATE FUNCTION mcp_restore_fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic restore audit failure'; END $$;
+ CREATE TRIGGER mcp_restore_fail_audit BEFORE INSERT ON events FOR EACH ROW
+ WHEN (NEW.document_id='%s'::uuid AND NEW.kind='document.updated') EXECUTE FUNCTION mcp_restore_fail_audit()`, doc.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if _, err := pool.Exec(cleanup, "DROP TRIGGER mcp_restore_fail_audit ON events; DROP FUNCTION mcp_restore_fail_audit()"); err != nil {
+				t.Error(err)
+			}
+		}()
+		current, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := state(t)
+		call(t, "restore_document_version", map[string]any{"document_id": doc.ID.String(), "target_version": targetVersion, "expected_updated_at": current.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)}, true)
+		if before != state(t) {
+			t.Fatal("failed restore audit committed source, history, event or measurement state")
+		}
+	})
+	t.Run("restore_compressed_history_refuses_without_side_effects", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{"version": 1, "blocks": []any{map[string]string{"id": "legacy", "type": "paragraph", "text": strings.Repeat("legacy compressed text ", 2048)}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: org.ID, Name: "Synthetic legacy compressed target", SourceKind: "blocks", BlocksJSON: body, VariablesJS: json.RawMessage(`{}`), CreatedBy: &user.ID, Via: versions.ViaHuman, Summary: "Explicit unsupported historical storage stimulus"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compressed bool
+		if err := pool.QueryRow(ctx, "SELECT pg_column_compression(block_tree_json) IS NOT NULL FROM document_versions WHERE id=$1", legacy.ID).Scan(&compressed); err != nil || !compressed {
+			t.Fatal("legacy refusal stimulus did not use actual compressed PostgreSQL storage", err)
+		}
+		current, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := state(t)
+		call(t, "restore_document_version", map[string]any{"document_id": doc.ID.String(), "target_version": legacy.VersionNo, "expected_updated_at": current.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)}, true)
+		if before != state(t) {
+			t.Fatal("unsupported historical restore changed source, versions, audit or original measurements")
+		}
+	})
 }

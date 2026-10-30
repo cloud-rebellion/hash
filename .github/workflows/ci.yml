@@ -99,19 +99,49 @@ jobs:
           wait_for minio curl -sf http://localhost:9000/minio/health/ready
           wait_for gotenberg curl -sf http://localhost:3000/health
 
-      - name: Build isolated PDF worker for E2E
-        run: go build -o "$RUNNER_TEMP/hash-pdf-worker" ./cmd/pdfworker
+      - name: Prepare owned E2E profiles from the checked-out source
+        run: |
+          docker exec pg psql -U hash -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE hash_backlog_github'
+          docker exec pg psql -U hash -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE hash_recipient_lock_github'
+          python3 - <<'PYTHON'
+          import hashlib, os, pathlib
+          root = pathlib.Path('internal/db/migrations')
+          names = sorted(p.relative_to(root).as_posix() for p in root.rglob('*.sql'))
+          if not names:
+              raise SystemExit('migration source is empty')
+          digest = hashlib.sha256()
+          for name in names:
+              path = root / name
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit('migration source must be a regular file')
+              digest.update(name.encode())
+              digest.update(b'\0')
+              digest.update(path.read_bytes())
+              digest.update(b'\0')
+          with open(os.environ['GITHUB_ENV'], 'a') as target:
+              target.write('HASH_E2E_EXPECT_MIGRATIONS_SHA256=' + digest.hexdigest() + '\n')
+          PYTHON
 
-      - name: Run module-wide E2E
+      - name: Run every tagged package against its owned E2E profile
         env:
-          HASH_E2E_DB_URL: postgres://hash:e2e@localhost:5432/hash?sslmode=disable
-          HASH_E2E_PDF_WORKER_PATH: ${{ runner.temp }}/hash-pdf-worker
+          TMPDIR: ${{ runner.temp }}
+          HASH_E2E_DB_URL: postgres://hash:e2e@127.0.0.1:5432/hash?sslmode=disable
+          HASH_E2E_BACKLOG_DB_URL: postgres://hash:e2e@127.0.0.1:5432/hash_backlog_github?sslmode=disable
+          HASH_E2E_RECIPIENT_LOCK_DB_URL: postgres://hash:e2e@127.0.0.1:5432/hash_recipient_lock_github?sslmode=disable
+          HASH_E2E_OWNED_PG: '1'
+          HASH_E2E_BACKLOG_OWNED_PG: '1'
+          HASH_E2E_RECIPIENT_LOCK_OWNED_PG: '1'
+          HASH_E2E_ORIGINALS_OWNED_PG: '1'
+          HASH_E2E_EVIDENCE_DIR: ${{ runner.temp }}/hash-e2e-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           HASH_E2E_S3_ENDPOINT: localhost:9000
           HASH_E2E_S3_ACCESS_KEY: minioadmin
           HASH_E2E_S3_SECRET_KEY: minioadmin
           HASH_E2E_S3_EPHEMERAL_BUCKET: 'true'
           HASH_E2E_GOTENBERG_URL: http://localhost:3000
-        run: go test -tags e2e -count=1 -timeout=180s ./...
+          HASH_E2E_RENDERER_URL: http://localhost:3000
+        run: sh scripts/test-e2e-profiles.sh
 
       - name: Collect E2E dependency logs
         if: failure()

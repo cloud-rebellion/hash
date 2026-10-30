@@ -25,6 +25,7 @@ type applicationBlocksMutationStateV1 struct {
 	sourceWork                  *applicationBlocksCreationStateV1
 	release                     func()
 	doc                         *generated.Document
+	restoreTarget               *generated.DocumentVersion
 	intermediate                [8]*generated.Document
 	retainedRows                int
 	sourceWritten               bool
@@ -57,7 +58,9 @@ func (h *ApplicationSessionV1) newBlocksMutationWriterV1(ctx context.Context, re
 	if old == nil || old.ID != h.state.document || old.OrgID != h.state.org || (old.SourceKind != "blocks" && (!allowPDF || old.SourceKind != "pdf")) || old.Status != "draft" || len(old.HtmlSourceJson) != 0 || len(old.HtmlCurrentSourceJson) != 0 || old.HtmlCurrentMaterializationID.Valid {
 		return nil, ErrBlocksWriterV1
 	}
-	close, err := reader.authoring.acquireOwnedRetainedBodyV1(ctx, 2*int64(unsafe.Sizeof(applicationBlocksMutationStateV1{}))+2*int64(unsafe.Sizeof(ApplicationBlocksMutationWriterV1{}))+2*int64(unsafe.Sizeof(applicationBlocksCreationStateV1{}))+2*int64(unsafe.Sizeof(ApplicationBlocksCreationWriterV1{}))+2*int64(unsafe.Sizeof(generated.HtmlCreationResponseSizesV1{})), 0)
+	// The same fixed writer header also covers a historical restore's scalar
+	// projection and target/snapshot DTOs before any version metadata query.
+	close, err := reader.authoring.acquireOwnedRetainedBodyV1(ctx, 2*int64(unsafe.Sizeof(applicationBlocksMutationStateV1{}))+2*int64(unsafe.Sizeof(ApplicationBlocksMutationWriterV1{}))+2*int64(unsafe.Sizeof(applicationBlocksCreationStateV1{}))+2*int64(unsafe.Sizeof(ApplicationBlocksCreationWriterV1{}))+2*int64(unsafe.Sizeof(generated.HtmlCreationResponseSizesV1{}))+4*int64(unsafe.Sizeof(generated.DocumentVersion{}))+512, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +199,7 @@ func (w *ApplicationBlocksMutationWriterV1) CloseConsumerV1() {
 	}
 	s.closed = true
 	s.doc = nil
+	s.restoreTarget = nil
 	s.intermediate = [8]*generated.Document{}
 	s.snapshot = nil
 	work, release := s.sourceWork, s.release

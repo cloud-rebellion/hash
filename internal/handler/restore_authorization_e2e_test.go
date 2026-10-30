@@ -25,29 +25,48 @@ import (
 
 type restoreAuthorizationFixture struct {
 	blockAuthorizationFixture
-	target *generated.DocumentVersion
+	target, previous *generated.DocumentVersion
 }
 
 func setupRestoreAuthorizationE2E(t *testing.T, role string) restoreAuthorizationFixture {
 	t.Helper()
 	f := setupBlockAuthorizationE2E(t, role)
-	target, err := versions.New(f.q).Snapshot(f.ctx, versions.SnapshotInput{
-		DocumentID: f.doc.ID, OrgID: f.org, Name: f.doc.Name, SourceKind: "blocks", BlocksJSON: f.doc.BlocksJson,
-		VariablesJS: f.doc.VariablesJson, CreatedBy: &f.user.ID, Via: versions.ViaHuman, Summary: "Historical restore target",
+	// The original target is the genuine creator's historical version. A new
+	// native draft update then owns the changed blocks/variables and their
+	// measurements; no raw UPDATE or cache repair seeds the restore stimulus.
+	target, err := f.q.GetLatestDocumentVersion(f.ctx, f.doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target == nil || target.DocumentID != f.doc.ID || target.OrgID != f.org || target.SourceKind != "blocks" || string(target.BlockTreeJson) != string(f.doc.BlocksJson) || string(target.VariablesJson) != string(f.doc.VariablesJson) {
+		t.Fatal("native creator's original restore target differs from the draft")
+	}
+	body, err := json.Marshal(map[string]any{
+		"expected_updated_at": f.doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
+		"blocks_json":         json.RawMessage(`{"version":1,"blocks":[{"id":"agreement","type":"paragraph","text":"Current reviewed terms"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`),
+		"variables_json":      map[string]string{"customer": "Current reviewed customer"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.doc, err = f.q.UpdateDocumentBlocks(f.ctx, generated.UpdateDocumentBlocksParams{
-		ID: f.doc.ID, OrgID: f.org,
-		BlocksJson:    json.RawMessage(`{"version":1,"blocks":[{"id":"agreement","type":"paragraph","text":"Current reviewed terms"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`),
-		VariablesJson: json.RawMessage(`{"customer":"Current reviewed customer"}`),
-	})
+	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPatch, "/api/v1/documents/"+f.doc.ID.String(), string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	if response.Code != http.StatusOK {
+		t.Fatalf("native current restore fixture update=%d %s", response.Code, response.Body.String())
+	}
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
 	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := f.q.GetLatestDocumentVersion(f.ctx, f.doc.ID)
+	if err != nil || previous == nil || previous.VersionNo != target.VersionNo+1 || !previous.ParentID.Valid || uuid.UUID(previous.ParentID.Bytes) != target.ID || string(previous.BlockTreeJson) != string(f.doc.BlocksJson) || string(previous.VariablesJson) != string(f.doc.VariablesJson) || string(f.doc.BlocksJson) == string(target.BlockTreeJson) || string(f.doc.VariablesJson) == string(target.VariablesJson) {
+		t.Fatal("native fixture update omitted its changed source or exact version", err)
+	}
+	f.originalEvents = blockOriginalEventsE2E(t, f.lifecycleAuthorizationFixture)
+	if err := f.pool.QueryRow(f.ctx, "SELECT (SELECT count(*) FROM document_versions WHERE document_id=$1),(SELECT count(*) FROM events WHERE document_id=$1)", f.doc.ID).Scan(&f.originalVersions, &f.originalDocumentEvents); err != nil {
 		t.Fatal(err)
 	}
 	f.enableMCP()
-	return restoreAuthorizationFixture{f, target}
+	return restoreAuthorizationFixture{blockAuthorizationFixture: f, target: target, previous: previous}
 }
 
 func (f restoreAuthorizationFixture) call(transport, credential, stamp string, docID uuid.UUID, version int32) *httptest.ResponseRecorder {
@@ -90,17 +109,24 @@ func (f restoreAuthorizationFixture) assertCommit(t *testing.T) {
 	if err := f.pool.QueryRow(f.ctx, `SELECT
 		(SELECT count(*) FROM document_versions WHERE document_id=$1),
 		(SELECT count(*) FROM document_versions v JOIN documents d ON d.id=v.document_id
-		 WHERE v.document_id=$1 AND v.version_no=2 AND v.created_by=$2 AND v.created_via='restore'
+		 WHERE v.document_id=$1 AND v.version_no=$3 AND v.created_by=$2 AND v.created_via='restore'
+		 AND v.parent_id=$4 AND v.summary=$5 AND v.name=$6
 		 AND v.block_tree_json=d.blocks_json AND v.variables_json=d.variables_json),
 		(SELECT count(*) FROM events WHERE document_id=$1),
 		(SELECT count(*) FROM events WHERE document_id=$1 AND actor_user_id=$2 AND kind='document.updated'
-		 AND payload_json->>'tool'='restore_document_version' AND payload_json->>'restored_from_v'='1'),
+		 AND payload_json->>'tool'='restore_document_version' AND payload_json->>'restored_from_v'=$7),
 		(SELECT count(*) FROM email_deliveries WHERE to_email IN (SELECT email FROM recipients WHERE document_id=$1))`,
-		f.doc.ID, f.user.ID).Scan(&versionCount, &exactVersions, &eventCount, &exactEvents, &outboxCount); err != nil { //nolint:rawsql -- exact fixture restore/version/audit/outbox proof
+		f.doc.ID, f.user.ID, f.previous.VersionNo+1, f.previous.ID, "restored from v"+strconv.Itoa(int(f.target.VersionNo)), f.target.Name, strconv.Itoa(int(f.target.VersionNo))).Scan(&versionCount, &exactVersions, &eventCount, &exactEvents, &outboxCount); err != nil { //nolint:rawsql -- exact fixture restore/version/audit/outbox proof
 		t.Fatal(err)
 	}
-	if versionCount != 2 || exactVersions != 1 || eventCount != 1 || exactEvents != 1 || outboxCount != 0 {
-		t.Fatalf("restore versions/exact/events/exact/outbox=%d/%d/%d/%d/%d want2/1/1/1/0", versionCount, exactVersions, eventCount, exactEvents, outboxCount)
+	currentEvents := blockOriginalEventsE2E(t, f.lifecycleAuthorizationFixture)
+	for id, digest := range f.originalEvents {
+		if currentEvents[id] != digest {
+			t.Fatal("restore changed original native creation/update history")
+		}
+	}
+	if versionCount != f.originalVersions+1 || exactVersions != 1 || eventCount != f.originalDocumentEvents+1 || exactEvents != 1 || outboxCount != 0 || len(currentEvents) != len(f.originalEvents)+1 {
+		t.Fatalf("restore versions/exact/events/exact/outbox=%d/%d/%d/%d/%d; baseline versions/events=%d/%d", versionCount, exactVersions, eventCount, exactEvents, outboxCount, f.originalVersions, f.originalDocumentEvents)
 	}
 	rows, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 	if err != nil {
@@ -108,7 +134,7 @@ func (f restoreAuthorizationFixture) assertCommit(t *testing.T) {
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(rows)
-	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != 1 {
+	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != len(f.originalEvents)+1 {
 		t.Fatalf("restore chain invalid: %+v", result)
 	}
 }

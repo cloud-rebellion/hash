@@ -15,10 +15,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -305,96 +305,34 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, docID)
-	if err != nil {
-		s.writeDraftAuthoringError(w, "restore document version failed", err)
-		return
-	}
-	q := s.Queries.WithTx(tx)
-	locked := guard.Document
-	if locked.SourceKind != "blocks" {
-		writeError(w, http.StatusConflict, "restore only supported on block-source documents")
-		return
-	}
-	actorID := guard.UserID()
-	if !locked.UpdatedAt.Valid || !locked.UpdatedAt.Time.Equal(expected) {
-		writeError(w, http.StatusPreconditionFailed, "Document changed since observation. Fetch and review before restoring.")
-		return
-	}
-
-	// Only this scoped target lookup translates absence into a readable error.
-	// No-row mutation, version and audit writes below are internal failures.
-	target, err := q.GetDocumentVersionByNo(ctx, generated.GetDocumentVersionByNoParams{DocumentID: docID, VersionNo: int32(n64)})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "version not found")
-		return
+	observationChanged := errors.New("Document changed since observation. Fetch and review before restoring.")
+	restored, err := blockauthoring.RestoreVersionV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Audit: s.Audit, SnapshotMutation: true},
+		blockauthoring.ActorV1{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize, Via: "rest", Tool: "restore_document_version", IP: firstIPFromHeader(r), UserAgent: r.UserAgent()},
+		docID, int32(n64), in.ExpectedUpdatedAt, func(doc *generated.Document, _ string) error {
+			if !doc.UpdatedAt.Valid || !doc.UpdatedAt.Time.Equal(expected) {
+				return observationChanged
+			}
+			return nil
+		})
+	if restored != nil {
+		defer restored.CloseConsumerV1()
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		switch {
+		case errors.Is(err, observationChanged):
+			writeError(w, http.StatusPreconditionFailed, observationChanged.Error())
+		case errors.Is(err, pdfadmission.ErrBlocksRestoreVersionNotFoundV1):
+			writeError(w, http.StatusNotFound, "version not found")
+		case errors.Is(err, blockauthoring.ErrRestoreDocumentKindV1), errors.Is(err, pdfadmission.ErrBlocksRestoreKindV1), errors.Is(err, pdfadmission.ErrBlocksRestoreSourceV1):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			s.writeBlockMutationError(w, err)
+		}
 		return
 	}
-	if target.OrgID != sess.OrgID {
-		writeError(w, http.StatusNotFound, "version not found")
-		return
-	}
-	if target.SourceKind != "blocks" {
-		writeError(w, http.StatusConflict, "target version is not block-source")
-		return
-	}
-	if _, _, err := versions.New(q).Restore(ctx, versions.RestoreInput{
-		DocumentID: docID, TargetVersion: int32(n64), OrgID: sess.OrgID, CreatedBy: &actorID,
-	}); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	updated, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
-		ID:            docID,
-		OrgID:         sess.OrgID,
-		BlocksJson:    target.BlockTreeJson,
-		VariablesJson: target.VariablesJson,
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &actorID,
-		DocumentID:  &docID,
-		Kind:        audit.KindDocumentUpdated,
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload: map[string]any{
-			"via":             "rest",
-			"tool":            "restore_document_version",
-			"restored_from_v": target.VersionNo,
-			"restored_blocks": blockCountOrZero(target.BlockTreeJson),
-		},
-	})
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	if err := guard.Recheck(ctx); err != nil {
-		s.writeDraftAuthoringError(w, "restore document version failed", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"document":        toDocumentResponse(updated),
-		"restored_from_v": target.VersionNo,
+		"document":        toDocumentResponse(restored.Document),
+		"restored_from_v": int32(n64),
 	})
 }
 

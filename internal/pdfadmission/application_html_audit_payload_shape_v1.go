@@ -79,6 +79,7 @@ const (
 	HTMLAuditPreSignCommittedV1
 	HTMLAuditPreSignPublishedV1
 	HTMLAuditPreSignSupersededV1
+	HTMLAuditBlocksRestoredV1
 )
 
 func (p HTMLAuditPurposeV1) KindV1() string {
@@ -161,7 +162,7 @@ func (p HTMLAuditPurposeV1) KindV1() string {
 		return "document.field_added"
 	case HTMLAuditPlainLayoutRecipientCreatedV1:
 		return "recipient.created"
-	case HTMLAuditHTMLReviewV1, HTMLAuditHTMLRevisionV1, HTMLAuditBlocksUpdatedV1, HTMLAuditEnvelopeUpdatedV1:
+	case HTMLAuditHTMLReviewV1, HTMLAuditHTMLRevisionV1, HTMLAuditBlocksUpdatedV1, HTMLAuditBlocksRestoredV1, HTMLAuditEnvelopeUpdatedV1:
 		return "document.updated"
 	case HTMLAuditRecipientInvitedV1, HTMLAuditPackageRecipientInvitedV1:
 		return "recipient.invited"
@@ -274,6 +275,8 @@ func htmlAuditRootKeyV1(p HTMLAuditPurposeV1, k string) bool {
 		fields = "|name|source_kind|via|tool|"
 	case HTMLAuditBlocksUpdatedV1:
 		fields = "|via|tool|blocks|"
+	case HTMLAuditBlocksRestoredV1:
+		fields = "|via|tool|restored_from_v|restored_blocks|"
 	case HTMLAuditPlainPDFCreatedV1:
 		fields = "|name|source_kind|intake|via|tool|template_id|template_version|layout_version|party_count|"
 	case HTMLAuditPlainFieldAddedV1:

@@ -8,16 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
-	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -224,8 +225,8 @@ func registerVersionTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			if p.TargetVersion <= 0 {
-				return nil, errors.New("target_version must be >= 1")
+			if p.TargetVersion <= 0 || p.TargetVersion > math.MaxInt32 {
+				return nil, errors.New("target_version must be a positive int32")
 			}
 			if d.Pool == nil || d.Audit == nil {
 				return nil, errors.New("atomic audit dependencies unavailable")
@@ -234,82 +235,34 @@ func registerVersionTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
-			defer cancel()
-			tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			if err != nil {
-				return nil, err
+			restored, err := blockauthoring.RestoreVersionV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: true},
+				blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "restore_document_version"},
+				id, int32(p.TargetVersion), p.ExpectedUpdatedAt, checkDocumentObservation)
+			result := &restoredDocumentToolResultV1{owner: restored, version: int32(p.TargetVersion)}
+			if errors.Is(err, pdfadmission.ErrBlocksRestoreVersionNotFoundV1) {
+				return result, errors.New("version not found")
 			}
-			defer func() { _ = authoring.Rollback(ctx, tx) }()
-			guard, err := authoring.LockDraft(ctx, tx, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id)
-			if err != nil {
-				return nil, err
-			}
-			q := d.Queries.WithTx(tx)
-			locked := guard.Document
-			if locked.SourceKind != "blocks" {
-				return nil, errors.New("restore only supported on block-source documents")
-			}
-			actorID := guard.UserID()
-			if err := checkDocumentObservation(locked, p.ExpectedUpdatedAt); err != nil {
-				return nil, err
-			}
-			target, err := q.GetDocumentVersionByNo(ctx, generated.GetDocumentVersionByNoParams{DocumentID: id, VersionNo: int32(p.TargetVersion)})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("version not found")
-			}
-			if err != nil {
-				return nil, err
-			}
-			if target.OrgID != u.OrgID {
-				return nil, errors.New("version not found")
-			}
-			if target.SourceKind != "blocks" {
-				return nil, errors.New("target version is not block-source")
-			}
-			if _, _, err := versions.New(q).Restore(ctx, versions.RestoreInput{
-				DocumentID: id, TargetVersion: int32(p.TargetVersion), OrgID: u.OrgID, CreatedBy: &actorID,
-			}); err != nil {
-				return nil, err
-			}
-			updated, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{
-				ID:            id,
-				OrgID:         u.OrgID,
-				BlocksJson:    target.BlockTreeJson,
-				VariablesJson: target.VariablesJson,
-			})
-			if err != nil {
-				return nil, err
-			}
-			pending, err := d.Audit.LogTx(ctx, tx, audit.Entry{
-				OrgID:       u.OrgID,
-				ActorUserID: &actorID,
-				DocumentID:  &id,
-				Kind:        audit.KindDocumentUpdated,
-				Payload: map[string]any{
-					"via":             "mcp",
-					"tool":            "restore_document_version",
-					"restored_from_v": target.VersionNo,
-				},
-			})
-			if err != nil {
-				return nil, err
-			}
-			if err := guard.Recheck(ctx); err != nil {
-				return nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return nil, err
-			}
-			d.Audit.Publish(pending)
-			return map[string]any{
-				"document_id":     updated.ID.String(),
-				"name":            updated.Name,
-				"status":          updated.Status,
-				"restored_from_v": target.VersionNo,
-			}, nil
+			return result, err
 		},
 	})
+}
+
+type restoredDocumentToolResultV1 struct {
+	owner   *blockauthoring.ResultV1
+	version int32
+}
+
+func (r *restoredDocumentToolResultV1) CloseConsumerV1() {
+	if r != nil && r.owner != nil {
+		r.owner.CloseConsumerV1()
+	}
+}
+func (r *restoredDocumentToolResultV1) MarshalJSON() ([]byte, error) {
+	if r == nil || r.owner == nil || r.owner.Document == nil {
+		return []byte("null"), nil
+	}
+	doc := r.owner.Document
+	return json.Marshal(map[string]any{"document_id": doc.ID.String(), "name": doc.Name, "status": doc.Status, "restored_from_v": r.version})
 }
 
 // HTML text/PDF changes cannot be represented by an empty block tree. Refuse

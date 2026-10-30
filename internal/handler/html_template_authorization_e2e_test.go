@@ -98,7 +98,7 @@ func isolateMigratedHTMLTemplateDatabaseE2E(t *testing.T) string {
 	return isolateHTMLTemplateDatabaseE2E(t)
 }
 
-func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string) lifecycleAuthorizationFixture {
+func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string, profiles ...htmlAuthoringNativeTestProfileE2E) lifecycleAuthorizationFixture {
 	t.Helper()
 	f := setupLifecycleAuthorizationE2E(t, role, false, false)
 	t.Cleanup(func() {
@@ -120,7 +120,7 @@ func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string) life
 			t.Error(err)
 		}
 	})
-	setupHTMLAuthoringNativeFixtureV1(t, f)
+	setupHTMLAuthoringNativeFixtureV1(t, f, profiles...)
 	return f
 }
 
@@ -1076,7 +1076,7 @@ func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
 			} else {
 				var document uuid.UUID
 				digest := sha256.Sum256([]byte("synthetic migration PDF source"))
-				err = tx.QueryRow(ctx, `INSERT INTO documents(org_id,sender_id,name,source_kind,pdf_storage_key,pdf_sha256) VALUES($1,$2,'Historical source witness','pdf','synthetic/migration.pdf',$3) RETURNING id`, org, user, digest[:]).Scan(&document) //nolint:rawsql -- schema76 source, no later columns/functions
+				err = tx.QueryRow(ctx, `INSERT INTO documents(org_id,sender_id,name,source_kind,pdf_storage_key,pdf_sha256,pdf_storage_version_id,evidence_version_pins_required) VALUES($1,$2,'Historical source witness','pdf','synthetic/migration.pdf',$3,'historical-migration-version-1',true) RETURNING id`, org, user, digest[:]).Scan(&document) //nolint:rawsql -- schema76 fixture satisfies the real migration47 legal-version guard
 				if err != nil {
 					t.Fatal(err)
 				}

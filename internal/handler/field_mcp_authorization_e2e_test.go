@@ -200,12 +200,18 @@ func TestFieldMCPCredentialsRecheckedAfterDocumentWaitE2E(t *testing.T) {
 				if err := blocked.Commit(f.ctx); err != nil {
 					t.Fatal(err)
 				}
-				want := auth.ErrMutationPermissionRevoked.Error()
+				var want error = auth.ErrMutationPermissionRevoked
 				if change == "key-expiry" {
-					want = auth.ErrMutationCredentialExpired.Error()
+					want = auth.ErrMutationCredentialExpired
 				}
-				if got := fieldMCPTextE2E(t, receiveSessionOperationE2E(t, result), true); got != want {
-					t.Fatalf("field credential refusal=%q want%q", got, want)
+				if tool == "add_document_field" {
+					// The native parent/actor reader preserves the same typed
+					// authorization cause with this fixed phase context. MCP exposes
+					// its exact safe message; unrelated errors remain failures.
+					want = fmt.Errorf("lock field parent: %w", want)
+				}
+				if got := fieldMCPTextE2E(t, receiveSessionOperationE2E(t, result), true); got != want.Error() {
+					t.Fatalf("field credential refusal=%q want%q", got, want.Error())
 				}
 				assertRecipientMCPUnchangedE2E(t, f.lifecycleAuthorizationFixture, before)
 				if change == "document-token-revocation" {

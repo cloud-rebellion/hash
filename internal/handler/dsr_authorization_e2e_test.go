@@ -124,7 +124,7 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 	for _, lock := range []string{"document", "request"} {
 		for _, change := range []string{"demotion", "revocation", "expiry"} {
 			t.Run(lock+"/"+change, func(t *testing.T) {
-				ctx, pool, q, s, org, user, doc, recipient := setupCompletedDSREvidenceE2E(t)
+				ctx, pool, q, s, org, user, doc, recipient := setupEligibleDSRDraftE2E(t)
 				otherOwner := seedSessionOwnerE2E(t, ctx, q, org)
 				if _, err := q.UpdateUserRole(ctx, generated.UpdateUserRoleParams{ID: user, OrgID: org, Role: "sender"}); err != nil {
 					t.Fatal(err)
@@ -153,10 +153,10 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 					ttl = time.Second
 				}
 				cookie := dsrSessionCookieE2E(t, s, user, 0, ttl)
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() {
-					result <- submitSessionOperationE2E(s, http.MethodPatch, "/api/v1/dsr/"+request.ID.String(), `{"status":"fulfilled","resolution_note":"authorized review"}`, cookie)
-				}()
+				result, cancel, joined := nativeReminderAsyncHTTP255(ctx, func(call context.Context) *httptest.ResponseRecorder {
+					return submitSessionOperationContextE2E(call, s, http.MethodPatch, "/api/v1/dsr/"+request.ID.String(), `{"status":"fulfilled","resolution_note":"authorized review"}`, cookie)
+				})
+				defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 				awaitSessionOperationLockE2E(t, ctx, pool, "-- name: "+queryName, "transactionid")
 				wantStatus := http.StatusForbidden
 				switch change {
@@ -179,6 +179,7 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 					t.Fatal(err)
 				}
 				res := receiveSessionOperationE2E(t, result)
+				joinHTMLAuthoringRequestE2E(t, cancel, joined)
 				if res.Code != wantStatus {
 					t.Fatalf("stale session response=%d want=%d %s", res.Code, wantStatus, res.Body.String())
 				}
@@ -189,7 +190,7 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 }
 
 func TestDSRTransactionsExpireDuringAuditWaitE2E(t *testing.T) {
-	ctx, pool, q, s, org, user, doc, recipient := setupCompletedDSREvidenceE2E(t)
+	ctx, pool, q, s, org, user, doc, recipient := setupEligibleDSRDraftE2E(t)
 	request, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{OrgID: org, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true}, SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -210,16 +211,17 @@ func TestDSRTransactionsExpireDuringAuditWaitE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 			cookie := dsrSessionCookieE2E(t, s, user, 0, time.Second)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitSessionOperationE2E(s, operation.method, operation.path, operation.body, cookie)
-			}()
+			result, cancel, joined := nativeReminderAsyncHTTP255(ctx, func(call context.Context) *httptest.ResponseRecorder {
+				return submitSessionOperationContextE2E(call, s, operation.method, operation.path, operation.body, cookie)
+			})
+			defer nativeReminderCleanupHTTP255(t, blocked, cancel, joined)
 			awaitSessionOperationLockE2E(t, ctx, pool, "-- name: AcquireOrgChainLock", "advisory")
 			awaitSessionCookieExpiryE2E(t, s, cookie)
 			if err = blocked.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}
 			response := receiveSessionOperationE2E(t, result)
+			joinHTMLAuthoringRequestE2E(t, cancel, joined)
 			if response.Code != http.StatusUnauthorized {
 				t.Fatalf("expired %s=%d %s", operation.name, response.Code, response.Body.String())
 			}

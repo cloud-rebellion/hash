@@ -34,75 +34,111 @@ import (
 	"github.com/bright-interaction/hash/internal/config"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/workguard"
 )
 
 func TestDSRErasureRollsBackEverySideEffectWhenSignatureScrubFailsE2E(t *testing.T) {
-	ctx, pool, q, server, orgID, userID, doc, recipient := setupCompletedDSREvidenceE2E(t)
-	dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
-		OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
-		SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender",
-		PayloadJson: json.RawMessage(`{}`),
+	t.Run("current-completed-evidence-requires-separate-review", func(t *testing.T) {
+		ctx, pool, q, server, orgID, userID, doc, recipient := setupCompletedDSREvidenceE2E(t)
+		dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
+			OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
+			SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender",
+			PayloadJson: json.RawMessage(`{}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Modern completion retains mandatory participant/preparation evidence.
+		// Its real API must refuse automated recipient-only fulfillment/export,
+		// even though the original four signed artifacts are all verified above.
+		before := snapshotDSRScopeE2E(t, ctx, pool, orgID)
+		recorder := transitionDSRE2E(server, orgID, userID, dsr.ID, "fulfilled")
+		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "separate privacy and retention review") {
+			t.Fatalf("retained completion fulfillment=%d %s", recorder.Code, recorder.Body.String())
+		}
+		cookie := dsrSessionCookieE2E(t, server, userID, 0, time.Hour)
+		export := submitSessionOperationContextE2E(ctx, server, http.MethodGet, "/api/v1/data-subject/export?email="+url.QueryEscape(recipient.Email), "", cookie)
+		if export.Code != http.StatusConflict || !strings.Contains(export.Body.String(), "separate privacy export review") {
+			t.Fatalf("retained completion export=%d %s", export.Code, export.Body.String())
+		}
+		if snapshotDSRScopeE2E(t, ctx, pool, orgID) != before {
+			t.Fatal("retained evidence review refusal changed request, subject, evidence or audit")
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Run("synthetic-legacy-shaped-component-uses-real-handler-rollback", func(t *testing.T) {
+		ctx, pool, q, server, orgID, userID, doc, recipient := setupSyntheticLegacyDSRComponentE2E(t)
+		dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
+			OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
+			SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := snapshotDSRScopeE2E(t, ctx, pool, orgID)
+		suffix := strings.ReplaceAll(recipient.ID.String(), "-", "")
+		functionName := "hash_test_fail_signature_scrub_" + suffix
+		triggerName := "hash_test_fail_signature_scrub_trg_" + suffix
+		createFunction := fmt.Sprintf(`
+	CREATE FUNCTION "%s"() RETURNS trigger LANGUAGE plpgsql AS $body$
+	BEGIN
+	  IF OLD.recipient_id = '%s'::uuid THEN
+	    RAISE EXCEPTION 'forced signature scrub failure';
+	  END IF;
+	  RETURN NEW;
+	END
+	$body$`, functionName, recipient.ID) //nolint:gosec -- identifier and literal derive from a parsed UUID
+		if _, err := pool.Exec(ctx, createFunction); err != nil { //nolint:rawsql
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER "%s" BEFORE UPDATE ON signatures FOR EACH ROW EXECUTE FUNCTION "%s"()`, triggerName, functionName)); err != nil { //nolint:rawsql,gosec
+			t.Fatal(err)
+		}
+		defer func() {
+			_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS "%s" ON signatures`, triggerName)) //nolint:rawsql,gosec
+			_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP FUNCTION IF EXISTS "%s"()`, functionName))           //nolint:rawsql,gosec
+		}()
 
-	suffix := strings.ReplaceAll(recipient.ID.String(), "-", "")
-	functionName := "hash_test_fail_signature_scrub_" + suffix
-	triggerName := "hash_test_fail_signature_scrub_trg_" + suffix
-	createFunction := fmt.Sprintf(`
-CREATE FUNCTION "%s"() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN
-  IF OLD.recipient_id = '%s'::uuid THEN
-    RAISE EXCEPTION 'forced signature scrub failure';
-  END IF;
-  RETURN NEW;
-END
-$body$`, functionName, recipient.ID) //nolint:gosec -- identifier and literal derive from a parsed UUID
-	if _, err := pool.Exec(ctx, createFunction); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER "%s" BEFORE UPDATE ON signatures FOR EACH ROW EXECUTE FUNCTION "%s"()`, triggerName, functionName)); err != nil { //nolint:rawsql,gosec
-		t.Fatal(err)
-	}
-	defer func() {
-		_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS "%s" ON signatures`, triggerName)) //nolint:rawsql,gosec
-		_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP FUNCTION IF EXISTS "%s"()`, functionName))           //nolint:rawsql,gosec
-	}()
-
-	recorder := transitionDSRE2E(server, orgID, userID, dsr.ID, "fulfilled")
-	if recorder.Code < 500 {
-		t.Fatalf("forced signature scrub failure status = %d, want 5xx; body=%s", recorder.Code, recorder.Body.String())
-	}
-	freshDSR, err := q.GetDataSubjectRequest(ctx, generated.GetDataSubjectRequestParams{ID: dsr.ID, OrgID: orgID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if freshDSR.Status != "open" || freshDSR.SubjectEmail != recipient.Email || freshDSR.SubjectName != recipient.Name {
-		t.Fatalf("DSR escaped rollback: status/email/name = %q/%q/%q", freshDSR.Status, freshDSR.SubjectEmail, freshDSR.SubjectName)
-	}
-	freshRecipient, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: orgID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if freshRecipient.Email != recipient.Email || freshRecipient.Name != recipient.Name {
-		t.Fatalf("recipient escaped rollback: email/name = %q/%q", freshRecipient.Email, freshRecipient.Name)
-	}
-	signatures, err := q.ListSignaturesByDocument(ctx, doc.ID)
-	if err != nil || len(signatures) != 1 {
-		t.Fatalf("signatures after rollback = %d, err=%v", len(signatures), err)
-	}
-	if signatures[0].TypedName != "Original Legal Name" || !signatures[0].SignerUa.Valid {
-		t.Fatalf("signature escaped rollback: %#v", signatures[0])
-	}
-	var terminalEvents int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE org_id = $1 AND kind IN ('data_subject.anonymized','data_subject.fulfilled')`, orgID).Scan(&terminalEvents); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
-	if terminalEvents != 0 {
-		t.Fatalf("terminal DSR audit events after rollback = %d, want 0", terminalEvents)
-	}
+		// Invoke the authoritative application transaction. These input rows are
+		// explicitly synthetic legacy-shaped components, not a verified signature
+		// journey or current/legacy legal artifact acceptance claim.
+		recorder := transitionDSRE2E(server, orgID, userID, dsr.ID, "fulfilled")
+		if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "anonymize signatures") {
+			t.Fatalf("actual component handler scrub failure=%d %s", recorder.Code, recorder.Body.String())
+		}
+		if snapshotDSRScopeE2E(t, ctx, pool, orgID) != before {
+			t.Fatal("actual application signature-scrub fault escaped complete rollback")
+		}
+		freshDSR, err := q.GetDataSubjectRequest(ctx, generated.GetDataSubjectRequestParams{ID: dsr.ID, OrgID: orgID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if freshDSR.Status != "open" || freshDSR.SubjectEmail != recipient.Email || freshDSR.SubjectName != recipient.Name {
+			t.Fatalf("DSR escaped rollback: status/email/name = %q/%q/%q", freshDSR.Status, freshDSR.SubjectEmail, freshDSR.SubjectName)
+		}
+		freshRecipient, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: orgID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if freshRecipient.Email != recipient.Email || freshRecipient.Name != recipient.Name {
+			t.Fatalf("recipient escaped rollback: email/name = %q/%q", freshRecipient.Email, freshRecipient.Name)
+		}
+		signatures, err := q.ListSignaturesByDocument(ctx, doc.ID)
+		if err != nil || len(signatures) != 1 {
+			t.Fatalf("signatures after rollback = %d, err=%v", len(signatures), err)
+		}
+		if signatures[0].TypedName != "Original Legal Name" || !signatures[0].SignerUa.Valid {
+			t.Fatalf("signature escaped rollback: %#v", signatures[0])
+		}
+		var terminalEvents int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE org_id = $1 AND kind IN ('data_subject.anonymized','data_subject.fulfilled')`, orgID).Scan(&terminalEvents); err != nil { //nolint:rawsql
+			t.Fatal(err)
+		}
+		if terminalEvents != 0 {
+			t.Fatalf("terminal DSR audit events after rollback = %d, want 0", terminalEvents)
+		}
+	})
 }
 
 func TestDSRConcurrentTerminalTransitionsHaveOneWinnerE2E(t *testing.T) {
@@ -669,14 +705,87 @@ func browserMigrationPhaseContext368(parent context.Context) (context.Context, c
 	return context.WithTimeout(parent, 90*time.Second)
 }
 
-// Completed DSR evidence comes from the genuine single-party ordinary creator,
-// Send, notice-bound Sign, original-output staging and versioned provider path.
-// The protocol peers are synthetic; no current intent/preparation is fabricated.
-// Pure DSR/component fixtures keep setupDSRE2E and its original pool unchanged.
-func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
+// Explicit synthetic legacy-shaped COMPONENT rows, seeded at the historical
+// schema boundary and migrated normally. Placeholders are only inputs for the
+// DSR handler's redaction transaction: no storage body, valid certificate,
+// cryptographic signature or genuine historical signing journey is asserted.
+func setupSyntheticLegacyDSRComponentE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
+	t.Helper()
+	isolateEmptyHTMLTemplateDatabaseE2E(t)
+	birth := migrationFixtureContext242(t)
+	cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrationDB := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() {
+		if err := migrationDB.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := mdb.RunMigrationsUpToContext(birth, migrationDB, 64); err != nil {
+		t.Fatal("component historical prefix migration", err)
+	}
+	org, user, docID, recipientID, fieldID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sent := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	completed := sent.Add(time.Minute)
+	digest := make([]byte, 32)
+	digest[0] = 7
+	prefix := "org/" + org.String() + "/documents/" + docID.String() + "/"
+	statements := []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO orgs(id,name,plan) VALUES($1,'Synthetic DSR component organization','pro')`, []any{org}},
+		{`INSERT INTO users(id,org_id,email,name,role) VALUES($1,$2,$3,'Synthetic DSR component owner','owner')`, []any{user, org, uuid.NewString() + "@dsr-component.test"}},
+		{`INSERT INTO documents(id,org_id,sender_id,name,status,source_kind,blocks_json,variables_json,sent_at,completed_at,completion_effective_at,finalization_retain_until,
+ final_pdf_key,final_pdf_sha,final_pdf_version_id,audit_cert_key,audit_cert_sha256,audit_cert_version_id,audit_payload_key,audit_payload_sha256,audit_payload_version_id,audit_signature_key,audit_signature_sha256,audit_signature_version_id)
+ VALUES($1,$2,$3,'Synthetic legacy-shaped DSR component','completed','blocks','[]','{}',$4,$5,$5,hash_evidence_retain_until($5,7),$6,$7,'component-only-final-version',$8,$7,'component-only-cert-version',$9,$7,'component-only-payload-version',$10,$7,'component-only-signature-version')`, []any{docID, org, user, sent, completed, prefix + "component-final.pdf", digest, prefix + "component-cert.pdf", prefix + "component-payload.txt", prefix + "component-signature.txt"}},
+		{`INSERT INTO document_branding_override(document_id,primary_hex,accent_hex,surface_hex,text_hex,muted_hex,logo_url,logo_alt,font_heading,font_body,signature_color)
+ VALUES($1,'#111111','#222222','#ffffff','#111111','#666666','','','Inter','Inter','#111111')`, []any{docID}},
+		{`INSERT INTO recipients(id,document_id,email,name,role,status,magic_token_hash,sent_at,signed_at) VALUES($1,$2,'component-subject@dsr.test','Original Name','signer','signed',$3,$4,$5)`, []any{recipientID, docID, make([]byte, 32), sent, completed}},
+		{`INSERT INTO document_fields(id,document_id,recipient_id,type,page,x_pct,y_pct,w_pct,h_pct,required,options_json) VALUES($1,$2,$3,'signature',1,0,0,10,5,true,'[]')`, []any{fieldID, docID, recipientID}},
+		{`INSERT INTO signatures(document_id,recipient_id,field_id,font,typed_name,image_storage_key,image_sha256,image_version_id,signer_ip,signer_ua,signed_at)
+ VALUES($1,$2,$3,'Caveat','Original Legal Name',$4,$5,'component-only-image-version','127.0.0.1','test-agent',$6)`, []any{docID, recipientID, fieldID, prefix + "component-signature.png", digest, completed}},
+	}
+	for _, statement := range statements {
+		if _, err := migrationDB.ExecContext(birth, statement.sql, statement.args...); err != nil {
+			t.Fatal("seed explicit synthetic DSR component", err)
+		}
+	} //nolint:rawsql -- historical scalar component inputs, never serving proofs/guard changes
+	if err := mdb.RunMigrationsContext(birth, migrationDB); err != nil {
+		t.Fatal("forward migrate DSR component to exact current source", err)
+	}
+	if err := migrationDB.Close(); err != nil {
+		t.Fatal("close component migration connection", err)
+	}
+	ctx, pool, q, server, _, _ := setupDSRE2E(t)
+	assertCurrentHandlerMigrationHistoryE2E(t, ctx, pool)
+	doc, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: org})
+	if err != nil || doc.Status != "completed" || !documentAllowsDestructiveErasure(doc, true) {
+		t.Fatal("migrated synthetic component shape differs", err)
+	}
+	recipient, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipientID, OrgID: org})
+	if err != nil || recipient.Status != "signed" {
+		t.Fatal("migrated synthetic component recipient differs", err)
+	}
+	if present, err := q.HasHTMLAuthoringDataForDSR(ctx, org); err != nil || present {
+		t.Fatal("synthetic component unexpectedly has actual retained report/history inventory", err)
+	}
+	return ctx, pool, q, server, org, user, doc, recipient
+}
+
+// This shared setup selects a fresh actual tenant on the same isolated native
+// runtime without deleting the unrelated template tenant's retained history.
+func newPlainDSRNativeFixtureE2E(t *testing.T) (*ownedPublicReadFixtureV1, uuid.UUID) {
 	t.Helper()
 	native := newOwnedAutomationAuthorizationFixtureV1(t)
 	f := native.f
+	originalOrg := f.org
+	// Catalog preparation starts the process observer while the original
+	// template tenant is still selected. The new DSR tenant has not performed
+	// any native operation yet and must not claim that tenant's observer debt.
+	ownedCreationPrepareProPlanV1(t, native)
 	// The shared provider fixture has an unrelated HTML template. DSR's
 	// tenant-wide separate-review guard must remain intact: this ordinary
 	// blocks journey belongs to a fresh tenant in the SAME owned database and
@@ -695,7 +804,48 @@ func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool,
 	f.s.Billing = billing.NewOperator(f.q, []config.OperatorEntitlement{{OrgID: f.org, PlanSlug: "pro", ReviewRef: "synthetic plain DSR evidence fixture"}})
 	native.f = f
 	native.cookie = dsrSessionCookieE2E(t, f.s, user.ID, user.SessionGeneration, time.Hour)
-	ownedCreationPrepareProPlanV1(t, native)
+	return native, originalOrg
+}
+
+// Eligible unsigned draft coverage keeps the original current API privacy,
+// authorization, archive and audit checks reachable without retained completion
+// evidence. Both document and recipient are actual public native producers.
+func setupEligibleDSRDraftE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
+	t.Helper()
+	native, originalOrg := newPlainDSRNativeFixtureE2E(t)
+	f := native.f
+	doc, err := nativeRevisionCreateE2E(t, f, "Eligible unsigned DSR draft", json.RawMessage(`{"version":1,"blocks":[]}`), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/recipients", `{"name":"Original subject","email":"subject@plain-dsr.test","role":"signer","locale":"en"}`, native.cookie)
+	var created recipientResponse
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &created) != nil || created.ID == uuid.Nil {
+		t.Fatal("actual eligible DSR recipient", w.Code, w.Body.String())
+	}
+	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: created.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var signatures int
+	if err := f.pool.QueryRow(f.ctx, "SELECT count(*) FROM signatures WHERE document_id=$1", doc.ID).Scan(&signatures); err != nil || signatures != 0 {
+		t.Fatal("unsigned DSR fixture captured signature evidence", signatures, err)
+	}
+	if present, err := f.q.HasHTMLAuthoringDataForDSR(f.ctx, f.org); err != nil || present || !documentAllowsDestructiveErasure(doc, false) {
+		t.Fatal("actual unsigned DSR draft is not eligible", err)
+	}
+	assertPlainDSRObserverScopesE2E(t, native, originalOrg, f.org)
+	return f.ctx, f.pool, f.q, f.s, f.org, f.user.ID, doc, recipient
+}
+
+// Completed DSR evidence comes from the genuine single-party ordinary creator,
+// Send, notice-bound Sign, original-output staging and versioned provider path.
+// The protocol peers are synthetic; no current intent/preparation is fabricated.
+// Pure DSR/component fixtures keep setupDSRE2E and its original pool unchanged.
+func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
+	t.Helper()
+	native, originalOrg := newPlainDSRNativeFixtureE2E(t)
+	f := native.f
 	draft, err := nativeRevisionCreateE2E(t, f, "Plain completed DSR evidence", json.RawMessage(`{"version":1,"blocks":[{"id":"terms","type":"paragraph","text":"Original agreed terms"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -754,9 +904,67 @@ func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool,
 			t.Fatal("completed DSR artifact bytes do not match actual retained output", readErr)
 		}
 	}
-	if present, checkErr := f.q.HasHTMLAuthoringDataForDSR(f.ctx, f.org); checkErr != nil || present {
-		t.Fatal("plain completed DSR tenant unexpectedly contains separate-review authoring history", checkErr)
+	// Mandatory completion preparations/reports retain personal evidence even
+	// for a blocks-only source. This real current API requires separate review.
+	if present, checkErr := f.q.HasHTMLAuthoringDataForDSR(f.ctx, f.org); checkErr != nil || !present {
+		t.Fatal("completed DSR evidence lost its mandatory retention-review fence", checkErr)
 	}
-	native.assertObserversOnlyV1(t)
+	var preparations, reports int
+	if err := f.pool.QueryRow(f.ctx, `SELECT
+ (SELECT count(*) FROM document_ordinary_finalization_preparations_v1 WHERE document_id=$1 AND org_id=$2 AND retain_until>=clock_timestamp()),
+ (SELECT count(*) FROM document_participant_reports_v1 WHERE document_id=$1 AND org_id=$2)`, doc.ID, f.org).Scan(&preparations, &reports); err != nil || preparations != 1 || reports != 1 {
+		t.Fatal("completed DSR evidence lacks actual retained preparation/report", preparations, reports, err)
+	} //nolint:rawsql -- exact native completion provenance scalars only
+	assertPlainDSRObserverScopesE2E(t, native, originalOrg, f.org)
 	return f.ctx, f.pool, f.q, f.s, f.org, f.user.ID, doc, recipient
+}
+
+// This one two-tenant fixture genuinely starts three observers: the retained
+// original HTML-template tenant, the plain DSR tenant and process catalog.
+// Compare every pending class and all three explicit coordinator scopes; no
+// returned consumer, physical debt or additional grant is treated as retired.
+func assertPlainDSRObserverScopesE2E(t *testing.T, native *ownedPublicReadFixtureV1, originalOrg, dsrOrg uuid.UUID) {
+	t.Helper()
+	if originalOrg == uuid.Nil || dsrOrg == uuid.Nil || originalOrg == dsrOrg || native.f.org != dsrOrg {
+		t.Fatal("completed DSR observer recipe requires its two actual distinct tenants")
+	}
+	native.reconcileV1(t)
+	pending := native.runtime.SessionsV1().PendingV1()
+	if pending != (pdfadmission.ApplicationSessionPendingV1{ObserverSessions: 3}) {
+		t.Fatal("completed DSR work remains or exact three-observer recipe differs", pending)
+	}
+	for _, org := range []uuid.UUID{originalOrg, dsrOrg, uuid.Nil} {
+		want := workguard.SnapshotV1{Global: workguard.VectorV1{SQLSessions: 3}, GlobalGrants: 3, ActiveOrganisations: 2}
+		if org != uuid.Nil {
+			want.Organisation, want.OrganisationGrants = workguard.VectorV1{SQLSessions: 1}, 1
+		}
+		actual, err := native.runtime.SnapshotV1(org)
+		if err != nil || actual != want {
+			t.Fatal("completed DSR observer scope differs from actual producer recipe", actual, err)
+		}
+	}
+}
+
+// A read-only complete synthetic scope snapshot. Comparing its value never
+// authorizes fulfillment or redacts/retires any retained evidence.
+func snapshotDSRScopeE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, org uuid.UUID) string {
+	t.Helper()
+	var state string
+	if err := pool.QueryRow(ctx, `WITH owned AS(SELECT id FROM documents WHERE org_id=$1)
+ SELECT jsonb_build_object(
+ 'documents',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY id),'[]'::jsonb) FROM documents d WHERE org_id=$1),
+ 'recipients',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY id),'[]'::jsonb) FROM recipients r WHERE document_id IN(SELECT id FROM owned)),
+ 'signatures',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY id),'[]'::jsonb) FROM signatures s WHERE document_id IN(SELECT id FROM owned)),
+ 'requests',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY id),'[]'::jsonb) FROM data_subject_requests r WHERE org_id=$1),
+ 'events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM events e WHERE org_id=$1),
+ 'versions',(SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY id),'[]'::jsonb) FROM document_versions v WHERE org_id=$1),
+ 'preparations',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY document_id),'[]'::jsonb) FROM document_ordinary_finalization_preparations_v1 p WHERE org_id=$1),
+ 'outputs',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY document_id,kind),'[]'::jsonb) FROM document_ordinary_finalization_outputs_v1 o WHERE org_id=$1),
+ 'reports',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY document_id,completion_effective_at),'[]'::jsonb) FROM document_participant_reports_v1 r WHERE org_id=$1),
+ 'deliveries',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY document_id,audience,recipient_id),'[]'::jsonb) FROM document_participant_report_deliveries_v1 d WHERE org_id=$1),
+ 'archives',(SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id),'[]'::jsonb) FROM collab_recovery_archives a WHERE document_id IN(SELECT id FROM owned)),
+ 'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM email_deliveries e WHERE to_email IN(SELECT email FROM recipients WHERE document_id IN(SELECT id FROM owned))))::text`, org).Scan(&state); err != nil {
+		t.Fatal("read exact DSR scope", err)
+	} //nolint:rawsql -- read-only exact isolated synthetic tenant
+	return state
 }

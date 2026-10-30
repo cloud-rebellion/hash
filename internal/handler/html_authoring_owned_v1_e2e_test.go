@@ -26,7 +26,13 @@ import (
 // Explicit synthetic test capacity, not deployed limits or approval. This
 // unique disposable DB uses the genuine direct factory, original observer,
 // native coordinator and physical cleanup; no caller Tx or READY is supplied.
-func setupHTMLAuthoringNativeFixtureV1(t *testing.T, f lifecycleAuthorizationFixture) {
+// The sole opt-in profile is for metadata's >128KiB source-read fixture.
+// Logical source recipe credit is not measured RSS or installation capacity.
+type htmlAuthoringNativeTestProfileE2E uint8
+
+const htmlAuthoringMetadataReadProfileE2E htmlAuthoringNativeTestProfileE2E = 1
+
+func setupHTMLAuthoringNativeFixtureV1(t *testing.T, f lifecycleAuthorizationFixture, profiles ...htmlAuthoringNativeTestProfileE2E) {
 	t.Helper()
 	cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 	if err != nil {
@@ -37,7 +43,16 @@ func setupHTMLAuthoringNativeFixtureV1(t *testing.T, f lifecycleAuthorizationFix
 	cfg.RuntimeParams["statement_timeout"] = "15000"
 	cfg.RuntimeParams["lock_timeout"] = "10000"
 	cfg.RuntimeParams["idle_in_transaction_session_timeout"] = "30000"
-	limits := workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 2 << 30, SQLSessions: 16}
+	parentBytes := int64(2 << 30)
+	if len(profiles) > 1 || len(profiles) == 1 && profiles[0] != htmlAuthoringMetadataReadProfileE2E {
+		t.Fatal("unsupported native HTML test profile")
+	}
+	if len(profiles) == 1 {
+		// Explicit finite experiment at factory birth; no live limits change.
+		// Every ordinary caller retains the original2GiB Parent allocation.
+		parentBytes = 3 << 30
+	}
+	limits := workguard.VectorV1{ParentBytes: parentBytes, DBStagingBytes: 2 << 30, SQLSessions: 16}
 	coordinator, err := workguard.NewV1(workguard.LimitsV1{Global: limits, Organisation: limits, MaxGrants: 256, MaxOrganisationGrants: 128})
 	if err != nil {
 		t.Fatal(err)

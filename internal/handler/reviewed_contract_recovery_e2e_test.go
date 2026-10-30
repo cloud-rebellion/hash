@@ -272,16 +272,43 @@ func (f *reviewedContractRecoveryFixtureE2E) assertCompleted(t *testing.T, label
 		t.Fatal("detached certificate verification failed")
 	}
 	events, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.orgID, PageLimit: 1000})
-	if err != nil || len(events) < 2 || len(events) >= 1000 || events[len(events)-1].Kind != audit.KindDocumentCompleted {
+	if err != nil || len(events) < 2 || len(events) >= 1000 || events[len(events)-1].Kind != audit.KindDocumentCompleted || !events[len(events)-1].DocumentID.Valid || uuid.UUID(events[len(events)-1].DocumentID.Bytes) != doc.ID {
 		t.Fatal("completion ledger missing", err)
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(events)
-	if result := verifier.Result(); !result.OK || !result.Complete {
+	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != len(events) {
 		t.Fatalf("completion chain invalid: %+v", result)
 	}
 	head := events[len(events)-2]
-	claims, err := render.NewCertificateEvidenceClaimsV1(doc, doc.FinalPdfSha, &generated.LatestEventChainHeadForOrgRow{RowHash: head.RowHash, CreatedAt: head.CreatedAt}, events[:len(events)-1])
+	// The pre-final head commits the COMPLETE interleaved organization chain.
+	// The separate event-set claim commits only this ceremony root, exactly as
+	// the real producer does; template/other-document events are not its rows.
+	preFinalDocumentEvents := make([]*generated.Event, 0, len(events)-1)
+	for _, event := range events[:len(events)-1] {
+		if event.DocumentID.Valid && uuid.UUID(event.DocumentID.Bytes) == doc.ID {
+			preFinalDocumentEvents = append(preFinalDocumentEvents, event)
+		}
+	}
+	claims, err := render.NewCertificateEvidenceClaimsV1(doc, doc.FinalPdfSha, &generated.LatestEventChainHeadForOrgRow{RowHash: head.RowHash, CreatedAt: head.CreatedAt}, preFinalDocumentEvents)
+	if err != nil {
+		t.Fatal("construct exact document claims from the verified organization ledger", err)
+	}
+	var reportSchema string
+	var reportDigest []byte
+	var reportCutoff time.Time
+	var reportRows int64
+	var exactArtifacts bool
+	err = f.pool.QueryRow(f.ctx, `SELECT schema_version,report_sha256,cutoff,history_rows,
+ completion_effective_at=$3 AND final_pdf_sha256=$4 AND audit_cert_sha256=$5 AND audit_payload_sha256=$6 AND audit_signature_sha256=$7
+ FROM document_participant_reports_v1 WHERE document_id=$1 AND org_id=$2`, doc.ID, doc.OrgID, doc.CompletionEffectiveAt, doc.FinalPdfSha, doc.AuditCertSha256, doc.AuditPayloadSha256, doc.AuditSignatureSha256).Scan(&reportSchema, &reportDigest, &reportCutoff, &reportRows, &exactArtifacts) //nolint:rawsql -- read-only genuine final producer receipt, never backfilled
+	if err != nil || reportSchema != doc.ParticipantReportSchema || len(reportDigest) != sha256.Size || reportCutoff.IsZero() || reportRows < 1 || !exactArtifacts {
+		t.Fatal("completed participant report receipt does not bind the exact four artifacts", err)
+	}
+	claims.ParticipantReportSchema = reportSchema
+	claims.ParticipantReportSHA256 = hex.EncodeToString(reportDigest)
+	claims.ParticipantReportCutoff = reportCutoff.UTC().Format(time.RFC3339Nano)
+	claims.ParticipantReportRows = reportRows
 	if err != nil || !strings.Contains(string(bodies[2]), claims.HTML()) {
 		t.Fatal("signed certificate does not bind exact artifact and pre-completion ledger", err)
 	}

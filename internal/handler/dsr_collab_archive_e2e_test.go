@@ -19,7 +19,7 @@ import (
 )
 
 func TestDSRErasureRequiresReviewOfCollabRecoveryArchivesE2E(t *testing.T) {
-	ctx, pool, q, server, orgID, userID, doc, recipient := setupCompletedDSREvidenceE2E(t)
+	ctx, pool, q, server, orgID, userID, doc, recipient := setupEligibleDSRDraftE2E(t)
 	dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
 		OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
 		SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender",
@@ -46,9 +46,13 @@ FROM collab_document_generations WHERE document_id=$1 RETURNING id`, doc.ID, arc
 				t.Fatalf("start review status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
 		}
+		before := snapshotDSRScopeE2E(t, ctx, pool, orgID)
 		recorder := transitionDSRE2E(server, orgID, userID, dsr.ID, "fulfilled")
 		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "separate privacy review") {
 			t.Fatalf("archive erasure from %s status=%d body=%s", status, recorder.Code, recorder.Body.String())
+		}
+		if snapshotDSRScopeE2E(t, ctx, pool, orgID) != before {
+			t.Fatal("archive review refusal changed exact DSR/subject/source/evidence scope")
 		}
 		freshDSR, err := q.GetDataSubjectRequest(ctx, generated.GetDataSubjectRequestParams{ID: dsr.ID, OrgID: orgID})
 		if err != nil {
@@ -65,11 +69,8 @@ FROM collab_document_generations WHERE document_id=$1 RETURNING id`, doc.ID, arc
 			t.Fatal("blocked erasure changed recipient identifiers")
 		}
 		signatures, err := q.ListSignaturesByDocument(ctx, doc.ID)
-		if err != nil || len(signatures) != 1 {
-			t.Fatalf("blocked erasure signatures=%d err=%v", len(signatures), err)
-		}
-		if signatures[0].TypedName != "Original Legal Name" || !signatures[0].SignerUa.Valid || signatures[0].SignerUa.String != "test-agent" {
-			t.Fatal("blocked erasure changed signature identifiers")
+		if err != nil || len(signatures) != 0 {
+			t.Fatalf("eligible unsigned draft acquired signatures=%d err=%v", len(signatures), err)
 		}
 		var retainedReplay []byte
 		var archivedGeneration pgtype.Int8

@@ -146,10 +146,10 @@ func (p *htmlCreationRendererE2E) sources() []string {
 	return append([]string(nil), p.html...)
 }
 
-func setupHTMLDocumentCreationE2E(t *testing.T, renderer *htmlCreationRendererE2E) (lifecycleAuthorizationFixture, *htmlCreationStorageE2E) {
+func setupHTMLDocumentCreationE2E(t *testing.T, renderer *htmlCreationRendererE2E, profiles ...htmlAuthoringNativeTestProfileE2E) (lifecycleAuthorizationFixture, *htmlCreationStorageE2E) {
 	t.Helper()
 	database := isolateHTMLTemplateDatabaseE2E(t)
-	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner", profiles...)
 	if workerPath := os.Getenv("HASH_E2E_PDF_WORKER_PATH"); workerPath != "" {
 		t.Cleanup(func() {
 			if err := sanitize.ConfigurePDFWorker(context.Background(), "", "development"); err != nil {

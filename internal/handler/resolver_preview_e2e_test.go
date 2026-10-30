@@ -8,9 +8,11 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +23,9 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/send"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -94,11 +98,23 @@ func reviewResolverCRMFixtureE2E(t *testing.T, f *variableBindingAuthorizationFi
 	f.auditBaseline = len(events)
 }
 
-func setupResolverPreviewE2E(t *testing.T, role string, blocked, failure bool) (variableBindingAuthorizationFixture, *previewBlockingSource) {
+func setupResolverPreviewE2E(t *testing.T, role string, blocked, failure bool, tracer ...pgx.QueryTracer) (variableBindingAuthorizationFixture, *previewBlockingSource) {
 	t.Helper()
 	// Enrollment, source review and native document birth require a real owner.
 	// Viewer/sender credentials are established only after that authorized setup.
-	f := setupVariableBindingAuthorizationE2E(t, "owner")
+	var f variableBindingAuthorizationFixture
+	if len(tracer) == 0 {
+		f = setupVariableBindingAuthorizationE2E(t, "owner")
+	} else {
+		if len(tracer) != 1 {
+			t.Fatal("resolver fixture accepts one actual query tracer")
+		}
+		owned := newOwnedPublicReadFixtureProfileV1(t, false, false, tracer...)
+		base := setupNativeLifecycleAuthorizationWithFixture257d(t, "owner", false, false, owned)
+		// The genuine CRM review below establishes the actual binding and its
+		// audit baseline; no legacy callback observation is needed for this race.
+		f = variableBindingAuthorizationFixture{lifecycleAuthorizationFixture: base, source: &bindingAuthorizationSource{refs: make(chan resolver.Ref, 16)}}
+	}
 	connection := setupCRMConnectionForFixtureE2E(t, f.lifecycleAuthorizationFixture)
 	peer := newCRMSourcePeerE2E(t)
 	peer.setDeal(t, "Current reviewed CRM customer")
@@ -136,6 +152,92 @@ func setupResolverPreviewE2E(t *testing.T, role string, blocked, failure bool) (
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
 	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, Resolver: f.s.Resolver, PublicURL: f.s.PublicURL, PDFCreationSessions: f.s.HTMLCreationSessions, Versions: f.s.Versions, Storage: f.s.Storage, Billing: f.s.Billing})
 	return f, source
+}
+
+// This fixed test tracer schedules only the second actual native Send state
+// query, before SQL dispatch. It supplies no row, transaction, measurement or
+// authority; the unchanged next-phase query and all its guards still execute.
+type resolverSendAdmissionTraceE2E struct {
+	mu               sync.Mutex
+	document         uuid.UUID
+	calls            int
+	reached, release chan struct{}
+	once             sync.Once
+}
+
+func (s *resolverSendAdmissionTraceE2E) arm(document uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.document, s.calls = document, 0
+	s.reached, s.release = make(chan struct{}), make(chan struct{})
+}
+func (s *resolverSendAdmissionTraceE2E) unblock() { s.once.Do(func() { close(s.release) }) }
+func (s *resolverSendAdmissionTraceE2E) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	s.mu.Lock()
+	if len(data.Args) == 0 || s.document == uuid.Nil || !strings.HasPrefix(data.SQL, "-- name: GetHTMLSendDocumentStateHeaderV1") || data.Args[0] != s.document {
+		s.mu.Unlock()
+		return ctx
+	}
+	s.calls++
+	if s.calls != 2 {
+		s.mu.Unlock()
+		return ctx
+	}
+	close(s.reached)
+	release := s.release
+	s.mu.Unlock()
+	select {
+	case <-release:
+	case <-ctx.Done():
+	}
+	return ctx
+}
+func (*resolverSendAdmissionTraceE2E) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+
+func awaitResolverQueuedMutationE2E(t *testing.T, f variableBindingAuthorizationFixture, query string) {
+	t.Helper()
+	application := f.pool.Config().ConnConfig.RuntimeParams["application_name"]
+	if application == "" {
+		t.Fatal("resolver mutation requires its exact fixture application")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*)::integer FROM pg_stat_activity a
+		 CROSS JOIN LATERAL unnest(pg_blocking_pids(a.pid)) AS b(pid)
+		 JOIN pg_stat_activity held ON held.pid=b.pid AND held.datname=a.datname AND held.application_name=a.application_name
+		 WHERE a.datname=current_database() AND a.application_name=$1 AND a.state='active' AND a.wait_event_type='Lock' AND a.query LIKE $2`, application, "%"+query+"%").Scan(&count); err != nil {
+			t.Fatal(err)
+		} //nolint:rawsql -- named actual mutation and same-fixture native source blocker
+		if count == 1 {
+			return
+		}
+		if count > 1 {
+			t.Fatal("unexpected queued resolver mutation dependencies", count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("mutation did not queue behind actual native source ownership", query)
+}
+
+// Binding edits may legitimately change only their definition/observation
+// ledger and authoring audit. Capture all original ceremony/source/version
+// state BEFORE releasing the provider, so even an early erroneous Send commit
+// cannot be concealed by the later full post-mutation baseline.
+func resolverSendCeremonySnapshotE2E(t *testing.T, f variableBindingAuthorizationFixture) string {
+	t.Helper()
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(f.lifecycleAuthorizationFixture.snapshot(t)), &state); err != nil {
+		t.Fatal(err)
+	}
+	delete(state, "bindings")
+	delete(state, "events")
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func submitResolverPreviewE2E(f variableBindingAuthorizationFixture, ctx context.Context, transport, credential string) *httptest.ResponseRecorder {
@@ -380,9 +482,10 @@ func TestResolverPreviewDocumentTokenConsumesOneAdmissionE2E(t *testing.T) {
 }
 
 func TestResolverSendFreshCRMRefusesCachedFallbackAndUnauthorizedWritesE2E(t *testing.T) {
-	for _, change := range []string{"source-failure", "fallback", "binding-change", "binding-recreate", "logout", "key-delete", "invalidate"} {
+	for _, change := range []string{"source-failure", "fallback", "binding-change", "binding-recreate", "logout", "key-delete"} {
 		t.Run(change, func(t *testing.T) {
-			f, source := setupResolverPreviewE2E(t, "sender", change != "source-failure" && change != "fallback", false)
+			trace := &resolverSendAdmissionTraceE2E{}
+			f, source := setupResolverPreviewE2E(t, "sender", change != "source-failure" && change != "fallback", false, trace)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			if change == "source-failure" || change == "fallback" {
 				assertResolverPreviewResultE2E(t, "resolve", submitResolverPreviewE2E(f, f.ctx, "resolve", cookie), http.StatusOK, "")
@@ -413,7 +516,11 @@ func TestResolverSendFreshCRMRefusesCachedFallbackAndUnauthorizedWritesE2E(t *te
 				}
 				return
 			}
+			trace.arm(f.doc.ID)
+			defer trace.unblock()
 			source.native = source.peer.pauseRecord(t)
+			originalCeremony := resolverSendCeremonySnapshotE2E(t, f)
+			originalEvents := blockOriginalEventsE2E(t, f.lifecycleAuthorizationFixture)
 			var keyID uuid.UUID
 			credential := cookie
 			if change == "key-delete" {
@@ -442,43 +549,197 @@ func TestResolverSendFreshCRMRefusesCachedFallbackAndUnauthorizedWritesE2E(t *te
 			}()
 			defer func() { cancel(); source.unblock(); joinHTMLAuthoringRequestE2E(t, cancel, joined) }()
 			awaitResolverSourceE2E(t, f, source)
-			var err error
-			switch change {
-			case "binding-change":
-				if w := f.submit("upsert", cookie); w.Code != http.StatusOK {
-					t.Fatalf("parallel binding update=%d %s", w.Code, w.Body.String())
+			mutationCtx, cancelMutation := context.WithCancel(f.ctx)
+			mutationJoined := make(chan struct{})
+			mutation := make(chan error, 1)
+			go func() {
+				defer close(mutationJoined)
+				var err error
+				switch change {
+				case "binding-change", "binding-recreate":
+					if change == "binding-recreate" {
+						if w := f.submitContext(mutationCtx, "delete", cookie); w.Code != http.StatusNoContent {
+							mutation <- fmt.Errorf("parallel binding delete=%d", w.Code)
+							return
+						}
+					}
+					if w := f.submitContext(mutationCtx, "upsert", cookie); w.Code != http.StatusOK {
+						err = fmt.Errorf("parallel binding update=%d", w.Code)
+					}
+				case "logout":
+					tag, queryErr := f.pool.Exec(mutationCtx, `/* resolver-send-logout */ UPDATE users SET session_generation=session_generation+1 WHERE id=$1 AND org_id=$2`, f.user.ID, f.org) //nolint:rawsql -- original controlled credential revocation
+					err = queryErr
+					if err == nil && tag.RowsAffected() != 1 {
+						err = fmt.Errorf("logout changed %d users", tag.RowsAffected())
+					}
+				case "key-delete":
+					tag, queryErr := f.pool.Exec(mutationCtx, `/* resolver-send-key-delete */ DELETE FROM api_keys WHERE id=$1 AND org_id=$2`, keyID, f.org) //nolint:rawsql -- original controlled admitted key deletion
+					err = queryErr
+					if err == nil && tag.RowsAffected() != 1 {
+						err = fmt.Errorf("revocation changed %d keys", tag.RowsAffected())
+					}
 				}
-			case "binding-recreate":
-				if w := f.submit("delete", cookie); w.Code != http.StatusNoContent {
-					t.Fatal("parallel binding delete failed")
-				}
-				if w := f.submit("upsert", cookie); w.Code != http.StatusOK {
-					t.Fatal("parallel binding recreate failed")
-				}
-			case "logout":
-				_, err = f.pool.Exec(f.ctx, `UPDATE users SET session_generation=session_generation+1 WHERE id=$1`, f.user.ID) //nolint:rawsql
-			case "key-delete":
-				_, err = f.pool.Exec(f.ctx, `DELETE FROM api_keys WHERE id=$1`, keyID) //nolint:rawsql
-			case "invalidate":
-				f.s.Send.Resolver.InvalidateForSourceOrgs(string(resolver.SourceCRMDeal), crmSourceDealE2E, []uuid.UUID{f.org})
+				mutation <- err
+			}()
+			defer func() {
+				cancelMutation()
+				source.unblock()
+				trace.unblock()
+				joinHTMLAuthoringRequestE2E(t, cancelMutation, mutationJoined)
+			}()
+			query := "-- name: LockVariableBindingMutationRootV1"
+			if change == "logout" {
+				query = "resolver-send-logout"
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			before := f.snapshot(t)
-			source.unblock()
-			w := receiveSessionOperationE2E(t, result)
 			if change == "key-delete" {
-				if text := fieldMCPTextE2E(t, w, true); !strings.Contains(text, auth.ErrMutationPermissionRevoked.Error()) {
-					t.Fatalf("send key revocation=%s", text)
-				}
-			} else if w.Code == http.StatusOK {
-				t.Fatalf("late send accepted %s: %s", change, w.Body.String())
+				query = "resolver-send-key-delete"
 			}
+			awaitResolverQueuedMutationE2E(t, f, query)
+			// The mutation really queued while the actual provider was blocked.
+			// Let preparation finish, but keep the next native state dispatch
+			// scheduled after the original mutation and complete state capture.
+			source.unblock()
+			select {
+			case err := <-mutation:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued resolver mutation did not join after provider release")
+			}
+			joinHTMLAuthoringRequestE2E(t, cancelMutation, mutationJoined)
+			assertIntendedDenial := func(w *httptest.ResponseRecorder) {
+				t.Helper()
+				switch change {
+				case "key-delete":
+					if text := fieldMCPTextE2E(t, w, true); !strings.Contains(text, auth.ErrMutationPermissionRevoked.Error()) {
+						t.Fatalf("send key revocation=%s", text)
+					}
+				case "logout":
+					if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), auth.ErrMutationPermissionRevoked.Error()) {
+						t.Fatalf("send original-session revocation=%d %s", w.Code, w.Body.String())
+					}
+				default:
+					if w.Code != http.StatusConflict || (!strings.Contains(w.Body.String(), send.ErrDraftChangedDuringSend.Error()) && !strings.Contains(w.Body.String(), "CRM mappings or contract content changed.")) {
+						t.Fatalf("send binding revision refusal=%d %s", w.Code, w.Body.String())
+					}
+				}
+			}
+			var completed *httptest.ResponseRecorder
+			select {
+			case <-trace.reached:
+				// This actual next-state dispatch remains gated until the exact
+				// committed mutation and full expected state below are captured.
+			case completed = <-result:
+				joinHTMLAuthoringRequestE2E(t, cancel, joined)
+				// Credential checks may deny before the second native phase.
+				// Only its specific expected denial permits this early branch.
+				assertIntendedDenial(completed)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Send neither reached actual next-state dispatch nor completed its intended denial")
+			}
+			if originalCeremony != resolverSendCeremonySnapshotE2E(t, f) {
+				t.Fatal("preparation changed original ceremony/source/history while mutation queued")
+			}
+			currentEvents := blockOriginalEventsE2E(t, f.lifecycleAuthorizationFixture)
+			for id, digest := range originalEvents {
+				if currentEvents[id] != digest {
+					t.Fatal("queued mutation rewrote original CRM/source history")
+				}
+			}
+			wantMutations := 0
+			if change == "binding-change" {
+				wantMutations = 1
+			}
+			if change == "binding-recreate" {
+				wantMutations = 2
+			}
+			if len(currentEvents) != len(originalEvents)+wantMutations {
+				t.Fatal("queued mutation produced unexpected audit effects")
+			}
+			ids := make([]uuid.UUID, 0, len(originalEvents))
+			for id := range originalEvents {
+				ids = append(ids, id)
+			}
+			var unexpected int
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1 AND NOT(id=ANY($2::uuid[]))
+			 AND (document_id IS DISTINCT FROM $3 OR actor_user_id IS DISTINCT FROM $4 OR kind<>'document.updated'
+			 OR payload_json->>'via' IS DISTINCT FROM 'rest' OR coalesce(payload_json->>'tool','') NOT IN ('upsert_variable_binding','delete_variable_binding'))`, f.org, ids, f.doc.ID, f.user.ID).Scan(&unexpected); err != nil || unexpected != 0 {
+				t.Fatal("unexpected queued mutation audit/actor", err)
+			} //nolint:rawsql -- exact allowed native binding effects only
+			before := f.snapshot(t)
+			trace.unblock()
+			if completed == nil {
+				completed = receiveSessionOperationE2E(t, result)
+				joinHTMLAuthoringRequestE2E(t, cancel, joined)
+			}
+			assertIntendedDenial(completed)
 			if f.snapshot(t) != before {
 				t.Fatal("late failed send persisted observations, frozen variables, notice, tokens, versions, audit or mail")
 			}
+			if originalCeremony != resolverSendCeremonySnapshotE2E(t, f) {
+				t.Fatal("failed Send changed its original ceremony/source/history")
+			}
 		})
+	}
+	t.Run("supported-http-source-cache-invalidation", testResolverSendHTTPInvalidationE2E)
+}
+
+// Invalidation governs the cache-enabled concrete HTTP producer. Genuine
+// CRMRecords deliberately bypasses that cache and has separate observed-account
+// and review fences above; no callback is disguised as a native CRM producer.
+func testResolverSendHTTPInvalidationE2E(t *testing.T) {
+	f := setupVariableBindingAuthorizationE2E(t, "sender")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var calls, unexpected atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/scans/source_fixture" || r.Header.Get("Authorization") != "Bearer synthetic-resolver-http" {
+			unexpected.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		calls.Add(1)
+		once.Do(func() { close(entered) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"title":"Original source value"}`))
+	}))
+	t.Cleanup(peer.Close)
+	unblock := func() { closeUnlessClosedRevisionE2E(release) }
+	defer unblock()
+	f.s.Send.Resolver = resolver.New(f.q, resolver.NewScannerFindingSource(peer.URL, "synthetic-resolver-http", true))
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	if w := f.submitScoped("upsert", f.doc.ID, "customer", `{"source_kind":"scanner.finding","source_ref":"source_fixture","source_path":"title"}`, cookie); w.Code != http.StatusOK {
+		t.Fatal("actual supported HTTP binding", w.Code, w.Body.String())
+	}
+	before := f.snapshot(t)
+	result, join := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+		request := f.lifecycleAuthorizationFixture
+		request.ctx = ctx
+		return request.submit("send", cookie)
+	})
+	defer func() { unblock(); join() }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("native supported HTTP source did not reach its actual provider")
+	}
+	if dropped := f.s.Send.Resolver.InvalidateForSourceOrgs(string(resolver.SourceScannerFind), "source_fixture", []uuid.UUID{f.org}); dropped != 0 {
+		t.Fatal("unexpected preexisting HTTP cache entry")
+	}
+	unblock()
+	w := receiveSessionOperationE2E(t, result)
+	join()
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "could not be verified") {
+		t.Fatal("in-flight cache invalidation did not preserve original freshness refusal", w.Code, w.Body.String())
+	}
+	if calls.Load() != 1 || unexpected.Load() != 0 || f.snapshot(t) != before {
+		t.Fatal("invalidated actual HTTP read changed source/ceremony or made unexpected provider calls")
 	}
 }
 

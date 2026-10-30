@@ -310,6 +310,7 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 					t.Fatalf("Send accepted revoked in-flight record: status=%d", w.Code)
 				}
 			} else {
+				accounts, records := f.source.accounts.Load(), f.source.deals.Load()
 				tx, err := f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
@@ -329,8 +330,15 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 				if err := tx.Commit(f.ctx); err != nil {
 					t.Fatal(err)
 				}
-				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusConflict {
-					t.Fatalf("Send accepted revoked connection after parent lock wait: status=%d", w.Code)
+				// No record read has started at this parent boundary. The
+				// configured source is now unavailable, rather than an observed
+				// record changing after a read as in the other subcase.
+				w := receiveSessionOperationE2E(t, done)
+				if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "The CRM connection is unavailable. Ask the organization owner to configure it.") {
+					t.Fatalf("revoked source refusal after parent lock wait: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if f.source.accounts.Load() != accounts || f.source.deals.Load() != records {
+					t.Fatal("revoked source reached provider before final refusal")
 				}
 			}
 			f.assertNoDocumentEffects(t, before)

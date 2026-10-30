@@ -32,10 +32,10 @@ import (
 
 // Actual REST/PG/isolated-PDF-worker protocol coverage. The renderer and
 // exact-version S3 peer are synthetic and do not prove layout/provider recovery.
-func setupHTMLRevisionE2E(t *testing.T) (lifecycleAuthorizationFixture, *htmlCreationRendererE2E, *htmlCreationStorageE2E, *generated.Document, string) {
+func setupHTMLRevisionE2E(t *testing.T, profiles ...htmlAuthoringNativeTestProfileE2E) (lifecycleAuthorizationFixture, *htmlCreationRendererE2E, *htmlCreationStorageE2E, *generated.Document, string) {
 	t.Helper()
 	renderer := &htmlCreationRendererE2E{}
-	f, peer := setupHTMLDocumentCreationE2E(t, renderer)
+	f, peer := setupHTMLDocumentCreationE2E(t, renderer, profiles...)
 	master, _ := json.Marshal(htmlmaster.Master{SchemaVersion: 1,
 		HTML:     `<p><span data-hash-value="customer"></span></p><div data-hash-section="scope"></div>`,
 		Values:   []htmlmaster.Value{{Name: "customer", Required: true, MaxChars: 200}},

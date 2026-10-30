@@ -8,6 +8,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -29,8 +31,9 @@ import (
 
 // Actual SQL/REST projection coverage uses one bounded sizable approved design,
 // not a capacity benchmark. Creation uses the source-built isolated worker;
-// Chromium and versioned S3 peers are synthetic. The same-SHA second projection
-// uses the actual revision route and its fixed PDF peer, not synthetic pins.
+// Chromium and versioned S3 peers are synthetic. The second projection uses the
+// actual revision/sanitizer output; its PDF file ID is not byte-stable. The
+// same-SHA/new-CID review policy remains covered in document_metadata_test.go.
 type metadataProjectionFixtureE2E struct {
 	f                                 lifecycleAuthorizationFixture
 	renderer                          *htmlCreationRendererE2E
@@ -68,11 +71,25 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 	if os.Getenv("HASH_E2E_PDF_WORKER_PATH") == "" {
 		t.Fatal("metadata creation fixture requires the source-built isolated HASH_E2E_PDF_WORKER_PATH")
 	}
-	f, renderer, storage, original, cookie := setupHTMLRevisionE2E(t)
+	// Metadata alone opts into finite3GiB logical Parent credit at birth.
+	// The observed2GiB refusal remains private negative evidence, not a reason
+	// to alter production limits or this suite's unchanged source/read checks.
+	f, renderer, storage, original, cookie := setupHTMLRevisionE2E(t, htmlAuthoringMetadataReadProfileE2E)
 	metadataPrepareNativePlanE2E(t, f)
 	original = metadataReviewE2E(t, f, original, cookie)
+	// Exercise the metadata read boundary just above128KiB, not an arbitrary
+	// larger design's peak revision capacity. Source JSON embeds this whole body;
+	// both origin/current source-size assertions below remain unchanged.
+	const htmlBytes = (128 << 10) + 1
+	const prefix, suffix = `<p>`, `</p><p><span data-hash-value="customer"></span></p><div data-hash-section="scope"></div>`
+	const text = "Bounded synthetic approved layout. "
+	paddingBytes := htmlBytes - len(prefix) - len(suffix)
+	layout := prefix + strings.Repeat(text, paddingBytes/len(text)) + text[:paddingBytes%len(text)] + suffix
+	if len(layout) != htmlBytes {
+		t.Fatal("metadata fixture HTML does not cross its exact128KiB boundary")
+	}
 	master, err := json.Marshal(htmlmaster.Master{SchemaVersion: 1,
-		HTML:     `<p>` + strings.Repeat("Bounded synthetic approved layout. ", 4096) + `</p><p><span data-hash-value="customer"></span></p><div data-hash-section="scope"></div>`,
+		HTML:     layout,
 		Values:   []htmlmaster.Value{{Name: "customer", Required: true, MaxChars: 200}},
 		Sections: []htmlmaster.Section{{Name: "scope", DefaultText: "Approved scope", MaxChars: 500}},
 	})
@@ -111,7 +128,7 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 	revisionFixture.doc = big
 	revision := revisionInputE2E(t, big)
 	revision.Values = htmlStringMap{"customer": "Revised metadata AB"}
-	revision.Summary = "Actual same-PDF metadata revision"
+	revision.Summary = "Actual source-bound metadata revision"
 	w = submitRevisionE2E(t, revisionFixture, revision, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("actual sizable metadata revision=%d %s", w.Code, w.Body.String())
@@ -120,8 +137,15 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(current.PdfSha256, big.PdfSha256) || current.HtmlCurrentMaterializationID == big.HtmlCurrentMaterializationID || current.HtmlReviewedBy.Valid || len(current.HtmlSourceJson) < 128<<10 || len(current.HtmlCurrentSourceJson) < 128<<10 {
-		t.Fatal("sizable same-SHA new-CID fixture was not established")
+	if current.HtmlCurrentMaterializationID == big.HtmlCurrentMaterializationID || current.HtmlReviewedBy.Valid || len(current.HtmlSourceJson) < 128<<10 || len(current.HtmlCurrentSourceJson) < 128<<10 {
+		t.Fatal("sizable new-CID fixture was not established")
+	}
+	readCtx, stopRead := context.WithTimeout(f.ctx, 5*time.Second)
+	pdf, readErr := f.s.Storage.GetVerifiedVersionBounded(readCtx, current.PdfStorageKey.String, current.PdfStorageVersionID.String, current.PdfSha256, sanitize.MaxPDFBytes)
+	stopRead()
+	actualSHA := sha256.Sum256(pdf)
+	if readErr != nil || !bytes.HasPrefix(pdf, []byte("%PDF")) || !bytes.Equal(actualSHA[:], current.PdfSha256) {
+		t.Fatal("current metadata SHA does not bind its actual exact-version PDF")
 	}
 	input, err := htmlsource.InputForCurrent(big)
 	if err != nil {

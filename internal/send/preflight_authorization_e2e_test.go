@@ -44,7 +44,7 @@ import (
 	"github.com/bright-interaction/hash/internal/workguard"
 )
 
-// These tests use only synthetic PostgreSQL rows, in-process CRM sources and
+// These tests use only synthetic PostgreSQL rows, in-process HTTP sources and
 // the durable email queue. No SMTP worker or production storage is involved.
 func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) {
 	for _, scenario := range []string{"member_demoted", "credential_revoked", "document_edited", "binding_edited"} {
@@ -87,9 +87,9 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 			select {
 			case <-entered:
 			case err := <-done:
-				t.Fatalf("send finished before CRM preflight reached the held source: %v", err)
+				t.Fatalf("send finished before HTTP preflight reached the held source: %v", err)
 			case <-ctx.Done():
-				t.Fatal("CRM preflight did not reach the held source")
+				t.Fatal("HTTP preflight did not reach the held source")
 			}
 			f.assertSnapshot(t, before, doc.ID)
 			// Native preparation holds the original source/member locks through
@@ -116,14 +116,14 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 					t.Fatal(err)
 				}
 			case "document_edited":
-				_, err := f.pool.Exec(f.ctx, `UPDATE documents SET name='Edited after CRM loading, before admission',updated_at=clock_timestamp() WHERE id=$1`, doc.ID)
+				_, err := f.pool.Exec(f.ctx, `UPDATE documents SET name='Edited after source loading, before admission',updated_at=clock_timestamp() WHERE id=$1`, doc.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
 				want = sendengine.ErrDraftChangedDuringSend
 			case "binding_edited":
 				_, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{
-					DocumentID: doc.ID, VariableName: "amount", SourceKind: "crm.deal", SourceRef: "changed-deal", SourcePath: "amount",
+					DocumentID: doc.ID, VariableName: "amount", SourceKind: string(resolver.SourceScannerFind), SourceRef: "changed-record", SourcePath: "amount",
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -142,7 +142,7 @@ func TestSendResolverWaitRechecksAuthorityAndOriginalSnapshotsE2E(t *testing.T) 
 					t.Fatalf("send error=%v, want %v", err, want)
 				}
 			case <-ctx.Done():
-				t.Fatal("send did not finish after releasing CRM")
+				t.Fatal("send did not finish after releasing HTTP")
 			}
 			f.assertSnapshot(t, expected, doc.ID)
 		})
@@ -551,23 +551,59 @@ func TestAutomaticReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.
 		t.Fatal(err)
 	}
 	before := f.snapshot(t, doc.ID)
-	reads := 0
+	var expired atomic.Bool
+	var finalReads atomic.Int32
 	f.engine.Now = func() time.Time {
-		reads++
-		// Parent deadline, schedule admission and token expiry observe a live
-		// document; the final check observes time elapsed during audit work.
-		if reads >= 4 {
+		if expired.Load() {
+			finalReads.Add(1)
 			return base.Add(2 * time.Minute)
 		}
 		return base
 	}
-	worker := sendengine.Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker"}
-	count, err := f.engine.Remind(f.ctx, worker, doc.ID, true)
-	if count != 0 || !errors.Is(err, sendengine.ErrNotRemindable) {
-		t.Fatalf("automatic reminder=%d, %v, want no fire and final document expiry rejection", count, err)
+	// Schedule the real org-audit boundary after the reminder's token, schedule
+	// and outbox work has been staged. Clock expiry is tied to that boundary,
+	// rather than to the incidental number of earlier policy-clock reads.
+	f.trace.armAudit(f.orgID)
+	ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	type reminderResult struct {
+		count int
+		err   error
 	}
-	if reads != 4 {
-		t.Fatalf("automatic reminder clock checks=%d, want 4", reads)
+	result, joined := make(chan reminderResult, 1), make(chan struct{})
+	go func() {
+		defer close(joined)
+		count, err := f.engine.Remind(ctx, sendengine.Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker"}, doc.ID, true)
+		result <- reminderResult{count, err}
+	}()
+	defer func() {
+		f.trace.unblock()
+		cancel()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("automatic reminder did not physically join")
+		}
+	}()
+	select {
+	case <-f.trace.reached:
+	case out := <-result:
+		t.Fatalf("reminder finished before its native audit boundary: %d %v", out.count, out.err)
+	case <-ctx.Done():
+		t.Fatal("reminder did not reach its native audit boundary")
+	}
+	f.assertSnapshot(t, before, doc.ID)
+	expired.Store(true)
+	f.trace.unblock()
+	select {
+	case out := <-result:
+		if out.count != 0 || !errors.Is(out.err, sendengine.ErrNotRemindable) {
+			t.Fatalf("automatic reminder=%d, %v, want no fire and final document expiry rejection", out.count, out.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("automatic reminder did not return after its native audit boundary")
+	}
+	if finalReads.Load() == 0 {
+		t.Fatal("reminder omitted its final policy-clock observation")
 	}
 	f.assertSnapshot(t, before, doc.ID)
 }
@@ -727,13 +763,16 @@ func (f *sendAdmissionFixture) topology(t *testing.T, input blockauthoring.Envel
 	}
 }
 
+// The generic HTTP binding tests do not claim direct-CRM review acceptance.
+// Use the concrete scanner HTTP source so the separate mandatory CRM mapping
+// review workflow is neither bypassed nor accidentally selected by this fixture.
 func (f *sendAdmissionFixture) resolver(t *testing.T, fetch func(context.Context, resolver.Ref) (string, error)) *resolver.Resolver {
 	t.Helper()
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, err := uuid.Parse(strings.TrimPrefix(r.URL.Path, "/api/v1/deals/"))
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/api/v1/deals/") || err != nil || r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer synthetic-send-crm" {
-			t.Error("unexpected synthetic CRM request")
-			http.Error(w, "unexpected synthetic CRM request", http.StatusBadRequest)
+		id, err := uuid.Parse(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"))
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/api/v1/scans/") || err != nil || r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer synthetic-send-source" {
+			t.Error("unexpected synthetic source request")
+			http.Error(w, "unexpected synthetic source request", http.StatusBadRequest)
 			return
 		}
 		value, err := fetch(r.Context(), resolver.Ref{OrgID: f.orgID, DocID: id, Source: id.String(), Path: "amount"})
@@ -749,10 +788,10 @@ func (f *sendAdmissionFixture) resolver(t *testing.T, fetch func(context.Context
 		_ = json.NewEncoder(w).Encode(map[string]string{"amount": value})
 	}))
 	t.Cleanup(peer.Close)
-	source := resolver.NewCRMDealSource(peer.URL, "synthetic-send-crm", true)
+	source := resolver.NewScannerFindingSource(peer.URL, "synthetic-send-source", true)
 	client, ok := source.Client.(*http.Client)
 	if !ok {
-		t.Fatal("actual first-party CRM HTTP client unavailable")
+		t.Fatal("actual first-party source HTTP client unavailable")
 	}
 	t.Cleanup(client.CloseIdleConnections)
 	return resolver.New(f.q, source)
@@ -804,7 +843,7 @@ func (f *sendAdmissionFixture) recipient(t *testing.T, docID uuid.UUID) *generat
 
 func (f *sendAdmissionFixture) binding(t *testing.T, docID uuid.UUID) {
 	t.Helper()
-	if _, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: docID, VariableName: "amount", SourceKind: "crm.deal", SourceRef: docID.String(), SourcePath: "amount"}); err != nil {
+	if _, err := f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: docID, VariableName: "amount", SourceKind: string(resolver.SourceScannerFind), SourceRef: docID.String(), SourcePath: "amount"}); err != nil {
 		t.Fatal(err)
 	}
 }

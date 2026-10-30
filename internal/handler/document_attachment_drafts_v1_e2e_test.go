@@ -133,14 +133,17 @@ func packageSnapshot218(t *testing.T, f lifecycleAuthorizationFixture, p uuid.UU
 
 func TestDocumentAttachmentDraftPersistenceAndSendGuardV1E2E(t *testing.T) {
 	digest, versions, err := mdb.EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) != 106 || versions[len(versions)-1] != 106 {
+	if err != nil || len(versions) == 0 || digest != os.Getenv("HASH_E2E_EXPECT_MIGRATIONS_SHA256") {
 		t.Fatal("embedded migration inventory", err)
 	}
 	if expected := os.Getenv("HASH_E2E_EXPECT_MIGRATION_SHA"); expected != "" && expected != digest {
 		t.Fatal("embedded migration identity differs from fixture source")
 	}
-	t.Logf("embedded migration v106 %s", digest)
 	f, html := htmlMaterializationFixtureE2E(t)
+	if current := assertCurrentHandlerMigrationHistoryE2E(t, f.ctx, f.pool); current != versions[len(versions)-1] {
+		t.Fatal("attachment fixture does not match the current embedded migration head")
+	}
+	t.Logf("embedded migration v%d %s", versions[len(versions)-1], digest)
 	html = packageFreshSyntheticReport222(t, f, html)
 	root := packagePDF218(t, f, "Main agreement")
 	imported := packagePDF218(t, f, "DPA – imported")
@@ -484,7 +487,7 @@ func TestDocumentAttachmentDraftPrivacyReviewV1E2E(t *testing.T) {
 }
 
 func TestDocumentAttachmentDraftRollbackV1E2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	root := packagePDF218(t, f, "Rollback agreement")
 	p := packageHeader218(t, f, root)
@@ -516,8 +519,9 @@ func TestDocumentAttachmentDraftRollbackV1E2E(t *testing.T) {
 	if err = mdb.RunMigrationsContext(f.ctx, sqlDB); err != nil {
 		t.Fatal("reapply attachment migration:", err)
 	}
+	wantCurrent := assertCurrentHandlerMigrationHistoryE2E(t, f.ctx, f.pool)
 	var version int64
-	if version, err = mdb.GetMigrationVersionContext(f.ctx, sqlDB); err != nil || version != 106 {
+	if version, err = mdb.GetMigrationVersionContext(f.ctx, sqlDB); err != nil || version != wantCurrent {
 		t.Fatal(version, err)
 	}
 }

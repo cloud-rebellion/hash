@@ -52,7 +52,7 @@ func documentClockLegacyBody254(t *testing.T) string {
 // they are not application documents, captured legal responses or native proof.
 // No existing application trigger is disabled, replaced or bypassed here.
 func TestDocumentFinalizationUpdateClockPolicyV1E2E(t *testing.T) {
-	isolateHTMLTemplateDatabaseE2E(t)
+	isolateEmptyHTMLTemplateDatabaseE2E(t)
 	ctx, pool, _, _, _, _ := setupDSRE2E(t)
 	tx, err := pool.Begin(ctx)
 	if err != nil {

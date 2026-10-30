@@ -37,7 +37,11 @@ import (
 // this foundation test does not repeat the separately tested preview protocol.
 func htmlMaterializationFixtureE2E(t *testing.T) (lifecycleAuthorizationFixture, *generated.Document) {
 	t.Helper()
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	return htmlMaterializationFixtureDatabaseE2E(t, isolateHTMLTemplateDatabaseE2E(t))
+}
+
+func htmlMaterializationFixtureDatabaseE2E(t *testing.T, database string) (lifecycleAuthorizationFixture, *generated.Document) {
+	t.Helper()
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	template := createHTMLTemplateE2E(t, f)
 	approved, err := f.q.ApproveHTMLTemplateRevision(f.ctx, generated.ApproveHTMLTemplateRevisionParams{TemplateID: template.ID, OrgID: f.org, ExpectedVersion: template.Version, ExpectedContentSha256: template.HtmlContentSha256, ApprovedBy: f.user.ID})
@@ -268,7 +272,7 @@ func htmlMaterializationInventoryE2E(t *testing.T, f lifecycleAuthorizationFixtu
 }
 
 func TestHTMLMaterializationRefusesFilledFieldsAndRetainedRollbackE2E(t *testing.T) {
-	f, doc := htmlMaterializationFixtureE2E(t)
+	f, doc := htmlMaterializationFixtureDatabaseE2E(t, isolateEmptyHTMLTemplateDatabaseE2E(t))
 	field, err := f.q.CreateDraftField(f.ctx, generated.CreateDraftFieldParams{DocumentID: doc.ID, OrgID: f.org, Type: "text", Page: 1, XPct: htmlMaterializationNumericE2E(t, "10"), YPct: htmlMaterializationNumericE2E(t, "20"), WPct: htmlMaterializationNumericE2E(t, "30"), HPct: htmlMaterializationNumericE2E(t, "10"), Label: pgtype.Text{String: "Synthetic captured field", Valid: true}, OptionsJson: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)

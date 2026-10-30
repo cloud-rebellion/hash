@@ -21,16 +21,13 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/config"
-	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
@@ -44,45 +41,11 @@ func TestMCPReplacementRevisionEvidenceE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Native authoring creates immutable history. Own a complete disposable
-	// database so teardown never deletes history or touches another package's
-	// fixture rows in the supplied parent database.
-	parent := cfg.ConnConfig.Copy()
-	admin, err := pgx.ConnectConfig(ctx, parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := "hash_mcp_revision_e2e_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil { //nolint:rawsql -- exact unique synthetic database
-		_ = admin.Close(ctx)
-		t.Fatal(err)
-	}
-	if err := admin.Close(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		admin, err := pgx.ConnectConfig(cleanup, parent)
-		if err != nil {
-			t.Error("connect revision fixture teardown", err)
-			return
-		}
-		defer admin.Close(cleanup)
-		if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); err != nil { //nolint:rawsql -- exact database created above, after runtime and pool close
-			t.Error("drop revision fixture database", err)
-		}
-	})
+	// Every case still owns a complete independent estate. Only the closed,
+	// fully migrated empty seed is reused; source/history assertions are unchanged.
+	database := revisionDatabasesE2E.Clone(t, "hash_mcp_revision_e2e_")
 	cfg.ConnConfig.Database = database
 	cfg.ConnConfig.RuntimeParams["application_name"] = "hash_mcp_revision_" + uuid.NewString()
-	db := stdlib.OpenDB(*cfg.ConnConfig)
-	t.Cleanup(func() { _ = db.Close() })
-	if err := mdb.RunMigrationsContext(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

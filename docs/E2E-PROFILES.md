@@ -8,14 +8,33 @@ The runner builds the real isolated PDF worker before starting timed tests.
 Its two temporary binaries and package lists live in one `TMPDIR` child and are
 removed on exit. It preserves the normal Go build and module caches.
 
-Each profile retains its package inventory, native `go test -json` stream/stderr,
-structured summary and pending skipped-test IDs. By default these small evidence
-files remain in a fresh directory under the caller's original `TMPDIR`; that
-directory follows the caller's scratch/container retention policy. Alternatively
+Each profile writes its package inventory, native `go test -json` stream/stderr,
+structured summary and pending skipped-test IDs. These files follow the caller's
+scratch/container retention policy; a CI owner may remove the whole workspace
+when the run ends. Their creation does not establish durable retention. By default
+they live in a fresh directory under the caller's original `TMPDIR`. Alternatively
 set `HASH_E2E_EVIDENCE_DIR` to a fresh absolute directory outside the checkout
 and assign its owner, size budget and retention before running. The runner never
 copies a runtime tree. Event streams contain ordinary test diagnostics and must
-remain private; the summary prints only counts and test/package identities.
+remain private. The summary also prints bounded, redacted failure diagnostics
+to stdout so the native CI journal can preserve useful failures after workspace
+cleanup. It includes failed-test source assertion tails, package panic headers
+and tails, and at most 128 unfinished-test IDs when a timeout/panic or truncated
+stream prevents terminal test events. Malformed/incomplete accounting still fails;
+observed counts and diagnostics do not turn it into a passing result.
+
+Diagnostic context is limited to 24 records and 16 KiB of identity/state/text bytes
+including at most 4 KiB of unfinished-test IDs, with 2 panic-header rows and 6 tail
+rows per record, each at most 256 UTF-8 bytes.
+Test tails prioritize the last 4 source assertion rows over verbose logs. Collection
+is bounded to 160 streams and 1024 running test IDs; truncation is explicit. These
+limits apply to diagnostic context, not the authoritative pass/failure counts or
+existing identity lists. Diagnostic redaction removes URL userinfo/query values,
+authentication tokens and credential-shaped header/JSON/key-value lines plus
+multiline continuations. Reported source IDs receive the same redaction after
+accounting/skip classification. Unlabelled arbitrary sensitive strings cannot be
+identified reliably; keep fixtures synthetic and never deliberately log secrets.
+Passing-test output is not published in diagnostic summaries.
 
 The caller creates, verifies and ultimately retires the disposable services.
 Supply three **fresh, distinct** databases; none may contain public relations.
@@ -56,8 +75,11 @@ The package inventory comes from `go list -tags=e2e ./...`. Its partition is:
 | Original capture | `internal/fitprepare`, using the owned administrative parent and original-capture acknowledgement. |
 | Fit selection | `internal/fitselect`, using the owned administrative parent and migration pin. |
 
-Every invocation uses `-json -tags=e2e -count=1 -timeout=180s`. No test-name filter,
-timeout increase or ownership-guard override is applied. A failed profile does
+Every invocation uses `-json -tags=e2e -count=1 -timeout=180s` and bounds package
+and independent test-case parallelism with `-p=2 -parallel=2`. This limits concurrent
+fresh-database and checkpoint work; each test still runs its own explicit concurrency
+and lock interleavings. No test-name filter, timeout increase or ownership-guard
+override is applied. A failed profile does
 not suppress the remaining profiles; the combined result fails. Missing service
 configuration, ownership, source identity or database preconditions fails before
 the first migration or test. Test-level assertions still decide schema and

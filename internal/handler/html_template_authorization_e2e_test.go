@@ -32,11 +32,11 @@ import (
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
-// Each top-level test owns a unique disposable database. Full migration Down
-// checks and explicit fixture teardown never affect the supplied parent DB.
+// Explicit migration/rollback tests start with an empty unique database.
+// Current-schema cases use an independently cloned current estate below.
 // The ordinary lifecycle fixture is retained, including its real middleware,
 // audit chain, row-lock observations, and original signed session credentials.
-func isolateHTMLTemplateDatabaseE2E(t *testing.T) string {
+func isolateEmptyHTMLTemplateDatabaseE2E(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {
@@ -70,6 +70,30 @@ func isolateHTMLTemplateDatabaseE2E(t *testing.T) string {
 	u.RawPath = ""
 	t.Setenv("HASH_E2E_DB_URL", u.String())
 	return name
+}
+
+// Current-schema cases clone one sealed migrated seed into independent DBs.
+// Explicit empty migration/rollback cases opt into the constructor above.
+func isolateHTMLTemplateDatabaseE2E(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("HASH_E2E_DB_URL")
+	if dsn == "" {
+		t.Skip("set HASH_E2E_DB_URL to run")
+	}
+	u, err := url.Parse(dsn)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		t.Fatal("owned HTML fixture requires a PostgreSQL URL")
+	}
+	name := handlerDatabasesE2E.Clone(t, "hash_html_e2e_")
+	u.Path, u.RawPath = "/"+name, ""
+	t.Setenv("HASH_E2E_DB_URL", u.String())
+	return name
+}
+
+// Retain the explicit current-estate spelling used by the owned runtime fixture.
+func isolateMigratedHTMLTemplateDatabaseE2E(t *testing.T) string {
+	t.Helper()
+	return isolateHTMLTemplateDatabaseE2E(t)
 }
 
 func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string) lifecycleAuthorizationFixture {
@@ -963,7 +987,7 @@ func htmlMigrationPartsE2E(t *testing.T) (string, string) {
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	up, down := htmlMigrationPartsE2E(t)
 	t.Run("empty Down and Up", func(t *testing.T) {

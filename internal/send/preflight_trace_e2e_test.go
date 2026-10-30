@@ -20,6 +20,8 @@ import (
 type sendAdmissionTrace struct {
 	mu               sync.Mutex
 	document         uuid.UUID
+	org              uuid.UUID
+	audit            bool
 	calls            int
 	reached, release chan struct{}
 	once             sync.Once
@@ -32,6 +34,14 @@ func (s *sendAdmissionTrace) arm(document uuid.UUID) {
 	s.reached, s.release = make(chan struct{}), make(chan struct{})
 }
 
+func (s *sendAdmissionTrace) armAudit(org uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.org, s.audit, s.calls = org, true, 0
+	s.reached, s.release = make(chan struct{}), make(chan struct{})
+	s.once = sync.Once{}
+}
+
 func (s *sendAdmissionTrace) unblock() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -41,17 +51,28 @@ func (s *sendAdmissionTrace) unblock() {
 }
 
 func (s *sendAdmissionTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if !strings.HasPrefix(data.SQL, "-- name: GetHTMLSendDocumentStateHeaderV1") || len(data.Args) == 0 {
+	if len(data.Args) == 0 {
 		return ctx
 	}
-	id, ok := data.Args[0].(uuid.UUID)
 	s.mu.Lock()
-	if !ok || s.document == uuid.Nil || id != s.document {
+	hit := false
+	if s.audit {
+		org, ok := data.Args[0].(string)
+		hit = ok && org == s.org.String() && strings.HasPrefix(data.SQL, "-- name: AcquireOrgChainLock")
+	} else {
+		id, ok := data.Args[0].(uuid.UUID)
+		hit = ok && s.document != uuid.Nil && id == s.document && strings.HasPrefix(data.SQL, "-- name: GetHTMLSendDocumentStateHeaderV1")
+	}
+	if !hit {
 		s.mu.Unlock()
 		return ctx
 	}
 	s.calls++
-	if s.calls != 2 {
+	target := 2
+	if s.audit {
+		target = 1
+	}
+	if s.calls != target {
 		s.mu.Unlock()
 		return ctx
 	}

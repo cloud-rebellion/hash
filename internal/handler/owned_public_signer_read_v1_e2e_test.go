@@ -226,7 +226,7 @@ func newOwnedPublicReadFixtureAllocatedPool315V1(t *testing.T, withLifecycleDocu
 	params.Set("idle_in_transaction_session_timeout", "15000")
 	dsn.RawQuery = params.Encode()
 	t.Setenv("HASH_E2E_DB_URL", dsn.String())
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateMigratedHTMLTemplateDatabaseE2E(t)
 	isolatedDSN := os.Getenv("HASH_E2E_DB_URL")
 	application := ""
 	// Registered before the base pool: its actual Close runs first. This one

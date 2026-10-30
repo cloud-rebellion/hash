@@ -23,13 +23,17 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/recipientauthoring"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/bright-interaction/hash/internal/workguard"
 )
 
@@ -71,7 +75,7 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 		t.Fatal(err)
 	}
 	invalidContactUser, err := q.CreateUser(ctx, generated.CreateUserParams{
-		OrgID: org.ID, Email: "not-an-email-" + uuid.NewString(), Name: "Invalid Contact Sender", Role: "owner",
+		OrgID: org.ID, Email: uuid.NewString() + "@preflight.test", Name: "Invalid Contact Sender", Role: "owner",
 		ZitadelSub: pgtype.Text{String: uuid.NewString(), Valid: true},
 	})
 	if err != nil {
@@ -124,6 +128,14 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 		WorkRuntime: runtime, Storage: client,
 		PublicURL: "http://localhost:8080", OrgName: "E2E",
 	}
+	authorize := func(senderID uuid.UUID) auth.TransactionAuthorization {
+		return func(_ context.Context, _ pgx.Tx, member *generated.User) error {
+			if member == nil || member.ID != senderID || member.OrgID != org.ID || member.Role != "owner" {
+				return auth.ErrMutationPermissionRevoked
+			}
+			return nil
+		}
+	}
 
 	createDraft := func(t *testing.T, name string, senderID uuid.UUID) *generated.Document {
 		t.Helper()
@@ -135,15 +147,58 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-			OrgID: org.ID, Name: name, BlocksJson: blockJSON,
-			VariablesJson: json.RawMessage(`{}`), SenderID: senderID,
+		actor := blockauthoring.ActorV1{OrgID: org.ID, UserID: senderID, Authorize: authorize(senderID), Via: "rest", Tool: "create_document"}
+		deps := blockauthoring.DependenciesV1{Sessions: runtime.SessionsV1(), Audit: engine.Audit}
+		created, err := blockauthoring.CreateV1(ctx, deps, actor, blockauthoring.CreateInputV1{
+			Name: "Customer agreement", BlocksJSON: blockJSON, VariablesJSON: json.RawMessage(`{}`),
 		})
+		if created != nil {
+			defer created.CloseConsumerV1()
+		}
+		if err != nil || created == nil || created.Document == nil {
+			t.Fatal("create native disclosure fixture draft", err)
+		}
+		docID := created.Document.ID
+		created.CloseConsumerV1()
+		params := recipientParams(docID)
+		mutator := &recipientauthoring.MutationEngine{Pool: pool, Audit: engine.Audit}
+		recipient, err := mutator.CreateOwnedV1(ctx, runtime.SessionsV1(), q,
+			recipientauthoring.MutationActor{OrgID: org.ID, UserID: senderID, Authorize: authorize(senderID), Via: "rest", Tool: "add_recipient"},
+			docID, recipientauthoring.Values{Role: params.Role, Email: params.Email, Name: params.Name, Locale: params.Locale, OrderIndex: params.OrderIndex})
+		if recipient != nil {
+			defer recipient.CloseConsumerV1()
+		}
+		if err != nil || recipient == nil || recipient.Recipient == nil {
+			t.Fatal("create native disclosure fixture recipient", err)
+		}
+		recipient.CloseConsumerV1()
+		doc, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: org.ID})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.CreateRecipient(ctx, recipientParams(doc.ID)); err != nil {
-			t.Fatal(err)
+		if name != doc.Name {
+			// Deliberately install a legacy-invalid stored display name only after
+			// valid creation. The genuine writer owns the changed row and fresh
+			// measurements; no raw-row cache retrofit grants source authority.
+			actor.Tool = "disclosure_fixture_legacy_name"
+			mutated, err := blockauthoring.MutatePlainDraftV1(ctx, deps, actor, doc.ID, versions.ViaHuman,
+				doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), func(current *generated.Document, expected string) error {
+					if !current.UpdatedAt.Valid || current.UpdatedAt.Time.UTC().Format(time.RFC3339Nano) != expected {
+						return errors.New("disclosure fixture draft observation changed")
+					}
+					return nil
+				}, blockauthoring.PlainDraftMutationInputV1{Patch: pdfadmission.PlainDraftPatchV1{Name: name}})
+			if mutated != nil {
+				defer mutated.CloseConsumerV1()
+			}
+			if err != nil || mutated == nil || mutated.Document == nil {
+				t.Fatal("install native measured legacy-invalid disclosure name", err)
+			}
+			mutated.CloseConsumerV1()
+			doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: docID, OrgID: org.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 		return doc
 	}
@@ -191,9 +246,16 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := createDraft(t, test.documentName, test.user.ID)
+			if test.user.ID == invalidContactUser.ID {
+				// The stored contact corruption is the sole adversarial input;
+				// document and recipient provenance were produced normally first.
+				if _, err := pool.Exec(ctx, `UPDATE users SET email=$2 WHERE id=$1 AND org_id=$3`, test.user.ID, "not-an-email-"+uuid.NewString(), org.ID); err != nil { //nolint:rawsql -- intentional legacy controller-contact corruption
+					t.Fatal(err)
+				}
+			}
 			result, err := engine.Send(ctx, send.Actor{
 				UserID: &test.user.ID, OrgID: org.ID, Email: test.user.Email,
-				Via: "test", LawfulBasis: "contract",
+				Via: "test", LawfulBasis: "contract", Authorize: authorize(test.user.ID),
 			}, doc.ID)
 			t.Cleanup(result.CloseConsumerV1)
 			if !errors.Is(err, send.ErrInvalidSignerDisclosure) {
@@ -205,6 +267,9 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 
 	t.Run("legacy reversible sealing intent is aborted before retention", func(t *testing.T) {
 		doc := createDraft(t, "Agreement\nInjected", validUser.ID)
+		// This is the supported reversible legacy Send intent, not an ordinary
+		// finalization intent governed by migration109's original-output guard.
+		// Its document/recipient source remains the genuine current producer.
 		if _, err := q.ConfirmDocumentLawfulBasis(ctx, generated.ConfirmDocumentLawfulBasisParams{
 			DocumentID: doc.ID, OrgID: org.ID, LawfulBasis: "contract",
 			ConfirmedBy: pgtype.UUID{Bytes: validUser.ID, Valid: true}, Via: "test",

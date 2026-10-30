@@ -9,12 +9,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/bright-interaction/hash/internal/audit"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -53,19 +55,16 @@ func TestAutomaticReminderRollbackAndConcurrentWorkersE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "Reminder", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), SenderID: user.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	recipient, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.reminder.test", Name: "Recipient", Locale: "en", MagicTokenHash: []byte("original-token-hash"), MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := signingWorkRuntimeE2E(t, pool)
+	logger := audit.New(q, pool)
+	producer := &Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Audit: logger}
+	doc := createSigningBlocksE2E(t, ctx, producer, generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "Reminder", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), SenderID: user.ID})
+	recipient := createSigningRecipientE2E(t, ctx, producer, user.ID, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@recipient.reminder.test", Name: "Recipient", Locale: "en", MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}})
 	doc = sendCommentFixtureE2E(t, ctx, pool, q, doc)
 	if _, err := pool.Exec(ctx, `INSERT INTO reminders(document_id,schedule_json,next_fire_at,fires_remaining) VALUES($1,'[{"days_after_send":3},{"days_after_send":7}]',$2,2)`, doc.ID, doc.SentAt.Time.Add(3*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	engine := &send.Engine{Pool: pool, Queries: q, WorkRuntime: signingWorkRuntimeE2E(t, pool), Audit: audit.New(q, pool), Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", Now: func() time.Time { return doc.SentAt.Time.Add(3*24*time.Hour + time.Minute) }}
+	engine := &send.Engine{Pool: pool, Queries: q, WorkRuntime: runtime, Audit: logger, Mailer: dispatch.QueueingMailer{Q: q}, PublicURL: "https://hash.example.test", Now: func() time.Time { return doc.SentAt.Time.Add(3*24*time.Hour + time.Minute) }}
 	actor := send.Actor{OrgID: org.ID, Email: user.Email, Via: "worker"}
 	// Reject only this recipient's insert, after schedule advancement and rotation.
 	constraint := "reminder_test_" + uuid.NewString()[:8]
@@ -73,7 +72,12 @@ func TestAutomaticReminderRollbackAndConcurrentWorkersE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Exec(context.Background(), `ALTER TABLE email_deliveries DROP CONSTRAINT IF EXISTS `+constraint)
-	if _, err := engine.Remind(ctx, actor, doc.ID, true); err == nil {
+	if _, err := engine.Remind(ctx, actor, doc.ID, true); err != nil {
+		var rejected *pgconn.PgError
+		if !errors.As(err, &rejected) || rejected.Code != "23514" || rejected.ConstraintName != constraint {
+			t.Fatalf("reminder did not reach its exact outbox failure: %v", err)
+		}
+	} else {
 		t.Fatal("outbox failure ignored")
 	}
 	check, err := q.GetReminderForUpdate(ctx, doc.ID)

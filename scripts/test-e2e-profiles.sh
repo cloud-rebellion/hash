@@ -78,7 +78,10 @@ run_profile() {
   shift 2
   printf 'e2e profile: %s (%s packages)\n' "$profile" "$#"
   printf '%s\n' "$@" > "$evidence/$profile.packages"
-  if HASH_E2E_DB_URL="$database" go test -json -tags=e2e -count=1 -timeout=180s "$@" \
+  # Bound simultaneous fresh-database/checkpoint work across packages and
+  # independent parallel test cases; each package keeps its existing180s
+  # deadline, and tests' own concurrency/interleaving assertions still run.
+  if HASH_E2E_DB_URL="$database" go test -json -tags=e2e -count=1 -timeout=180s -p=2 -parallel=2 "$@" \
       > "$evidence/$profile.events.jsonl" 2> "$evidence/$profile.stderr"; then
     go_exit=0
   else

@@ -402,7 +402,7 @@ func TestDocumentPackageCaptureTransactionV1E2E(t *testing.T) {
 	})
 }
 func TestDocumentPackageCaptureRollbackAndBoundsV1E2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	root := packagePDF218(t, f, "Main-only bounds")
 	p := packageHeader218(t, f, root)
@@ -483,10 +483,13 @@ func TestDocumentPackageCaptureRollbackAndBoundsV1E2E(t *testing.T) {
 	})
 	// Empty Down/reapply is covered after synthetic fixture disposal by the V99
 	// rollback test, which first rolls empty102/101/100 down to99, retains occupied99's
-	// refusal, then reapplies all and verifies max migration106.
+	// refusal, then reapplies all and verifies the exact embedded current migration set.
 	digest, versions, err := mdb.EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) != 106 || versions[105] != 106 {
+	if err != nil || len(versions) == 0 || digest != os.Getenv("HASH_E2E_EXPECT_MIGRATIONS_SHA256") {
 		t.Fatal(err)
 	}
-	t.Logf("capture migration v106 %s", digest)
+	if current := assertCurrentHandlerMigrationHistoryE2E(t, f.ctx, f.pool); current != versions[len(versions)-1] {
+		t.Fatal("capture fixture does not match the current embedded migration head")
+	}
+	t.Logf("capture migration v%d %s", versions[len(versions)-1], digest)
 }

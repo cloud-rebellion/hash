@@ -88,15 +88,9 @@ func setupOwnerPolicyNative441E2E(t *testing.T, sharedDatabase ...string) ownerO
 		}
 	})
 	f := setupOwnerOrgMutationE2E(t)
-	// Observe the same latest-per-version history rule as the genuine migration
-	// getter, after actual embedded Up and before any selected catalog work.
-	var version int64
-	if err := f.pool.QueryRow(f.ctx, `SELECT version_id FROM (
-  SELECT DISTINCT ON (version_id) id,version_id,is_applied
-  FROM goose_db_version ORDER BY version_id,id DESC
- ) AS latest_versions WHERE is_applied ORDER BY id DESC LIMIT 1`).Scan(&version); err != nil || version != 114 { //nolint:rawsql -- scalar actual child history oracle only
-		t.Fatal("owner-policy fixture is not at exact current migration114", version, err)
-	}
+	// Current means the exact caller-pinned embedded migration set, including
+	// every applied version, rather than the historical M114 fixture ceiling.
+	assertCurrentHandlerMigrationHistoryE2E(t, f.ctx, f.pool)
 	application = f.pool.Config().ConnConfig.RuntimeParams["application_name"]
 	if application == "" || f.s.Send == nil {
 		t.Fatal("original owner-policy pool identity/send dependency unavailable")

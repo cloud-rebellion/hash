@@ -15,9 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bright-interaction/hash/internal/article13"
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/branding"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/google/uuid"
@@ -27,7 +24,8 @@ import (
 )
 
 // These tests use an already migrated, disposable PostgreSQL owned by the
-// acceptance caller. They never migrate/drop a database or activate admission
+// acceptance caller. The completion cases migrate only their own legacy child;
+// the caller database is never migrated/dropped. No fixture activates admission
 // policy/READY. Synthetic blocks documents test direct query lock order, not a
 // completed signing ceremony or immutable provider evidence. Root must retain
 // the exact applied SQL tree and runtime/container provenance independently.
@@ -88,7 +86,7 @@ type recipientLockFixture struct {
 	initial             *generated.Recipient
 }
 
-func seedRecipientLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *generated.Queries, status string, completed bool) recipientLockFixture {
+func seedRecipientLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *generated.Queries, status string) recipientLockFixture {
 	t.Helper()
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: "Synthetic recipient lock " + uuid.NewString(), Plan: "pro"})
 	if err != nil {
@@ -111,71 +109,7 @@ func seedRecipientLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q 
 			t.Fatal(err)
 		} //nolint:rawsql -- synthetic eligibility input only
 	}
-	if completed {
-		// The real durable-send SQL must allocate sent_at. This reference-free
-		// synthetic blocks fixture does not qualify provider retention or signing.
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_ = tx.Rollback(cleanupCtx)
-		}()
-		locked := q.WithTx(tx)
-		if _, err := locked.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: org.ID}); err != nil {
-			t.Fatal(err)
-		}
-		defaults := branding.DefaultBranding()
-		value := func(s string) pgtype.Text { return pgtype.Text{String: s, Valid: true} }
-		if _, err := locked.UpsertDocumentBrandingOverride(ctx, generated.UpsertDocumentBrandingOverrideParams{
-			DocumentID: doc.ID, PrimaryHex: value(defaults.PrimaryHex), AccentHex: value(defaults.AccentHex),
-			SurfaceHex: value(defaults.SurfaceHex), TextHex: value(defaults.TextHex), MutedHex: value(defaults.MutedHex),
-			LogoUrl: value(""), LogoAlt: value(""), FontHeading: value(defaults.FontHeading),
-			FontBody: value(defaults.FontBody), SignatureColor: value(defaults.SignatureColor),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := locked.CreateSendSealingIntent(ctx, generated.CreateSendSealingIntentParams{DocumentID: doc.ID, OrgID: org.ID, ActorUserID: pgtype.UUID{Bytes: owner.ID, Valid: true}, ActorEmail: owner.Email, ActorIp: "127.0.0.1", Via: "recipient-lock-fixture", Tool: "synthetic-state-only"}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := locked.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: org.ID}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := locked.PinDocumentSendEvidenceVersions(ctx, generated.PinDocumentSendEvidenceVersionsParams{ID: doc.ID, OrgID: org.ID}); err != nil {
-			t.Fatal(err)
-		}
-		if n, err := locked.MarkSendSealingRetentionStarted(ctx, generated.MarkSendSealingRetentionStartedParams{DocumentID: doc.ID, OrgID: org.ID}); err != nil || n != 1 {
-			t.Fatal("synthetic send checkpoint", n, err)
-		}
-		if n, err := locked.MarkSendSealingRetentionComplete(ctx, generated.MarkSendSealingRetentionCompleteParams{DocumentID: doc.ID, OrgID: org.ID}); err != nil || n != 1 {
-			t.Fatal("synthetic send checkpoint", n, err)
-		}
-		sent, err := locked.CompleteDocumentSendSealing(ctx, generated.CompleteDocumentSendSealingParams{ID: doc.ID, OrgID: org.ID})
-		if err != nil {
-			t.Fatal(err)
-		}
-		epoch, err := article13.CanonicalSentAt(sent.SentAt.Time)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := audit.New(q, pool).LogTx(ctx, tx, audit.Entry{
-			OrgID: org.ID, DocumentID: &doc.ID, ActorUserID: &owner.ID, Kind: audit.KindDocumentSent,
-			Payload: map[string]any{article13.AuditRequiredNoticeSchemaKey: sent.Article13NoticeSchema,
-				article13.AuditRequiredNoticeSentAtKey: epoch, "synthetic_recipient_lock_fixture": true},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		// Only the terminal eligibility metadata is synthetic; provenance remains
-		// bound, all triggers stay enabled, and no controller READY is asserted.
-		if _, err := tx.Exec(ctx, "WITH stamp AS MATERIALIZED (SELECT GREATEST(clock_timestamp(),sent_at+interval '1 microsecond') AS value FROM documents WHERE id=$1) UPDATE documents SET status='completed',completion_effective_at=stamp.value,completed_at=stamp.value,finalization_retain_until=hash_evidence_retain_until(stamp.value,7) FROM stamp WHERE id=$1", doc.ID); err != nil {
-			t.Fatal(err)
-		} //nolint:rawsql -- synthetic completed-state query precondition, never production evidence
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
+
 	recipient, err = q.GetRecipient(ctx, generated.GetRecipientParams{ID: recipient.ID, OrgID: org.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +177,13 @@ func TestRecipientUpdatesAcquireParentBeforeChildE2E(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := seedRecipientLock(t, ctx, pool, q, tc.status, tc.completed)
+			pool, q := pool, q
+			var f recipientLockFixture
+			if tc.completed {
+				pool, q, f = legacyCompletedRecipientLock(t, ctx, pool)
+			} else {
+				f = seedRecipientLock(t, ctx, pool, q, tc.status)
+			}
 			held, err := pool.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -372,7 +312,7 @@ func TestRecipientUpdatesAcquireParentBeforeChildE2E(t *testing.T) {
 func TestRecipientUpdateIdentityAndTerminalGuardsE2E(t *testing.T) {
 	ctx, pool, q := recipientLockDB(t)
 	t.Run("cross_tenant_anonymization", func(t *testing.T) {
-		f := seedRecipientLock(t, ctx, pool, q, "pending", false)
+		f := seedRecipientLock(t, ctx, pool, q, "pending")
 		before := recipientLockRowSnapshot(t, ctx, pool, f.recipient)
 		rows, err := q.AnonymizeRecipient(ctx, generated.AnonymizeRecipientParams{ID: f.recipient, OrgID: uuid.New(), Email: "not-authorized@recipient-lock.test", Name: "Not authorized"})
 		if err != nil || rows != 0 || before != recipientLockRowSnapshot(t, ctx, pool, f.recipient) {
@@ -380,7 +320,7 @@ func TestRecipientUpdateIdentityAndTerminalGuardsE2E(t *testing.T) {
 		}
 	})
 	t.Run("wrong_document_rotation", func(t *testing.T) {
-		f := seedRecipientLock(t, ctx, pool, q, "pending", false)
+		f := seedRecipientLock(t, ctx, pool, q, "pending")
 		before := recipientLockRowSnapshot(t, ctx, pool, f.recipient)
 		if err := q.RotateRecipientMagicToken(ctx, generated.RotateRecipientMagicTokenParams{ID: f.recipient, DocumentID: uuid.New(), MagicTokenHash: bytes.Repeat([]byte{2}, 32), MagicTokenExpiresAt: f.initial.MagicTokenExpiresAt}); err != nil {
 			t.Fatal(err)
@@ -390,7 +330,7 @@ func TestRecipientUpdateIdentityAndTerminalGuardsE2E(t *testing.T) {
 		}
 	})
 	t.Run("signed_status_cannot_reopen_or_reset", func(t *testing.T) {
-		f := seedRecipientLock(t, ctx, pool, q, "signed", false)
+		f := seedRecipientLock(t, ctx, pool, q, "signed")
 		before := recipientLockRowSnapshot(t, ctx, pool, f.recipient)
 		if err := q.SetRecipientStatus(ctx, generated.SetRecipientStatusParams{ID: f.recipient, DocumentID: f.doc, Status: "viewed"}); err != nil {
 			t.Fatal(err)
@@ -403,7 +343,7 @@ func TestRecipientUpdateIdentityAndTerminalGuardsE2E(t *testing.T) {
 		}
 	})
 	t.Run("completion_rotation_requires_completed_document", func(t *testing.T) {
-		f := seedRecipientLock(t, ctx, pool, q, "signed", false)
+		f := seedRecipientLock(t, ctx, pool, q, "signed")
 		before := recipientLockRowSnapshot(t, ctx, pool, f.recipient)
 		rows, err := q.RotateCompletedArtifactToken(ctx, generated.RotateCompletedArtifactTokenParams{ID: f.recipient, DocumentID: f.doc, MagicTokenHash: bytes.Repeat([]byte{2}, 32), MagicTokenExpiresAt: f.initial.MagicTokenExpiresAt})
 		if err != nil || rows != 0 || before != recipientLockRowSnapshot(t, ctx, pool, f.recipient) {
@@ -411,7 +351,7 @@ func TestRecipientUpdateIdentityAndTerminalGuardsE2E(t *testing.T) {
 		}
 	})
 	t.Run("send_transition_counts_stale_row", func(t *testing.T) {
-		f := seedRecipientLock(t, ctx, pool, q, "signed", false)
+		f := seedRecipientLock(t, ctx, pool, q, "signed")
 		before := recipientLockRowSnapshot(t, ctx, pool, f.recipient)
 		rows, err := q.MarkRecipientSent(ctx, generated.MarkRecipientSentParams{ID: f.recipient, DocumentID: f.doc})
 		if err != nil || rows != 0 || before != recipientLockRowSnapshot(t, ctx, pool, f.recipient) {

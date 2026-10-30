@@ -19,7 +19,6 @@ import (
 
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -32,7 +31,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Real PostgreSQL only. The selected source3/PDF/image/version descriptors are
@@ -75,49 +73,9 @@ func isolatedExecutionDB(t testing.TB) (context.Context, *pgxpool.Pool) {
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		t.Fatal("actual PostgreSQL URL required")
 	}
-	adminCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	admin, err := pgx.Connect(adminCtx, dsn)
-	if err != nil {
-		t.Fatal("connect synthetic parent PostgreSQL")
-	}
-	name := "hash_presign_execution_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = admin.Exec(adminCtx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		_ = admin.Close(context.Background())
-		t.Fatal("create unique owned execution DB")
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		// The pool's local Close can precede PostgreSQL backend retirement.
-		// Independently observe this exact, uniquely owned database before DROP;
-		// never terminate an uncertain connection or disguise it with FORCE.
-		if executionDatabaseRetired(t, ctx, admin, name) {
-			if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-				executionCleanupError(t, "drop exact owned execution DB", err)
-			}
-		}
-		cancel()
-		closeCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		if err := admin.Close(closeCtx); err != nil {
-			executionCleanupError(t, "close owned execution administrator", err)
-		}
-	})
+	name := executionDatabasesE2E.Clone(t, "hash_presign_execution_")
 	u.Path = "/" + name
 	u.RawPath = ""
-	config, err := pgx.ParseConfig(u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB := stdlib.OpenDB(*config)
-	sqlDB.SetMaxOpenConns(1)
-	if err = db.RunMigrations(sqlDB); err != nil {
-		_ = sqlDB.Close()
-		t.Fatal("migrate owned execution DB", err)
-	}
-	if err = sqlDB.Close(); err != nil {
-		t.Fatal(err)
-	}
 	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(stop)
 	pool, err := pgxpool.New(ctx, u.String())

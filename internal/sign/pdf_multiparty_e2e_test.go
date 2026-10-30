@@ -57,19 +57,25 @@ func TestNamedPartyPDFSignsBothPartiesAndProducesBoundArtifactsE2E(t *testing.T)
 		t.Run(scenario, func(t *testing.T) {
 			f := newMultipartyPDFE2E(t, false)
 			first := f.context(t, 0)
-			second := f.context(t, 1)
 			if scenario == "parallel" {
+				second := f.context(t, 1)
 				start := make(chan struct{})
 				results := make(chan error, 2)
 				for i, rc := range []*RecipientContext{first, second} {
 					input := f.input(t, rc, i)
-					go func() { <-start; _, err := f.engine.Sign(f.ctx, rc, input); results <- err }()
+					go func() {
+						<-start
+						_, err := f.engine.Sign(f.ctx, rc, input)
+						results <- errors.Join(err, rc.CloseReadV1())
+					}()
 				}
 				close(start)
+				var failures error
 				for i := 0; i < 2; i++ {
-					if err := <-results; err != nil {
-						t.Fatal(err)
-					}
+					failures = errors.Join(failures, <-results)
+				}
+				if failures != nil {
+					t.Fatal(failures)
 				}
 			} else {
 				result, err := f.engine.Sign(f.ctx, first, f.input(t, first, 0))
@@ -83,10 +89,13 @@ func TestNamedPartyPDFSignsBothPartiesAndProducesBoundArtifactsE2E(t *testing.T)
 				if _, err := f.engine.Sign(f.ctx, first, f.input(t, first, 0)); !errors.Is(err, ErrAlreadySigned) {
 					t.Fatalf("duplicate first signature error=%v", err)
 				}
+				f.closeContext(t, first)
+				second := f.context(t, 1)
 				if scenario == "render_failure_retry" {
 					f.rendererFail.Store(true)
 				}
 				result, err = f.engine.Sign(f.ctx, second, f.input(t, second, 1))
+				f.closeContext(t, second)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -129,6 +138,7 @@ func TestLegacySingleSignerFillablePDFStillSignsAndCompletesE2E(t *testing.T) {
 	f := newMultipartyPDFE2E(t, true)
 	rc := f.context(t, 0)
 	result, err := f.engine.Sign(f.ctx, rc, f.input(t, rc, 0))
+	f.closeContext(t, rc)
 	if err != nil || !result.Completed {
 		t.Fatalf("legacy result=%+v error=%v", result, err)
 	}
@@ -149,6 +159,7 @@ func TestNamedPartyPDFNonA4AndRotatedGeometryE2E(t *testing.T) {
 				if _, err := f.engine.Sign(f.ctx, rc, f.input(t, rc, i)); err != nil {
 					t.Fatal(err)
 				}
+				f.closeContext(t, rc)
 			}
 			f.assertCompleted(t, label)
 			doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.docID, OrgID: f.orgID})
@@ -216,12 +227,15 @@ func TestNamedPartyPDFResumeRejectsMissingOrMisboundCapturedSignatureE2E(t *test
 	for _, scenario := range []string{"missing", "other_party_field"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newMultipartyPDFE2E(t, false)
-			first, second := f.context(t, 0), f.context(t, 1)
+			first := f.context(t, 0)
 			if _, err := f.engine.Sign(f.ctx, first, f.input(t, first, 0)); err != nil {
 				t.Fatal(err)
 			}
+			f.closeContext(t, first)
+			second := f.context(t, 1)
 			f.store.failFinalRetention.Store(true)
 			result, err := f.engine.Sign(f.ctx, second, f.input(t, second, 1))
+			f.closeContext(t, second)
 			if err != nil || result.Completed {
 				t.Fatalf("staged retry result=%+v error=%v", result, err)
 			}
@@ -261,11 +275,11 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 			clock.Store(base.UnixNano())
 			f.engine.Now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
 			if scenario == "recipient_deadline_audit_wait" || scenario == "admitted_recipient_deadline_extended" {
-				if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE magic_token_hash=$1`, auth.HashMagicToken(f.tokens[0]), base.Add(time.Second)); err != nil { //nolint:rawsql
+				if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE magic_token_hash=$1`, auth.HashMagicToken(f.tokens[0]), base.Add(time.Minute)); err != nil { //nolint:rawsql
 					t.Fatal(err)
 				}
 			} else if scenario == "document_deadline_audit_wait" || scenario == "admitted_document_deadline_extended" {
-				if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET expires_at=$2 WHERE id=$1`, f.docID, base.Add(time.Second)); err != nil { //nolint:rawsql
+				if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET expires_at=$2 WHERE id=$1`, f.docID, base.Add(time.Minute)); err != nil { //nolint:rawsql
 					t.Fatal(err)
 				}
 			}
@@ -281,12 +295,27 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 				if _, err := f.q.WithTx(held).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.docID, OrgID: f.orgID}); err != nil {
 					t.Fatal(err)
 				}
-				query, event = "-- name: GetDocumentForUpdate", "transactionid"
+				query, event = "-- name: GetHTMLSendDocumentStateHeaderV1", "transactionid"
 			} else if err := f.q.WithTx(held).AcquireOrgChainLock(f.ctx, f.orgID.String()); err != nil {
 				t.Fatal(err)
 			}
 			result := make(chan error, 1)
-			go func() { _, err := f.engine.Sign(f.ctx, rc, input); result <- err }()
+			signCtx, cancelSign := context.WithCancel(f.ctx)
+			joined := false
+			go func() { _, err := f.engine.Sign(signCtx, rc, input); result <- err }()
+			defer func() {
+				cancelSign()
+				cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = held.Rollback(cleanup)
+				if !joined {
+					select {
+					case <-result:
+					case <-cleanup.Done():
+						t.Error("signature did not join after releasing its owned wait")
+					}
+				}
+			}()
 			var holderPID int32
 			if err := held.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil { //nolint:rawsql
 				t.Fatal(err)
@@ -296,6 +325,7 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 			for time.Now().Before(waitUntil) {
 				select {
 				case err := <-result:
+					joined = true
 					t.Fatalf("signature returned before its authoritative wait: %v", err)
 				default:
 				}
@@ -326,7 +356,7 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 						t.Fatal(err)
 					}
 				}
-				clock.Store(base.Add(2 * time.Second).UnixNano())
+				clock.Store(base.Add(2 * time.Minute).UnixNano())
 			}
 			// Capture the holder's own authorized credential/deadline changes
 			// before releasing the document: an incorrectly accepted request
@@ -335,7 +365,10 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 			if err := held.Commit(f.ctx); err != nil {
 				t.Fatal(err)
 			}
-			if err := <-result; !errors.Is(err, ErrMagicLinkExpired) {
+			err = <-result
+			joined = true
+			f.closeContext(t, rc)
+			if !errors.Is(err, ErrMagicLinkExpired) {
 				t.Fatalf("expired/rotated signature error=%v", err)
 			}
 			if before != negotiationCredentialSnapshot(t, f.ctx, f.pool, f) {
@@ -346,6 +379,7 @@ func TestNamedPartyPDFSignatureRechecksOriginalTokenAndDeadlineAfterWaitsE2E(t *
 				if result, err := f.engine.Sign(f.ctx, fresh, f.input(t, fresh, 0)); err != nil || result.Completed {
 					t.Fatalf("newly admitted extended credential result=%+v error=%v", result, err)
 				}
+				f.closeContext(t, fresh)
 				f.assertIncomplete(t, 1)
 			}
 		})
@@ -587,6 +621,16 @@ func (f *multipartyPDFFixture) context(t *testing.T, index int) *RecipientContex
 	return rc
 }
 
+// An HTTP ceremony retires its request owner after Sign returns. Keep retry and
+// recovery fixtures on that same lifetime instead of retaining every failed
+// renderer/source body until the entire test ends.
+func (f *multipartyPDFFixture) closeContext(t *testing.T, rc *RecipientContext) {
+	t.Helper()
+	if err := rc.CloseReadV1(); err != nil {
+		t.Fatal("close completed signing fixture request", err)
+	}
+}
+
 func (f *multipartyPDFFixture) input(t *testing.T, rc *RecipientContext, index int) SignInput {
 	return SignInput{Font: "Caveat", TypedName: f.names[index], Notice: testArticle13NoticeEvidence(t, rc), IP: "127.0.0.1", UserAgent: "Synthetic lifecycle fixture"}
 }
@@ -641,6 +685,28 @@ func (f *multipartyPDFFixture) assertCompleted(t *testing.T, label string) {
 	}
 	head := events[len(events)-2]
 	claims, err := newCertificateEvidenceClaims(doc, doc.FinalPdfSha, &generated.LatestEventChainHeadForOrgRow{RowHash: head.RowHash, CreatedAt: head.CreatedAt}, events[:len(events)-1])
+	if err != nil {
+		t.Fatal("construct exact pre-completion certificate claims", err)
+	}
+	// Native certificates also bind the published participant report. Read its
+	// actual immutable receipt using the complete four-artifact commitment; a
+	// legacy claim section without these attributes cannot equal current HTML.
+	var reportDigest []byte
+	var reportCutoff pgtype.Timestamptz
+	if err := f.pool.QueryRow(f.ctx, `SELECT schema_version,cutoff,history_rows,report_sha256
+		FROM document_participant_reports_v1 WHERE document_id=$1 AND org_id=$2
+		AND completion_effective_at=$3 AND final_pdf_sha256=$4 AND audit_cert_sha256=$5
+		AND audit_payload_sha256=$6 AND audit_signature_sha256=$7`, f.docID, f.orgID,
+		doc.CompletionEffectiveAt, doc.FinalPdfSha, doc.AuditCertSha256, doc.AuditPayloadSha256,
+		doc.AuditSignatureSha256).Scan(&claims.ParticipantReportSchema, &reportCutoff,
+		&claims.ParticipantReportRows, &reportDigest); err != nil { //nolint:rawsql -- independent verification of the actual published receipt
+		t.Fatal("load exact completed participant-report commitment", err)
+	}
+	if claims.ParticipantReportSchema != doc.ParticipantReportSchema || !reportCutoff.Valid || len(reportDigest) != sha256.Size {
+		t.Fatal("completed participant-report receipt has invalid provenance")
+	}
+	claims.ParticipantReportSHA256 = fmt.Sprintf("%x", reportDigest)
+	claims.ParticipantReportCutoff = reportCutoff.Time.UTC().Format(time.RFC3339Nano)
 	if err != nil || !strings.Contains(string(payload), claims.HTML()) {
 		t.Fatalf("signed certificate does not bind the exact final artifact and pre-completion audit ledger: %v", err)
 	}

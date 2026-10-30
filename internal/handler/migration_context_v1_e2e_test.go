@@ -31,7 +31,7 @@ type migrationPGFixture242 struct {
 
 func migrationPG242(t *testing.T) migrationPGFixture242 {
 	t.Helper()
-	isolateHTMLTemplateDatabaseE2E(t)
+	isolateEmptyHTMLTemplateDatabaseE2E(t)
 	ctx := migrationFixtureContext242(t)
 	cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 	if err != nil {

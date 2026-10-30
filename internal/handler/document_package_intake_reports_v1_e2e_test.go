@@ -79,7 +79,7 @@ func packageDraftArgs222(p generated.InsertDocumentAttachmentDraftV1Params) []an
 }
 
 func TestDocumentPackageIntakeReportPersistenceV1E2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	t.Run("selected and sparse captured reports survive live source changes", func(t *testing.T) {
 		p, root, annex, first := selectedReportPackage222(t, f, "Frozen")
@@ -304,7 +304,7 @@ func legacyPackageCaptureInput222(t *testing.T, f lifecycleAuthorizationFixture,
 	return generated.AppendDocumentPackageCaptureV1Params{PackageID: p.ID, OrgID: f.org, DocumentID: root.ID, Revision: 1, ExpectedPreviousRevision: 0, ExpectedUpdatedAt: root.UpdatedAt, ExpectedGeneration: p.DraftGeneration, Manifest: manifest.CanonicalJSON(), ManifestSha256: object, LegalCommitmentSha256: legal, CreatedBy: f.user.ID}
 }
 func TestDocumentPackageIntakeReportLegacyMigrationV1E2E(t *testing.T) {
-	database := isolateHTMLTemplateDatabaseE2E(t)
+	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
 	root := packagePDF218(t, f, "Legacy root")
 	annex := packagePDF218(t, f, "Legacy annex")

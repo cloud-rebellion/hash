@@ -12,20 +12,17 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bright-interaction/hash/internal/audit"
-	hashdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/passwordhash"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Each case owns a separate database, not the shared HASH_E2E_DB_URL estate.
@@ -40,54 +37,27 @@ func bootstrapScratch(t *testing.T) (context.Context, *pgx.Conn, *pgx.ConnConfig
 	t.Cleanup(cancel)
 	cfg, err := pgx.ParseConfig(dsn)
 	bootstrapMust(t, err, "parse private PostgreSQL fixture configuration")
-	adminConfig := cfg.Copy()
-	adminConfig.RuntimeParams["application_name"] = "hash-bootstrap-fixture-admin"
-	admin, err := pgx.ConnectConfig(ctx, adminConfig)
-	bootstrapMust(t, err, "connect fixture database administrator")
-	name := "hash_bootstrap_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	var conn *pgx.Conn
-	created := false
-	t.Cleanup(func() {
-		if conn != nil {
-			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := conn.Close(cleanup); err != nil {
-				t.Errorf("close owned bootstrap connection (%s)", bootstrapErrorDiagnostic(err))
-			}
-			stop()
-		}
-		if created {
-			// A successful local Close is not PostgreSQL backend retirement.
-			// Observe this uniquely owned database independently before DROP;
-			// never terminate sessions or force-drop an uncertain connection.
-			cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-			if bootstrapObserveDatabaseRetired(t, cleanup, admin, name) {
-				if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-					t.Errorf("drop owned bootstrap fixture database (%s)", bootstrapErrorDiagnostic(err))
-				}
-			}
-			stop()
-		}
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		if err := admin.Close(cleanup); err != nil {
-			t.Errorf("close bootstrap fixture administrator (%s)", bootstrapErrorDiagnostic(err))
-		}
-	})
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
-	bootstrapMust(t, err, "create owned bootstrap fixture database")
-	created = true
+	name := bootstrapDatabasesE2E.Clone(t, "hash_bootstrap_")
 	scratch := cfg.Copy()
 	scratch.Database = name
 	scratch.RuntimeParams["application_name"] = "hash-bootstrap-fixture-client"
-	migrationConfig := scratch.Copy()
-	migrationConfig.RuntimeParams["application_name"] = "hash-bootstrap-fixture-migration"
-	migration := stdlib.OpenDB(*migrationConfig)
-	migration.SetMaxOpenConns(1)
-	migration.SetMaxIdleConns(1)
-	err = hashdb.RunMigrationsContext(ctx, migration)
-	closeErr := migration.Close()
-	bootstrapMust(t, err, "migrate owned fixture through real embedded M117")
-	bootstrapMust(t, closeErr, "close fixture migration connection")
+	var conn *pgx.Conn
+	t.Cleanup(func() {
+		if conn == nil {
+			return
+		}
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err := conn.Close(cleanup); err != nil {
+			t.Errorf("close owned bootstrap connection (%s)", bootstrapErrorDiagnostic(err))
+			return
+		}
+		select {
+		case <-conn.PgConn().CleanupDone():
+		case <-cleanup.Done():
+			t.Error("bootstrap native connection cleanup did not join")
+		}
+	})
 	conn, err = pgx.ConnectConfig(ctx, scratch)
 	bootstrapMust(t, err, "connect actual bootstrap operation")
 	return ctx, conn, scratch

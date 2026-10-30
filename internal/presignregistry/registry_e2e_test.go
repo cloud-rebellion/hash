@@ -19,14 +19,12 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
-	"github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/presign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // These cases require an actual disposable PostgreSQL with current migrations.
@@ -73,51 +71,9 @@ func setupRegistryDatabaseE2E(t testing.TB) (context.Context, *pgxpool.Pool) {
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		t.Fatal("registry fixture requires a PostgreSQL URL")
 	}
-	adminCtx, adminCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer adminCancel()
-	admin, err := pgx.Connect(adminCtx, dsn)
-	if err != nil {
-		t.Fatal("connect registry fixture parent PostgreSQL")
-	}
-	name := "hash_presign_e2e_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(adminCtx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil { //nolint:rawsql -- unique owned synthetic DB
-		_ = admin.Close(context.Background())
-		t.Fatal("create isolated registry fixture database")
-	}
-	// Registered before the fixture pool, so the pool closes before disposal.
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		// Cleanup must not depend on a parent connection left idle throughout
-		// migrations, expiry waits and actual concurrent authority mutations.
-		cleanupAdmin, err := pgx.Connect(cleanupCtx, dsn)
-		if err != nil {
-			t.Error("connect registry fixture parent for disposal", err)
-			return
-		}
-		defer cleanupAdmin.Close(cleanupCtx)
-		if _, err := cleanupAdmin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil { //nolint:rawsql -- exact database created above
-			t.Error("drop isolated registry fixture database", err)
-		}
-	})
-	if err := admin.Close(adminCtx); err != nil {
-		t.Fatal("close registry fixture parent PostgreSQL", err)
-	}
+	name := registryDatabasesE2E.Clone(t, "hash_presign_e2e_")
 	u.Path = "/" + name
 	u.RawPath = ""
-	cfg, err := pgx.ParseConfig(u.String())
-	if err != nil {
-		t.Fatal("parse isolated registry database configuration")
-	}
-	sqlDB := stdlib.OpenDB(*cfg)
-	sqlDB.SetMaxOpenConns(1)
-	if err := db.RunMigrations(sqlDB); err != nil {
-		_ = sqlDB.Close()
-		t.Fatal("migrate isolated registry fixture database")
-	}
-	if err := sqlDB.Close(); err != nil {
-		t.Fatal("close registry migration connection")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	t.Cleanup(cancel)
 	pool, err := pgxpool.New(ctx, u.String())

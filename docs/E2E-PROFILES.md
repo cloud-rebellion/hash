@@ -5,7 +5,7 @@ Go toolchain and caller-owned PostgreSQL 16.15, S3-compatible storage and Gotenb
 The native measurement protocol currently supports PostgreSQL `160015`; preflight
 checks the live server version as well as the supplied database identity.
 The runner builds the real isolated PDF worker before starting timed tests.
-Its two temporary binaries and package lists live in one `TMPDIR` child and are
+Its worker, helper and tagged handler-test binaries and package lists live in one `TMPDIR` child and are
 removed on exit. It preserves the normal Go build and module caches.
 
 Each profile writes its package inventory, native `go test -json` stream/stderr,
@@ -67,25 +67,49 @@ an interrupted run. This script never deletes caller-owned databases or services
 
 The package inventory comes from `go list -tags=e2e ./...`. Its partition is:
 
-| Profile | Whole packages run exactly once |
+| Profile | Complete package coverage |
 | --- | --- |
-| Ordinary | Every package except the four below; existing service environment is preserved. |
+| Ordinary | Every package except the four below; handler uses complete root cohorts, other packages run once. Existing service environment is preserved. |
 | Backlog | `cmd/worker` against the owned backlog database. Its temporary-relation tests need no schema; other worker fixtures create isolated migrated child databases. |
 | Recipient lock | `internal/db` against the normally migrated recipient-lock database, with the exact migration pin passed to its existing guard. |
 | Original capture | `internal/fitprepare`, using the owned administrative parent and original-capture acknowledgement. |
 | Fit selection | `internal/fitselect`, using the owned administrative parent and migration pin. |
 
-Every invocation uses `-json -tags=e2e -count=1 -timeout=180s` and bounds package
-and independent test-case parallelism with `-p=2 -parallel=2`. This limits concurrent
-fresh-database and checkpoint work; each test still runs its own explicit concurrency
-and lock interleavings. No test-name filter, timeout increase or ownership-guard
-override is applied. A failed profile does
+Ordinary packages other than handler and the four dedicated profiles use
+`-json -tags=e2e -count=1 -timeout=180s -p=2 -parallel=2`. Handler is built once
+with the same `e2e` tag and `-p=2`; its own `-test.list` supplies every Test,
+Example and Fuzz root. Sorted groups of at most16 roots run sequentially from
+that same binary through `go tool test2json`, with `-test.count=1`,
+`-test.timeout=180s`, `-test.parallel=2` and an exact anchored cohort expression.
+Every selected root must run and terminate exactly once, every subtest must
+belong to its selected parent, and the cohort union must equal the full catalog.
+No benchmark, case or assertion is substituted for mandatory tests. Existing
+in-test concurrency, ownership gates and the180s invocation bound remain.
+Each handler command also has a180s process context so a descendant holding
+test2json's stdio cannot outlive that bound silently. Cancellation fences the
+owned process group with2s TERM and3s KILL/join reserves. Unknown ownership or
+overall cancellation retains partial receipts/not-dispatched roots and exits70;
+the shell stops all later profiles. Known joined test failures continue coverage.
+A failed invocation does
 not suppress the remaining profiles; the combined result fails. Missing service
 configuration, ownership, source identity or database preconditions fails before
 the first migration or test. Test-level assertions still decide schema and
 behavior compatibility; a stale fixture pin remains a failure requiring repair.
-The JSON audit also verifies that each expected package has exactly one terminal
-event. Its retained, same-tag `go list` inventory distinguishes packages without
+The ordinary summary uses `hash.e2e-cohort-profile.v1`: distinct packages count
+once, while each native invocation retains its actual exit code, event digest,
+selected roots, accounting result and elapsed time. No native package PASS is
+manufactured. Original profile filenames stay unchanged. Ordinary events are a
+versioned stream of `hash.e2e-native-event.v1` envelopes (`invocation`, `event`)
+and `hash.e2e-native-receipt.v1` records, rather than concatenated duplicate
+package terminals. Malformed fragments are retained privately as base64 and fail
+accounting. Dedicated-profile events keep their original native Go JSON format.
+Only one temporary invocation stream coexists with the final evidence; it is
+reused instead of retaining source/runtime copies. Full sequential coverage can
+exceed a short caller-wide budget; callers must qualify that budget separately,
+without interpreting an interrupted cohort run as complete.
+
+The JSON audit verifies each native invocation's package terminals. Its retained,
+same-tag `go list` inventory distinguishes packages without
 test files: those may report a package-level skip as compiled/no-tests. Packages
 with test files must emit test terminal events and may not skip as a package.
 

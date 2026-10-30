@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 # Copyright (c) Bright Interaction
-# Run every tagged Go package once against its declared disposable profile.
+# Run every tagged Go package against its declared disposable profile. Handler
+# roots use exact, sequential cohorts with the same180s invocation deadline.
 set +x
 set -eu
 umask 077
@@ -46,6 +47,7 @@ printf 'e2e profile evidence: %s\n' "$evidence"
 # normal Go/module caches; remove only this invocation's temporary directory.
 go build -o "$scratch/hash-pdf-worker" ./cmd/pdfworker
 go build -tags=e2e -o "$scratch/profile-preflight" ./scripts/e2eprofile
+go test -c -tags=e2e -p=2 -o "$scratch/handler.test" ./internal/handler
 migration_digest=$("$scratch/profile-preflight" "$PWD" "$scratch/hash-pdf-worker")
 export HASH_E2E_PDF_WORKER_PATH="$scratch/hash-pdf-worker"
 export HASH_E2E_RECIPIENT_LOCK_MIGRATION_SHA256="$migration_digest"
@@ -93,10 +95,16 @@ run_profile() {
     failed=1
   fi
 }
-set --
-while IFS= read -r package; do set -- "$@" "$package"; done < "$scratch/ordinary-packages"
-[ "$#" -gt 0 ] || fail 'ordinary package partition is empty'
-run_profile ordinary "$HASH_E2E_DB_URL" "$@"
+if "$scratch/profile-preflight" ordinary-cohorts "$evidence" "$scratch/handler.test" \
+    "$scratch/ordinary-packages" "$evidence/source-test-inventory.txt"; then
+  :
+else
+  ordinary_exit=$?
+  # Only a known, joined test/accounting failure may continue other profiles.
+  # Fatal ownership/cancellation, signal exits or helper crashes stop dispatch.
+  [ "$ordinary_exit" -eq 1 ] || exit "$ordinary_exit"
+  failed=1
+fi
 run_profile backlog "$HASH_E2E_BACKLOG_DB_URL" "$module_path/cmd/worker"
 run_profile recipient-lock "$HASH_E2E_RECIPIENT_LOCK_DB_URL" "$module_path/internal/db"
 run_profile original-capture "$HASH_E2E_DB_URL" "$module_path/internal/fitprepare"

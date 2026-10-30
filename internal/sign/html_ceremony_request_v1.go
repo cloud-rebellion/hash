@@ -27,7 +27,7 @@ func htmlCeremonyAdmissionErrorV1(err error) error {
 	if errors.Is(err, htmlsource.ErrInvalid) || errors.Is(err, htmlsource.ErrReviewRequired) || errors.Is(err, htmlmaterialization.ErrInvalid) || errors.Is(err, htmlmaster.ErrInvalid) || errors.Is(err, htmlmaster.ErrLimit) || errors.Is(err, htmlmaster.ErrContractIncomplete) {
 		return err
 	}
-	// Completed faults from these two fixed mutation statements remain internal
+	// Completed faults from privately tagged fixed mutation statements remain internal
 	// failures. Context/unknown outcomes take precedence; generic session, cache,
 	// measurement and source refusals keep their original availability mapping.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1) || errors.Is(err, pdfadmission.ErrApplicationSessionCommitUnknownV1) {

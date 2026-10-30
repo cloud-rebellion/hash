@@ -24,7 +24,9 @@ import (
 
 func main() {
 	var err error
-	if len(os.Args) > 1 && os.Args[1] == "audit" {
+	if len(os.Args) > 1 && os.Args[1] == "ordinary-cohorts" {
+		err = ordinaryCohortsRun(os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "audit" {
 		err = auditRun(os.Args[2:])
 	} else {
 		err = run()
@@ -33,7 +35,7 @@ func main() {
 		// PostgreSQL/parser errors may contain credential-bearing connection
 		// strings. Only the fixed phase errors constructed below are printed.
 		fmt.Fprintln(os.Stderr, "e2e profiles:", err)
-		os.Exit(1)
+		os.Exit(cohortErrorExitCode(err))
 	}
 }
 

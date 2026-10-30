@@ -13,6 +13,7 @@ import (
 	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -216,6 +217,81 @@ func TestHTMLCeremonyActualDecisionOpenRefusalPrecedesMissingBodyCachesV1(t *tes
 				}
 			} else if !errors.Is(err, closed) {
 				t.Fatal("genuine already-resolved policy was hidden by missing full-body cache", err)
+			}
+		})
+	}
+}
+
+// Drive the actual guarded workflow and generated decision write. SQL rows and
+// response faults are synthetic; real PostgreSQL rollback/HTTP fidelity remains
+// the existing change-resolution integration contract, not a claim of this test.
+func TestHTMLCeremonyDecisionWriteClassifiesOnlyCompletedResponseV1(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cause    error
+		internal bool
+	}{
+		{"trigger", &pgconn.PgError{Code: "P0001", Message: "private decision driver detail"}, true},
+		{"no returned decision", pgx.ErrNoRows, true},
+		{"retry", &pgconn.PgError{Code: "40001"}, false},
+		{"cancel", context.Canceled, false},
+		{"unknown session", ErrApplicationSessionUnknownV1, false},
+		{"measurement", errors.Join(ErrHTMLAuditEventV1, pgx.ErrNoRows), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actor := uuid.New()
+			work, f, _, _, tx, _ := htmlCeremonyWorkflowFixtureV1(t, HTMLCeremonyChangeDecisionV1, actor, nil)
+			document := generated.Document{ID: f.scope.DocumentID, OrgID: f.scope.OrgID, SenderID: actor,
+				Status: "changes_requested", SourceKind: "pdf", HtmlSourceJson: []byte("{}"), VariablesJson: []byte("{}"),
+				BlocksJson: []byte("[]"), Metadata: []byte("{}"), MetadataRedactionReport: []byte("{}"),
+				UpdatedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}}
+			member := generated.User{ID: actor, OrgID: document.OrgID, Name: "Owner", Role: "owner"}
+			original := generated.ChangeRequest{ID: uuid.New(), DocumentID: document.ID, Status: "open", Message: "Revise the term"}
+			raw, err := htmlCeremonyChangeRawV1(&original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx.rows = append(htmlCeremonyReadRowsV1(document, member, true),
+				htmlRevisionReadRowTestV1{record: generated.GetHTMLChangeRequestReadHeaderV1Row{ChangeRequestID: original.ID,
+					DocumentID: document.ID, OrgID: document.OrgID, IsOpen: true, RawTextBytes: raw}},
+				htmlRevisionReadRowTestV1{record: original}, internalWriteFaultRowV1{err: tc.cause})
+			err = work.WithTxV1(func(call context.Context, _ generated.DBTX, _ *ApplicationHTMLRevisionReaderV1) error {
+				if _, err := work.ReadActorDocumentV1(call, func(HTMLRevisionReadAccessV1) error { return nil }, func(_ HTMLRevisionReadAccessV1, user *generated.User) error {
+					if user == nil || user.ID != actor || user.OrgID != document.OrgID || user.Role != "owner" {
+						return errors.New("original decision actor changed")
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				if err := work.PreflightChangeV1(call, original.ID, func(open bool) error {
+					if !open {
+						return errors.New("original decision is not open")
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				if _, err := work.ReadChangeV1(call, original.ID); err != nil {
+					return err
+				}
+				result, err := work.ResolveChangeV1(call, true)
+				if result != nil || err == nil {
+					t.Fatal("failed decision exposed a completed result")
+				}
+				if retry, retryErr := work.ResolveChangeV1(call, true); retry != nil || !errors.Is(retryErr, ErrHTMLCeremonyWorkflowV1) {
+					t.Fatal("failed decision acquired retry authority", retryErr)
+				}
+				return err
+			})
+			if tx.calls != 7 || len(tx.rows) != 0 || !work.resolveAttempted {
+				t.Fatal("actual guarded decision write was not reached exactly once", tx.calls, err)
+			}
+			if IsInternalApplicationWriteFailureV1(err) != tc.internal || !errors.Is(err, tc.cause) || !errors.Is(err, ErrApplicationSessionV1) {
+				t.Fatal("actual decision response lost internal/native error distinction", err)
+			}
+			if work.change == nil || work.change.ID != original.ID || work.change.Status != "open" || work.change.Resolution.Valid {
+				t.Fatal("failed decision changed the original request snapshot")
 			}
 		})
 	}

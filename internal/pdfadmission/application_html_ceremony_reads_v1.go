@@ -243,7 +243,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) ResolveChangeV1(call context.Context
 	}
 	row, err := q.ResolveChangeRequest(call, generated.ResolveChangeRequestParams{ID: original.ID, DocumentID: original.DocumentID, Resolution: pgtype.Text{String: resolution, Valid: true}})
 	if err != nil {
-		return nil, err
+		return nil, applicationInternalWriteErrorV1(call, applicationCeremonyChangeDecisionWriteV1, err)
 	}
 	if row == nil || row.ID != original.ID || row.DocumentID != original.DocumentID {
 		return nil, ErrHTMLCeremonyWorkflowV1

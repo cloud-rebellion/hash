@@ -22,7 +22,7 @@ import (
 // by the existing original500 and freshM94 PostgreSQL journeys.
 func TestInternalWriteFailurePreservesNativeAvailabilityV1(t *testing.T) {
 	server := func(code string) error { return &pgconn.PgError{Code: code, Message: "private driver detail"} }
-	for _, phase := range []applicationInternalWritePhaseV1{applicationAuditIdentityWriteV1, applicationCeremonyReopenWriteV1, applicationBlocksMutationWriteV1, applicationBlocksVersionWriteV1} {
+	for _, phase := range []applicationInternalWritePhaseV1{applicationAuditIdentityWriteV1, applicationCeremonyReopenWriteV1, applicationBlocksMutationWriteV1, applicationBlocksVersionWriteV1, applicationCeremonyChangeDecisionWriteV1} {
 		for _, tc := range []struct {
 			name     string
 			cause    error
@@ -109,6 +109,10 @@ func TestNativeFixedBlockWritesClassifyOnlyCompletedResponsesV1(t *testing.T) {
 		}},
 		{"version snapshot", true, func(ctx context.Context, q *generated.Queries) error {
 			_, err := q.InsertDocumentVersion(ctx, generated.InsertDocumentVersionParams{})
+			return err
+		}},
+		{"decision outside workflow", false, func(ctx context.Context, q *generated.Queries) error {
+			_, err := q.ResolveChangeRequest(ctx, generated.ResolveChangeRequestParams{})
 			return err
 		}},
 		{"document read", false, func(ctx context.Context, q *generated.Queries) error {

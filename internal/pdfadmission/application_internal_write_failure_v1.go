@@ -20,6 +20,7 @@ const (
 	applicationCeremonyReopenWriteV1
 	applicationBlocksMutationWriteV1
 	applicationBlocksVersionWriteV1
+	applicationCeremonyChangeDecisionWriteV1
 )
 
 // The private immutable tag describes only a known completed failure at one
@@ -43,7 +44,7 @@ func applicationInternalWriteErrorV1(ctx context.Context, phase applicationInter
 }
 
 func applicationInternalWritePhaseValidV1(phase applicationInternalWritePhaseV1) bool {
-	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1 || phase == applicationBlocksMutationWriteV1 || phase == applicationBlocksVersionWriteV1
+	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1 || phase == applicationBlocksMutationWriteV1 || phase == applicationBlocksVersionWriteV1 || phase == applicationCeremonyChangeDecisionWriteV1
 }
 
 // Only these two generated fixed writes acquire a phase at the native Scan

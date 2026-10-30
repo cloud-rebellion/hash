@@ -18,11 +18,139 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// Historical schemas do not contain today's complete generated.Document. Read
-// the actual canonical queries, replacing only wildcard output projections
-// and sqlc's named-argument spelling. Predicates, locks, ordering, updates and
-// the full family lifecycle clock remain the application's canonical SQL.
+// Historical schemas do not contain today's complete generated.Document.
+// Keep live canonical selectors, but freeze the two schema61/62 claim mutations:
+// later participant-report schema assignments are not part of these cutovers.
+// Only wildcard outputs and sqlc named arguments are adapted below; no current
+// function/column or fabricated report evidence is installed in the old schema.
 // Load everything on the test goroutine before starting any concurrent work.
+// Frozen historical projection of the application statements inspected at
+// 8125783a64889b4a08fec06aa227ff4eb6e9304d. The only omitted assignments are the
+// later participant_report_schema selector/copy. Root tenant/status/deletion
+// predicates, every family send/response/history high-water, retention function,
+// child eligibility, canonical lock ordering and exact shared timestamps remain.
+// These fixtures qualify M61/M62 chronology; current native signing is separate.
+const historicalBeginDocumentFinalization62 = `-- name: BeginDocumentFinalization :one
+-- The surrounding transaction holds the root row lock and has rechecked the
+-- exact recipient readiness predicate. Capture one post-readiness timestamp,
+-- but never let database clock rollback place completion before the durable
+-- send epoch or any already-committed response or retained participant-history
+-- row in the envelope family. PostgreSQL timestamps have microsecond precision,
+-- so advancing each
+-- prior high-water by one microsecond gives a strict and representable order.
+WITH finalizing_root AS MATERIALIZED (
+    SELECT d.id, d.org_id, d.sent_at
+    FROM documents d
+    WHERE d.id = sqlc.arg(id)
+      AND d.org_id = sqlc.arg(org_id)
+      AND d.status = 'in_progress'
+      AND d.sent_at IS NOT NULL
+      AND d.deleted_at IS NULL
+), lifecycle_clock AS MATERIALIZED (
+    SELECT root.id,
+           GREATEST(
+               statement_timestamp(),
+               COALESCE((
+                   SELECT max(member.sent_at) + interval '1 microsecond'
+                   FROM documents member
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(r.signed_at) + interval '1 microsecond'
+                   FROM recipients r
+                   JOIN documents member ON member.id = r.document_id
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(s.signed_at) + interval '1 microsecond'
+                   FROM signatures s
+                   JOIN documents member ON member.id = s.document_id
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(e.created_at) + interval '1 microsecond'
+                   FROM events e
+                   JOIN documents member ON member.id = e.document_id
+                   WHERE e.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(c.created_at) + interval '1 microsecond'
+                   FROM document_comments c
+                   JOIN documents member ON member.id = c.document_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(v.created_at) + interval '1 microsecond'
+                   FROM document_versions v
+                   JOIN documents member ON member.id = v.document_id AND member.org_id = v.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(p.updated_at) + interval '1 microsecond'
+                   FROM document_proposals p
+                   JOIN documents member ON member.id = p.document_id AND member.org_id = p.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz)
+           ) AS effective_at
+    FROM finalizing_root root
+)
+UPDATE documents AS target
+SET status = 'finalizing',
+    completion_effective_at_bound = TRUE,
+    completion_effective_at = COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
+    -- Object Lock timestamps have whole-second precision. Round upward after
+    -- the calendar-year addition so the deadline is never even fractionally
+    -- shorter than the configured retention period.
+    finalization_retain_until = COALESCE(
+        finalization_retain_until,
+        hash_evidence_retain_until(
+            COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
+            sqlc.arg(retention_years)::integer
+        )
+    ),
+    updated_at = lifecycle_clock.effective_at
+FROM lifecycle_clock
+WHERE target.id = lifecycle_clock.id
+  AND target.id = sqlc.arg(id)
+  AND target.org_id = sqlc.arg(org_id)
+  AND target.status = 'in_progress'
+  AND target.sent_at IS NOT NULL
+  AND target.deleted_at IS NULL
+RETURNING target.*;`
+
+const historicalBeginEnvelopeChildrenFinalization62 = `-- name: BeginEnvelopeChildrenFinalization :many
+-- The caller holds the root and every child row lock before the parent claim
+-- allocates its completion timestamp. Move the entire family into the same
+-- non-interactive state in that transaction and copy, rather than recompute,
+-- the root's exact completion and retention commitments. A child-addressed
+-- comment or other lifecycle mutation therefore either commits before the
+-- family high-water snapshot or observes finalizing and fails closed.
+UPDATE documents AS child
+SET status = 'finalizing',
+    completion_effective_at_bound = parent.completion_effective_at_bound,
+    completion_effective_at = parent.completion_effective_at,
+    finalization_retain_until = parent.finalization_retain_until,
+    updated_at = parent.completion_effective_at
+FROM documents AS parent
+WHERE child.parent_envelope_id = $1
+  AND child.org_id = $2
+  AND child.status IN ('sent','in_progress')
+  AND child.deleted_at IS NULL
+  AND parent.id = $1
+  AND parent.org_id = $2
+  AND parent.status = 'finalizing'
+  AND parent.is_envelope = TRUE
+  AND parent.parent_envelope_id IS NULL
+  AND parent.deleted_at IS NULL
+  AND parent.completion_effective_at_bound = TRUE
+  AND parent.completion_effective_at IS NOT NULL
+  AND parent.finalization_retain_until IS NOT NULL
+RETURNING child.*;`
+
 type historicalFamilySQL62 struct {
 	db  generated.DBTX
 	sql map[string]string
@@ -41,15 +169,19 @@ type historicalFamilyMember62 struct {
 func newHistoricalFamilySQL62(t *testing.T, db generated.DBTX) *historicalFamilySQL62 {
 	t.Helper()
 	q := &historicalFamilySQL62{db: db, sql: make(map[string]string)}
-	for _, item := range []struct{ file, name, wildcard, prefix string }{
-		{"documents.sql", "GetDocumentForUpdate", "SELECT *", ""},
-		{"documents.sql", "GetStrandedDocuments", "SELECT d.*", "d."},
-		{"envelopes.sql", "ListEnvelopeChildren", "SELECT *", ""},
-		{"envelopes.sql", "BeginEnvelopeChildrenFinalization", "RETURNING child.*", "child."},
-		{"finalization.sql", "BeginDocumentFinalization", "RETURNING target.*", "target."},
+	for _, item := range []struct{ file, name, wildcard, prefix, frozen string }{
+		{"documents.sql", "GetDocumentForUpdate", "SELECT *", "", ""},
+		{"documents.sql", "GetStrandedDocuments", "SELECT d.*", "d.", ""},
+		{"envelopes.sql", "ListEnvelopeChildren", "SELECT *", "", ""},
+		{"envelopes.sql", "BeginEnvelopeChildrenFinalization", "RETURNING child.*", "child.", historicalBeginEnvelopeChildrenFinalization62},
+		{"finalization.sql", "BeginDocumentFinalization", "RETURNING target.*", "target.", historicalBeginDocumentFinalization62},
 	} {
-		raw, err := os.ReadFile(filepath.Join("..", "db", "queries", item.file))
-		must(t, err, "read canonical historical family query")
+		raw := []byte(item.frozen)
+		if item.frozen == "" {
+			var err error
+			raw, err = os.ReadFile(filepath.Join("..", "db", "queries", item.file))
+			must(t, err, "read canonical historical family selector")
+		}
 		marker := "-- name: " + item.name + " :"
 		if strings.Count(string(raw), marker) != 1 {
 			t.Fatalf("canonical query marker %q is not unique", marker)

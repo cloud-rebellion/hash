@@ -90,8 +90,20 @@ func legacyCompletedRecipientLock(t *testing.T, ctx context.Context, parent *pgx
 			t.Fatal("seed explicit historical recipient query state failed")
 		}
 	} //nolint:rawsql -- owned pre109 history, before normal forward migration
+	// M65 correctly refuses historical non-draft rows without the branding
+	// snapshot that Send already required in that release. Install that explicit
+	// historical configuration at M64, before its lifecycle guard exists. This
+	// remains synthetic legacy state, not a modern producer/evidence receipt.
+	if err := mdb.RunMigrationsUpToContext(ctx, migrationDB, 64); err != nil {
+		t.Fatal("migrate owned legacy recipient to branding boundary failed", err)
+	}
+	if _, err := migrationDB.ExecContext(ctx, `INSERT INTO document_branding_override
+		(document_id,primary_hex,accent_hex,surface_hex,text_hex,muted_hex,logo_url,logo_alt,font_heading,font_body,signature_color)
+		VALUES($1,'#111111','#222222','#ffffff','#111111','#666666','','','Inter','Inter','#111111')`, f.doc); err != nil { //nolint:rawsql -- explicit pre65 legacy configuration
+		t.Fatal("seed complete historical branding snapshot failed", err)
+	}
 	if err := mdb.RunMigrationsContext(ctx, migrationDB); err != nil {
-		t.Fatal("forward migrate legacy recipient fixture to bound current tree failed")
+		t.Fatal("forward migrate legacy recipient fixture to bound current tree failed", err)
 	}
 	if err := migrationDB.Close(); err != nil {
 		t.Fatal("close legacy migration connection failed")
@@ -119,6 +131,10 @@ func legacyCompletedRecipientLock(t *testing.T, ctx context.Context, parent *pgx
 	var bound bool
 	if err := child.QueryRow(ctx, "SELECT status,completion_effective_at_bound FROM documents WHERE id=$1 AND org_id=$2", f.doc, f.org).Scan(&status, &bound); err != nil || status != "completed" || bound {
 		t.Fatal("legacy completed-state migration provenance changed")
+	}
+	var frozenBranding bool
+	if err := child.QueryRow(ctx, "SELECT hash_document_has_valid_frozen_branding($1)", f.doc).Scan(&frozenBranding); err != nil || !frozenBranding {
+		t.Fatal("historical branding snapshot did not survive the unchanged migration guards")
 	}
 	q := generated.New(child)
 	f.initial, err = q.GetRecipient(ctx, generated.GetRecipientParams{ID: f.recipient, OrgID: f.org})

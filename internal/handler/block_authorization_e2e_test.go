@@ -42,7 +42,9 @@ func setupBlockAuthorizationE2E(t *testing.T, role string) blockAuthorizationFix
 	// Current routes require the original native creator/recipient measurements,
 	// not an unmeasured SQL row with a runtime attached afterward. Keep the same
 	// agreement IDs/roles while using the actual supported lifecycle producer.
-	f := setupNativeLifecycleAuthorization256(t, role, false, false)
+	trace := &blockMutationTrace620{}
+	owned := newOwnedPublicReadFixtureProfileV1(t, false, false, trace)
+	f := setupNativeLifecycleAuthorizationWithFixture257d(t, role, false, false, owned)
 	f.s.Versions = versions.New(f.q)
 	body, err := json.Marshal(addFieldInput{RecipientID: f.recipient.ID.String(), Type: "text", Page: 1, WPct: 15, HPct: 4})
 	if err != nil {
@@ -60,6 +62,7 @@ func setupBlockAuthorizationE2E(t *testing.T, role string) blockAuthorizationFix
 	if err := f.pool.QueryRow(f.ctx, "SELECT (SELECT count(*) FROM document_versions WHERE document_id=$1),(SELECT count(*) FROM events WHERE document_id=$1)", f.doc.ID).Scan(&fixture.originalVersions, &fixture.originalDocumentEvents); err != nil {
 		t.Fatal(err)
 	}
+	trace.begin620(t, owned, f.doc.ID)
 	return fixture
 }
 

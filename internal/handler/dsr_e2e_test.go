@@ -31,11 +31,11 @@ import (
 	"github.com/bright-interaction/hash/internal/collab"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 func TestDSRErasureRollsBackEverySideEffectWhenSignatureScrubFailsE2E(t *testing.T) {
-	ctx, pool, q, server, orgID, userID := setupDSRE2E(t)
-	doc, recipient := seedDSRRecipientE2E(t, ctx, pool, q, orgID, userID, true)
+	ctx, pool, q, server, orgID, userID, doc, recipient := setupCompletedDSREvidenceE2E(t)
 	dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
 		OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
 		SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender",
@@ -664,4 +664,55 @@ func browserFixtureContext368(t *testing.T) context.Context {
 
 func browserMigrationPhaseContext368(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, 90*time.Second)
+}
+
+// Completed DSR evidence comes from the genuine single-party ordinary creator,
+// Send, notice-bound Sign, original-output staging and versioned provider path.
+// The protocol peers are synthetic; no current intent/preparation is fabricated.
+// Pure DSR/component fixtures keep setupDSRE2E and its original pool unchanged.
+func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
+	t.Helper()
+	n := nativeNegotiationStart262(t, false, false)
+	f := n.q.f
+	rc := n.q.lookupV1(t, n.token)
+	notice, err := f.s.signerPrivacyNotice(signerReadRequestE2E(n.token, ""), rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := signerArticle13NoticeEvidence(rc, notice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.s.Sign.Sign(f.ctx, rc, sign.SignInput{TypedName: "Original Legal Name", Font: "Caveat", Notice: proof, IP: "127.0.0.1", UserAgent: "test-agent"})
+	closeErr := rc.CloseReadV1()
+	if err != nil || closeErr != nil || result == nil || !result.Completed {
+		t.Fatal("genuine completed DSR signature/evidence", err, closeErr)
+	}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: n.document.ID, OrgID: f.org})
+	if err != nil || doc.Status != "completed" || !doc.CompletedAt.Valid {
+		t.Fatal("genuine completed DSR document", err)
+	}
+	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: n.recipient, OrgID: f.org})
+	if err != nil || recipient.Status != "signed" {
+		t.Fatal("genuine DSR signed subject", err)
+	}
+	for _, artifact := range []struct {
+		key     pgtype.Text
+		sum     []byte
+		version pgtype.Text
+	}{
+		{doc.FinalPdfKey, doc.FinalPdfSha, doc.FinalPdfVersionID},
+		{doc.AuditCertKey, doc.AuditCertSha256, doc.AuditCertVersionID},
+		{doc.AuditPayloadKey, doc.AuditPayloadSha256, doc.AuditPayloadVersionID},
+		{doc.AuditSignatureKey, doc.AuditSignatureSha256, doc.AuditSignatureVersionID},
+	} {
+		if !artifact.key.Valid || !artifact.version.Valid || artifact.version.String == "" || len(artifact.sum) != 32 {
+			t.Fatal("completed DSR evidence lacks exact four-artifact pins")
+		}
+		if body, readErr := readDocumentArtifact(f.ctx, f.s.Storage, doc, artifact.key.String, artifact.sum, artifact.version); readErr != nil || len(body) == 0 {
+			t.Fatal("completed DSR artifact bytes do not match actual retained output", readErr)
+		}
+	}
+	n.q.assertObserversOnlyV1(t)
+	return f.ctx, f.pool, f.q, f.s, f.org, f.user.ID, doc, recipient
 }

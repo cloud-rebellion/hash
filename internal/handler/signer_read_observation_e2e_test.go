@@ -8,7 +8,6 @@ package handler
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -22,12 +21,10 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -65,12 +62,13 @@ func (p *signerReadStorageE2E) unblock() {
 
 func attachSignerReadStorageE2E(t *testing.T, f *signerPDFFieldFixture, block bool) ([]byte, *signerReadStorageE2E) {
 	t.Helper()
-	body := fieldBrowserPDF("Synthetic exact public signer PDF")
-	digest := sha256.Sum256(body)
-	if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET pdf_sha256=$2 WHERE id=$1 AND org_id=$3`, f.doc.ID, digest[:], f.doc.OrgID); err != nil { //nolint:rawsql -- bind the synthetic static fixture to real bytes
-		t.Fatal(err)
+	// Serve the exact source bytes produced by the genuine admitted import.
+	// A public-read fixture must not rewrite a sent contract's digest merely
+	// to match a second synthetic PDF. The new peer changes transport only.
+	body := bytes.Clone(f.sourceBody)
+	if len(body) == 0 {
+		t.Fatal("original genuine source bytes are unavailable")
 	}
-	f.doc.PdfSha256 = digest[:]
 	peer := &signerReadStorageE2E{key: f.doc.PdfStorageKey.String, base: &fieldBrowserStoragePeer{
 		bucket: "hash-signer-read-fixture", version: f.doc.PdfStorageVersionID.String,
 		objects: map[string][]byte{f.doc.PdfStorageKey.String: body}, reads: make(map[string]int),
@@ -87,7 +85,7 @@ func attachSignerReadStorageE2E(t *testing.T, f *signerPDFFieldFixture, block bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.s.Storage = client
+	f.s.Storage, f.s.Sign.Storage = client, client
 	return body, peer
 }
 
@@ -99,6 +97,11 @@ func signerReadRequestE2E(token, endpoint string) *http.Request {
 }
 
 func invokeSignerReadE2E(s *Server, request *http.Request, endpoint string) *httptest.ResponseRecorder {
+	// Direct handler fixtures retain the same eight-second owner as their
+	// blocking cases; production routes supply their own finite middleware owner.
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	request = request.WithContext(ctx)
 	w := httptest.NewRecorder()
 	var handler http.HandlerFunc
 	switch endpoint {
@@ -236,36 +239,27 @@ func TestSignerPDFReadObservationMatchesContextFieldsAndExactBytesE2E(t *testing
 
 func setupSignerHTMLReadE2E(t *testing.T) (lifecycleAuthorizationFixture, *htmlCreationStorageE2E, *generated.Document, *generated.Recipient, string, signerPDFObservation) {
 	t.Helper()
-	f, _, peer, doc, cookie := setupHTMLContractDocumentE2E(t)
-	doc = metadataReviewE2E(t, f, doc, cookie)
-	rows, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("reviewed HTML parties=%d error=%v", len(rows), err)
+	native := newOwnedPublicReadFixtureV1(t)
+	doc, parties := native.createSentV1(t)
+	f, peer := native.f, native.storagePeer
+	if len(parties) != 2 {
+		t.Fatal("genuine reviewed HTML ceremony requires two parties")
 	}
-	token, hash, err := auth.MintMagicToken()
+	token := parties[0].Token
+	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: parties[0].RecipientID, OrgID: f.org})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.q.RotateRecipientMagicToken(f.ctx, generated.RotateRecipientMagicTokenParams{ID: rows[0].ID, DocumentID: doc.ID, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = f.q.ConfirmDocumentLawfulBasis(f.ctx, generated.ConfirmDocumentLawfulBasisParams{DocumentID: doc.ID, OrgID: doc.OrgID, LawfulBasis: "contract", Via: "test", ConfirmedBy: pgtype.UUID{Bytes: doc.SenderID, Valid: true}}); err != nil {
-		t.Fatal(err)
-	}
-	doc = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, doc, rows[0])
-	f.s.OperatorName, f.s.PrivacyContact = "Synthetic operator", "privacy@hash.example.test"
-	f.s.SupervisoryAuthority, f.s.PrivacyPolicyURL = "Synthetic DPA", "https://hash.example.test/privacy"
-	f.s.Sign = &sign.Engine{Pool: f.pool, Queries: f.q, Audit: f.s.Audit}
 	commitment, err := htmlsource.Commitment(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := signerPDFObservation{DocumentID: doc.ID, RecipientID: rows[0].ID, PDFSHA256: hex.EncodeToString(doc.PdfSha256),
+	expected := signerPDFObservation{DocumentID: doc.ID, RecipientID: recipient.ID, PDFSHA256: hex.EncodeToString(doc.PdfSha256),
 		HTMLSourceCommitment: commitment, MaterializationRevision: doc.HtmlCurrentMaterializationSequence.Int32, PageCount: doc.HtmlCurrentPageCount.Int32}
 	if expected.PageCount < 1 || expected.MaterializationRevision != 1 || expected.HTMLSourceCommitment == "" {
 		t.Fatal("HTML fixture is missing its real registered observation")
 	}
-	return f, peer, doc, rows[0], token, expected
+	return f, peer, doc, recipient, token, expected
 }
 
 func TestSignerHTMLReadObservationUsesRegisteredHistoryWithoutLeakingSourceE2E(t *testing.T) {
@@ -410,9 +404,9 @@ func TestSignerPublicReadRechecksOriginalAdmissionAfterDatabaseWaitE2E(t *testin
 					t.Fatal(err)
 				}
 				defer func() { _ = held.Rollback(context.Background()) }()
-				query := "-- name: ListFieldsByRecipient"
+				query := "-- name: GetHTMLSendCollectionReadHeaderV1"
 				if endpoint == "" {
-					query = "-- name: GetOrg"
+					query = "-- name: GetSignerControllerReadHeaderV1"
 					if _, err = held.Exec(f.ctx, `LOCK TABLE orgs IN ACCESS EXCLUSIVE MODE`); err != nil {
 						t.Fatal(err)
 					} //nolint:rawsql
@@ -493,6 +487,17 @@ func TestSignerHTMLReadRetainsFinalLocksAndDeadlineThroughHistoryWaitE2E(t *test
 			result := make(chan *httptest.ResponseRecorder, 1)
 			done := make(chan struct{})
 			go func() { defer close(done); result <- invokeSignerReadE2E(f.s, request, "/pdf") }()
+			// Establish failure cleanup before the first external wait too. Later
+			// held-query cleanup additionally joins its exact blocker.
+			t.Cleanup(func() {
+				cancel()
+				peer.unblock()
+				select {
+				case <-done:
+				case <-time.After(4 * time.Second):
+					t.Error("initial HTML storage read did not join before fixture cleanup")
+				}
+			})
 			select {
 			case version := <-peer.entered:
 				if version != current.PdfVersionID {
@@ -520,7 +525,7 @@ func TestSignerHTMLReadRetainsFinalLocksAndDeadlineThroughHistoryWaitE2E(t *test
 				t.Fatal(err)
 			} //nolint:rawsql
 			peer.unblock()
-			query := "-- name: GetCurrentHTMLDocumentMaterialization"
+			query := "-- name: GetSignerCurrentMaterializationHeaderV1"
 			awaitSignerReadDatabaseWaitE2E(t, proxy, held, result, query)
 			var holderPID, readerPID int32
 			if err = held.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
@@ -627,35 +632,22 @@ func TestSignerFieldSaveReturnsDurableObservationAndRejectsIdentityDriftE2E(t *t
 				}
 				return
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			request = request.WithContext(context.WithValue(ctx, chi.RouteCtxKey, request.Context().Value(chi.RouteCtxKey)))
+			mutation := startSignerFieldsBeforeMutation621(t, f, request)
 			held, err := f.pool.Begin(f.ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = held.Rollback(context.Background()) }()
+			mutation.blocker = held
 			if _, err = f.q.WithTx(held).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.doc.OrgID}); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			defer cancel()
-			request = request.WithContext(context.WithValue(ctx, chi.RouteCtxKey, request.Context().Value(chi.RouteCtxKey)))
-			result := make(chan *httptest.ResponseRecorder, 1)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				w := httptest.NewRecorder()
-				f.s.securityHeaders(http.HandlerFunc(f.s.handleSignerSubmitFields)).ServeHTTP(w, request)
-				result <- w
-			}()
-			t.Cleanup(func() {
-				cancel()
-				_ = held.Rollback(context.Background())
-				select {
-				case <-done:
-				case <-time.After(4 * time.Second):
-					t.Error("identity-drift save did not drain before fixture cleanup")
-				}
-			})
-			awaitSignerFieldLock(t, f, held, result, "-- name: GetDocumentForUpdate", "transactionid")
+			result := mutation.result
+			mutation.unblock()
+			awaitSignerFieldLock(t, f, held, result, "-- name: GetHTMLSendDocumentStateHeaderV1", "transactionid")
 			statement, arg := `UPDATE recipients SET name=$2 WHERE id=$1 AND document_id=$3`, any("Changed printed name")
 			switch scenario {
 			case "mailbox":

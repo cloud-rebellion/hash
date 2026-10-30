@@ -124,12 +124,11 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 	for _, lock := range []string{"document", "request"} {
 		for _, change := range []string{"demotion", "revocation", "expiry"} {
 			t.Run(lock+"/"+change, func(t *testing.T) {
-				ctx, pool, q, s, org, user := setupDSRE2E(t)
+				ctx, pool, q, s, org, user, doc, recipient := setupCompletedDSREvidenceE2E(t)
 				otherOwner := seedSessionOwnerE2E(t, ctx, q, org)
 				if _, err := q.UpdateUserRole(ctx, generated.UpdateUserRoleParams{ID: user, OrgID: org, Role: "sender"}); err != nil {
 					t.Fatal(err)
 				}
-				doc, recipient := seedDSRRecipientE2E(t, ctx, pool, q, org, user, true)
 				request, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{OrgID: org, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true}, SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`)})
 				if err != nil {
 					t.Fatal(err)
@@ -190,8 +189,7 @@ func TestDSRTransitionRechecksAuthorizationAfterParentAndRequestWaitE2E(t *testi
 }
 
 func TestDSRTransactionsExpireDuringAuditWaitE2E(t *testing.T) {
-	ctx, pool, q, s, org, user := setupDSRE2E(t)
-	doc, recipient := seedDSRRecipientE2E(t, ctx, pool, q, org, user, true)
+	ctx, pool, q, s, org, user, doc, recipient := setupCompletedDSREvidenceE2E(t)
 	request, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{OrgID: org, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true}, SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender", PayloadJson: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)

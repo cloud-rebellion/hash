@@ -28,6 +28,21 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
+// Exact M103 ordinary intent allocation: the original family epoch high-water,
+// root tenant/draft/deletion predicate and seven-year retention function remain.
+// A later presign/package identity is neither supplied nor invented here.
+const packageLegacyCreateSendIntentSQL103 = `WITH next_epoch AS MATERIALIZED (
+ SELECT GREATEST(statement_timestamp(),clock_timestamp(),
+  COALESCE(parent.article13_notice_epoch_at+interval '1 microsecond','-infinity'::timestamptz),
+  COALESCE((SELECT max(child.article13_notice_epoch_at)+interval '1 microsecond'
+   FROM documents child WHERE child.parent_envelope_id=parent.id AND child.org_id=parent.org_id),'-infinity'::timestamptz)) AS value
+ FROM documents parent WHERE parent.id=$1 AND parent.org_id=$2
+ AND parent.status='draft' AND parent.deleted_at IS NULL
+)
+INSERT INTO send_sealing_intents(document_id,org_id,actor_user_id,actor_email,actor_ip,via,tool,article13_notice_epoch_at,retain_until)
+SELECT $1,$2,$3,$4,'','synthetic-legacy','',next_epoch.value,hash_evidence_retain_until(next_epoch.value,7)
+FROM next_epoch RETURNING document_id`
+
 func packageAttemptMatch235(m pdfadmission.HTMLSendPackageIntentMetadataV1) generated.DeleteDocumentPackageSealingIntentV1Params {
 	return generated.DeleteDocumentPackageSealingIntentV1Params{AttemptID: m.AttemptID, OrgID: m.Capture.OrgID, DocumentID: m.Capture.DocumentID, ExpectedManifestSha256: m.Capture.CanonicalSHA256[:], ExpectedLegalCommitmentSha256: m.Capture.CommitmentSHA256[:]}
 }
@@ -602,18 +617,27 @@ func TestDocumentPackageSendAttemptV1E2E(t *testing.T) {
 		if e = packageAttemptTransition235(t, q, m, "aborted", false); e != nil {
 			t.Fatal(e)
 		}
-		before := packageMeasurementState232(t, q)
 		cfg, e := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 		if e != nil {
 			t.Fatal(e)
 		}
 		db := stdlib.OpenDB(*cfg)
 		defer db.Close()
+		// Establish the actual M103 predecessor state before taking the exact
+		// occupied-Down snapshot. Reversing later independent migrations changes
+		// document shape; that is not an M103 rollback side effect.
+		if e = mdb.RunMigrationsDownToContext(q.f.ctx, db, 103); e != nil {
+			t.Fatal("reach actual103 with retained terminal attempt", e)
+		}
+		before := packageMeasurementState232(t, q)
 		if e = mdb.RunMigrationsDownToContext(q.f.ctx, db, 102); e == nil {
 			t.Fatal("rollback erased terminal attempt history")
 		}
 		if version, x := mdb.GetMigrationVersionContext(q.f.ctx, db); x != nil || version != 103 || packageMeasurementState232(t, q) != before {
 			t.Fatal("occupied rollback changed current state", version, x)
+		}
+		if e = mdb.RunMigrationsContext(q.f.ctx, db); e != nil {
+			t.Fatal("restore current schema after genuine103 refusal", e)
 		}
 	})
 }
@@ -765,6 +789,9 @@ func TestDocumentPackageSendAttemptBindingGuardsV1E2E(t *testing.T) {
 		}
 	})
 	t.Run("empty history down up preserves nullable legacy intent", func(t *testing.T) {
+		// Own a genuinely empty package-attempt history, independent of the
+		// earlier current-schema active/retained fixtures in this parent test.
+		q := inspectionFixturePG236(t)
 		legacy := packageImported220(t, q, "Legacy unbound main")
 		header, e := q.f.q.GetHTMLSendBrandingInputHeaderV1(q.f.ctx, generated.GetHTMLSendBrandingInputHeaderV1Params{DocumentID: legacy.ID, OrgID: q.f.org})
 		if e != nil {
@@ -773,22 +800,29 @@ func TestDocumentPackageSendAttemptBindingGuardsV1E2E(t *testing.T) {
 		if _, e = q.f.q.FreezeHTMLSendBrandingV1(q.f.ctx, htmlSendFreezeFixtureV1(header)); e != nil {
 			t.Fatal(e)
 		}
-		if _, e := q.f.q.CreateSendSealingIntent(q.f.ctx, generated.CreateSendSealingIntentParams{DocumentID: legacy.ID, OrgID: q.f.org, ActorUserID: pgtype.UUID{Bytes: q.f.user.ID, Valid: true}, ActorEmail: q.f.user.Email, Via: "synthetic-legacy"}); e != nil {
-			t.Fatal(e)
-		}
-		if _, e := q.f.q.BeginDocumentSendSealing(q.f.ctx, generated.BeginDocumentSendSealingParams{ID: legacy.ID, OrgID: q.f.org}); e != nil {
-			t.Fatal(e)
-		}
-		var before, after string
-		if e := q.f.pool.QueryRow(q.f.ctx, "SELECT (to_jsonb(i)-'package_send_attempt_id')::text FROM send_sealing_intents i WHERE document_id=$1", legacy.ID).Scan(&before); e != nil {
-			t.Fatal(e)
-		}
 		cfg, e := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 		if e != nil {
 			t.Fatal(e)
 		}
 		db := stdlib.OpenDB(*cfg)
 		defer db.Close()
+		if e = mdb.RunMigrationsDownToContext(q.f.ctx, db, 103); e != nil {
+			t.Fatal("reach actual103 before creating its historical legacy intent", e)
+		}
+		// These are the frozen M103 CreateSendSealingIntent/Begin statements,
+		// with only bounded result projection. Today's generated return includes
+		// later M113/M116 columns absent at this real historical boundary.
+		var created uuid.UUID
+		if e = q.f.pool.QueryRow(q.f.ctx, packageLegacyCreateSendIntentSQL103, legacy.ID, q.f.org, q.f.user.ID, q.f.user.Email).Scan(&created); e != nil || created != legacy.ID {
+			t.Fatal("actual103 legacy intent creation", e)
+		}
+		if tag, err := q.f.pool.Exec(q.f.ctx, "UPDATE documents SET status='sealing',updated_at=now() WHERE id=$1 AND org_id=$2 AND status='draft' AND deleted_at IS NULL", legacy.ID, q.f.org); err != nil || tag.RowsAffected() != 1 {
+			t.Fatal("actual103 legacy sealing transition", err)
+		}
+		var before, after string
+		if e := q.f.pool.QueryRow(q.f.ctx, "SELECT (to_jsonb(i)-'package_send_attempt_id')::text FROM send_sealing_intents i WHERE document_id=$1", legacy.ID).Scan(&before); e != nil {
+			t.Fatal(e)
+		}
 		if e = mdb.RunMigrationsDownToContext(q.f.ctx, db, 102); e != nil {
 			t.Fatal(e)
 		}

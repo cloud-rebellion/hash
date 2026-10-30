@@ -120,9 +120,22 @@ type crmConnectionFixtureE2E struct {
 
 func setupCRMConnectionE2E(t *testing.T) crmConnectionFixtureE2E {
 	t.Helper()
-	t.Setenv("HASH_ENVIRONMENT", "development")
 	f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+	return setupCRMConnectionForFixtureE2E(t, f)
+}
+
+// Component-only connection tests keep their original pooled fixture. Source
+// and Send tests supply the real native authoring/runtime fixture instead.
+func setupCRMConnectionForFixtureE2E(t *testing.T, f lifecycleAuthorizationFixture) crmConnectionFixtureE2E {
+	t.Helper()
+	t.Setenv("HASH_ENVIRONMENT", "development")
 	f.s.PublicURL, f.s.Environment = "http://localhost:39487", "development"
+	if f.s.Send != nil {
+		f.s.Send.PublicURL = f.s.PublicURL
+	}
+	if f.s.Sign != nil {
+		f.s.Sign.BaseURL = f.s.PublicURL
+	}
 	p := newCRMConnectionPeerE2E(t)
 	client, err := crmconnection.NewClient(p.server.URL, true)
 	if err != nil {

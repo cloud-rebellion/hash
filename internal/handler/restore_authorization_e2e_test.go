@@ -31,15 +31,30 @@ type restoreAuthorizationFixture struct {
 func setupRestoreAuthorizationE2E(t *testing.T, role string) restoreAuthorizationFixture {
 	t.Helper()
 	f := setupBlockAuthorizationE2E(t, role)
-	// The original target is the genuine creator's historical version. A new
-	// native draft update then owns the changed blocks/variables and their
-	// measurements; no raw UPDATE or cache repair seeds the restore stimulus.
+	// Establish history through a genuine native edit. Creation can intentionally
+	// omit its initial snapshot; it must not be assumed to supply a restore target.
+	// Both versions below retain their actual writer-owned measurements.
+	original, err := json.Marshal(map[string]any{
+		"expected_updated_at": f.doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
+		"variables_json":      map[string]string{"customer": "Original reviewed customer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPatch, "/api/v1/documents/"+f.doc.ID.String(), string(original), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	if response.Code != http.StatusOK {
+		t.Fatalf("native historical restore fixture update=%d %s", response.Code, response.Body.String())
+	}
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
 	target, err := f.q.GetLatestDocumentVersion(f.ctx, f.doc.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target == nil || target.DocumentID != f.doc.ID || target.OrgID != f.org || target.SourceKind != "blocks" || string(target.BlockTreeJson) != string(f.doc.BlocksJson) || string(target.VariablesJson) != string(f.doc.VariablesJson) {
-		t.Fatal("native creator's original restore target differs from the draft")
+		t.Fatal("native edit's original restore target differs from the draft")
 	}
 	body, err := json.Marshal(map[string]any{
 		"expected_updated_at": f.doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
@@ -49,7 +64,7 @@ func setupRestoreAuthorizationE2E(t *testing.T, role string) restoreAuthorizatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPatch, "/api/v1/documents/"+f.doc.ID.String(), string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPatch, "/api/v1/documents/"+f.doc.ID.String(), string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
 	if response.Code != http.StatusOK {
 		t.Fatalf("native current restore fixture update=%d %s", response.Code, response.Body.String())
 	}

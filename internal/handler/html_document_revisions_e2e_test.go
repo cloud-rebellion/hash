@@ -366,7 +366,7 @@ func TestHTMLDocumentRevisionAuditExpiryRollsBackAndCompensatesExactOwnedVersion
 	in := revisionInputE2E(t, doc)
 	pending := beginHTMLRevisionRequestE2E(t, f, in, cookie)
 	defer pending.stop(t, func() { _ = blocked.Rollback(context.Background()) })
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+	awaitHTMLAuthoringOperationLockE2E(t, f, "pg_advisory_xact_lock", "advisory")
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)

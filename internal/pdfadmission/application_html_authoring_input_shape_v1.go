@@ -58,6 +58,7 @@ const (
 	htmlInputPreSignSupersessionV1
 	htmlInputPreSignPriorV1
 	htmlInputPreSignTemplateV1
+	htmlInputCRMApplyV1
 )
 
 type htmlInputFieldV1 struct {
@@ -72,6 +73,13 @@ var htmlInputMasterInputV1Fields = [...]htmlInputFieldV1{
 	{"expected_version", htmlInputScalarV1},
 }
 var htmlInputRevisionV1Fields = [...]htmlInputFieldV1{{"expected_updated_at", htmlInputScalarV1}, {"expected_html_source_commitment", htmlInputScalarV1}, {"values", htmlInputStringMapV1}, {"sections", htmlInputStringMapV1}, {"summary", htmlInputScalarV1}}
+var htmlInputCRMApplyV1Fields = [...]htmlInputFieldV1{
+	{"expected_org_id", htmlInputScalarV1}, {"expected_user_id", htmlInputScalarV1},
+	{"expected_updated_at", htmlInputScalarV1}, {"expected_html_source_commitment", htmlInputScalarV1},
+	{"expected_binding_fingerprint", htmlInputScalarV1}, {"expected_connection_id", htmlInputScalarV1},
+	{"expected_connection_generation", htmlInputScalarV1}, {"mappings", htmlInputMappingsV1},
+	{"reviewed_digest", htmlInputScalarV1}, {"confirmed", htmlInputScalarV1},
+}
 var htmlInputApprovalV1Fields = [...]htmlInputFieldV1{
 	{"expected_version", htmlInputScalarV1},
 	{"expected_content_sha256", htmlInputScalarV1},
@@ -236,6 +244,8 @@ func htmlInputFieldsV1(n htmlInputNodeV1) []htmlInputFieldV1 {
 		return fields
 	}
 	switch n {
+	case htmlInputCRMApplyV1:
+		return htmlInputCRMApplyV1Fields[:]
 	case htmlInputRevisionV1:
 		return htmlInputRevisionV1Fields[:]
 	case htmlInputMasterInputV1:
@@ -315,6 +325,8 @@ func htmlAuthoringInputLimitV1(p HTMLAuthoringInputProfileV1) (int64, error) {
 		return 1 << 20, nil
 	case HTMLCRMTemplateSearchInputV1:
 		return 16 << 10, nil
+	case HTMLCRMDocumentApplyInputV1:
+		return 128 << 10, nil
 	case HTMLPreSignAPISourceInputV1:
 		return 16 << 10, nil
 	case HTMLPreSignSupersessionInputV1:
@@ -346,6 +358,8 @@ func htmlInputRootV1(p HTMLAuthoringInputProfileV1) htmlInputNodeV1 {
 		return htmlInputObservationV1
 	case HTMLDocumentRevisionInputV1:
 		return htmlInputRevisionV1
+	case HTMLCRMDocumentApplyInputV1:
+		return htmlInputCRMApplyV1
 	case HTMLCreationClosureInputV1:
 		return htmlInputCloseV1
 	}

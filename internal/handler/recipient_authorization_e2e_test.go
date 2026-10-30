@@ -17,26 +17,117 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type recipientAuthorizationFixture struct {
 	lifecycleAuthorizationFixture
-	newEmail string
+	newEmail      string
+	originalAudit authoringAuditBaseline621
 }
 
 func setupRecipientAuthorizationE2E(t *testing.T, role string) recipientAuthorizationFixture {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, role, false, false)
+	f := setupNativeLifecycleAuthorization256(t, role, false, false)
+	return recipientAuthorizationWithFieldE2E(t, f)
+}
+
+// Scope adversaries must exist in the SAME owned database as the admitted
+// actor. They are deliberately raw foreign rows, never successful producer or
+// runtime evidence. A second owned fixture would silently put them in another DB.
+func setupForeignRecipientAuthorizationE2E(t *testing.T) recipientAuthorizationFixture {
+	t.Helper()
+	return recipientAuthorizationWithFieldE2E(t, setupLifecycleAuthorizationE2E(t, "owner", false, false))
+}
+
+func recipientAuthorizationWithFieldE2E(t *testing.T, f lifecycleAuthorizationFixture) recipientAuthorizationFixture {
+	t.Helper()
 	// An uncompleted assigned field makes deletion rollback meaningful: its
 	// cascade must be restored together with the original recipient and token.
 	if _, err := f.pool.Exec(f.ctx, `INSERT INTO document_fields(document_id,recipient_id,type,page,x_pct,y_pct,w_pct,h_pct,required,options_json)
 		VALUES($1,$2,'text',1,0,0,20,5,false,'[]'::jsonb)`, f.doc.ID, f.recipient.ID); err != nil { //nolint:rawsql -- synthetic draft field
 		t.Fatal(err)
 	}
-	return recipientAuthorizationFixture{lifecycleAuthorizationFixture: f, newEmail: uuid.NewString() + "@recipient.test"}
+	return recipientAuthorizationFixture{lifecycleAuthorizationFixture: f, newEmail: uuid.NewString() + "@recipient.test", originalAudit: authoringAuditBaselineE2E(t, f)}
+}
+
+type authoringAuditBaseline621 struct {
+	events         map[uuid.UUID]string
+	documentEvents int
+}
+
+func authoringAuditBaselineE2E(t *testing.T, f lifecycleAuthorizationFixture) authoringAuditBaseline621 {
+	t.Helper()
+	baseline := authoringAuditBaseline621{events: blockOriginalEventsE2E(t, f)}
+	if err := f.pool.QueryRow(f.ctx, "SELECT count(*) FROM events WHERE document_id=$1", f.doc.ID).Scan(&baseline.documentEvents); err != nil {
+		t.Fatal(err)
+	}
+	return baseline
+}
+
+func (b authoringAuditBaseline621) ids() []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(b.events))
+	for id := range b.events {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (b authoringAuditBaseline621) assertAdded(t *testing.T, f lifecycleAuthorizationFixture, added int) {
+	t.Helper()
+	current := blockOriginalEventsE2E(t, f)
+	for id, digest := range b.events {
+		if current[id] != digest {
+			t.Fatal("authoring mutation changed genuine native setup history")
+		}
+	}
+	var documentEvents int
+	if err := f.pool.QueryRow(f.ctx, "SELECT count(*) FROM events WHERE document_id=$1", f.doc.ID).Scan(&documentEvents); err != nil {
+		t.Fatal(err)
+	}
+	if len(current) != len(b.events)+added || documentEvents != b.documentEvents+added {
+		t.Fatalf("authoring audit delta differs: org=%d/%d document=%d/%d", len(current), len(b.events)+added, documentEvents, b.documentEvents+added)
+	}
+}
+
+// These live/reopened cases use the original same-pool Send and Sign runtime;
+// no synthetic retention markers, evidence measurements or replacement engine.
+func sendRecipientAuthorizationNativeE2E(t *testing.T, f lifecycleAuthorizationFixture) *generated.Document {
+	t.Helper()
+	response := nativeLifecycleSubmit256(f.ctx, f, "send", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	var sent sendDocumentResponse
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &sent) != nil || sent.Status != "sent" || len(sent.Links) != 1 || sent.Links[0].RecipientID != f.recipient.ID {
+		t.Fatalf("actual authoring fixture Send=%d %s", response.Code, response.Body.String())
+	}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil || doc.Status != "sent" {
+		t.Fatal("native authoring Send document readback", err)
+	}
+	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: f.recipient.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*f.recipient = *recipient
+	return doc
+}
+
+func createAuthoringSiblingE2E(t *testing.T, f lifecycleAuthorizationFixture, name string) *generated.Document {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"name": name, "source_kind": "blocks", "blocks_json": map[string]any{"version": 1, "blocks": []any{}}, "variables_json": map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents", string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	var created struct{ ID uuid.UUID }
+	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &created) != nil || created.ID == uuid.Nil {
+		t.Fatalf("actual authoring sibling creation=%d %s", response.Code, response.Body.String())
+	}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: created.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
 }
 
 func (f recipientAuthorizationFixture) submit(operation, cookie string) *httptest.ResponseRecorder {
@@ -205,7 +296,7 @@ func TestRecipientMutationSenderAndOwnerCommitAtomicallyE2E(t *testing.T) {
 					t.Fatalf("valid recipient %s=%d %s", operation, response.Code, response.Body.String())
 				}
 				var actor, subject uuid.UUID
-				if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,recipient_id FROM events WHERE document_id=$1 AND kind=$2`, f.doc.ID, recipientAuditKind(operation)).Scan(&actor, &subject); err != nil || actor != f.user.ID { //nolint:rawsql
+				if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,recipient_id FROM events WHERE document_id=$1 AND kind=$2 AND NOT (id=ANY($3::uuid[]))`, f.doc.ID, recipientAuditKind(operation), f.originalAudit.ids()).Scan(&actor, &subject); err != nil || actor != f.user.ID { //nolint:rawsql
 					t.Fatalf("recipient %s canonical audit actor=%s err=%v", operation, actor, err)
 				}
 				if operation == "delete" {
@@ -223,13 +314,14 @@ func TestRecipientMutationSenderAndOwnerCommitAtomicallyE2E(t *testing.T) {
 						t.Fatalf("recipient credential missing: err=%v", err)
 					}
 				}
+				f.originalAudit.assertAdded(t, f.lifecycleAuthorizationFixture, 1)
 				rows, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 				if err != nil {
 					t.Fatal(err)
 				}
 				verifier := audit.NewChainVerifier()
 				verifier.VerifyPage(rows)
-				if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != 1 {
+				if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != len(f.originalAudit.events)+1 {
 					t.Fatalf("recipient mutation broke audit chain: %+v", result)
 				}
 			})
@@ -338,7 +430,7 @@ func TestRecipientMutationScopesParentAndRecipientE2E(t *testing.T) {
 	for _, operation := range []string{"create", "update", "delete"} {
 		t.Run(operation, func(t *testing.T) {
 			f := setupRecipientAuthorizationE2E(t, "owner")
-			foreign := setupRecipientAuthorizationE2E(t, "owner")
+			foreign := setupForeignRecipientAuthorizationE2E(t)
 			before, foreignBefore := f.snapshot(t), foreign.snapshot(t)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			for _, parent := range []uuid.UUID{uuid.New(), foreign.doc.ID} {
@@ -347,10 +439,7 @@ func TestRecipientMutationScopesParentAndRecipientE2E(t *testing.T) {
 				}
 			}
 			if operation != "create" {
-				sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Recipient sibling fixture", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-				if err != nil {
-					t.Fatal(err)
-				}
+				sibling := createAuthoringSiblingE2E(t, f.lifecycleAuthorizationFixture, "Recipient sibling fixture")
 				before = f.snapshot(t)
 				for _, target := range []struct{ doc, recipient uuid.UUID }{{f.doc.ID, uuid.New()}, {f.doc.ID, foreign.recipient.ID}, {sibling.ID, f.recipient.ID}} {
 					if response := f.submitScoped(operation, target.doc, target.recipient, cookie); response.Code != http.StatusNotFound {
@@ -434,7 +523,7 @@ func TestRecipientMutationRequiresLiveDraftE2E(t *testing.T) {
 				} else if state == "sent" {
 					// The existing fixture establishes a constraint-valid sent
 					// ceremony with its durable retention and Article 13 receipts.
-					f.doc = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, f.doc, f.recipient)
+					f.doc = sendRecipientAuthorizationNativeE2E(t, f.lifecycleAuthorizationFixture)
 				} else {
 					if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET deleted_at=now() WHERE id=$1`, f.doc.ID); err != nil { //nolint:rawsql -- synthetic soft-deleted draft
 						t.Fatal(err)
@@ -456,11 +545,10 @@ func TestRecipientMutationAllowsReopenedDraftHistoryE2E(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			f := setupRecipientAuthorizationE2E(t, "owner")
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-			f.doc = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, f.doc, f.recipient)
+			f.doc = sendRecipientAuthorizationNativeE2E(t, f.lifecycleAuthorizationFixture)
 			if _, err := f.q.RequestChangesOnDocument(f.ctx, generated.RequestChangesOnDocumentParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 				t.Fatal(err)
 			}
-			f.s.Sign = &sign.Engine{Pool: f.pool, Queries: f.q, Audit: f.s.Audit}
 			if response := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/revise", "", cookie); response.Code != http.StatusOK {
 				t.Fatalf("bootstrap actual revision=%d %s", response.Code, response.Body.String())
 			}

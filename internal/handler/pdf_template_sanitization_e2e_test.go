@@ -19,6 +19,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // These tests use actual HTTP/MCP admission, PostgreSQL, the source-built
@@ -193,16 +194,25 @@ func TestPDFTemplateCorruptBindingRefusesRESTAndMCPWithoutEffectsE2E(t *testing.
 				t.Fatal(err)
 			}
 			before := pdfTemplateSanitizationSnapshotE2E(t, f)
+			cacheBefore := ownedBlocksTemplateCacheV1(t, f, tpl.ID)
+			header, err := f.q.GetPDFTemplateSourceHeaderForShareV1(f.ctx, generated.GetPDFTemplateSourceHeaderForShareV1Params{TemplateID: tpl.ID, OrgID: f.org})
+			if err != nil || header.MeasurementServerVersionNum != -1 {
+				t.Fatal("intentional report tamper must invalidate the actual native source measurement", err)
+			}
 			beforeRequests := peer.requests.Load()
+			// The current native reader refuses the stale M97 source before
+			// expanding the corrupted binding. Semantic binding validation remains
+			// covered by the authoring formatter's unit tests; never repair this
+			// deliberately corrupted source cache to reach a later validator.
 			for _, transport := range []string{"rest", "mcp"} {
 				t.Run(transport, func(t *testing.T) {
 					w := submitDocumentCreationE2E(f, f.ctx, transport, credentials[transport], documentCreationArgsE2E(tpl))
 					if transport == "mcp" {
 						assertLifecycleMCPResultE2E(t, w, true)
-					} else if w.Code != http.StatusInternalServerError {
+					} else if w.Code != http.StatusServiceUnavailable {
 						t.Fatalf("corrupt template clone=%d %s", w.Code, w.Body.String())
 					}
-					if pdfTemplateSanitizationSnapshotE2E(t, f) != before || peer.requests.Load() != beforeRequests {
+					if pdfTemplateSanitizationSnapshotE2E(t, f) != before || peer.requests.Load() != beforeRequests || ownedBlocksTemplateCacheV1(t, f, tpl.ID) != cacheBefore {
 						t.Fatal("refused clone changed template, document/recipient/field, version, audit/outbox or storage state")
 					}
 				})
@@ -215,34 +225,34 @@ func TestPDFTemplateCorruptBindingRefusesRESTAndMCPWithoutEffectsE2E(t *testing.
 	assertImportStorageE2E(t, peer.importStoragePeer, 1, 0, 1)
 }
 
-func TestPDFTemplateLegacyClonesRemainExplicitlyUnknownE2E(t *testing.T) {
+func TestPDFTemplateUnmeasuredHistoricalSourceRefusesNativeCloneE2E(t *testing.T) {
 	for _, transport := range []string{"rest", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
-			// Existing synthetic legacy source pins deliberately have no intake
-			// observation. Cloning must not fabricate a fresh worker proof.
-			f, tpl := setupDocumentCreationE2E(t, "pdf")
-			if len(tpl.PdfSanitizationReport) != 0 {
-				t.Fatal("legacy fixture unexpectedly carries measured provenance")
+			// Only this negative historical fixture bypasses today's upload
+			// producer. Its raw old row has no intake observation or M97 source
+			// measurement; the normal reader must refuse instead of inventing one.
+			f := setupNativeTemplateAuthorizationE2E(t, "sender")
+			peer := templateAuthorizationStoragePeerE2E(t, f)
+			digest := sha256.Sum256([]byte("synthetic historical PDF source"))
+			tpl, err := f.q.CreatePDFTemplate(f.ctx, generated.CreatePDFTemplateParams{OrgID: f.org, Name: "Explicit unmeasured historical PDF template", CreatedBy: f.user.ID, PdfStorageKey: pgtype.Text{String: "historical-template-source.pdf", Valid: true}, PdfSha256: digest[:], PdfStorageVersionID: pgtype.Text{String: "historical-source-version", Valid: true}, EvidenceVersionPinRequired: true, PageCount: pgtype.Int4{Int32: 1, Valid: true}, FieldsJson: json.RawMessage(`[]`)})
+			if err != nil || len(tpl.PdfSanitizationReport) != 0 || ownedBlocksTemplateCacheV1(t, f, tpl.ID) != "missing" {
+				t.Fatal("historical source must genuinely lack report and source measurement", err)
 			}
 			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
 			args := documentCreationArgsE2E(tpl)
 			args["name"] = "Legacy PDF unknown clone " + transport
-			doc := loadPDFLayoutCreatedE2E(t, f, transport, submitDocumentCreationE2E(f, f.ctx, transport, credential, args), args["name"].(string))
-			var envelope struct {
-				SchemaVersion int               `json:"schema_version"`
-				Items         []sanitize.Report `json:"items"`
-			}
-			if err := json.Unmarshal(doc.MetadataRedactionReport, &envelope); err != nil || envelope.SchemaVersion != 2 || len(envelope.Items) != 1 {
-				t.Fatalf("legacy report envelope=%s err=%v", doc.MetadataRedactionReport, err)
-			}
-			unknown := envelope.Items[0]
-			if unknown.Provenance != "legacy-unknown" || unknown.Method != "legacy-template" || unknown.PDF != nil || len(unknown.Stripped) != 0 || unknown.BytesBefore != 0 || unknown.BytesAfter != 0 {
-				t.Fatalf("legacy source was promoted to measured sanitization: %s", doc.MetadataRedactionReport)
+			before := pdfTemplateSanitizationSnapshotE2E(t, f)
+			w := submitDocumentCreationE2E(f, f.ctx, transport, credential, args)
+			if transport == "mcp" {
+				assertLifecycleMCPResultE2E(t, w, true)
+			} else if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("unmeasured historical source clone=%d %s", w.Code, w.Body.String())
 			}
 			fresh, err := f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: tpl.ID, OrgID: f.org})
-			if err != nil || len(fresh.PdfSanitizationReport) != 0 {
-				t.Fatalf("clone backfilled historical template provenance: %v", err)
+			if err != nil || len(fresh.PdfSanitizationReport) != 0 || ownedBlocksTemplateCacheV1(t, f, tpl.ID) != "missing" || pdfTemplateSanitizationSnapshotE2E(t, f) != before {
+				t.Fatalf("refusal changed historical source or invented report/measurement: %v", err)
 			}
+			assertImportStorageE2E(t, peer, 0, 0, 0)
 		})
 	}
 }

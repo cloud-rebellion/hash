@@ -48,7 +48,7 @@ type htmlRevisionLoadedV1 struct {
 // All original decisions run inside the actual tracked native callback. The
 // scalar parent/real User stages preserve auth before cache/body failures;
 // source commitment and CAS still precede Current and fresh signing state.
-func readOwnedHTMLRevisionV1(call context.Context, db generated.DBTX, reader *pdfadmission.ApplicationHTMLRevisionReaderV1, stage *pdfadmission.ApplicationHTMLRevisionSQLV1, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time) (*htmlRevisionLoadedV1, error) {
+func readOwnedHTMLRevisionV1(call context.Context, db generated.DBTX, reader *pdfadmission.ApplicationHTMLRevisionReaderV1, stage *pdfadmission.ApplicationHTMLRevisionSQLV1, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time, admission *crmMappingAdmission) (*htmlRevisionLoadedV1, error) {
 	models, guard, err := htmlRevisionPolicyReadV1(call, db, reader, actor, id, expected)
 	if err != nil {
 		return nil, err
@@ -73,6 +73,11 @@ func readOwnedHTMLRevisionV1(call context.Context, db generated.DBTX, reader *pd
 	if !models.Document.UpdatedAt.Time.Equal(expected) || commitment != in.ExpectedHTMLSourceCommitment {
 		return nil, errHTMLDocumentRevisionConflict
 	}
+	if admission != nil {
+		if err = admission.checkOwnedLockedV1(call, db, actor, models.Document, commitment); err != nil {
+			return nil, err
+		}
+	}
 	if err = source.ValidateCurrentV1(); err != nil {
 		return nil, err
 	}
@@ -93,7 +98,7 @@ func readOwnedHTMLRevisionV1(call context.Context, db generated.DBTX, reader *pd
 	keepCollection = true
 	return &htmlRevisionLoadedV1{source: source, document: models.Document, collections: collections, guard: guard}, nil
 }
-func loadOwnedHTMLRevisionV1(ctx context.Context, op *pdfadmission.ApplicationHTMLRevisionOperationV1, purpose pdfadmission.HTMLRevisionSQLPurposeV1, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time) (*htmlRevisionLoadedV1, error) {
+func loadOwnedHTMLRevisionV1(ctx context.Context, op *pdfadmission.ApplicationHTMLRevisionOperationV1, purpose pdfadmission.HTMLRevisionSQLPurposeV1, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time, admission *crmMappingAdmission) (*htmlRevisionLoadedV1, error) {
 	stage, err := op.OpenSQLV1(purpose)
 	if err != nil {
 		return nil, err
@@ -101,7 +106,7 @@ func loadOwnedHTMLRevisionV1(ctx context.Context, op *pdfadmission.ApplicationHT
 	var loaded *htmlRevisionLoadedV1
 	err = stage.WithTxV1(func(call context.Context, db generated.DBTX, reader *pdfadmission.ApplicationHTMLRevisionReaderV1) error {
 		var e error
-		loaded, e = readOwnedHTMLRevisionV1(call, db, reader, stage, actor, id, in, expected)
+		loaded, e = readOwnedHTMLRevisionV1(call, db, reader, stage, actor, id, in, expected, admission)
 		if e != nil {
 			return e
 		}
@@ -150,11 +155,23 @@ func (s *Server) composeOwnedRevisionSigningPageV1(ctx context.Context, page *pd
 // The caller retains release until the actual HTTP response writer returns.
 // The result is a defensive value projection, never a new mutation authority.
 func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time, inputOwner *pdfadmission.ApplicationHTMLAuthoringInputV1) (result *pdfadmission.HTMLRevisionResultModelsV1, release func(), failure error) {
+	return s.reviseHTMLDocumentOwnedWithCRMV1(parent, actor, id, in, expected, inputOwner, nil)
+}
+
+func (s *Server) reviseHTMLDocumentOwnedWithCRMV1(parent context.Context, actor authoring.Actor, id uuid.UUID, in htmlDocumentRevisionInput, expected time.Time, inputOwner *pdfadmission.ApplicationHTMLAuthoringInputV1, admission *crmMappingAdmission) (result *pdfadmission.HTMLRevisionResultModelsV1, release func(), failure error) {
 	if s.HTMLCreationSessions == nil || inputOwner == nil {
 		return nil, nil, pdfadmission.ErrHTMLRevisionOperationV1
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
-	op, err := s.HTMLCreationSessions.NewHTMLRevisionOperationV1(ctx, actor.OrgID, id, actor.UserID, inputOwner)
+	var op *pdfadmission.ApplicationHTMLRevisionOperationV1
+	var err error
+	if admission == nil {
+		op, err = s.HTMLCreationSessions.NewHTMLRevisionOperationV1(ctx, actor.OrgID, id, actor.UserID, inputOwner)
+	} else {
+		if err = admission.checkDeadline(); err == nil {
+			op, err = s.HTMLCreationSessions.NewHTMLCRMRevisionOperationV1(ctx, actor.OrgID, id, actor.UserID, inputOwner, admission.observation.snapshot)
+		}
+	}
 	if err != nil {
 		cancel()
 		return nil, nil, err
@@ -168,7 +185,7 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 			failure = errors.Join(failure, op.CloseV1(cleanup))
 		}
 	}()
-	initial, err := loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionInitialReadV1, actor, id, in, expected)
+	initial, err := loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionInitialReadV1, actor, id, in, expected, admission)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -198,7 +215,7 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 		}
 		previousPages = int32(count)
 	}
-	checked, err := loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionBeforeRenderReadV1, actor, id, in, expected)
+	checked, err := loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionBeforeRenderReadV1, actor, id, in, expected, admission)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -249,7 +266,7 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 	if err != nil {
 		return nil, nil, err
 	}
-	checked, err = loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionBeforeStoreReadV1, actor, id, in, expected)
+	checked, err = loadOwnedHTMLRevisionV1(ctx, op, pdfadmission.HTMLRevisionBeforeStoreReadV1, actor, id, in, expected, admission)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -275,11 +292,19 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 	if err != nil {
 		return nil, nil, err
 	}
-	var pending audit.PendingEvent
-	var eventConsumer *pdfadmission.ApplicationHTMLAuditEventConsumerV1
+	var pending, crmPending audit.PendingEvent
+	var eventConsumer, crmEventConsumer *pdfadmission.ApplicationHTMLAuditEventConsumerV1
+	closeEvents := func() {
+		if crmEventConsumer != nil {
+			crmEventConsumer.CloseConsumerV1()
+		}
+		if eventConsumer != nil {
+			eventConsumer.CloseConsumerV1()
+		}
+	}
 	var finishResult func()
 	err = mutation.WithTxV1(func(call context.Context, db generated.DBTX, reader *pdfadmission.ApplicationHTMLRevisionReaderV1) error {
-		final, e := readOwnedHTMLRevisionV1(call, db, reader, mutation, actor, id, in, expected)
+		final, e := readOwnedHTMLRevisionV1(call, db, reader, mutation, actor, id, in, expected, admission)
 		if e != nil {
 			return e
 		}
@@ -311,6 +336,12 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 		if e != nil {
 			return e
 		}
+		if admission != nil {
+			crmPending, crmEventConsumer, e = admission.persistOwnedV1(call, s, &htmlCreationPolicyTxV1{DBTX: db}, actor, result.Document, session)
+			if e != nil {
+				return e
+			}
+		}
 		pending, eventConsumer, e = ownedaudit.LogV1(s.Audit, call, session, pdfadmission.HTMLAuditHTMLRevisionV1, audit.Entry{
 			OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &id, Kind: audit.KindDocumentUpdated,
 			Payload: map[string]any{"html_materialization_revision": result.MaterializationRevision, "html_source_commitment": result.Document.HtmlEffectiveSourceCommitment.String, "review_required": true, "placement_reset": true, "changed_sections": prepared.Rendered.ChangedSections, "contract_party_identities_updated": changed},
@@ -318,21 +349,23 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 		if e != nil {
 			return e
 		}
-		return final.guard.Recheck(call)
+		if e = final.guard.Recheck(call); e != nil {
+			return e
+		}
+		if admission != nil {
+			return admission.checkDeadline()
+		}
+		return nil
 	})
 	if err != nil {
-		if eventConsumer != nil {
-			eventConsumer.CloseConsumerV1()
-		}
+		closeEvents()
 		if finishResult != nil {
 			finishResult()
 		}
 		return nil, nil, err
 	}
 	if err = mutation.CommitV1(); err != nil {
-		if eventConsumer != nil {
-			eventConsumer.CloseConsumerV1()
-		}
+		closeEvents()
 		if finishResult != nil {
 			finishResult()
 		}
@@ -340,8 +373,17 @@ func (s *Server) reviseHTMLDocumentOwnedV1(parent context.Context, actor authori
 	}
 	// Actual acknowledged commit precedes publication. The event's own
 	// consumer remains retained through every hook's actual last use.
+	if crmEventConsumer != nil {
+		if err = ownedaudit.PublishV1(s.Audit, crmPending, crmEventConsumer); err != nil {
+			closeEvents()
+			if finishResult != nil {
+				finishResult()
+			}
+			return nil, nil, err
+		}
+	}
 	if err = ownedaudit.PublishV1(s.Audit, pending, eventConsumer); err != nil {
-		eventConsumer.CloseConsumerV1()
+		closeEvents()
 		if finishResult != nil {
 			finishResult()
 		}

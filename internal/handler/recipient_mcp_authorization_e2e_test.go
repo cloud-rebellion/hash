@@ -115,7 +115,7 @@ func TestRecipientMCPCredentialsRecheckedAfterDocumentWaitE2E(t *testing.T) {
 	for _, tool := range []string{"add_recipient", "update_recipient", "delete_recipient"} {
 		for _, change := range []string{"key-delete", "scope-reduction", "key-expiry", "document-token-revocation", "member-demotion"} {
 			t.Run(tool+"/"+change, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+				f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 				f.enableMCP()
 				seedRecipientMCPFieldE2E(t, f)
 				before := recipientMCPSnapshotE2E(t, f)
@@ -176,10 +176,11 @@ func TestRecipientMCPCredentialsRecheckedAfterDocumentWaitE2E(t *testing.T) {
 func TestRecipientMCPOneUseTokenDoesNotDoubleClaimE2E(t *testing.T) {
 	for _, tool := range []string{"add_recipient", "update_recipient", "delete_recipient"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+			f := setupNativeLifecycleAuthorization256(t, "sender", false, false)
 			f.enableMCP()
 			mint, _ := mintRecipientMCPKeyE2E(t, f, true, 1)
 			args := recipientMCPArgumentsE2E(f, tool)
+			originalAudit := authoringAuditBaselineE2E(t, f)
 			assertLifecycleMCPResultE2E(t, submitRecipientMCPE2E(f, tool, mint.Plaintext, args), false)
 			rows, err := f.q.ListRecipientsByDocument(f.ctx, f.doc.ID)
 			if err != nil {
@@ -212,13 +213,14 @@ func TestRecipientMCPOneUseTokenDoesNotDoubleClaimE2E(t *testing.T) {
 			}
 			var total, matching int
 			if err := f.pool.QueryRow(f.ctx, `SELECT count(*),count(*) FILTER (WHERE kind=$2 AND actor_user_id=$3 AND recipient_id=$4
-				AND payload_json->>'tool'=$5 AND payload_json->>'via'='mcp') FROM events WHERE document_id=$1`,
-				f.doc.ID, kind, f.user.ID, subject, tool).Scan(&total, &matching); err != nil {
+				AND payload_json->>'tool'=$5 AND payload_json->>'via'='mcp') FROM events WHERE document_id=$1 AND NOT (id=ANY($6::uuid[]))`,
+				f.doc.ID, kind, f.user.ID, subject, tool, originalAudit.ids()).Scan(&total, &matching); err != nil {
 				t.Fatal(err)
 			}
 			if total != 1 || matching != 1 {
 				t.Fatalf("one-use mutation audit total/matching=%d/%d", total, matching)
 			}
+			originalAudit.assertAdded(t, f, 1)
 			key, err := f.q.GetDocAgentTokenByPrefix(f.ctx, mint.Prefix)
 			if err != nil || key.UsedCount != 1 || !key.LastUsedAt.Valid {
 				t.Fatal("authorizing twice consumed more than the one admitted token use")
@@ -233,7 +235,7 @@ func TestRecipientMCPOneUseTokenDoesNotDoubleClaimE2E(t *testing.T) {
 }
 
 func TestRecipientMCPRefusesForgedContextWithoutReceiptE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 	f.enableMCP()
 	before := recipientMCPSnapshotE2E(t, f)
 	ctx := context.WithValue(f.ctx, auth.UserIDKey, f.user.ID)
@@ -257,7 +259,7 @@ func TestRecipientMCPRefusesForgedContextWithoutReceiptE2E(t *testing.T) {
 func TestRecipientMCPRefusesConcurrentSoftDeleteE2E(t *testing.T) {
 	for _, tool := range []string{"add_recipient", "update_recipient", "delete_recipient"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+			f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 			f.enableMCP()
 			seedRecipientMCPFieldE2E(t, f)
 			mint, _ := mintRecipientMCPKeyE2E(t, f, false, 0)
@@ -292,13 +294,9 @@ func TestRecipientMCPRefusesConcurrentSoftDeleteE2E(t *testing.T) {
 }
 
 func TestRecipientMCPScopeAndTenantBoundariesE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 	f.enableMCP()
-	sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID,
-		Name: "Recipient scope sibling", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	sibling := createAuthoringSiblingE2E(t, f, "Recipient scope sibling")
 	foreign := setupLifecycleAuthorizationE2E(t, "owner", false, false)
 	docKey, _ := mintRecipientMCPKeyE2E(t, f, true, 10)
 	orgKey, _ := mintRecipientMCPKeyE2E(t, f, false, 0)
@@ -328,8 +326,9 @@ func TestRecipientMCPScopeAndTenantBoundariesE2E(t *testing.T) {
 }
 
 func TestRecipientMCPLockedDefaultAndNormalizedCRUDActorE2E(t *testing.T) {
-	f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+	f := setupNativeLifecycleAuthorization256(t, "sender", false, false)
 	f.enableMCP()
+	originalAudit := authoringAuditBaselineE2E(t, f)
 	mint, _ := mintRecipientMCPKeyE2E(t, f, false, 0)
 	blocked, err := f.pool.Begin(f.ctx)
 	if err != nil {
@@ -380,21 +379,22 @@ func TestRecipientMCPLockedDefaultAndNormalizedCRUDActorE2E(t *testing.T) {
 		map[string]any{"document_id": f.doc.ID, "recipient_id": created.ID}), false)
 	var remaining, audits, wrongActors int
 	if err := f.pool.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM recipients WHERE id=$1),
-		(SELECT count(*) FROM events WHERE document_id=$2 AND kind IN ('recipient.created','recipient.updated','recipient.deleted')),
-		(SELECT count(*) FROM events WHERE document_id=$2 AND (actor_user_id IS DISTINCT FROM $3 OR recipient_id IS DISTINCT FROM $1
-		OR payload_json->>'via' IS DISTINCT FROM 'mcp' OR ua IS DISTINCT FROM 'recipient-mcp-acceptance'))`, created.ID, f.doc.ID, f.user.ID).Scan(&remaining, &audits, &wrongActors); err != nil {
+		(SELECT count(*) FROM events WHERE document_id=$2 AND NOT (id=ANY($4::uuid[])) AND kind IN ('recipient.created','recipient.updated','recipient.deleted')),
+		(SELECT count(*) FROM events WHERE document_id=$2 AND NOT (id=ANY($4::uuid[])) AND (actor_user_id IS DISTINCT FROM $3 OR recipient_id IS DISTINCT FROM $1
+		OR payload_json->>'via' IS DISTINCT FROM 'mcp' OR ua IS DISTINCT FROM 'recipient-mcp-acceptance'))`, created.ID, f.doc.ID, f.user.ID, originalAudit.ids()).Scan(&remaining, &audits, &wrongActors); err != nil {
 		t.Fatal(err)
 	}
 	if remaining != 0 || audits != 3 || wrongActors != 0 {
 		t.Fatalf("normalized CRUD recipient/audits/wrong identities=%d/%d/%d", remaining, audits, wrongActors)
 	}
+	originalAudit.assertAdded(t, f, 3)
 	rows, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(rows)
-	if verified := verifier.Result(); !verified.OK || verified.TotalChecked != 3 {
+	if verified := verifier.Result(); !verified.OK || verified.TotalChecked != len(originalAudit.events)+3 {
 		t.Fatalf("successful deleted-recipient audit chain failed: %+v", verified)
 	}
 }
@@ -402,7 +402,7 @@ func TestRecipientMCPLockedDefaultAndNormalizedCRUDActorE2E(t *testing.T) {
 func TestRecipientMCPExpiryDuringAuditWaitRollsBackE2E(t *testing.T) {
 	for _, tool := range []string{"add_recipient", "update_recipient", "delete_recipient"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+			f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 			f.enableMCP()
 			seedRecipientMCPFieldE2E(t, f)
 			mint, keyID := mintRecipientMCPKeyE2E(t, f, false, 0)
@@ -456,7 +456,7 @@ func TestRecipientMCPPendingPrivacyReviewPreservesRecipientLinkageE2E(t *testing
 			name = "linked-document"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+			f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 			f.enableMCP()
 			seedRecipientMCPFieldE2E(t, f)
 			document := pgtype.UUID{}
@@ -492,11 +492,12 @@ func TestRecipientMCPInternalFailuresRollBackAndRetryE2E(t *testing.T) {
 	for _, tool := range []string{"add_recipient", "update_recipient", "delete_recipient"} {
 		for _, fault := range []string{"audit-exception", "audit-no-row", "mutation-no-row"} {
 			t.Run(tool+"/"+fault, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+				f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
 				f.enableMCP()
 				seedRecipientMCPFieldE2E(t, f)
 				mint, _ := mintRecipientMCPKeyE2E(t, f, false, 0)
 				before := recipientMCPSnapshotE2E(t, f)
+				originalAudit := authoringAuditBaselineE2E(t, f)
 				kind := map[string]string{
 					"add_recipient": audit.KindRecipientCreated, "update_recipient": audit.KindRecipientUpdated, "delete_recipient": audit.KindRecipientDeleted,
 				}[tool]
@@ -584,13 +585,14 @@ func TestRecipientMCPInternalFailuresRollBackAndRetryE2E(t *testing.T) {
 				}
 				var total, matching int
 				if err := f.pool.QueryRow(f.ctx, `SELECT count(*),count(*) FILTER (WHERE kind=$2 AND actor_user_id=$3
-					AND payload_json->>'tool'=$4 AND payload_json->>'via'='mcp') FROM events WHERE document_id=$1`,
-					f.doc.ID, kind, f.user.ID, tool).Scan(&total, &matching); err != nil {
+					AND payload_json->>'tool'=$4 AND payload_json->>'via'='mcp') FROM events WHERE document_id=$1 AND NOT (id=ANY($5::uuid[]))`,
+					f.doc.ID, kind, f.user.ID, tool, originalAudit.ids()).Scan(&total, &matching); err != nil {
 					t.Fatal(err)
 				}
 				if total != 1 || matching != 1 {
 					t.Fatalf("retry audit total/matching=%d/%d want1/1", total, matching)
 				}
+				originalAudit.assertAdded(t, f, 1)
 			})
 		}
 	}

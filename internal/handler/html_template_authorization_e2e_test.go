@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -869,14 +870,22 @@ func awaitTwoHTMLAuditWaitersE2E(t *testing.T, f lifecycleAuthorizationFixture) 
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	application := f.pool.Config().ConnConfig.RuntimeParams["application_name"]
+	nativeApplication := htmlAuthoringNativeApplicationNameE2E(t, f.s)
+	if application == "" || application == nativeApplication {
+		t.Fatal("privacy pool and native authoring must have distinct exact backend identities")
+	}
 	for time.Now().Before(deadline) {
-		var count int
-		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()
-			AND application_name=$1 AND query LIKE '%-- name: AcquireOrgChainLock%' AND wait_event='advisory' AND state='active'`, application).Scan(&count); err != nil { //nolint:rawsql -- observe both independently queued real requests
+		var privacy, creation int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FILTER (WHERE application_name=$1),count(*) FILTER (WHERE application_name=$2)
+			FROM pg_stat_activity WHERE datname=current_database() AND application_name IN ($1,$2)
+			AND query LIKE '%-- name: AcquireOrgChainLock%' AND wait_event='advisory' AND state='active'`, application, nativeApplication).Scan(&privacy, &creation); err != nil { //nolint:rawsql -- exact original privacy pool and distinct native authoring factory
 			t.Fatal(err)
 		}
-		if count == 2 {
+		if privacy == 1 && creation == 1 {
 			return
+		}
+		if privacy > 1 || creation > 1 {
+			t.Fatalf("unexpected privacy/native audit waiters=%d/%d", privacy, creation)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -904,22 +913,33 @@ func TestHTMLTemplateDSRRechecksNewAuthoringAfterAuditWaitE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
 			creation := make(chan *httptest.ResponseRecorder, 1)
+			creationDone := make(chan struct{})
 			input := htmlTemplateInputE2E(t, 0, "Concurrent privacy inventory")
-			go func() { creation <- submitHTMLTemplateE2E(t, f, "create", uuid.Nil, input, cookie) }()
+			go func() {
+				defer close(creationDone)
+				creation <- submitHTMLTemplateContextE2E(t, ctx, f, "create", uuid.Nil, input, cookie)
+			}()
+			defer joinHTMLAuthoringRequestE2E(t, cancel, creationDone, hold)
 			// Queue creation first. Its rows remain uncommitted and invisible to
 			// the privacy request's first inventory check until its audit commits.
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+			awaitHTMLAuthoringOperationLockE2E(t, f, "-- name: AcquireOrgChainLock", "advisory")
 			privacy := make(chan *httptest.ResponseRecorder, 1)
+			privacyDone := make(chan struct{})
 			go func() {
+				defer close(privacyDone)
 				if operation == "erasure" {
-					privacy <- submitSessionOperationE2E(f.s, http.MethodPatch, "/api/v1/dsr/"+request.ID.String(), `{"status":"fulfilled"}`, cookie)
+					privacy <- submitSessionOperationContextE2E(ctx, f.s, http.MethodPatch, "/api/v1/dsr/"+request.ID.String(), `{"status":"fulfilled"}`, cookie)
 				} else {
-					privacy <- submitSessionOperationE2E(f.s, http.MethodGet, "/api/v1/data-subject/export?email="+url.QueryEscape(f.recipient.Email), "", cookie)
+					privacy <- submitSessionOperationContextE2E(ctx, f.s, http.MethodGet, "/api/v1/data-subject/export?email="+url.QueryEscape(f.recipient.Email), "", cookie)
 				}
 			}()
+			defer joinHTMLAuthoringRequestE2E(t, cancel, privacyDone, hold)
 			// Reaching this second audit wait proves the initial inventory check
-			// accepted absence. Both requests use this fixture's unique app name.
+			// accepted absence. The creator uses its distinct native factory, while
+			// privacy retains this fixture's original pool application identity.
 			awaitTwoHTMLAuditWaitersE2E(t, f)
 			if err := hold.Commit(f.ctx); err != nil {
 				t.Fatal(err)
@@ -947,43 +967,32 @@ func TestHTMLTemplateDSRRechecksNewAuthoringAfterAuditWaitE2E(t *testing.T) {
 }
 
 func htmlMigrationPartsE2E(t *testing.T) (string, string) {
-	t.Helper()
-	raw, err := os.ReadFile("../db/migrations/00073_html_template_masters.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	parts := strings.SplitN(string(raw), "-- +goose Down", 2)
-	if len(parts) != 2 {
-		t.Fatal("HTML migration must contain explicit Up and Down")
-	}
-	// Migration74 depends on73's columns and has its own independent history
-	// refusal fence. Remove that empty dependent state first; never bypass its
-	// retention guards or alter73's production migration bytes.
-	dependent, err := os.ReadFile("../db/migrations/00074_html_document_materializations.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dependentParts := strings.SplitN(string(dependent), "-- +goose Down", 2)
-	if len(dependentParts) != 2 {
-		t.Fatal("HTML materialization migration requires Up/Down")
-	}
-	provenance, err := os.ReadFile("../db/migrations/00075_pdf_sanitization_provenance.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	provenanceParts := strings.SplitN(string(provenance), "-- +goose Down", 2)
-	if len(provenanceParts) != 2 {
-		t.Fatal("PDF provenance migration requires Up/Down")
-	}
-	branded, err := os.ReadFile("../db/migrations/00076_branded_signing_pages.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	brandedParts := strings.SplitN(string(branded), "-- +goose Down", 2)
-	if len(brandedParts) != 2 {
-		t.Fatal("Branded page migration requires Up/Down")
-	}
-	return parts[0] + "\n" + dependentParts[0] + "\n" + provenanceParts[0] + "\n" + brandedParts[0], brandedParts[1] + "\n" + provenanceParts[1] + "\n" + dependentParts[1] + "\n" + parts[1]
+ t.Helper()
+ // Exercise the actual HTML migration with every currently applied dependent
+ // migration reversed first. Running only73–76 against a current117 schema
+ // leaves genuine later SQL-function dependencies on the removed columns.
+ // Every byte below comes from the authored migrations; all tests execute this
+ // inside their original rollback-only transaction, retaining every refusal
+ // guard and restoring the current estate on rollback. No history is forged.
+ entries, err := os.ReadDir("../db/migrations")
+ if err != nil { t.Fatal(err) }
+ var ups, downs []string
+ for _, entry := range entries {
+  name := entry.Name()
+  if entry.IsDir() || !strings.HasSuffix(name,".sql") { continue }
+  prefix, _, ok := strings.Cut(name,"_")
+  version, parseErr := strconv.ParseInt(prefix,10,64)
+  if !ok || parseErr != nil { t.Fatal("unrecognized authored migration name",name) }
+  if version < 73 { continue }
+  raw, readErr := os.ReadFile("../db/migrations/"+name)
+  if readErr != nil { t.Fatal(readErr) }
+  sections := strings.SplitN(string(raw),"-- +goose Down",2)
+  if len(sections)!=2 { t.Fatal("dependent migration requires actual Up and Down",name) }
+  ups=append(ups,sections[0]);downs=append(downs,sections[1])
+ }
+ if len(ups)<4 { t.Fatal("HTML dependency migration chain missing") }
+ for i,j:=0,len(downs)-1;i<j;i,j=i+1,j-1 { downs[i],downs[j]=downs[j],downs[i] }
+ return strings.Join(ups,"\n"),strings.Join(downs,"\n")
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {

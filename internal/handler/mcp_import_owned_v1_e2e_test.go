@@ -105,8 +105,10 @@ func TestOwnedMCPHTMLMarkdownImportConstructionAndActualLastUseE2E(t *testing.T)
 			if gate.entry.OrgID != f.org || gate.entry.ActorUserID == nil || *gate.entry.ActorUserID != f.user.ID || gate.eventID == uuid.Nil {
 				t.Fatal("actual imported source audit lost original identity")
 			}
-			if q.runtime.SessionsV1().PendingV1().HTMLInputProducers != 1 {
-				t.Fatal("actual parsed DOM/AST input retired before source response last use")
+			// The actual transport envelope and parsed import arguments are two
+			// distinct producers in this same registry, both owned until response.
+			if pending := q.runtime.SessionsV1().PendingV1(); pending.HTMLInputProducers != 2 {
+				t.Fatal("actual MCP envelope/import input topology changed before response last use", pending)
 			}
 			ownedPlainAssertRetainedV1(t, q, "actual blocked canonical import response and hook")
 			stored, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: old.ID, OrgID: f.org})
@@ -147,8 +149,8 @@ func TestOwnedMCPHTMLMarkdownImportConstructionAndActualLastUseE2E(t *testing.T)
 			} else {
 				gate.unblock()
 				ownedPlainAwaitV1(t, gate.returned, "actual hook before import response")
-				if q.runtime.SessionsV1().PendingV1().HTMLInputProducers != 1 {
-					t.Fatal("actual parsed source refunded while serializer still blocked")
+				if pending := q.runtime.SessionsV1().PendingV1(); pending.HTMLInputProducers != 2 {
+					t.Fatal("actual MCP envelope/import source refunded while serializer still blocked", pending)
 				}
 				response.unblock()
 				ownedPlainAwaitV1(t, done, "actual response last use after hook")

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -23,7 +24,6 @@ import (
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func ownedCommentPageRequest166V1(q *ownedPublicReadFixtureV1, ctx context.Context, doc *generated.Document, token, query string) *http.Request {
@@ -170,23 +170,33 @@ func TestOwnedCommentPagesPreserveWholeHistoryAndAccessE2E(t *testing.T) {
 }
 
 func TestOwnedCommentWindowIndexMigrationPreservesHistoryE2E(t *testing.T) {
+	// Qualify the real97↔98 goose boundary independently. Today's native
+	// signer cannot run against schema97, and M111 rightly forbids rolling an
+	// active ceremony back through its later clock disposition guard.
+	qualifyHistoricalCommentIndex98E2E(t)
 	q := newOwnedPublicReadFixtureV1(t)
 	doc, parties := q.createSentV1(t)
 	ownedHistoricalCommentRows166V1(t, q, doc)
 	want := ownedCommentPage166V1(t, q, doc, parties[0].Token, "")
 	before := captureNativeCommentState163V1(t, q, doc)
-	migrations := stdlib.OpenDB(*q.f.pool.Config().ConnConfig)
-	defer migrations.Close()
+	current := assertCurrentHandlerMigrationHistoryE2E(t, q.f.ctx, q.f.pool)
+	raw, err := os.ReadFile("../db/migrations/00098_comment_window_order.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(string(raw), "-- +goose Down", 2)
+	if len(parts) != 2 {
+		t.Fatal("M98 requires actual Up/Down")
+	}
 	var definition string
 	if err := q.f.pool.QueryRow(q.f.ctx, "SELECT pg_get_indexdef('idx_document_comments_window'::regclass)").Scan(&definition); err != nil || !strings.Contains(definition, "(document_id, created_at, id)") {
 		t.Fatal("normal98 did not create exact seek-order index", definition, err)
 	} //nolint:rawsql -- actual migration shape, not a planner/capacity claim
-	if err := mdb.RunMigrationsDownToContext(q.f.ctx, migrations, 97); err != nil {
-		t.Fatal("rollback actual migration98", err)
-	}
-	version, err := mdb.GetMigrationVersionContext(q.f.ctx, migrations)
-	if err != nil || version != 97 {
-		t.Fatal("rollback did not reach exact97", version, err)
+	// Current native API compatibility with exactly the authored index Down.
+	// Migration history stays current; the independent phase above owns the
+	// historical version assertions. No newer ceremony guard is bypassed.
+	if _, err := q.f.pool.Exec(q.f.ctx, parts[1]); err != nil {
+		t.Fatal("actual98 index Down on current native history", err)
 	}
 	var absent bool
 	if err := q.f.pool.QueryRow(q.f.ctx, "SELECT to_regclass('idx_document_comments_window') IS NULL").Scan(&absent); err != nil || !absent {
@@ -195,12 +205,11 @@ func TestOwnedCommentWindowIndexMigrationPreservesHistoryE2E(t *testing.T) {
 	if got := ownedCommentPage166V1(t, q, doc, parties[0].Token, ""); !reflect.DeepEqual(got, want) {
 		t.Fatal("index rollback changed history semantics")
 	}
-	if err := mdb.RunMigrationsUpToContext(q.f.ctx, migrations, 98); err != nil {
-		t.Fatal("reapply actual migration98", err)
+	if _, err := q.f.pool.Exec(q.f.ctx, parts[0]); err != nil {
+		t.Fatal("actual98 index Up on current native history", err)
 	}
-	version, err = mdb.GetMigrationVersionContext(q.f.ctx, migrations)
-	if err != nil || version != 98 {
-		t.Fatal("reapply did not reach exact98", version, err)
+	if got := assertCurrentHandlerMigrationHistoryE2E(t, q.f.ctx, q.f.pool); got != current {
+		t.Fatal("index-only compatibility changed current migration history")
 	}
 	var restored string
 	if err := q.f.pool.QueryRow(q.f.ctx, "SELECT pg_get_indexdef('idx_document_comments_window'::regclass)").Scan(&restored); err != nil || restored != definition {
@@ -328,4 +337,35 @@ func TestOwnedCommentPageResponseRetainsNativeDebtE2E(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Real historical goose application/rollback is distinct from exercising the
+// current native signer above. Both use the same authored M98 index migration.
+func qualifyHistoricalCommentIndex98E2E(t *testing.T) {
+	t.Helper()
+	f := migrationPG242(t)
+	if err := mdb.RunMigrationsUpToContext(f.ctx, f.db, 98); err != nil {
+		t.Fatal("actual empty98 Up", err)
+	}
+	var before string
+	if err := f.admin.QueryRow(f.ctx, "SELECT pg_get_indexdef('idx_document_comments_window'::regclass)").Scan(&before); err != nil || !strings.Contains(before, "(document_id, created_at, id)") {
+		t.Fatal("historical98 seek index", before, err)
+	}
+	if err := mdb.RunMigrationsDownToContext(f.ctx, f.db, 97); err != nil {
+		t.Fatal("actual98 Down97", err)
+	}
+	migrationHead242(t, f, 97, true)
+	var absent bool
+	if err := f.admin.QueryRow(f.ctx, "SELECT to_regclass('idx_document_comments_window') IS NULL").Scan(&absent); err != nil || !absent {
+		t.Fatal("historical98 index survived Down", err)
+	}
+	if err := mdb.RunMigrationsUpToContext(f.ctx, f.db, 98); err != nil {
+		t.Fatal("actual98 replay", err)
+	}
+	migrationHead242(t, f, 98, true)
+	var after string
+	if err := f.admin.QueryRow(f.ctx, "SELECT pg_get_indexdef('idx_document_comments_window'::regclass)").Scan(&after); err != nil || before != after {
+		t.Fatal("historical98 replay changed index", after, err)
+	}
+	migrationPoolRetired242(t, f, f.db, f.name)
 }

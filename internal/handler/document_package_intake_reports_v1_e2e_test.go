@@ -284,7 +284,20 @@ func TestDocumentPackageIntakeReportPersistenceV1E2E(t *testing.T) {
 }
 func legacyPackageCaptureInput222(t *testing.T, f lifecycleAuthorizationFixture, p *generated.DocumentPackagesV1, pin generated.InsertDocumentAttachmentDraftV1Params) generated.AppendDocumentPackageCaptureV1Params {
 	t.Helper()
-	root, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: p.DocumentID, OrgID: f.org})
+	// This reader runs at the actual M100 boundary. Its concrete manifest
+	// inputs predate the later participant-report column selected by today's
+	// GetDocument; read only these real historical columns, without adding or
+	// inventing a current-schema field in the old database.
+	root := &generated.Document{}
+	err := f.pool.QueryRow(f.ctx, `SELECT id,org_id,name,source_kind,updated_at,
+ pdf_storage_key,pdf_storage_version_id,pdf_sha256,html_source_json,
+ html_current_source_json,html_current_materialization_id,
+ html_current_materialization_sequence,html_current_page_count
+ FROM documents WHERE id=$1 AND org_id=$2`, p.DocumentID, f.org).Scan(
+		&root.ID, &root.OrgID, &root.Name, &root.SourceKind, &root.UpdatedAt,
+		&root.PdfStorageKey, &root.PdfStorageVersionID, &root.PdfSha256, &root.HtmlSourceJson,
+		&root.HtmlCurrentSourceJson, &root.HtmlCurrentMaterializationID,
+		&root.HtmlCurrentMaterializationSequence, &root.HtmlCurrentPageCount)
 	if err != nil {
 		t.Fatal(err)
 	}

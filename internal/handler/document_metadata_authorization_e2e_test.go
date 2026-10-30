@@ -202,7 +202,7 @@ func TestDocumentMetadataMCPPreservesEvidenceAndPrivacyE2E(t *testing.T) {
 	for _, tool := range []string{"set_expiry", "attach_metadata"} {
 		for _, protected := range []string{"filled-field", "signature", "final-artifact", "linked-privacy", "global-privacy", "sent"} {
 			t.Run(tool+"/"+protected, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "sender", protected == "sent", false)
+				f := setupNativeLifecycleAuthorization256(t, "sender", protected == "sent", false)
 				f.enableMCP()
 				mint, _ := mintDocumentMetadataKeyE2E(t, f, false)
 				want := authoring.ErrDocumentHasEvidence.Error()

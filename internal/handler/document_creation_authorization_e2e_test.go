@@ -8,7 +8,6 @@ package handler
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,33 +28,30 @@ import (
 
 // These regressions enter real admission middleware, block on PostgreSQL's
 // actual quota/template/member/audit locks, and verify complete rollback.
-// No renderer, mail dispatcher or production object storage is involved.
+// No renderer, mail dispatcher or production object storage is involved. PDF
+// templates use the source-built sanitizer and a local versioned storage peer.
 func setupDocumentCreationE2E(t *testing.T, source string) (lifecycleAuthorizationFixture, *generated.Template) {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+	f := setupNativeTemplateAuthorizationE2E(t, "sender")
 	tpl := seedAuthorizationTemplateE2E(t, f, source)
-	if source == "pdf" {
-		digest := sha256.Sum256([]byte("synthetic pinned PDF template"))
-		if _, err := f.pool.Exec(f.ctx, `UPDATE templates SET pdf_sha256=$2,pdf_storage_version_id='creation-template-version',evidence_version_pin_required=true,variables_json='{"customer":"Original customer"}' WHERE id=$1`, tpl.ID, digest[:]); err != nil { //nolint:rawsql -- synthetic template source pins
-			t.Fatal(err)
-		}
-		var err error
-		tpl, err = f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: tpl.ID, OrgID: f.org})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+
 	return f, tpl
 }
 
 func enableDocumentCreationMCPE2E(f lifecycleAuthorizationFixture) {
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Versions: versions.New(f.q), Billing: f.s.Billing})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Versions: versions.New(f.q), Billing: f.s.Billing, Storage: f.s.Storage, Send: f.s.Send, PDFCreationSessions: f.s.HTMLCreationSessions})
 }
 
 func submitDocumentCreationE2E(f lifecycleAuthorizationFixture, ctx context.Context, transport, credential string, args map[string]any) *httptest.ResponseRecorder {
 	if transport == "mcp" {
-		return submitRecipientMCPE2E(f, "create_document", credential, args)
+		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "create_document", "arguments": args}})
+		r := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", bytes.NewReader(body)).WithContext(ctx)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+credential)
+		w := httptest.NewRecorder()
+		f.s.Routes().ServeHTTP(w, r)
+		return w
 	}
 	body, _ := json.Marshal(args)
 	r := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/api/v1/documents", bytes.NewReader(body)).WithContext(ctx)
@@ -69,6 +65,13 @@ func submitDocumentCreationE2E(f lifecycleAuthorizationFixture, ctx context.Cont
 
 func documentCreationArgsE2E(tpl *generated.Template) map[string]any {
 	return map[string]any{"name": "Authorized sales draft", "source_kind": tpl.SourceKind, "template_id": tpl.ID}
+}
+
+func documentCreationTemplateQueryE2E(tpl *generated.Template) string {
+	if tpl.SourceKind == "pdf" {
+		return "GetPDFTemplateSourceHeaderForShareV1"
+	}
+	return "GetNonHTMLTemplateSourceHeaderForShareV1"
 }
 
 func documentCreationCredentialE2E(t *testing.T, f lifecycleAuthorizationFixture, transport string, expires bool) (string, uuid.UUID, time.Time) {
@@ -146,11 +149,11 @@ func TestDocumentCreationRechecksAdmittedCredentialAfterTemplateWaitE2E(t *testi
 					credential, id, expiry := documentCreationCredentialE2E(t, f, transport, change == "expiry")
 					before := f.snapshot(t)
 					blocked := holdDocumentCreationTemplateE2E(t, f, tpl.ID)
-					result := make(chan *httptest.ResponseRecorder, 1)
-					go func() {
-						result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))
-					}()
-					awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetTemplateForShare", "transactionid")
+					result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+						return submitDocumentCreationE2E(f, ctx, transport, credential, documentCreationArgsE2E(tpl))
+					}, blocked)
+					defer join()
+					awaitNativeTemplateLockE2E(t, f, blocked, documentCreationTemplateQueryE2E(tpl), true)
 					status, message := http.StatusForbidden, "permission or credential revoked"
 					var err error
 					switch change {
@@ -194,11 +197,11 @@ func TestDocumentCreationRechecksAdmittedCredentialAfterMemberWaitE2E(t *testing
 				if _, err := f.q.WithTx(blocked).UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "sender"}); err != nil {
 					t.Fatal(err)
 				}
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() {
-					result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))
-				}()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetUserForShare", "transactionid")
+				result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+					return submitDocumentCreationE2E(f, ctx, transport, credential, documentCreationArgsE2E(tpl))
+				}, blocked)
+				defer join()
+				awaitNativeTemplateLockE2E(t, f, blocked, "GetHTMLAuthoringActorHeaderV1", true)
 				status, message := http.StatusForbidden, "permission or credential revoked"
 				if change == "demotion" {
 					if _, err := f.q.WithTx(blocked).UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "viewer"}); err != nil {
@@ -232,11 +235,11 @@ func TestDocumentCreationFinalCredentialCheckAfterAuditWaitE2E(t *testing.T) {
 				if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 					t.Fatal(err)
 				}
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() {
-					result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))
-				}()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
+				result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+					return submitDocumentCreationE2E(f, ctx, transport, credential, documentCreationArgsE2E(tpl))
+				}, blocked)
+				defer join()
+				awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
 				expireDocumentCreationCredentialE2E(t, f, transport, credential, expiry)
 				if err := blocked.Commit(f.ctx); err != nil {
 					t.Fatal(err)
@@ -263,11 +266,11 @@ func TestDocumentCreationOriginalCredentialAfterQuotaWaitE2E(t *testing.T) {
 				if err := f.q.WithTx(blocked).LockBillingUsageForOrg(f.ctx, f.org.String()); err != nil {
 					t.Fatal(err)
 				}
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() {
-					result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))
-				}()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: LockBillingUsageForOrg", "advisory")
+				result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+					return submitDocumentCreationE2E(f, ctx, transport, credential, documentCreationArgsE2E(tpl))
+				}, blocked)
+				defer join()
+				awaitNativeTemplateLockE2E(t, f, blocked, "LockBillingUsageForOrg", true)
 				status, message := http.StatusForbidden, "permission or credential revoked"
 				if change == "demotion" {
 					if _, err := f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "viewer"}); err != nil {
@@ -292,8 +295,12 @@ func TestDocumentCreationAlwaysValidatesTemplateReferenceE2E(t *testing.T) {
 			t.Run(transport+"/"+boundary, func(t *testing.T) {
 				f, tpl := setupDocumentCreationE2E(t, "blocks")
 				if boundary == "other-tenant" {
-					_, other := setupDocumentCreationE2E(t, "blocks")
-					tpl = other
+					foreign := setupHTMLTemplateAuthorizationE2E(t, f.pool.Config().ConnConfig.Database, "sender")
+					tpl = seedAuthorizationTemplateE2E(t, foreign, "blocks")
+					var exists bool
+					if err := f.pool.QueryRow(f.ctx, "SELECT EXISTS(SELECT 1 FROM templates WHERE id=$1 AND org_id=$2)", tpl.ID, foreign.org).Scan(&exists); err != nil || !exists {
+						t.Fatal("foreign template must exist in the same actual database", exists, err)
+					}
 				} else if boundary == "archived" {
 					if err := f.q.ArchiveTemplate(f.ctx, generated.ArchiveTemplateParams{ID: tpl.ID, OrgID: f.org}); err != nil {
 						t.Fatal(err)
@@ -358,7 +365,11 @@ func TestDocumentCreationFreshTemplateDefaultsAndExplicitOverridesE2E(t *testing
 					f, tpl := setupDocumentCreationE2E(t, source)
 					credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
 					args := documentCreationArgsE2E(tpl)
-					want := "Original customer"
+					var defaults map[string]string
+					if err := json.Unmarshal(tpl.VariablesJson, &defaults); err != nil {
+						t.Fatal(err)
+					}
+					want := defaults["customer"]
 					if override == "variables" || override == "both" {
 						want = "Explicit customer"
 						args["variables_json"] = map[string]string{"customer": want}
@@ -400,25 +411,43 @@ func TestDocumentCreationCopiesUpdatedTemplateAfterWaitE2E(t *testing.T) {
 		t.Run(transport, func(t *testing.T) {
 			f, tpl := setupDocumentCreationE2E(t, "blocks")
 			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
-			blocked := holdDocumentCreationTemplateE2E(t, f, tpl.ID)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))
-			}()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetTemplateForShare", "transactionid")
-			if _, err := f.q.WithTx(blocked).UpdateBlocksTemplate(f.ctx, generated.UpdateBlocksTemplateParams{
-				ID: tpl.ID, OrgID: f.org, Name: tpl.Name,
-				BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"new","type":"paragraph","text":"Fresh updated terms"}]}`), VariablesJson: json.RawMessage(`{"customer":"Fresh updated customer"}`),
-			}); err != nil {
+			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+			blocked, err := f.pool.Begin(f.ctx)
+			if err != nil {
 				t.Fatal(err)
 			}
+			defer blocked.Rollback(context.Background())
+			if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
+				t.Fatal(err)
+			}
+			// A real first PATCH owns the source row and fresh measurement while
+			// its audit is queued. The later creator must copy that committed edit.
+			edit, joinEdit := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitSessionOperationContextE2E(ctx, f.s, http.MethodPatch, "/api/v1/templates/"+tpl.ID.String(), `{"blocks_json":{"version":1,"blocks":[{"id":"new","type":"paragraph","text":"Fresh updated terms"}]},"variables_json":{"customer":"Fresh updated customer"}}`, cookie)
+			}, blocked)
+			defer joinEdit()
+			awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
+			// Bind the creator's row wait to the actual first PATCH backend.
+			var editorPID int32
+			if err := f.pool.QueryRow(f.ctx, `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND query LIKE '%-- name: AcquireOrgChainLock%' AND wait_event='advisory' AND state='active'`, htmlAuthoringNativeApplicationNameE2E(t, f.s)).Scan(&editorPID); err != nil {
+				t.Fatal(err)
+			} //nolint:rawsql -- exact native first PATCH waiter
+			result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitDocumentCreationE2E(f, ctx, transport, credential, documentCreationArgsE2E(tpl))
+			}, blocked)
+			defer join()
+			awaitNativeTemplatePIDLockE2E(t, f, editorPID, documentCreationTemplateQueryE2E(tpl), true)
 			if err := blocked.Commit(f.ctx); err != nil {
 				t.Fatal(err)
+			}
+			if w := receiveSessionOperationE2E(t, edit); w.Code != http.StatusOK {
+				t.Fatalf("genuine concurrent template PATCH=%d %s", w.Code, w.Body.String())
 			}
 			doc := loadCreatedDocumentE2E(t, f, transport, receiveSessionOperationE2E(t, result))
 			if !strings.Contains(string(doc.BlocksJson), "Fresh updated terms") || !strings.Contains(string(doc.VariablesJson), "Fresh updated customer") {
 				t.Fatalf("stale defaults copied blocks=%s values=%s", doc.BlocksJson, doc.VariablesJson)
 			}
+			ownedBlocksTemplateExactSourceV1(t, f, tpl.ID)
 		})
 	}
 }
@@ -464,33 +493,31 @@ func TestDocumentCreationTemplateLockRetainedThroughAuditE2E(t *testing.T) {
 	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		result <- submitDocumentCreationE2E(f, f.ctx, "rest", credential, documentCreationArgsE2E(tpl))
-	}()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
-	editResult := make(chan error, 1)
-	go func() {
-		_, err := f.q.UpdateBlocksTemplate(f.ctx, generated.UpdateBlocksTemplateParams{ID: tpl.ID, OrgID: f.org, Name: tpl.Name,
-			BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"later","type":"paragraph","text":"Later terms"}]}`), VariablesJson: json.RawMessage(`{"customer":"Later customer"}`)})
-		editResult <- err
-	}()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: UpdateBlocksTemplate", "transactionid")
+	result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitDocumentCreationE2E(f, ctx, "rest", credential, documentCreationArgsE2E(tpl))
+	}, blocked)
+	defer join()
+	awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
+	var creatorPID int32
+	if err := f.pool.QueryRow(f.ctx, `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND query LIKE '%-- name: AcquireOrgChainLock%' AND wait_event='advisory' AND state='active'`, htmlAuthoringNativeApplicationNameE2E(t, f.s)).Scan(&creatorPID); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- exact creator owns the template share lock
+	edit, joinEdit := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitSessionOperationContextE2E(ctx, f.s, http.MethodPatch, "/api/v1/templates/"+tpl.ID.String(), `{"blocks_json":{"version":1,"blocks":[{"id":"later","type":"paragraph","text":"Later terms"}]},"variables_json":{"customer":"Later customer"}}`, credential)
+	}, blocked)
+	defer joinEdit()
+	awaitNativeTemplatePIDLockE2E(t, f, creatorPID, "GetNonHTMLTemplateSourceHeaderForUpdateV1", true)
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	doc := loadCreatedDocumentE2E(t, f, "rest", receiveSessionOperationE2E(t, result))
-	select {
-	case err := <-editResult:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("template edit did not resume after document commit")
+	if w := receiveSessionOperationE2E(t, edit); w.Code != http.StatusOK {
+		t.Fatalf("template edit did not resume after document commit=%d %s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(string(doc.BlocksJson), "Original terms") || !strings.Contains(string(doc.VariablesJson), "Original customer") {
 		t.Fatal("later template edit changed the committed document snapshot")
 	}
+	ownedBlocksTemplateExactSourceV1(t, f, tpl.ID)
 }
 
 func TestDocumentCreationOperatorQuotaRollsBackE2E(t *testing.T) {

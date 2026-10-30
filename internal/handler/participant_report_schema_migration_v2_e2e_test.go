@@ -6,6 +6,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"strings"
@@ -62,7 +63,7 @@ func TestParticipantReportSchemaUpgradeAndNativeSelection404E2E(t *testing.T) {
 	// draft pin, pre-supplied future clock, or callback selects the new version.
 	reportSchemaSend404(t, f, org, user, draft, nil)
 	q := generated.New(f.admin)
-	claimed, err := q.BeginDocumentFinalization(f.ctx, generated.BeginDocumentFinalizationParams{ID: draft, OrgID: org, RetentionYears: 7})
+	claimed, err := reportSchemaBeginFinalization113(f.ctx, f.admin, draft, org)
 	if err != nil || claimed.ParticipantReportSchema != render.ParticipantReportSchemaV2 || !claimed.CompletionEffectiveAt.Valid || claimed.UpdatedAt.Time.Before(claimed.CompletionEffectiveAt.Time) {
 		t.Fatal("fresh preexisting draft did not select exact V2/clock at native freeze", err)
 	}
@@ -143,7 +144,7 @@ func TestParticipantReportSchemaFamilyAndRetainedReceipt404E2E(t *testing.T) {
 	if _, err = tx.Exec(f.ctx, "SELECT id FROM documents WHERE parent_envelope_id=$1 AND org_id=$2 ORDER BY id FOR UPDATE", root, org); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := qt.BeginDocumentFinalization(f.ctx, generated.BeginDocumentFinalizationParams{ID: root, OrgID: org, RetentionYears: 7})
+	claimed, err := reportSchemaBeginFinalization113(f.ctx, tx, root, org)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,4 +499,116 @@ func reportSchemaRetainReceipt404(t *testing.T, f migrationPGFixture242, doc *ge
 	if err = tx.Commit(f.ctx); err != nil {
 		t.Fatal("M108/M109 original deferred guards refused synthetic exact retained tuple", err)
 	}
+}
+
+// The M113 fixture executes its historical claim contract, rather than today's
+// M116 presign selector (which does not exist in schema113). Frozen from the
+// 2152cbff1652706a003a8ad56fff0298746f3558 claim: all tenant/status/deletion,
+// family response/history high-waters and the real retention clock remain.
+// Only the historically current V2 selector and bounded RETURNING projection
+// differ. No modern function, column or report evidence is installed at M113.
+const reportSchemaBeginFinalizationSQL113 = `-- name: BeginDocumentFinalization :one
+-- The surrounding transaction holds the root row lock and has rechecked the
+-- exact recipient readiness predicate. Capture one post-readiness timestamp,
+-- but never let database clock rollback place completion before the durable
+-- send epoch or any already-committed response or retained participant-history
+-- row in the envelope family. PostgreSQL timestamps have microsecond precision,
+-- so advancing each
+-- prior high-water by one microsecond gives a strict and representable order.
+WITH finalizing_root AS MATERIALIZED (
+    SELECT d.id, d.org_id, d.sent_at
+    FROM documents d
+    WHERE d.id = $2
+      AND d.org_id = $3
+      AND d.status = 'in_progress'
+      AND d.sent_at IS NOT NULL
+      AND d.deleted_at IS NULL
+), lifecycle_clock AS MATERIALIZED (
+    SELECT root.id,
+           GREATEST(
+               statement_timestamp(),
+               COALESCE((
+                   SELECT max(member.sent_at) + interval '1 microsecond'
+                   FROM documents member
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(r.signed_at) + interval '1 microsecond'
+                   FROM recipients r
+                   JOIN documents member ON member.id = r.document_id
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(s.signed_at) + interval '1 microsecond'
+                   FROM signatures s
+                   JOIN documents member ON member.id = s.document_id
+                   WHERE member.id = root.id OR member.parent_envelope_id = root.id
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(e.created_at) + interval '1 microsecond'
+                   FROM events e
+                   JOIN documents member ON member.id = e.document_id
+                   WHERE e.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(c.created_at) + interval '1 microsecond'
+                   FROM document_comments c
+                   JOIN documents member ON member.id = c.document_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(v.created_at) + interval '1 microsecond'
+                   FROM document_versions v
+                   JOIN documents member ON member.id = v.document_id AND member.org_id = v.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz),
+               COALESCE((
+                   SELECT max(p.updated_at) + interval '1 microsecond'
+                   FROM document_proposals p
+                   JOIN documents member ON member.id = p.document_id AND member.org_id = p.org_id
+                   WHERE member.org_id = root.org_id
+                     AND (member.id = root.id OR member.parent_envelope_id = root.id)
+               ), '-infinity'::timestamptz)
+           ) AS effective_at
+    FROM finalizing_root root
+)
+UPDATE documents AS target
+SET status = 'finalizing',
+    participant_report_schema = 'hash-participant-report-v2',
+    completion_effective_at_bound = TRUE,
+    completion_effective_at = COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
+    -- Object Lock timestamps have whole-second precision. Round upward after
+    -- the calendar-year addition so the deadline is never even fractionally
+    -- shorter than the configured retention period.
+    finalization_retain_until = COALESCE(
+        finalization_retain_until,
+        hash_evidence_retain_until(
+            COALESCE(target.completion_effective_at, lifecycle_clock.effective_at),
+            $1::integer
+        )
+    ),
+    updated_at = lifecycle_clock.effective_at
+FROM lifecycle_clock
+WHERE target.id = lifecycle_clock.id
+  AND target.id = $2
+  AND target.org_id = $3
+  AND target.status = 'in_progress'
+  AND target.sent_at IS NOT NULL
+  AND target.deleted_at IS NULL
+RETURNING target.id,target.org_id,target.participant_report_schema,
+ target.completion_effective_at_bound,target.completion_effective_at,
+ target.finalization_retain_until,target.updated_at;`
+
+func reportSchemaBeginFinalization113(ctx context.Context, database generated.DBTX, id, org uuid.UUID) (*generated.Document, error) {
+	out := &generated.Document{}
+	err := database.QueryRow(ctx, reportSchemaBeginFinalizationSQL113, int32(article13.RetentionYearsV1), id, org).Scan(
+		&out.ID, &out.OrgID, &out.ParticipantReportSchema, &out.CompletionEffectiveAtBound,
+		&out.CompletionEffectiveAt, &out.FinalizationRetainUntil, &out.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

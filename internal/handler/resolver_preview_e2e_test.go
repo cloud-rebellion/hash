@@ -17,6 +17,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/crmconnection"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/resolver"
@@ -28,7 +29,11 @@ type previewBlockingSource struct {
 	calls   atomic.Int32
 	entered chan resolver.Ref
 	release chan struct{}
-	failure bool
+	failure atomic.Bool
+	value   string
+	peer    *crmSourcePeerE2E
+	native  *crmConnectionPauseE2E
+	records int64
 }
 
 func (*previewBlockingSource) Kind() resolver.SourceKind { return resolver.SourceCRMDeal }
@@ -41,31 +46,95 @@ func (s *previewBlockingSource) Fetch(ctx context.Context, ref resolver.Ref) (st
 			return "", ctx.Err()
 		}
 	}
-	if s.failure {
+	if s.failure.Load() {
 		return "", resolver.ErrNotFound
 	}
-	return "Current reviewed CRM customer", nil
+	return s.value, nil
+}
+
+func (s *previewBlockingSource) callsTotal() int64 {
+	return int64(s.calls.Load()) + s.peer.deals.Load() - s.records
+}
+func (s *previewBlockingSource) unblock() {
+	if s.release != nil {
+		select {
+		case <-s.release:
+		default:
+			close(s.release)
+		}
+	}
+	if s.native != nil {
+		s.native.finish()
+	}
+}
+
+// Use the actual one-value observe/apply ceremony so Send owns the supported
+// CRM HTTP source and the document already contains its human-reviewed value.
+// Preview's independent callback remains only a cache/failure/wait probe.
+func reviewResolverCRMFixtureE2E(t *testing.T, f *variableBindingAuthorizationFixture, source *previewBlockingSource) {
+	t.Helper()
+	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+	c := crmDocumentReadContextE2E(t, f.lifecycleAuthorizationFixture, cookie)
+	in := CRMMappingRequest{CRMDocumentWitnessE2E(c), []crmDocumentMapping{{"customer", "crm.deal", crmSourceDealE2E, "title"}}}
+	observation := crmDocumentObserveE2E(t, f.lifecycleAuthorizationFixture, cookie, in)
+	w := crmDocumentRequestE2E(t, f.lifecycleAuthorizationFixture, f.ctx, http.MethodPost, "apply", cookie, crmDocumentApplyInputE2E(in, observation.ReviewDigest))
+	if w.Code != http.StatusOK {
+		t.Fatalf("genuine one-value CRM review=%d %s", w.Code, w.Body.String())
+	}
+	var err error
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.records = source.peer.deals.Load()
+	events, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.auditBaseline = len(events)
 }
 
 func setupResolverPreviewE2E(t *testing.T, role string, blocked, failure bool) (variableBindingAuthorizationFixture, *previewBlockingSource) {
 	t.Helper()
-	f := setupVariableBindingAuthorizationE2E(t, role)
-	source := &previewBlockingSource{failure: failure}
+	// Enrollment, source review and native document birth require a real owner.
+	// Viewer/sender credentials are established only after that authorized setup.
+	f := setupVariableBindingAuthorizationE2E(t, "owner")
+	connection := setupCRMConnectionForFixtureE2E(t, f.lifecycleAuthorizationFixture)
+	peer := newCRMSourcePeerE2E(t)
+	peer.setDeal(t, "Current reviewed CRM customer")
+	client, err := crmconnection.NewClient(peer.server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.CRMOrigin, f.s.CRMClient = peer.server.URL, client
+	connection.active(t)
+	source := &previewBlockingSource{value: "Current reviewed CRM customer", peer: peer}
+	source.failure.Store(failure)
+	f.s.Send.Resolver = resolver.New(f.q)
+	f.s.Send.Resolver.CRM = &resolver.CRMRecords{Store: f.q, Client: client, Keys: f.s.CRMKeys, Origin: peer.server.URL}
+	reviewResolverCRMFixtureE2E(t, &f, source)
+	if failure {
+		// Preview-only fallback is an explicit authoring choice. Native Send
+		// forbids it; these source-failure read tests never send this document.
+		body := `{"source_kind":"crm.deal","source_ref":"` + crmSourceDealE2E + `","source_path":"title","fallback":"Original fallback"}`
+		if w := f.submitScoped("upsert", f.doc.ID, "customer", body, connection.cookie); w.Code != http.StatusOK {
+			t.Fatalf("actual preview fallback preparation=%d %s", w.Code, w.Body.String())
+		}
+	}
 	if blocked {
 		source.entered = make(chan resolver.Ref, 1)
 		source.release = make(chan struct{})
-		t.Cleanup(func() {
-			select {
-			case <-source.release:
-			default:
-				close(source.release)
-			}
-		})
 	}
+	t.Cleanup(source.unblock)
 	f.s.Resolver = resolver.New(f.q, source)
-	f.s.Send.Resolver = f.s.Resolver
+	if role != "owner" {
+		f.user, err = f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, Resolver: f.s.Resolver, PublicURL: f.s.PublicURL})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, Resolver: f.s.Resolver, PublicURL: f.s.PublicURL, PDFCreationSessions: f.s.HTMLCreationSessions, Versions: f.s.Versions, Storage: f.s.Storage, Billing: f.s.Billing})
 	return f, source
 }
 
@@ -115,10 +184,22 @@ func mintResolverReadKeyE2E(t *testing.T, f variableBindingAuthorizationFixture,
 
 func awaitResolverSourceE2E(t *testing.T, f variableBindingAuthorizationFixture, source *previewBlockingSource) {
 	t.Helper()
+	var nativeEntered <-chan struct{}
+	if source.native != nil {
+		nativeEntered = source.native.entered
+	}
 	select {
 	case ref := <-source.entered:
-		if ref.OrgID != f.org || ref.DocID != f.doc.ID || ref.Source != "deal_original" || ref.Path != "deal.name" {
+		if ref.OrgID != f.org || ref.DocID != f.doc.ID || ref.Source != crmSourceDealE2E || ref.Path != "title" {
 			t.Fatalf("lost source tenant/ref: %+v", ref)
+		}
+	case <-nativeEntered:
+		// The real peer already checked the exact deal endpoint and original
+		// account bearer. Bind that HTTP wait to this actual document's row;
+		// no callback-shaped Ref is manufactured as native source evidence.
+		bindings, err := f.q.ListVariableBindings(f.ctx, f.doc.ID)
+		if err != nil || len(bindings) != 1 || bindings[0].SourceRef != crmSourceDealE2E || bindings[0].SourcePath != "title" || source.peer.unexpected.Load() != 0 || source.peer.deals.Load()-source.records != 1 {
+			t.Fatal("native HTTP wait lost the original document/source/account", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("preview did not reach actual blocking source")
@@ -164,12 +245,12 @@ func TestResolverPreviewViewerReadsAreSideEffectFreeE2E(t *testing.T) {
 				if f.snapshot(t) != before {
 					t.Fatal("viewer preview/source failure/cache hit persisted an observation, content, audit, version, or outbox")
 				}
-				expectedCalls := int32(1)
+				expectedCalls := int64(1)
 				if failure {
 					expectedCalls = 2
 				}
-				if source.calls.Load() != expectedCalls {
-					t.Fatalf("source calls=%d want%d", source.calls.Load(), expectedCalls)
+				if source.callsTotal() != expectedCalls {
+					t.Fatalf("source calls=%d want%d", source.callsTotal(), expectedCalls)
 				}
 			})
 		}
@@ -204,7 +285,9 @@ func TestResolverPreviewRechecksAfterSourceWaitE2E(t *testing.T) {
 				ctx, cancel := context.WithCancel(f.ctx)
 				defer cancel()
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- submitResolverPreviewE2E(f, ctx, transport, credential) }()
+				joined := make(chan struct{})
+				go func() { defer close(joined); result <- submitResolverPreviewE2E(f, ctx, transport, credential) }()
+				defer func() { cancel(); source.unblock(); joinHTMLAuthoringRequestE2E(t, cancel, joined) }()
 				awaitResolverSourceE2E(t, f, source)
 				senderCookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 				want, message := http.StatusConflict, resolver.ErrPreviewChanged.Error()
@@ -269,7 +352,7 @@ func TestResolverPreviewRechecksAfterSourceWaitE2E(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := f.snapshot(t)
-				close(source.release)
+				source.unblock()
 				assertResolverPreviewResultE2E(t, transport, receiveSessionOperationE2E(t, result), want, message)
 				if f.snapshot(t) != before {
 					t.Fatal("late preview changed current binding/doc/audit/outbox after concurrent mutation or read revocation")
@@ -297,43 +380,67 @@ func TestResolverPreviewDocumentTokenConsumesOneAdmissionE2E(t *testing.T) {
 }
 
 func TestResolverSendFreshCRMRefusesCachedFallbackAndUnauthorizedWritesE2E(t *testing.T) {
-	for _, change := range []string{"source-failure", "binding-change", "binding-recreate", "logout", "key-delete", "invalidate"} {
+	for _, change := range []string{"source-failure", "fallback", "binding-change", "binding-recreate", "logout", "key-delete", "invalidate"} {
 		t.Run(change, func(t *testing.T) {
-			f, source := setupResolverPreviewE2E(t, "sender", change != "source-failure", false)
+			f, source := setupResolverPreviewE2E(t, "sender", change != "source-failure" && change != "fallback", false)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-			if change == "source-failure" {
+			if change == "source-failure" || change == "fallback" {
 				assertResolverPreviewResultE2E(t, "resolve", submitResolverPreviewE2E(f, f.ctx, "resolve", cookie), http.StatusOK, "")
-				source.failure = true
+				wantCalls := int64(2)
+				if change == "source-failure" {
+					source.failure.Store(true)
+					source.peer.mu.Lock()
+					source.peer.deal = json.RawMessage(`{}`) // actual HTTP response fails record identity/shape validation
+					source.peer.mu.Unlock()
+				} else {
+					// A cached read is not authority to use an explicit fallback in
+					// native Send when the real fresh provider response is invalid.
+					body := `{"source_kind":"crm.deal","source_ref":"` + crmSourceDealE2E + `","source_path":"title","fallback":"Original fallback"}`
+					if w := f.submitScoped("upsert", f.doc.ID, "customer", body, cookie); w.Code != http.StatusOK {
+						t.Fatalf("actual fallback authoring=%d %s", w.Code, w.Body.String())
+					}
+					source.peer.mu.Lock()
+					source.peer.deal = json.RawMessage(`{}`)
+					source.peer.mu.Unlock()
+				}
 				before := f.snapshot(t)
 				w := f.lifecycleAuthorizationFixture.submit("send", cookie)
-				if w.Code == http.StatusOK || source.calls.Load() != 2 {
-					t.Fatalf("send trusted preview cache/fallback: %d %s calls=%d", w.Code, w.Body.String(), source.calls.Load())
+				if w.Code == http.StatusOK || source.callsTotal() != wantCalls {
+					t.Fatalf("send trusted preview cache/fallback: %d %s calls=%d", w.Code, w.Body.String(), source.callsTotal())
 				}
 				if f.snapshot(t) != before {
 					t.Fatal("failed fresh CRM send persisted observation or ceremony")
 				}
 				return
 			}
+			source.native = source.peer.pauseRecord(t)
 			var keyID uuid.UUID
 			credential := cookie
 			if change == "key-delete" {
 				mint, id := mintDocumentMetadataKeyE2E(t, f.lifecycleAuthorizationFixture, false)
 				credential, keyID = mint.Plaintext, id
 			}
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
 			result := make(chan *httptest.ResponseRecorder, 1)
+			joined := make(chan struct{})
 			go func() {
+				defer close(joined)
 				if change == "key-delete" {
 					body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "send_document", "arguments": map[string]any{"document_id": f.doc.ID, "lawful_basis": "contract"}}})
-					r := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", strings.NewReader(string(body)))
+					r := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", strings.NewReader(string(body))).WithContext(ctx)
 					r.Header.Set("Content-Type", "application/json")
 					r.Header.Set("Authorization", "Bearer "+credential)
 					w := httptest.NewRecorder()
 					f.s.Routes().ServeHTTP(w, r)
 					result <- w
 				} else {
-					result <- f.lifecycleAuthorizationFixture.submit("send", credential)
+					requestFixture := f.lifecycleAuthorizationFixture
+					requestFixture.ctx = ctx
+					result <- requestFixture.submit("send", credential)
 				}
 			}()
+			defer func() { cancel(); source.unblock(); joinHTMLAuthoringRequestE2E(t, cancel, joined) }()
 			awaitResolverSourceE2E(t, f, source)
 			var err error
 			switch change {
@@ -353,13 +460,13 @@ func TestResolverSendFreshCRMRefusesCachedFallbackAndUnauthorizedWritesE2E(t *te
 			case "key-delete":
 				_, err = f.pool.Exec(f.ctx, `DELETE FROM api_keys WHERE id=$1`, keyID) //nolint:rawsql
 			case "invalidate":
-				f.s.Resolver.InvalidateForSourceOrgs(string(resolver.SourceCRMDeal), "deal_original", []uuid.UUID{f.org})
+				f.s.Send.Resolver.InvalidateForSourceOrgs(string(resolver.SourceCRMDeal), crmSourceDealE2E, []uuid.UUID{f.org})
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			before := f.snapshot(t)
-			close(source.release)
+			source.unblock()
 			w := receiveSessionOperationE2E(t, result)
 			if change == "key-delete" {
 				if text := fieldMCPTextE2E(t, w, true); !strings.Contains(text, auth.ErrMutationPermissionRevoked.Error()) {
@@ -391,11 +498,11 @@ func TestResolverDurableObservationRequiresExactRevisionsE2E(t *testing.T) {
 			case "document-revision":
 				_, err = f.pool.Exec(f.ctx, `UPDATE documents SET updated_at=clock_timestamp() WHERE id=$1`, f.doc.ID) //nolint:rawsql
 			case "binding-revision":
-				_, err = f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: f.doc.ID, VariableName: "customer", SourceKind: "crm.deal", SourceRef: "deal_changed", SourcePath: "deal.name"})
+				_, err = f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: f.doc.ID, VariableName: "customer", SourceKind: "crm.deal", SourceRef: "deal_changed", SourcePath: "title"})
 			case "binding-recreated":
 				err = f.q.DeleteVariableBinding(f.ctx, generated.DeleteVariableBindingParams{DocumentID: f.doc.ID, VariableName: "customer"})
 				if err == nil {
-					_, err = f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: f.doc.ID, VariableName: "customer", SourceKind: "crm.deal", SourceRef: "deal_original", SourcePath: "deal.name"})
+					_, err = f.q.UpsertVariableBinding(f.ctx, generated.UpsertVariableBindingParams{DocumentID: f.doc.ID, VariableName: "customer", SourceKind: "crm.deal", SourceRef: crmSourceDealE2E, SourcePath: "title"})
 				}
 			case "sent":
 				w := f.lifecycleAuthorizationFixture.submit("send", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
@@ -433,7 +540,7 @@ func TestResolverFrozenPreviewRemainsReadableAndNeverFetchesE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.snapshot(t)
-	calls := source.calls.Load()
+	calls := source.callsTotal()
 	for _, transport := range []string{"resolve", "html", "mcp"} {
 		credential := cookie
 		if transport == "mcp" {
@@ -445,26 +552,18 @@ func TestResolverFrozenPreviewRemainsReadableAndNeverFetchesE2E(t *testing.T) {
 			t.Fatalf("frozen preview not labelled: %s", answer)
 		}
 	}
-	if source.calls.Load() != calls || f.snapshot(t) != before {
+	if source.callsTotal() != calls || f.snapshot(t) != before {
 		t.Fatal("frozen viewer/read-key previews fetched live source or mutated signing evidence")
 	}
 }
 
-type previewThenCurrentCRMSource struct{ calls atomic.Int32 }
-
-func (*previewThenCurrentCRMSource) Kind() resolver.SourceKind { return resolver.SourceCRMDeal }
-func (s *previewThenCurrentCRMSource) Fetch(context.Context, resolver.Ref) (string, error) {
-	if s.calls.Add(1) == 1 {
-		return "Older CRM value cached for preview", nil
-	}
-	return "Current CRM value reviewed at send", nil
-}
-
 func TestResolverSendFreezesCurrentCRMInsteadOfCachedPreviewE2E(t *testing.T) {
-	f, _ := setupResolverPreviewE2E(t, "sender", false, false)
-	source := &previewThenCurrentCRMSource{}
-	f.s.Resolver = resolver.New(f.q, source)
-	f.s.Send.Resolver = f.s.Resolver
+	f, source := setupResolverPreviewE2E(t, "owner", false, false)
+	source.peer.setDeal(t, "Current CRM value reviewed at send")
+	reviewResolverCRMFixtureE2E(t, &f, source)
+	// The current value is genuinely reviewed in the static draft. Only the
+	// read-only preview probe returns an older cached value; Send must ignore it.
+	source.value = "Older CRM value cached for preview"
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 	before := f.snapshot(t)
 	for i := 0; i < 2; i++ {
@@ -473,12 +572,12 @@ func TestResolverSendFreezesCurrentCRMInsteadOfCachedPreviewE2E(t *testing.T) {
 			t.Fatalf("second preview did not exercise cache: %s", answer)
 		}
 	}
-	if source.calls.Load() != 1 || f.snapshot(t) != before {
+	if source.callsTotal() != 1 || f.snapshot(t) != before {
 		t.Fatal("cached previews fetched twice or wrote document/binding observations")
 	}
 	sent := f.lifecycleAuthorizationFixture.submit("send", cookie)
-	if sent.Code != http.StatusOK || source.calls.Load() != 2 {
-		t.Fatalf("actual send did not fetch current CRM: %d %s calls=%d", sent.Code, sent.Body.String(), source.calls.Load())
+	if sent.Code != http.StatusOK || source.callsTotal() != 2 {
+		t.Fatalf("actual send did not fetch current CRM: %d %s calls=%d", sent.Code, sent.Body.String(), source.callsTotal())
 	}
 	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
 	if err != nil || doc.Status != "sent" {
@@ -492,18 +591,19 @@ func TestResolverSendFreezesCurrentCRMInsteadOfCachedPreviewE2E(t *testing.T) {
 	if err != nil || len(bindings) != 1 || bindings[0].LastValue != values["customer"] || bindings[0].LastError != "" || !bindings[0].LastResolved.Valid {
 		t.Fatalf("send observation not tied to frozen value: %+v err=%v", bindings, err)
 	}
-	var sentEvents, invitedEvents, outbox, confirmations, intents, wrongActors int
+	var sentEvents, invitedEvents, observedEvents, outbox, confirmations, intents, wrongActors int
 	if err := f.pool.QueryRow(f.ctx, `SELECT
  (SELECT count(*) FROM events WHERE document_id=$1 AND kind='document.sent' AND payload_json->>'via'='rest' AND payload_json->>'lawful_basis'='contract' AND payload_json->>'lawful_basis_confirmed'='true'),
  (SELECT count(*) FROM events WHERE document_id=$1 AND kind='recipient.invited'),
+ (SELECT count(*) FROM events WHERE document_id=$1 AND kind='crm.variables.observed' AND payload_json->>'assurance'='time-of-read'),
  (SELECT count(*) FROM email_deliveries WHERE to_email=$2),
  (SELECT count(*) FROM document_lawful_basis_confirmations WHERE document_id=$1 AND lawful_basis='contract'),
  (SELECT count(*) FROM send_sealing_intents WHERE document_id=$1),
- (SELECT count(*) FROM events WHERE document_id=$1 AND actor_user_id IS DISTINCT FROM $3)`, f.doc.ID, f.recipient.Email, f.user.ID).Scan(&sentEvents, &invitedEvents, &outbox, &confirmations, &intents, &wrongActors); err != nil {
+ (SELECT count(*) FROM events WHERE document_id=$1 AND actor_user_id IS DISTINCT FROM $3)`, f.doc.ID, f.recipient.Email, f.user.ID).Scan(&sentEvents, &invitedEvents, &observedEvents, &outbox, &confirmations, &intents, &wrongActors); err != nil {
 		t.Fatal(err)
 	} //nolint:rawsql -- exact fixture reviewed send ledger
-	if sentEvents != 1 || invitedEvents != 1 || outbox != 1 || confirmations != 1 || intents != 0 || wrongActors != 0 {
-		t.Fatalf("reviewed send effects sent/invited/outbox/notice/pending-intents/wrong-actors=%d/%d/%d/%d/%d/%d", sentEvents, invitedEvents, outbox, confirmations, intents, wrongActors)
+	if sentEvents != 1 || invitedEvents != 1 || observedEvents != 1 || outbox != 1 || confirmations != 1 || intents != 0 || wrongActors != 0 {
+		t.Fatalf("reviewed send effects sent/invited/CRM/outbox/notice/pending-intents/wrong-actors=%d/%d/%d/%d/%d/%d/%d", sentEvents, invitedEvents, observedEvents, outbox, confirmations, intents, wrongActors)
 	}
 	events, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 	if err != nil {
@@ -511,12 +611,12 @@ func TestResolverSendFreezesCurrentCRMInsteadOfCachedPreviewE2E(t *testing.T) {
 	}
 	verifier := audit.NewChainVerifier()
 	verifier.VerifyPage(events)
-	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != 2 {
+	if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != f.auditBaseline+3 {
 		t.Fatalf("send chain invalid: %+v", result)
 	}
 	after := f.snapshot(t)
 	assertResolverPreviewResultE2E(t, "resolve", submitResolverPreviewE2E(f, f.ctx, "resolve", cookie), http.StatusOK, "Current CRM value reviewed at send")
-	if source.calls.Load() != 2 || f.snapshot(t) != after {
+	if source.callsTotal() != 2 || f.snapshot(t) != after {
 		t.Fatal("sent preview refetched CRM or altered frozen evidence")
 	}
 }

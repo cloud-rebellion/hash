@@ -8,6 +8,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -20,18 +21,56 @@ import (
 	"time"
 )
 
+// These CAS regressions need actual current source measurements. The original
+// public creator and PATCH are the only positive producers; stale/refusal
+// stimuli below never backfill a source or claim a version from raw SQL.
+func nativeRevisionCreateE2E(t *testing.T, f lifecycleAuthorizationFixture, name string, blocks, variables json.RawMessage) (*generated.Document, error) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"name": name, "source_kind": "blocks", "blocks_json": blocks, "variables_json": variables})
+	if err != nil {
+		return nil, err
+	}
+	w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents", string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	var created documentResponse
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &created) != nil {
+		return nil, fmt.Errorf("actual native revision creator=%d", w.Code)
+	}
+	return f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: created.ID, OrgID: f.org})
+}
+
+func nativeRevisionEditE2E(t *testing.T, f lifecycleAuthorizationFixture, document *generated.Document, blocks, variables json.RawMessage) (*generated.Document, error) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"expected_updated_at": document.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), "blocks_json": blocks, "variables_json": variables})
+	if err != nil {
+		return nil, err
+	}
+	w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPatch, "/api/v1/documents/"+document.ID.String(), string(body), dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
+	if w.Code != http.StatusOK {
+		return nil, fmt.Errorf("actual native revision PATCH=%d", w.Code)
+	}
+	return f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: document.ID, OrgID: f.org})
+}
+
 func TestStaleRestoreLeavesEvidenceUntouchedE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Restore", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{"value":"historical"}`)})
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
+	doc, err := nativeRevisionCreateE2E(t, f, "Restore", json.RawMessage(`{"version":1,"blocks":[]}`), json.RawMessage(`{"value":"historical"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: doc.ID, OrgID: org, Name: doc.Name, SourceKind: doc.SourceKind, BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &user, Via: versions.ViaHuman})
+	server.Versions = versions.New(q)
+	doc, err = nativeRevisionEditE2E(t, f, doc, doc.BlocksJson, doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
+	}
+	target, err := q.GetLatestDocumentVersion(ctx, doc.ID)
+	if err != nil || target == nil || string(target.BlockTreeJson) != string(doc.BlocksJson) || string(target.VariablesJson) != string(doc.VariablesJson) {
+		t.Fatal("actual native historical target differs from current draft", err)
 	}
 	old := toDocumentResponse(doc).UpdatedAt
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: doc.BlocksJson, VariablesJson: json.RawMessage(`{"value":"current"}`)})
+	current, err := nativeRevisionEditE2E(t, f, doc, doc.BlocksJson, json.RawMessage(`{"value":"current"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +131,17 @@ func TestStaleRestoreLeavesEvidenceUntouchedE2E(t *testing.T) {
 }
 
 func TestStaleBlockReplacementLeavesEvidenceUntouchedE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
 	server.Versions = versions.New(q)
 	original := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Blocks", BlocksJson: original, VariablesJson: json.RawMessage(`{}`)})
+	doc, err := nativeRevisionCreateE2E(t, f, "Blocks", original, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), VariablesJson: doc.VariablesJson})
+	current, err := nativeRevisionEditE2E(t, f, doc, json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,14 +195,17 @@ func TestStaleBlockReplacementLeavesEvidenceUntouchedE2E(t *testing.T) {
 }
 
 func TestStaleImportReplacementLeavesEvidenceUntouchedE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
 	server.Versions = versions.New(q)
 	original := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Blocks", BlocksJson: original, VariablesJson: json.RawMessage(`{}`)})
+	doc, err := nativeRevisionCreateE2E(t, f, "Blocks", original, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), VariablesJson: doc.VariablesJson})
+	current, err := nativeRevisionEditE2E(t, f, doc, json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,14 +262,17 @@ func TestStaleImportReplacementLeavesEvidenceUntouchedE2E(t *testing.T) {
 }
 
 func TestStaleReorderLeavesEvidenceUntouchedE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
 	server.Versions = versions.New(q)
 	original := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"},{"id":"q","type":"paragraph","text":"second"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Blocks", BlocksJson: original, VariablesJson: json.RawMessage(`{}`)})
+	doc, err := nativeRevisionCreateE2E(t, f, "Blocks", original, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"q","type":"paragraph","text":"second"},{"id":"p","type":"paragraph","text":"original"}]}`), VariablesJson: doc.VariablesJson})
+	current, err := nativeRevisionEditE2E(t, f, doc, json.RawMessage(`{"version":1,"blocks":[{"id":"q","type":"paragraph","text":"second"},{"id":"p","type":"paragraph","text":"original"}]}`), doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,14 +326,17 @@ func TestStaleReorderLeavesEvidenceUntouchedE2E(t *testing.T) {
 }
 
 func TestStaleDeleteLeavesEvidenceUntouchedE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
 	server.Versions = versions.New(q)
 	original := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Blocks", BlocksJson: original, VariablesJson: json.RawMessage(`{}`)})
+	doc, err := nativeRevisionCreateE2E(t, f, "Blocks", original, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), VariablesJson: doc.VariablesJson})
+	current, err := nativeRevisionEditE2E(t, f, doc, json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,14 +404,17 @@ func TestStaleDeleteLeavesEvidenceUntouchedE2E(t *testing.T) {
 }
 
 func TestAppendRetryDoesNotDuplicateGeneratedBlockE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
 	server.Versions = versions.New(q)
 	original := json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"original"}]}`)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Blocks", BlocksJson: original, VariablesJson: json.RawMessage(`{}`)})
+	doc, err := nativeRevisionCreateE2E(t, f, "Blocks", original, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: doc.ID, OrgID: org, BlocksJson: json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), VariablesJson: doc.VariablesJson})
+	current, err := nativeRevisionEditE2E(t, f, doc, json.RawMessage(`{"version":1,"blocks":[{"id":"p","type":"paragraph","text":"other client"}]}`), doc.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}

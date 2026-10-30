@@ -31,6 +31,7 @@ const (
 	HTMLDocumentRevisionInputV1
 	HTMLPreSignAPISourceInputV1
 	HTMLPreSignSupersessionInputV1
+	HTMLCRMDocumentApplyInputV1
 )
 
 // Copied public shells share the original private owner. Neither a copied

@@ -15,21 +15,28 @@ import (
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Actual REST import/recipient/field/Send/Sign and committed intent precede
-// every recovery. The S3 and renderer peers are synthetic protocol providers.
-// Only the explicitly labelled legacy/partial row version columns are changed
-// to exercise old compatibility states; no source/history/cache row is forged.
-func TestOwnedHistoricalResumePinnedAndLegacyExactWitnessE2E(t *testing.T) {
+// genuine pinned recovery. The S3 and renderer peers are synthetic providers.
+// Current post109 evidence must not be relabelled as legacy. Real pre109
+// unmeasured recovery is unsupported/unqualified by this fixture; the existing
+// installation is retained separately from the authorized fresh installation.
+func TestOwnedHistoricalResumePinnedAndCurrentIntentLegacyRelabelRefusedE2E(t *testing.T) {
 	for _, mode := range []string{"pinned", "legacy", "partial"} {
-		t.Run(mode, func(t *testing.T) {
+		name := mode
+		if mode != "pinned" {
+			name = "current_intent_cannot_be_relabelled_" + mode
+		}
+		t.Run(name, func(t *testing.T) {
 			q := newOwnedPublicReadFixtureV1(t)
 			ownedCreationPrepareProPlanV1(t, q)
 			f := q.f
@@ -42,9 +49,11 @@ func TestOwnedHistoricalResumePinnedAndLegacyExactWitnessE2E(t *testing.T) {
 				}
 			})
 			peer := &importStoragePeer{objects: make(map[string][]byte)}
+			var providerCalls atomic.Int64
 			var blockFinal atomic.Bool
 			blockFinal.Store(true)
 			objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				providerCalls.Add(1)
 				if blockFinal.Load() && r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/final-") {
 					// Refuse only after the actual Stage transaction committed its real intent.
 					var staged bool
@@ -124,33 +133,11 @@ func TestOwnedHistoricalResumePinnedAndLegacyExactWitnessE2E(t *testing.T) {
 				t.Fatal("actual Sign did not commit genuine pinned intent", err)
 			}
 			if mode != "pinned" {
-				// Intentional isolated legacy-fixture compatibility state. The four exact
-				// artifact objects/version histories and all immutable evidence stay real.
-				statement := "UPDATE document_finalization_intents SET evidence_version_pins_required=false,final_pdf_version_id=NULL,audit_cert_version_id=NULL,audit_payload_version_id=NULL,audit_signature_version_id=NULL WHERE document_id=$1 AND org_id=$2"
-				if mode == "partial" {
-					statement = "UPDATE document_finalization_intents SET evidence_version_pins_required=false,audit_cert_version_id=NULL,audit_payload_version_id=NULL,audit_signature_version_id=NULL WHERE document_id=$1 AND org_id=$2"
-				}
-				tag, updateErr := f.pool.Exec(f.ctx, statement, id, f.org)
-				if updateErr != nil || tag.RowsAffected() != 1 {
-					t.Fatal("seed labelled legacy version state", updateErr)
-				}
-			}
-			blockFinal.Store(false)
-			if mode == "partial" {
-				damaged, readErr := f.q.GetDocumentFinalizationIntent(f.ctx, generated.GetDocumentFinalizationIntentParams{DocumentID: id, OrgID: f.org})
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				if err = f.s.Sign.FinalizeStranded(f.ctx, f.org, id); err == nil || !strings.Contains(err.Error(), "partial VersionId set") {
-					t.Fatal("partial legacy intent was not refused at original compatibility gate", err)
-				}
-				after, readErr := f.q.GetDocumentFinalizationIntent(f.ctx, generated.GetDocumentFinalizationIntentParams{DocumentID: id, OrgID: f.org})
-				if readErr != nil || after.EvidenceVersionPinsRequired || after.FinalPdfVersionID != damaged.FinalPdfVersionID || after.AuditCertVersionID.Valid || after.AuditPayloadVersionID.Valid || after.AuditSignatureVersionID.Valid {
-					t.Fatal("partial refusal changed pins", readErr)
-				}
+				assertCurrentIntentLegacyRelabelRefused621(t, f, id, mode, &providerCalls)
 				ownedPlainAssertDrainedV1(t, q)
 				return
 			}
+			blockFinal.Store(false)
 			if err = f.s.Sign.FinalizeStranded(f.ctx, f.org, id); err != nil {
 				t.Fatal("actual native Resume/source/intent/retention/publication", err)
 			}
@@ -167,5 +154,74 @@ func TestOwnedHistoricalResumePinnedAndLegacyExactWitnessE2E(t *testing.T) {
 			}
 			ownedPlainAssertDrainedV1(t, q)
 		})
+	}
+}
+
+// This exact inventory includes the current original-output bodies and all
+// published/staged identities, not only the flags targeted by the bad UPDATE.
+func currentIntentRelabelInventory621(t *testing.T, f lifecycleAuthorizationFixture, document uuid.UUID) string {
+	t.Helper()
+	var out string
+	err := f.pool.QueryRow(f.ctx, `SELECT jsonb_build_object(
+ 'document',(SELECT to_jsonb(d) FROM documents d WHERE d.id=$1 AND d.org_id=$2),
+ 'intent',(SELECT to_jsonb(i) FROM document_finalization_intents i WHERE i.document_id=$1 AND i.org_id=$2),
+ 'preparation',(SELECT to_jsonb(p) FROM document_ordinary_finalization_preparations_v1 p WHERE p.document_id=$1 AND p.org_id=$2),
+ 'artifacts',(SELECT jsonb_agg(to_jsonb(o) ORDER BY kind) FROM document_ordinary_finalization_outputs_v1 o WHERE o.document_id=$1 AND o.org_id=$2),
+ 'reports',(SELECT jsonb_agg(to_jsonb(r) ORDER BY completion_effective_at) FROM document_participant_reports_v1 r WHERE r.document_id=$1 AND r.org_id=$2),
+ 'recipients',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM recipients r WHERE r.document_id=$1),
+ 'signatures',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM signatures s WHERE s.document_id=$1),
+ 'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM events e WHERE e.document_id=$1 AND e.org_id=$2)
+ )::text`, document, f.org).Scan(&out)
+	if err != nil {
+		t.Fatal("current intent exact inventory", err)
+	}
+	return out
+}
+
+func assertCurrentIntentLegacyRelabelRefused621(t *testing.T, f lifecycleAuthorizationFixture, document uuid.UUID, mode string, calls *atomic.Int64) {
+	t.Helper()
+	before := currentIntentRelabelInventory621(t, f, document)
+	beforeCalls := calls.Load()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Always join the actual failed transaction before leaving this fixture.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	statement := "UPDATE document_finalization_intents SET evidence_version_pins_required=false,final_pdf_version_id=NULL,audit_cert_version_id=NULL,audit_payload_version_id=NULL,audit_signature_version_id=NULL WHERE document_id=$1 AND org_id=$2"
+	if mode == "partial" {
+		statement = "UPDATE document_finalization_intents SET evidence_version_pins_required=false,audit_cert_version_id=NULL,audit_payload_version_id=NULL,audit_signature_version_id=NULL WHERE document_id=$1 AND org_id=$2"
+	} else if mode != "legacy" {
+		t.Fatal("unknown current-intent corruption mode")
+	}
+	tag, refusal := tx.Exec(f.ctx, statement, document, f.org)
+	if refusal == nil {
+		if tag.RowsAffected() != 1 {
+			t.Fatal("bad relabel did not address its exact genuine current intent")
+		}
+		// M109 owns an initially deferred guard. Force its real validation while
+		// rollback is still explicit, rather than treating UPDATE's rowcount as a
+		// successful historical producer or committing a counterfeit legacy state.
+		_, refusal = tx.Exec(f.ctx, "SET CONSTRAINTS ordinary_finalization_intent_guard_v1 IMMEDIATE")
+	}
+	var pgError *pgconn.PgError
+	if !errors.As(refusal, &pgError) || pgError.Code != "23514" || pgError.Message != "ordinary intent requires exact durable original outputs" {
+		t.Fatal("current evidence relabel did not reach exact original-output immutability guard", refusal)
+	}
+	cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
+	rollbackErr := tx.Rollback(cleanup)
+	cancel()
+	if rollbackErr != nil {
+		t.Fatal("join refused current intent relabel rollback", rollbackErr)
+	}
+	if after := currentIntentRelabelInventory621(t, f, document); after != before {
+		t.Fatal("refused relabel changed document, original artifacts, intent or legal evidence")
+	}
+	if calls.Load() != beforeCalls {
+		t.Fatal("refused SQL relabel touched provider artifacts")
 	}
 }

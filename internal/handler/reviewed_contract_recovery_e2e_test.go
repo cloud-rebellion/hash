@@ -9,11 +9,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,7 @@ import (
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	sendengine "github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/google/uuid"
@@ -163,7 +166,7 @@ func newReviewedContractRecoveryE2E(t *testing.T, withIntent bool) *reviewedCont
 	// failures while constructing the requested damaged state.
 	native.template = createHTMLContractDesignE2E(t, native.f, native.cookie)
 	approveHTMLCreationTemplateE2E(t, native.f, native.template)
-	doc, parties := native.createSentV1(t)
+	doc, parties := createReviewedRecoverySentE2E(t, native)
 	f.docID, f.original = doc.ID, doc
 	for _, party := range parties {
 		f.names = append(f.names, party.Name)
@@ -449,4 +452,92 @@ func reviewedContractRecoverySnapshotE2E(t *testing.T, f *reviewedContractRecove
 		t.Fatal(err)
 	}
 	return strings.Join([]string{f.snapshot(t), reviewedContractHistoryE2E(t, f), state}, "\n")
+}
+
+// This local schema2 recovery baseline keeps the shared schema3 lifecycle helper unchanged.
+func createReviewedRecoverySentE2E(t *testing.T, q *ownedPublicReadFixtureV1) (*generated.Document, []signerBrowserPartyE2E) {
+	t.Helper()
+	f := q.f
+	doc := createHTMLContractDocumentE2E(t, f, q.template, q.cookie)
+	// Schema2 carries its declared parties but predates schema3's frozen field
+	// layout producer. Place each original party's required field through the
+	// real field API before review/Send; no SQL field or measurement is forged.
+	rows, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
+	if err != nil || len(rows) != 2 {
+		t.Fatal("reviewed recovery requires two genuine parties", err)
+	}
+	for i, row := range rows {
+		body, marshalErr := json.Marshal(map[string]any{"recipient_id": row.ID.String(), "type": "signature", "page": 1, "x_pct": 12, "y_pct": 65 + i*15, "w_pct": 30, "h_pct": 8, "required": true})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/fields", string(body), q.cookie)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("genuine reviewed recovery signature placement=%d %s", response.Code, response.Body.String())
+		}
+	}
+	doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.MetadataRedactionReport) == 0 {
+		t.Fatal("fresh real worker report absent")
+	}
+	commitment, err := htmlsource.Commitment(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := json.Marshal(htmlDocumentReviewInput{ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256), ExpectedHTMLSourceCommitment: commitment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/html/review", string(review), q.cookie); w.Code != http.StatusOK {
+		t.Fatalf("genuine exact review=%d %s", w.Code, w.Body.String())
+	}
+	doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := doc
+	var before string
+	if err := f.pool.QueryRow(f.ctx, "SELECT to_jsonb(s)::text FROM document_signing_policy_sizes_v1 s WHERE document_id=$1 AND org_id=$2", doc.ID, f.org).Scan(&before); err != nil || before == "" {
+		t.Fatal("fresh creator did not derive actual policy cache", err)
+	} //nolint:rawsql -- genuine fresh cache witness, never insertion/repair
+	actor := sendengine.Actor{UserID: &f.user.ID, OrgID: f.org, Via: "test", LawfulBasis: "contract", Authorize: func(_ context.Context, _ pgx.Tx, user *generated.User) error {
+		if user == nil || user.ID != f.user.ID || user.OrgID != f.org || user.Role != "owner" {
+			return auth.ErrMutationPermissionRevoked
+		}
+		return nil
+	}}
+	sent, err := f.s.Send.Send(f.ctx, actor, doc.ID)
+	defer sent.CloseConsumerV1() // After actual final link/error use below.
+	if err != nil || sent.Status != "sent" || len(sent.Links) != 2 {
+		t.Fatalf("genuine configured-Resolver send=%+v err=%v", sent, err)
+	}
+	var after string
+	if err := f.pool.QueryRow(f.ctx, "SELECT to_jsonb(s)::text FROM document_signing_policy_sizes_v1 s WHERE document_id=$1 AND org_id=$2", doc.ID, f.org).Scan(&after); err != nil || after != before {
+		t.Fatal("configured Send rewrote/lost fresh immutable HTML policy cache; no repair or remeasurement allowed", err)
+	} //nolint:rawsql -- desired production integration regression
+	if q.fetches.Load() != 0 {
+		t.Fatal("literal no-binding fixture fetched an undeclared source")
+	}
+	parties := make([]signerBrowserPartyE2E, 0, 2)
+	for _, link := range sent.Links {
+		u, err := url.Parse(link.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parties = append(parties, signerBrowserPartyE2E{Token: strings.TrimPrefix(u.Path, "/sign/"), RecipientID: link.RecipientID, Name: link.Name, Role: link.Role})
+	}
+	doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameSignerDocumentSource(original, doc) || original.HtmlReviewedBy != doc.HtmlReviewedBy || original.HtmlReviewedAt != doc.HtmlReviewedAt || !bytes.Equal(original.HtmlReviewedPdfSha256, doc.HtmlReviewedPdfSha256) {
+		t.Fatal("configured Send changed exact reviewed source/variables/PDF pins")
+	}
+	if doc.Status != "sent" || doc.SigningAdmissionPolicy != "historical" {
+		t.Fatal("fixture did not retain genuine actual existing lifecycle policy")
+	}
+	return doc, parties
 }

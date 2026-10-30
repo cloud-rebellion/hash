@@ -83,7 +83,7 @@ func TestDocumentMetadataMCPReadProjectionE2E(t *testing.T) {
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
 	f.s.MCP = mcp.New(mcp.Deps{
 		Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Versions: f.s.Versions,
-		Envelopes: envelopes.New(f.q), Billing: f.s.Billing, PublicURL: f.s.PublicURL,
+		Envelopes: envelopes.New(f.q), Billing: f.s.Billing, PDFCreationSessions: f.s.HTMLCreationSessions, PublicURL: f.s.PublicURL,
 	})
 	orgKey, _ := mintAuthoringMCPE2E(t, f)
 	docKey := mintMetadataDocumentKeyE2E(t, f, m.current.ID)

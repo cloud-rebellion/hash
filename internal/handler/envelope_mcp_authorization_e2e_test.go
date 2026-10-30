@@ -25,10 +25,10 @@ import (
 
 func setupEnvelopeMCPE2E(t *testing.T) (lifecycleAuthorizationFixture, uuid.UUID) {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, "sender", false, true)
+	f := setupNativeLifecycleAuthorization256(t, "sender", false, true)
 	f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Envelopes: envelopes.New(f.q), PublicURL: f.s.PublicURL})
-	child, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Standalone child", BlocksJson: []byte(`{"version":1,"blocks":[]}`), VariablesJson: []byte(`{}`)})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Envelopes: envelopes.New(f.q), PDFCreationSessions: f.s.HTMLCreationSessions, Billing: f.s.Billing, PublicURL: f.s.PublicURL})
+	child, err := nativeRevisionCreateE2E(t, f, "Standalone child", json.RawMessage(`{"version":1,"blocks":[]}`), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +120,12 @@ func TestEnvelopeMCPRetainsOriginalAuthorAndKeyAfterParentWaitE2E(t *testing.T) 
 				mint, keyID := mintAuthoringMCPE2E(t, f)
 				args := envelopeMCPArgsE2E(t, f, standalone, tool)
 				blocked := holdAuthoringDocumentMCPE2E(t, f, envelopeMCPWaitDocE2E(f, standalone, tool))
-				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- submitAuthoringMCPE2E(f, f.ctx, tool, mint.Plaintext, args) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+					return submitAuthoringMCPE2E(f, ctx, tool, mint.Plaintext, args)
+				}, blocked)
+				defer join()
+				// This runtime inherits the exact original pool application identity.
+				awaitNativeTemplateLockE2E(t, f, blocked, "GetHTMLRevisionDocumentReadHeaderV1", false)
 				var err error
 				if change == "demotion" {
 					_, err = f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "viewer"})

@@ -80,6 +80,7 @@ const (
 	HTMLAuditPreSignPublishedV1
 	HTMLAuditPreSignSupersededV1
 	HTMLAuditBlocksRestoredV1
+	HTMLAuditCRMAppliedV1
 )
 
 func (p HTMLAuditPurposeV1) KindV1() string {
@@ -174,6 +175,8 @@ func (p HTMLAuditPurposeV1) KindV1() string {
 		return "document.send_aborted"
 	case HTMLAuditCRMObservedV1:
 		return "crm.variables.observed"
+	case HTMLAuditCRMAppliedV1:
+		return "crm.variables.applied"
 	case HTMLAuditChangesRequestedV1, HTMLAuditChangeDecisionV1:
 		return "document.changes_requested"
 	case HTMLAuditCeremonyRetiredV1:
@@ -297,6 +300,8 @@ func htmlAuditRootKeyV1(p HTMLAuditPurposeV1, k string) bool {
 		fields = "|before_invite|irreversible_sealing_recovery|envelope_id|propagated|via|tool|"
 	case HTMLAuditCRMObservedV1:
 		fields = "|observations|assurance|via|tool|"
+	case HTMLAuditCRMAppliedV1:
+		fields = "|binding_fingerprint_before|binding_fingerprint_after|mapping_digest|content_commitment|html_source_commitment|html_materialization_revision|pdf_sha256|review_digest|has_mappings|observations|assurance|human_confirmed|content_changed|"
 	case HTMLAuditChangesRequestedV1:
 		fields = "|message|block_id|quote|notice_schema|notice_digest|notice_snapshot|change_request|context|proposed|"
 	case HTMLAuditChangeDecisionV1:

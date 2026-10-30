@@ -17,7 +17,6 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -33,6 +32,16 @@ func setupFieldAuthorizationE2E(t *testing.T, role string) fieldAuthorizationFix
 	rows, err := f.q.ListFieldsByDocument(f.ctx, f.doc.ID)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("field fixture count=%d err=%v", len(rows), err)
+	}
+	return fieldAuthorizationFixture{recipientAuthorizationFixture: f, field: rows[0]}
+}
+
+func setupForeignFieldAuthorizationE2E(t *testing.T) fieldAuthorizationFixture {
+	t.Helper()
+	f := setupForeignRecipientAuthorizationE2E(t)
+	rows, err := f.q.ListFieldsByDocument(f.ctx, f.doc.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("foreign field fixture count=%d err=%v", len(rows), err)
 	}
 	return fieldAuthorizationFixture{recipientAuthorizationFixture: f, field: rows[0]}
 }
@@ -213,16 +222,17 @@ func TestFieldAuthoringSenderOwnerCanonicalAuditAndDTOE2E(t *testing.T) {
 				}
 				var actor uuid.UUID
 				var subject string
-				if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,payload_json->>'field_id' FROM events WHERE document_id=$1 AND kind=$2`, f.doc.ID, fieldAuthoringKind(operation)).Scan(&actor, &subject); err != nil || actor != f.user.ID || subject != fieldID.String() {
+				if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,payload_json->>'field_id' FROM events WHERE document_id=$1 AND kind=$2 AND NOT (id=ANY($3::uuid[]))`, f.doc.ID, fieldAuthoringKind(operation), f.originalAudit.ids()).Scan(&actor, &subject); err != nil || actor != f.user.ID || subject != fieldID.String() {
 					t.Fatalf("field audit actor/subject=%s/%s err=%v", actor, subject, err)
 				} //nolint:rawsql
+				f.originalAudit.assertAdded(t, f.lifecycleAuthorizationFixture, 1)
 				rows, err := f.q.ListChainedEventsPageForOrg(f.ctx, generated.ListChainedEventsPageForOrgParams{OrgID: f.org, PageLimit: 100})
 				if err != nil {
 					t.Fatal(err)
 				}
 				verifier := audit.NewChainVerifier()
 				verifier.VerifyPage(rows)
-				if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != 1 {
+				if result := verifier.Result(); !result.OK || !result.Complete || result.TotalChecked != len(f.originalAudit.events)+1 {
 					t.Fatalf("field audit chain invalid: %+v", result)
 				}
 			})
@@ -284,11 +294,8 @@ func TestFieldAuthoringInternalFailuresRollBackAndRetryE2E(t *testing.T) {
 
 func TestFieldAuthoringScopesDocumentRecipientAndFieldE2E(t *testing.T) {
 	f := setupFieldAuthorizationE2E(t, "owner")
-	foreign := setupFieldAuthorizationE2E(t, "owner")
-	sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Field sibling fixture", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	foreign := setupForeignFieldAuthorizationE2E(t)
+	sibling := createAuthoringSiblingE2E(t, f.lifecycleAuthorizationFixture, "Field sibling fixture")
 	before, foreignBefore := f.snapshot(t), foreign.snapshot(t)
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 	for _, parent := range []uuid.UUID{uuid.New(), foreign.doc.ID} {
@@ -314,10 +321,7 @@ func TestFieldAuthoringScopesDocumentRecipientAndFieldE2E(t *testing.T) {
 
 func TestFieldDeleteRechecksOriginalOwnerAfterDocumentWaitE2E(t *testing.T) {
 	f := setupFieldAuthorizationE2E(t, "sender")
-	sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Moved field fixture", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	sibling := createAuthoringSiblingE2E(t, f.lifecycleAuthorizationFixture, "Moved field fixture")
 	blocked, err := f.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -527,12 +531,11 @@ func TestFieldAuthoringAllowsReopenedHistoryAndEnforcesLiveDraftE2E(t *testing.T
 					} //nolint:rawsql -- synthetic soft-deleted parent
 					want = http.StatusNotFound
 				} else {
-					f.doc = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, f.doc, f.recipient)
+					f.doc = sendRecipientAuthorizationNativeE2E(t, f.lifecycleAuthorizationFixture)
 					if state == "reopened" {
 						if _, err := f.q.RequestChangesOnDocument(f.ctx, generated.RequestChangesOnDocumentParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 							t.Fatal(err)
 						}
-						f.s.Sign = &sign.Engine{Pool: f.pool, Queries: f.q, Audit: f.s.Audit}
 						if response := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+f.doc.ID.String()+"/revise", "", cookie); response.Code != http.StatusOK {
 							t.Fatalf("bootstrap revision=%d %s", response.Code, response.Body.String())
 						}

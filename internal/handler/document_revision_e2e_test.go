@@ -17,8 +17,11 @@ import (
 )
 
 func TestDocumentRevisionConcurrentSaveE2E(t *testing.T) {
-	ctx, pool, q, server, org, user := setupDSRE2E(t)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, SenderID: user, Name: "Original", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, native)
+	f := native.f
+	ctx, pool, q, server, org, user := f.ctx, f.pool, f.q, f.s, f.org, f.user.ID
+	doc, err := nativeRevisionCreateE2E(t, f, "Original", json.RawMessage(`{"version":1,"blocks":[]}`), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}

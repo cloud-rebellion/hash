@@ -21,6 +21,8 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/ownedaudit"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -73,8 +75,13 @@ func (a *crmMappingAdmission) checkLocked(ctx context.Context, s *Server, tx pgx
 // bindings are retained unless the reviewer explicitly selected that variable.
 // All callers hold the original draft/member/connection/ledger locks.
 func (a *crmMappingAdmission) persist(ctx context.Context, s *Server, tx pgx.Tx, actor authoring.Actor, doc *generated.Document) (audit.PendingEvent, error) {
+	pending, _, err := a.persistOwnedV1(ctx, s, tx, actor, doc, nil)
+	return pending, err
+}
+
+func (a *crmMappingAdmission) persistOwnedV1(ctx context.Context, s *Server, tx pgx.Tx, actor authoring.Actor, doc *generated.Document, session *pdfadmission.ApplicationSessionV1) (audit.PendingEvent, *pdfadmission.ApplicationHTMLAuditEventConsumerV1, error) {
 	if err := a.checkDeadline(); err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	q := generated.New(tx)
 	desired := map[string]crmDocumentMapping{}
@@ -85,30 +92,30 @@ func (a *crmMappingAdmission) persist(ctx context.Context, s *Server, tx pgx.Tx,
 		_, keep := desired[binding.VariableName]
 		if !keep && (binding.SourceKind == string(crmconnection.Deal) || binding.SourceKind == string(crmconnection.Contact) || binding.SourceKind == string(crmconnection.Company)) {
 			if err := q.DeleteVariableBinding(ctx, generated.DeleteVariableBindingParams{DocumentID: doc.ID, VariableName: binding.VariableName}); err != nil {
-				return audit.PendingEvent{}, err
+				return audit.PendingEvent{}, nil, err
 			}
 		}
 	}
 	for _, m := range a.observation.Mappings {
 		if _, err := q.UpsertVariableBinding(ctx, generated.UpsertVariableBindingParams{DocumentID: doc.ID, VariableName: m.Variable, SourceKind: m.SourceKind, SourceRef: m.SourceRef, SourcePath: m.SourcePath, Fallback: ""}); err != nil {
-			return audit.PendingEvent{}, err
+			return audit.PendingEvent{}, nil, err
 		}
 	}
 	bindings, err := q.ListCRMMappingBindingsForShare(ctx, generated.ListCRMMappingBindingsForShareParams{DocumentID: doc.ID, OrgID: actor.OrgID})
 	if err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	fingerprint, err := crmreview.FullBindingFingerprint(bindings)
 	if err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	semantic, err := crmreview.CRMSemanticDigest(bindings)
 	if err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	content, err := crmreview.ContentCommitment(doc)
 	if err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	input := generated.UpsertDocumentCRMMappingReviewParams{DocumentID: doc.ID, OrgID: actor.OrgID, ExpectedUpdatedAt: doc.UpdatedAt, HasMappings: len(a.observation.Mappings) != 0, BindingDigest: semantic, ContentCommitment: content, ReviewedBy: actor.UserID}
 	if a.observation.snapshot != nil {
@@ -120,9 +127,9 @@ func (a *crmMappingAdmission) persist(ctx context.Context, s *Server, tx pgx.Tx,
 		input.CrmUserID = identity.CRMUserID
 	}
 	if _, err = q.UpsertDocumentCRMMappingReview(ctx, input); errors.Is(err, pgx.ErrNoRows) {
-		return audit.PendingEvent{}, errCRMDocumentChanged
+		return audit.PendingEvent{}, nil, errCRMDocumentChanged
 	} else if err != nil {
-		return audit.PendingEvent{}, err
+		return audit.PendingEvent{}, nil, err
 	}
 	response := a.source.response
 	response.UpdatedAt = doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano)
@@ -130,26 +137,35 @@ func (a *crmMappingAdmission) persist(ctx context.Context, s *Server, tx pgx.Tx,
 	if len(doc.HtmlSourceJson) != 0 {
 		response.HTMLSourceCommitment, err = htmlsource.Commitment(doc)
 		if err != nil {
-			return audit.PendingEvent{}, err
+			return audit.PendingEvent{}, nil, err
 		}
 	}
 	a.response = response
 	// Values and provider payloads are omitted. Exact mapping/record/account and
 	// body/value hashes retain lineage to this materialization without secrets.
-	type appliedObservation struct {
-		crmDocumentMapping
-		Proof any `json:"proof"`
-	}
-	observations := make([]appliedObservation, 0, len(a.observation.Items))
+	observations := make([]map[string]any, 0, len(a.observation.Items))
 	for _, item := range a.observation.Items {
-		observations = append(observations, appliedObservation{item.crmDocumentMapping, item.CRMObservation})
+		var proof any
+		if p := item.CRMObservation; p != nil {
+			fields := map[string]any{"connection_id": p.ConnectionID, "generation": p.Generation, "origin": p.Origin, "crm_team_id": p.CRMTeamID, "crm_user_id": p.CRMUserID, "record_updated_at": p.RecordUpdatedAt, "observed_at": p.ObservedAt, "body_sha256": p.BodySHA256, "value_sha256": p.ValueSHA256}
+			if p.Transformation != "" {
+				fields["transformation"] = p.Transformation
+			}
+			proof = fields
+		}
+		observations = append(observations, map[string]any{"variable": item.Variable, "source_kind": item.SourceKind, "source_ref": item.SourceRef, "source_path": item.SourcePath, "proof": proof})
 	}
-	return s.Audit.LogTx(ctx, tx, audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: "crm.variables.applied", Payload: map[string]any{
+	entry := audit.Entry{OrgID: actor.OrgID, ActorUserID: &actor.UserID, DocumentID: &doc.ID, Kind: "crm.variables.applied", Payload: map[string]any{
 		"binding_fingerprint_before": a.source.response.BindingFingerprint, "binding_fingerprint_after": fingerprint, "mapping_digest": semantic, "content_commitment": content,
 		"html_source_commitment": response.HTMLSourceCommitment, "html_materialization_revision": doc.HtmlCurrentMaterializationSequence.Int32,
 		"pdf_sha256": toDocumentResponse(doc).PDFSHA256, "review_digest": a.observation.ReviewDigest, "has_mappings": input.HasMappings, "observations": observations,
 		"assurance": "time-of-read", "human_confirmed": true, "content_changed": a.observation.ContentChanged,
-	}})
+	}}
+	if session != nil {
+		return ownedaudit.LogV1(s.Audit, ctx, session, pdfadmission.HTMLAuditCRMAppliedV1, entry)
+	}
+	pending, err := s.Audit.LogTx(ctx, tx, entry)
+	return pending, nil, err
 }
 
 func (s *Server) commitCRMDocumentValues(ctx context.Context, actor authoring.Actor, id uuid.UUID, admission *crmMappingAdmission) (*generated.Document, error) {
@@ -214,13 +230,28 @@ func (s *Server) handleCRMDocumentApply(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if s.HTMLCreationSessions != nil {
+		var closeInput func()
+		r, closeInput, ok = s.beginHTMLAuthoringInputV1(w, r, actor.OrgID, pdfadmission.HTMLCRMDocumentApplyInputV1)
+		if !ok {
+			return
+		}
+		defer closeInput()
+	}
 	var in struct {
 		CRMMappingRequest
 		ReviewedDigest string `json:"reviewed_digest"`
 		Confirmed      bool   `json:"confirmed"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
-	if decodeSignerJSON(r, &in) != nil || !in.Confirmed || !htmlPreviewSHA256(in.ReviewedDigest) {
+	if err := decodeSignerJSON(r, &in); err != nil {
+		if writeHTMLAuthoringInputFailureV1(w, err) {
+			return
+		}
+		s.writeCRMDocumentError(w, errCRMDocumentInput)
+		return
+	}
+	if !in.Confirmed || !htmlPreviewSHA256(in.ReviewedDigest) {
 		s.writeCRMDocumentError(w, errCRMDocumentInput)
 		return
 	}
@@ -266,8 +297,17 @@ func (s *Server) handleCRMDocumentApply(w http.ResponseWriter, r *http.Request) 
 		}
 		defer release()
 		expected, _ := time.Parse(time.RFC3339Nano, in.ExpectedUpdatedAt)
-		input := htmlDocumentRevisionInput{ExpectedUpdatedAt: in.ExpectedUpdatedAt, ExpectedHTMLSourceCommitment: in.ExpectedHTMLSourceCommitment, Values: htmlStringMap(observation.values), Summary: "Reviewed CRM information applied"}
-		updated, revision, pages, err = s.reviseHTMLDocumentWithCRM(ctx, actor, id, input, expected, admission)
+		input := htmlDocumentRevisionInput{ExpectedUpdatedAt: in.ExpectedUpdatedAt, ExpectedHTMLSourceCommitment: in.ExpectedHTMLSourceCommitment, Summary: "Reviewed CRM information applied"}
+		inputOwner, _ := r.Context().Value(htmlAuthoringInputContextKeyV1{}).(*pdfadmission.ApplicationHTMLAuthoringInputV1)
+		var native *pdfadmission.HTMLRevisionResultModelsV1
+		var finish func()
+		native, finish, err = s.reviseHTMLDocumentOwnedWithCRMV1(ctx, actor, id, input, expected, inputOwner, admission)
+		if err == nil {
+			defer finish()
+			updated, revision, pages = native.Document, native.MaterializationRevision, native.PageCount
+		} else if errors.Is(err, pdfadmission.ErrHTMLRevisionNoChangeV1) {
+			err = errHTMLDocumentRevisionConflict
+		}
 	} else {
 		updated, err = s.commitCRMDocumentValues(ctx, actor, id, admission)
 	}

@@ -61,7 +61,10 @@ func TestRecoveryInventoryPolicy244E2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(raw)
-	if len(raw) != 19459 || hex.EncodeToString(sum[:]) != "88ed1d5501571a287dd9e7f20d0a73fe926b72eff3caf48b8a5a850a2af158f2" {
+	// The current canonical query adds frozen amendments and presign preparation
+	// objects to the same thirteen-column inventory. Both branches are empty in
+	// this main-only fixture; its exact row and commit/rollback policy stay fixed.
+	if len(raw) != 20789 || hex.EncodeToString(sum[:]) != "2723f9866b09faacbc1334df4d265e0176bc0e1aad5a25be637b3154d480a333" {
 		t.Fatal("canonical inventory changed; review full inventory policy equivalence")
 	}
 	config := q.f.pool.Config().ConnConfig.Copy()

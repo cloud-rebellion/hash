@@ -131,7 +131,7 @@ type crmSourceFixtureE2E struct {
 
 func setupCRMSourceAuthorizationE2E(t *testing.T) crmSourceFixtureE2E {
 	t.Helper()
-	f := setupCRMConnectionE2E(t)
+	f := setupCRMConnectionForFixtureE2E(t, setupNativeLifecycleAuthorization256(t, "owner", false, false))
 	p := newCRMSourcePeerE2E(t)
 	client, err := crmconnection.NewClient(p.server.URL, true)
 	if err != nil {
@@ -145,15 +145,30 @@ func setupCRMSourceAuthorizationE2E(t *testing.T) crmSourceFixtureE2E {
 			t.Fatal(err)
 		}
 	}
+	var tree map[string]any
+	if err := json.Unmarshal(f.doc.BlocksJson, &tree); err != nil {
+		t.Fatal(err)
+	}
+	blocks, ok := tree["blocks"].([]any)
+	if !ok || len(blocks) == 0 {
+		t.Fatal("native CRM source fixture has no original agreement block")
+	}
+	first, ok := blocks[0].(map[string]any)
+	if !ok {
+		t.Fatal("native CRM source fixture original block is not an object")
+	}
+	first["text"] = "Agreement for {{customer}} at {{amount}}"
+	updatedBlocks, err := json.Marshal(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
 	values, err := json.Marshal(map[string]string{"customer": crmSourceTitleE2E, "amount": crmSourceValueE2E})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := f.pool.Exec(f.ctx, `UPDATE documents SET variables_json=$3,blocks_json=jsonb_set(blocks_json,'{blocks,0,text}','"Agreement for {{customer}} at {{amount}}"'::jsonb),updated_at=clock_timestamp() WHERE id=$1 AND org_id=$2 AND status='draft'`, f.doc.ID, f.org, values) //nolint:rawsql -- explicitly reviewed synthetic static draft, not an automatic CRM prose replacement
-	if err != nil || rows.RowsAffected() != 1 {
-		t.Fatal("could not seed the reviewed static agreement", err)
-	}
-	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	// A genuine manual CAS edit owns the reviewed static prose/values and its
+	// current source measurements before the separate CRM observe/apply review.
+	f.doc, err = nativeRevisionEditE2E(t, f.lifecycleAuthorizationFixture, f.doc, updatedBlocks, values)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +275,7 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 				}
 				done := make(chan *httptest.ResponseRecorder, 1)
 				go func() { done <- f.lifecycleAuthorizationFixture.submit("send", f.cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				awaitNativeTemplateLockE2E(t, f.lifecycleAuthorizationFixture, tx, "GetHTMLSendDocumentStateHeaderV1", false)
 				assertCRMConnectionSafeResponseE2E(t, f.submit(f.ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie), http.StatusOK)
 				if err := tx.Commit(f.ctx); err != nil {
 					t.Fatal(err)

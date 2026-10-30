@@ -82,10 +82,14 @@ func (f *ApplicationSessionFactoryV1) NewHTMLRevisionOperationV1(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
+	return f.newHTMLRevisionOperationV1(ctx, org, document, actor, declaration, releaseInput), nil
+}
+
+func (f *ApplicationSessionFactoryV1) newHTMLRevisionOperationV1(ctx context.Context, org, document, actor uuid.UUID, declaration htmlRevisionDeclarationV1, releaseInput func()) *ApplicationHTMLRevisionOperationV1 {
 	deadline, _ := ctx.Deadline()
 	original, cancel := context.WithCancel(ctx)
 	state := &applicationHTMLRevisionOperationV1{factory: f, ctx: original, cancel: cancel, deadline: deadline, org: org, document: document, actor: actor, declaration: declaration, releaseInput: releaseInput, stages: make(map[*applicationHTMLRevisionSQLV1]struct{})}
-	return &ApplicationHTMLRevisionOperationV1{state: state}, nil
+	return &ApplicationHTMLRevisionOperationV1{state: state}
 }
 func (o *applicationHTMLRevisionOperationV1) usableV1() bool {
 	return o != nil && !o.closed && o.factory != nil && o.factory.state != nil && o.org != uuid.Nil && o.document != uuid.Nil && applicationContextV1(o.ctx)

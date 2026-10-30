@@ -19,8 +19,7 @@ import (
 )
 
 func TestDSRErasureRequiresReviewOfCollabRecoveryArchivesE2E(t *testing.T) {
-	ctx, pool, q, server, orgID, userID := setupDSRE2E(t)
-	doc, recipient := seedDSRRecipientE2E(t, ctx, pool, q, orgID, userID, true)
+	ctx, pool, q, server, orgID, userID, doc, recipient := setupCompletedDSREvidenceE2E(t)
 	dsr, err := q.CreateDataSubjectRequest(ctx, generated.CreateDataSubjectRequestParams{
 		OrgID: orgID, DocumentID: pgtype.UUID{Bytes: doc.ID, Valid: true}, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true},
 		SubjectEmail: recipient.Email, SubjectName: recipient.Name, Kind: "erasure", RequestedVia: "sender",
@@ -31,7 +30,7 @@ func TestDSRErasureRequiresReviewOfCollabRecoveryArchivesE2E(t *testing.T) {
 	}
 	// The archive is deliberately opaque. The erasure handler must neither
 	// parse it nor assume a missing legacy generation means it contains no PII.
-	archivedReplay := []byte("old opaque replay: Original Name original@example.test")
+	archivedReplay := []byte("old opaque replay: " + recipient.Name + " " + recipient.Email)
 	var archiveID uuid.UUID
 	if err := pool.QueryRow(ctx, `INSERT INTO collab_recovery_archives
 (document_id, observed_canonical_generation, origin, ydoc_state, recovered_by)

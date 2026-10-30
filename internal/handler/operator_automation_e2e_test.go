@@ -65,8 +65,31 @@ func TestOperatorAutomationEntitlementAndQuotasE2E(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := setupAutomationAuthorizationE2E(t, time.Time{})
 			slug := "operator-test-" + uuid.NewString()
-			if _, err := f.pool.Exec(f.ctx, `INSERT INTO billing_plans(slug,name,document_quota_monthly,recipient_quota_monthly,features_json) VALUES($1,'Reviewed operator test',$2,$3,'{"mcp":true,"evidence_bundle":true}')`, slug, test.documentQuota, test.recQuota); err != nil {
+			var planID uuid.UUID
+			if err := f.pool.QueryRow(f.ctx, `INSERT INTO billing_plans(slug,name,document_quota_monthly,recipient_quota_monthly,features_json) VALUES($1,'Reviewed operator test',$2,$3,'{"mcp":true,"evidence_bundle":true}') RETURNING id`, slug, test.documentQuota, test.recQuota).Scan(&planID); err != nil {
 				t.Fatal(err)
+			}
+			// Measure this newly created synthetic catalog source through the same
+			// admitted maintenance primitive as the original free-plan fixture.
+			measurement, err := f.s.HTMLCreationSessions.ControlledMeasurePlanSourceV1(f.ctx, planID)
+			if measurement != nil {
+				t.Cleanup(func() {
+					cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := measurement.CloseV1(cleanup); err != nil {
+						t.Error("operator plan source cleanup", err)
+					}
+				})
+			}
+			if err != nil || measurement == nil {
+				t.Fatal("prepare actual operator plan source", err)
+			}
+			measurement.CloseConsumerV1()
+			cleanup, stopMeasurement := context.WithTimeout(context.Background(), 5*time.Second)
+			measureErr := measurement.CloseV1(cleanup)
+			stopMeasurement()
+			if measureErr != nil {
+				t.Fatal("operator plan source did not join", measureErr)
 			}
 			t.Cleanup(func() {
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

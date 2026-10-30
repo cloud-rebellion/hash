@@ -273,11 +273,24 @@ func commitWireProxy236(t *testing.T, mode string) *packageCommitWireProxy236 {
 	if ip == nil || !ip.IsLoopback() || cfg.TLSConfig != nil {
 		t.Fatal("transport fixture requires actual local plaintext PG fixture")
 	}
-	dir := t.TempDir()
+	// Keep this socket under the caller's bounded TMPDIR without Go's long
+	// test/subtest-derived directory name exceeding sockaddr_un's path limit.
+	dir, e := os.MkdirTemp("", "hcw-")
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error("remove exact owned transport socket directory", err)
+		}
+	})
 	if e = os.Chmod(dir, 0o700); e != nil {
 		t.Fatal(e)
 	}
 	sock := filepath.Join(dir, ".s.PGSQL."+strconv.Itoa(int(cfg.Port)))
+	if len(sock) > 100 {
+		t.Fatal("bounded caller TMPDIR leaves no portable Unix socket path")
+	}
 	listener, e := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if e != nil {
 		t.Fatal(e)

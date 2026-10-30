@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/fields"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -27,12 +28,25 @@ import (
 // signing ceremony or SMTP worker is claimed by these authoring fixtures.
 type fieldMCPFixture struct {
 	lifecycleAuthorizationFixture
-	field *generated.DocumentField
+	field         *generated.DocumentField
+	originalAudit authoringAuditBaseline621
 }
 
 func setupFieldMCPE2E(t *testing.T) fieldMCPFixture {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+	f := setupNativeLifecycleAuthorization256(t, "owner", false, false)
+	return setupFieldMCPWithLifecycleE2E(t, f)
+}
+
+func setupForeignFieldMCPE2E(t *testing.T) fieldMCPFixture {
+	t.Helper()
+	// Keep the foreign tenant/document/field in the admitted fixture's database.
+	// It is a deliberately raw scope adversary, never successful native work.
+	return setupFieldMCPWithLifecycleE2E(t, setupLifecycleAuthorizationE2E(t, "owner", false, false))
+}
+
+func setupFieldMCPWithLifecycleE2E(t *testing.T, f lifecycleAuthorizationFixture) fieldMCPFixture {
+	t.Helper()
 	f.enableMCP()
 	row, err := f.q.CreateDraftField(f.ctx, generated.CreateDraftFieldParams{
 		DocumentID: f.doc.ID, OrgID: f.org, RecipientID: pgtype.UUID{Bytes: f.recipient.ID, Valid: true}, Type: "text", Page: 1,
@@ -42,7 +56,7 @@ func setupFieldMCPE2E(t *testing.T) fieldMCPFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fieldMCPFixture{f, row}
+	return fieldMCPFixture{lifecycleAuthorizationFixture: f, field: row, originalAudit: authoringAuditBaselineE2E(t, f)}
 }
 
 func fieldMCPArgumentsE2E(f fieldMCPFixture, tool string) map[string]any {
@@ -131,12 +145,13 @@ func assertFieldMCPCommitE2E(t *testing.T, f fieldMCPFixture, tool string) *gene
 	var total, matching int
 	if err := f.pool.QueryRow(f.ctx, `SELECT count(*),count(*) FILTER (WHERE kind=$2 AND actor_user_id=$3
 		AND payload_json->>'field_id'=$4 AND payload_json->>'tool'=$5 AND payload_json->>'via'='mcp')
-		FROM events WHERE document_id=$1`, f.doc.ID, kind, f.user.ID, subject.ID.String(), tool).Scan(&total, &matching); err != nil {
+		FROM events WHERE document_id=$1 AND NOT (id=ANY($6::uuid[]))`, f.doc.ID, kind, f.user.ID, subject.ID.String(), tool, f.originalAudit.ids()).Scan(&total, &matching); err != nil {
 		t.Fatal(err)
 	}
 	if total != 1 || matching != 1 {
 		t.Fatalf("field audit total/matching=%d/%d want1/1", total, matching)
 	}
+	f.originalAudit.assertAdded(t, f.lifecycleAuthorizationFixture, 1)
 	return subject
 }
 
@@ -243,11 +258,9 @@ func TestFieldMCPRefusesForgedContextE2E(t *testing.T) {
 }
 
 func TestFieldMCPScopeAndTenantBoundariesE2E(t *testing.T) {
-	f, foreign := setupFieldMCPE2E(t), setupFieldMCPE2E(t)
-	siblingDoc, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Field sibling", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := setupFieldMCPE2E(t)
+	foreign := setupForeignFieldMCPE2E(t)
+	siblingDoc := createAuthoringSiblingE2E(t, f.lifecycleAuthorizationFixture, "Field sibling")
 	siblingField, err := f.q.CreateDraftField(f.ctx, generated.CreateDraftFieldParams{DocumentID: siblingDoc.ID, OrgID: f.org, Type: "text", Page: 1, XPct: pctToNumeric(0), YPct: pctToNumeric(0), WPct: pctToNumeric(15), HPct: pctToNumeric(4), OptionsJson: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -355,27 +368,39 @@ func TestFieldMCPRejectsInvalidPlacementAndConfigurationE2E(t *testing.T) {
 }
 
 func TestFieldMCPPDFSignatureRequiresOwnedRecipientE2E(t *testing.T) {
-	f := setupFieldMCPE2E(t)
-	doc, err := f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{
-		OrgID: f.org, SenderID: f.user.ID, Name: "Synthetic PDF field fixture", PdfStorageKey: pgtype.Text{String: "fixture/authoring.pdf", Valid: true}, PdfSha256: make([]byte, 32),
+	q := newOwnedAutomationAuthorizationFixtureV1(t)
+	f := setupFieldMCPWithLifecycleE2E(t, setupNativeLifecycleAuthorizationWithFixture257d(t, "owner", false, false, q))
+	// The actual intake owns the source/report measurements consumed by field
+	// creation. A raw PDF row cannot stand in for a successful upload producer.
+	if err := malwarescan.Configure(f.ctx, "", "development"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := malwarescan.Configure(context.Background(), "", "development"); err != nil {
+			t.Error(err)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
+	upload := httptest.NewRecorder()
+	f.s.Routes().ServeHTTP(upload, ownedPlainRequestV1(t, q, "REST", "create_pdf_document", "", nil, fieldBrowserPDF("Actual PDF signature recipient authorization")))
+	var imported struct {
+		Document documentResponse `json:"document"`
 	}
-	_, hash, err := auth.MintMagicToken()
-	if err != nil {
-		t.Fatal(err)
+	if upload.Code != http.StatusCreated || json.Unmarshal(upload.Body.Bytes(), &imported) != nil || imported.Document.ID == uuid.Nil {
+		t.Fatal("actual PDF field fixture import failed", upload.Code)
 	}
-	recipient, err := f.q.CreateRecipient(f.ctx, generated.CreateRecipientParams{
-		DocumentID: doc.ID, Role: "signer", Email: "pdf-field@example.test", Name: "PDF fixture signer", Locale: "en",
-		MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
-	})
-	if err != nil {
-		t.Fatal(err)
+	ownedPlainFreshDocumentV1(t, q, imported.Document.ID)
+	created := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+imported.Document.ID.String()+"/recipients", `{"email":"pdf-field@example.test","name":"PDF fixture signer","role":"signer","locale":"en"}`, q.cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatal("actual PDF field fixture recipient failed", created.Code)
 	}
+	parties, err := f.q.ListRecipientsByDocument(f.ctx, imported.Document.ID)
+	if err != nil || len(parties) != 1 {
+		t.Fatal("actual PDF field fixture recipient readback failed", err)
+	}
+	recipient := parties[0]
 	mint, _ := mintRecipientMCPKeyE2E(t, f.lifecycleAuthorizationFixture, false, 0)
 	before := recipientMCPSnapshotE2E(t, f.lifecycleAuthorizationFixture)
-	args := map[string]any{"document_id": doc.ID, "type": "signature"}
+	args := map[string]any{"document_id": imported.Document.ID, "type": "signature"}
 	fieldMCPTextE2E(t, submitFieldMCPE2E(f, "add_document_field", mint.Plaintext, args), true)
 	assertRecipientMCPUnchangedE2E(t, f.lifecycleAuthorizationFixture, before)
 	args["recipient_id"] = f.recipient.ID
@@ -385,7 +410,7 @@ func TestFieldMCPPDFSignatureRequiresOwnedRecipientE2E(t *testing.T) {
 	assertRecipientMCPUnchangedE2E(t, f.lifecycleAuthorizationFixture, before)
 	args["recipient_id"] = recipient.ID
 	fieldMCPTextE2E(t, submitFieldMCPE2E(f, "add_document_field", mint.Plaintext, args), false)
-	rows, err := f.q.ListFieldsByDocument(f.ctx, doc.ID)
+	rows, err := f.q.ListFieldsByDocument(f.ctx, imported.Document.ID)
 	if err != nil || len(rows) != 1 || rows[0].Type != "signature" || !rows[0].RecipientID.Valid || uuid.UUID(rows[0].RecipientID.Bytes) != recipient.ID {
 		t.Fatal("PDF-only signature overlay did not bind its actual document recipient")
 	}

@@ -120,7 +120,7 @@ func failedMailHead114(t *testing.T, f migrationPGFixture242, want int64) {
 	call, stop := context.WithTimeout(f.ctx, 250*time.Millisecond)
 	defer stop()
 	var rows, applied int
-	if err := f.admin.QueryRow(call, "SELECT count(*)::integer,count(*) FILTER(WHERE is_applied)::integer FROM public.goose_db_version WHERE version_id=114").Scan(&rows, &applied); err != nil || rows != map[bool]int{true: 1, false: 0}[want == 114] || applied != rows {
+	if err := f.admin.QueryRow(call, "SELECT count(*)::integer,count(*) FILTER(WHERE is_applied)::integer FROM public.goose_db_version WHERE version_id=114").Scan(&rows, &applied); err != nil || rows != map[bool]int{true: 1, false: 0}[want >= 114] || applied != rows {
 		t.Fatal("M114 committed history differs", rows, applied, err)
 	}
 } //nolint:rawsql -- exact applied114 row, no history repair
@@ -142,16 +142,17 @@ func failedMailSeed114(t *testing.T, f migrationPGFixture242) {
 } //nolint:rawsql -- six fixed synthetic rows, all required actual columns
 
 func TestFailedMailIndex114FreshOccupiedReplayDownAndCollisionE2E(t *testing.T) {
-	t.Run("fresh current114 and repeated Up", func(t *testing.T) {
+	t.Run("fresh current release and repeated Up", func(t *testing.T) {
 		f := migrationPG242(t)
 		if err := mdb.RunMigrationsContext(f.ctx, f.db); err != nil {
-			t.Fatal("fresh embedded114", err)
+			t.Fatal("fresh embedded release", err)
 		}
-		failedMailHead114(t, f, 114)
+		latest := assertCurrentHandlerMigrationHistoryE2E(t, f.ctx, f.admin)
+		failedMailHead114(t, f, latest)
 		before := failedMailSnapshot114(t, f)
 		failedMailIndexState114(t, before, true)
 		if err := mdb.RunMigrationsContext(f.ctx, f.db); err != nil {
-			t.Fatal("current114 replay", err)
+			t.Fatal("current release replay", err)
 		}
 		if after := failedMailSnapshot114(t, f); !reflect.DeepEqual(before, after) {
 			t.Fatal("repeated Up changed exact state/history")
@@ -173,7 +174,7 @@ func TestFailedMailIndex114FreshOccupiedReplayDownAndCollisionE2E(t *testing.T) 
 		up := failedMailSnapshot114(t, f)
 		failedMailRowsUnchanged114(t, before, up)
 		failedMailIndexState114(t, up, true)
-		if err := mdb.RunMigrationsContext(f.ctx, f.db); err != nil {
+		if err := mdb.RunMigrationsUpToContext(f.ctx, f.db, 114); err != nil {
 			t.Fatal("occupied replay", err)
 		}
 		if after := failedMailSnapshot114(t, f); !reflect.DeepEqual(up, after) {

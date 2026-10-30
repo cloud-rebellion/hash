@@ -437,9 +437,17 @@ func TestEnvelopeMetadataReadAndReorderPreserveHTMLPinsE2E(t *testing.T) {
 	// The creation fixture only installs dependencies for HTML creation.
 	// Envelope routes are mounted when their engine is explicitly configured.
 	f.s.Envelopes = envelopes.New(f.q)
-	parent := seedDocumentDeleteDraft(t, f.ctx, f.q, f.org, f.user.ID)
-	if _, err := f.q.MarkAsEnvelope(f.ctx, generated.MarkAsEnvelopeParams{ID: parent.ID, OrgID: f.org}); err != nil {
+	created := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents", `{"name":"Metadata envelope","source_kind":"blocks","blocks_json":{"version":1,"blocks":[]},"variables_json":{}}`, m.cookie)
+	var createdParent documentResponse
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &createdParent) != nil || createdParent.ID == uuid.Nil {
+		t.Fatalf("actual metadata envelope parent=%d %s", created.Code, created.Body.String())
+	}
+	parent, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: createdParent.ID, OrgID: f.org})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if promoted := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+parent.ID.String()+"/promote-to-envelope", "{}", m.cookie); promoted.Code != http.StatusOK {
+		t.Fatalf("actual metadata envelope promotion=%d %s", promoted.Code, promoted.Body.String())
 	}
 	children := []*generated.Document{m.current, m.reviewed, m.legacy, m.static}
 	for i, doc := range children {

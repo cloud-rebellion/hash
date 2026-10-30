@@ -242,6 +242,7 @@ func runHTMLOptionalEmptyE2E(t *testing.T, f lifecycleAuthorizationFixture, rend
 	}
 	current := reloadHTMLOptionalEmptyE2E(t, f, original.ID)
 	f.doc = current
+	assertCRMNativeRevisionMeasurements621(t, f, current)
 	currentInput, err := htmlsource.InputForCurrent(current)
 	if err != nil {
 		t.Fatal(err)

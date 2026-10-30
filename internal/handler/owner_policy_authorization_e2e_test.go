@@ -391,18 +391,31 @@ func TestOwnerPolicyFinalCredentialRecheckAfterAuditWaitE2E(t *testing.T) {
 					ctx, cancel := context.WithCancel(f.ctx)
 					defer cancel()
 					result := make(chan *httptest.ResponseRecorder, 1)
+					joined := make(chan struct{})
 					go func() {
+						defer close(joined)
 						if transport == "mcp" {
 							result <- f.submitMCP(ctx, name, mint.Plaintext)
 						} else {
 							result <- f.submit(ctx, name, cookie)
 						}
 					}()
+					defer joinHTMLAuthoringRequestE2E(t, cancel, joined, blocked)
 					awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
 					var w *httptest.ResponseRecorder
 					if failure == "cancellation" {
 						cancel()
-						w = receiveSessionOperationE2E(t, result)
+						select {
+						case <-ctx.Done():
+							if ctx.Err() != context.Canceled {
+								t.Fatal("original blocked request did not retain explicit cancellation", ctx.Err())
+							}
+						default:
+							t.Fatal("original blocked request was not canceled before fixture lock release")
+						}
+						// Native cancellation cannot open an unadmitted CancelRequest
+						// socket or refund the still-queued backend. Release this real
+						// test-owned blocker before awaiting physical cleanup/response.
 					} else if transport == "mcp" {
 						awaitOwnerPolicyKeyExpiryE2E(t, f, keyID)
 					} else {

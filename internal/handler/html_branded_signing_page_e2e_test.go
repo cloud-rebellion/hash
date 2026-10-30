@@ -365,6 +365,15 @@ func assertBrandedCommitRefusalE2E(t *testing.T, f lifecycleAuthorizationFixture
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	rows, err := tx.Exec(f.ctx, mutation.statement, mutation.args...) //nolint:rawsql -- exact owned corruption simulation, must reach deferred guard
+	if mutation.name == "empty_field_identity" {
+		// The current measurement row retains this exact field identity with an
+		// immediate foreign key. Refusal before commit is stronger than the older
+		// deferred branded-page check; the caller still proves full rollback.
+		var pgerr *pgconn.PgError
+		if errors.As(err, &pgerr) && pgerr.Code == "23503" && rows.RowsAffected() == 0 {
+			return
+		}
+	}
 	if err != nil || rows.RowsAffected() != 1 {
 		t.Fatalf("scoped corruption did not reach deferred guard: rows=%d error=%v", rows.RowsAffected(), err)
 	}

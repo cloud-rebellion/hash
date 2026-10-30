@@ -178,18 +178,21 @@ func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 	before := f.snapshot(t, doc.ID)
 	actor := f.actor()
 	checks := 0
+	deniedSealingBoundary := false
 	actor.Authorize = func(ctx context.Context, tx pgx.Tx, user *generated.User) error {
 		checks++
 		if user.ID != f.user.ID || user.Email != f.user.Email {
 			t.Error("callback did not receive the live canonical user")
 		}
-		if checks == 4 {
-			var status, amount string
-			if err := tx.QueryRow(ctx, `SELECT status,variables_json->>'amount' FROM documents WHERE id=$1`, doc.ID).Scan(&status, &amount); err != nil {
-				return err
-			}
-			if status != "sealing" || amount != "4200" {
-				t.Errorf("final send check saw %s/%s", status, amount)
+		var status, amount string
+		var intent bool
+		if err := tx.QueryRow(ctx, `SELECT status,COALESCE(variables_json->>'amount',''),EXISTS(SELECT 1 FROM send_sealing_intents WHERE document_id=$1) FROM documents WHERE id=$1`, doc.ID).Scan(&status, &amount, &intent); err != nil {
+			return err
+		}
+		if status == "sealing" {
+			deniedSealingBoundary = true
+			if amount != "4200" || !intent {
+				t.Errorf("final send check did not follow actual freeze/intent: amount=%s intent=%t", amount, intent)
 			}
 			return auth.ErrMutationCredentialExpired
 		}
@@ -198,19 +201,39 @@ func TestSendAndVoidFinalAuthorizationRollsBackAllArtifactsE2E(t *testing.T) {
 	if _, err := f.send(t, f.ctx, actor, doc.ID); !errors.Is(err, auth.ErrMutationCredentialExpired) {
 		t.Fatalf("send error=%v", err)
 	}
-	if checks != 4 {
-		t.Fatalf("send authorization checks=%d, want 4 (preparation entry/exit, admission entry/final)", checks)
+	if !deniedSealingBoundary {
+		t.Fatal("send denial did not reach the actual frozen sealing-intent boundary")
 	}
 	f.assertSnapshot(t, before, doc.ID)
 
 	checks = 0
-	actor.Authorize = func(context.Context, pgx.Tx, *generated.User) error { checks++; return nil }
+	var sawDraft, sawSealing, sawObservationAudit bool
+	actor.Authorize = func(ctx context.Context, tx pgx.Tx, user *generated.User) error {
+		checks++
+		if user.ID != f.user.ID || user.Email != f.user.Email {
+			t.Error("callback did not receive the live canonical user")
+		}
+		var status, amount string
+		var intent, observed bool
+		if err := tx.QueryRow(ctx, `SELECT status,COALESCE(variables_json->>'amount',''),
+			EXISTS(SELECT 1 FROM send_sealing_intents WHERE document_id=$1),
+			EXISTS(SELECT 1 FROM events WHERE document_id=$1 AND kind='crm.variables.observed')
+			FROM documents WHERE id=$1`, doc.ID).Scan(&status, &amount, &intent, &observed); err != nil {
+			return err
+		}
+		sawDraft = sawDraft || status == "draft"
+		if status == "sealing" && amount == "4200" && intent {
+			sawSealing = true
+			sawObservationAudit = sawObservationAudit || observed
+		}
+		return nil
+	}
 	result, err := f.send(t, f.ctx, actor, doc.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "sent" || len(result.Links) != 1 || checks != 4 {
-		t.Fatalf("successful send status/links/checks=%s/%d/%d", result.Status, len(result.Links), checks)
+	if result.Status != "sent" || len(result.Links) != 1 || !sawDraft || !sawSealing || !sawObservationAudit {
+		t.Fatalf("successful send status/links/checks=%s/%d/%d draft/sealing/post-audit=%t/%t/%t", result.Status, len(result.Links), checks, sawDraft, sawSealing, sawObservationAudit)
 	}
 	var replyTo, deliveryStatus string
 	if err := f.pool.QueryRow(f.ctx, `SELECT reply_to,status FROM email_deliveries WHERE to_email=$1`, recipient.Email).Scan(&replyTo, &deliveryStatus); err != nil {

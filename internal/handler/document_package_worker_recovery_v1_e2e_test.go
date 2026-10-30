@@ -488,14 +488,7 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q := inspectionFixturePG236(t)
-			var job packageWorkerJob239
-			if occupied {
-				job = packageWorkerBirth239(t, q)
-			} else {
-				root := packageImported220(t, q, "Empty recovery queue schema witness")
-				_ = packageCreate223(t, q, root)
-				packageWorkerDrained239(t, q)
-			}
+			job := packageLegacyWorkerBirth619(t, q, occupied)
 			before := packageMeasurementState232(t, q)
 			requests := q.storagePeer.requests.Load()
 			cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))

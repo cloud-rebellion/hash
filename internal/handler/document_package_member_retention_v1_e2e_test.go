@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bright-interaction/hash/internal/article13"
-	"github.com/bright-interaction/hash/internal/audit"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
@@ -339,13 +337,9 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q := inspectionFixturePG236(t)
-			packageCompletionPreviousSchema241(t, q)
-			_, _, m, err := packageAttemptBirth235(t, q, false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			m := packageLegacyAttempt619(t, q, 105)
 			if occupied {
-				packageMemberRetentionAggregateStart240(t, q, m)
+				packageLegacyAggregateStart619(t, q, m)
 				if _, err := q.f.q.StartDocumentPackageSendMemberRetentionV1(q.f.ctx, packageMemberRetentionStart240(m, 0, packageMemberRetentionNamespace240())); err != nil {
 					t.Fatal(err)
 				}
@@ -411,7 +405,7 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 	}
 	t.Run("pre105 completed history receives no fabricated receipts", func(t *testing.T) {
 		q := inspectionFixturePG236(t)
-		packageCompletionPreviousSchema241(t, q)
+		m := packageLegacyAttempt619(t, q, 104)
 		cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 		if err != nil {
 			t.Fatal(err)
@@ -436,10 +430,7 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 		if version, err := mdb.GetMigrationVersionContext(q.f.ctx, db); err != nil || version != 104 {
 			t.Fatal("historical completion fixture is not actually pre105", version, err)
 		}
-		root, _, m, err := packageAttemptBirth235(t, q, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+
 		requests := q.storagePeer.requests.Load()
 		// Exercise the actual old SQL protocol at its actual schema version.
 		// This is synthetic pre105 completion, not historical provider proof.
@@ -447,36 +438,10 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 		defer rollbackHTMLQueryFixtureV1(t, tx)
 		queries := generated.New(tx)
 		match := packageAttemptMatch235(m)
-		if _, err := queries.GetDocumentForUpdate(q.f.ctx, generated.GetDocumentForUpdateParams{ID: root.ID, OrgID: root.OrgID}); err != nil {
+		if err := packageLegacyCompletionStage619(t, q, tx, m, false, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := queries.MarkDocumentPackageSendRetentionStartedV1(q.f.ctx, generated.MarkDocumentPackageSendRetentionStartedV1Params(match)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := queries.SynchronizeDocumentPackageSendRetentionV1(q.f.ctx, generated.SynchronizeDocumentPackageSendRetentionV1Params(match)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := queries.MarkDocumentPackageSendRetentionCompleteV1(q.f.ctx, generated.MarkDocumentPackageSendRetentionCompleteV1Params(match)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := queries.SynchronizeDocumentPackageSendRetentionV1(q.f.ctx, generated.SynchronizeDocumentPackageSendRetentionV1Params(match)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := queries.PinDocumentSendEvidenceVersions(q.f.ctx, generated.PinDocumentSendEvidenceVersionsParams{ID: root.ID, OrgID: root.OrgID, PdfStorageVersionID: root.PdfStorageVersionID, RenderedPdfVersionID: root.RenderedPdfVersionID}); err != nil {
-			t.Fatal(err)
-		}
-		sent, err := queries.CompleteDocumentPackageSendSealingV1(q.f.ctx, generated.CompleteDocumentPackageSendSealingV1Params(match))
-		if err != nil {
-			t.Fatal(err)
-		}
-		epoch, err := article13.CanonicalSentAt(sent.SentAt.Time)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := q.f.s.Audit.LogTx(q.f.ctx, tx, audit.Entry{OrgID: root.OrgID, DocumentID: &root.ID, ActorUserID: &q.f.user.ID, Kind: audit.KindDocumentSent, Payload: map[string]any{article13.AuditRequiredNoticeSchemaKey: sent.Article13NoticeSchema, article13.AuditRequiredNoticeSentAtKey: epoch}}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := queries.TerminalizeDocumentPackageSendAttemptV1(q.f.ctx, generated.TerminalizeDocumentPackageSendAttemptV1Params{Outcome: "completed", AttemptID: m.AttemptID, OrgID: root.OrgID, DocumentID: root.ID, ExpectedManifestSha256: match.ExpectedManifestSha256, ExpectedLegalCommitmentSha256: match.ExpectedLegalCommitmentSha256}); err != nil {
+		if _, err := queries.TerminalizeDocumentPackageSendAttemptV1(q.f.ctx, generated.TerminalizeDocumentPackageSendAttemptV1Params{Outcome: "completed", AttemptID: m.AttemptID, OrgID: m.Capture.OrgID, DocumentID: m.Capture.DocumentID, ExpectedManifestSha256: match.ExpectedManifestSha256, ExpectedLegalCommitmentSha256: match.ExpectedLegalCommitmentSha256}); err != nil {
 			t.Fatal(err)
 		}
 		if rows, err := queries.DeleteDocumentPackageSealingIntentV1(q.f.ctx, match); err != nil || rows != 1 {

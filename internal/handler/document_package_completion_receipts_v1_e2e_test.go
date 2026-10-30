@@ -236,12 +236,9 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q := inspectionFixturePG236(t)
-			_, _, m, err := packageAttemptBirth235(t, q, false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			m := packageLegacyAttempt619(t, q, 106)
 			if occupied {
-				if err := packageAttemptTransition235(t, q, m, "completed", false); err != nil {
+				if err := packageLegacyComplete619(t, q, m); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -289,6 +286,7 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 	}
 	t.Run("pre106 completed history is preserved without fabricated effect receipts", func(t *testing.T) {
 		q := inspectionFixturePG236(t)
+		m := packageLegacyAttempt619(t, q, 105)
 		cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 		if err != nil {
 			t.Fatal(err)
@@ -310,13 +308,10 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 		if version, err := mdb.GetMigrationVersionContext(q.f.ctx, db); err != nil || version != 105 {
 			t.Fatal("historical completion is not actually pre106", version, err)
 		}
-		_, _, m, err := packageAttemptBirth235(t, q, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+
 		tx := beginHTMLQueryFixtureV1(t, q.f.ctx, q.f)
 		defer rollbackHTMLQueryFixtureV1(t, tx)
-		if err := packageCompletionSQLStage241(t, q, tx, m, false); err != nil {
+		if err := packageLegacyCompletionStage619(t, q, tx, m, true, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := packageCompletionSQLTerminal241(q.f.ctx, generated.New(tx), m); err != nil {
@@ -344,31 +339,4 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 			t.Fatal("M106 changed old completion or replayed provider work")
 		}
 	})
-}
-
-// Keep the original M105 rollback oracles at their actual schema version. The
-// new empty M106 layer is restored after the unchanged older journey joins.
-func packageCompletionPreviousSchema241(t *testing.T, q *ownedPublicReadFixtureV1) {
-	t.Helper()
-	cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	db := stdlib.OpenDB(*cfg)
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	t.Cleanup(func() {
-		defer db.Close()
-		cleanup, stop := context.WithTimeout(context.WithoutCancel(q.f.ctx), 5*time.Second)
-		defer stop()
-		if err := mdb.RunMigrationsUpToContext(cleanup, db, 106); err != nil {
-			t.Error("restore current M106 after original M105 journey", err)
-		}
-	})
-	if version, err := mdb.GetMigrationVersionContext(q.f.ctx, db); err != nil || version != 106 {
-		t.Fatal("M105 witness did not begin at current M106", version, err)
-	}
-	if err := mdb.RunMigrationsDownToContext(q.f.ctx, db, 105); err != nil {
-		t.Fatal(err)
-	}
 }

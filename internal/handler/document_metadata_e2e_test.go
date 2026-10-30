@@ -8,7 +8,6 @@ package handler
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -21,7 +20,6 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
-	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/google/uuid"
@@ -32,7 +30,7 @@ import (
 // Actual SQL/REST projection coverage uses one bounded sizable approved design,
 // not a capacity benchmark. Creation uses the source-built isolated worker;
 // Chromium and versioned S3 peers are synthetic. The same-SHA second projection
-// is created by the domain protocol with synthetic pins, not a rendering claim.
+// uses the actual revision route and its fixed PDF peer, not synthetic pins.
 type metadataProjectionFixtureE2E struct {
 	f                                 lifecycleAuthorizationFixture
 	renderer                          *htmlCreationRendererE2E
@@ -71,6 +69,7 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 		t.Fatal("metadata creation fixture requires the source-built isolated HASH_E2E_PDF_WORKER_PATH")
 	}
 	f, renderer, storage, original, cookie := setupHTMLRevisionE2E(t)
+	metadataPrepareNativePlanE2E(t, f)
 	original = metadataReviewE2E(t, f, original, cookie)
 	master, err := json.Marshal(htmlmaster.Master{SchemaVersion: 1,
 		HTML:     `<p>` + strings.Repeat("Bounded synthetic approved layout. ", 4096) + `</p><p><span data-hash-value="customer"></span></p><div data-hash-section="scope"></div>`,
@@ -108,22 +107,17 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 		t.Fatal(err)
 	}
 	big = metadataReviewE2E(t, f, big, cookie)
-	candidate, source := htmlMaterializationCandidateE2E(t, big, "Revised metadata AB")
-	tx, err := f.pool.Begin(f.ctx)
-	if err != nil {
-		t.Fatal(err)
+	revisionFixture := f
+	revisionFixture.doc = big
+	revision := revisionInputE2E(t, big)
+	revision.Values = htmlStringMap{"customer": "Revised metadata AB"}
+	revision.Summary = "Actual same-PDF metadata revision"
+	w = submitRevisionE2E(t, revisionFixture, revision, cookie)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("actual sizable metadata revision=%d %s", w.Code, w.Body.String())
 	}
-	defer tx.Rollback(context.Background())
-	q := f.q.WithTx(tx)
-	locked, err := q.GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: big.ID, OrgID: f.org})
+	current, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: big.ID, OrgID: f.org})
 	if err != nil {
-		t.Fatal(err)
-	}
-	current, _, err := htmlmaterialization.Append(f.ctx, q, locked, candidate, htmlmaterialization.AppendInput{SourceJSON: source, PageCount: 1, ActorID: f.user.ID, Summary: "Synthetic same-PDF metadata revision"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(current.PdfSha256, big.PdfSha256) || current.HtmlCurrentMaterializationID == big.HtmlCurrentMaterializationID || current.HtmlReviewedBy.Valid || len(current.HtmlSourceJson) < 128<<10 || len(current.HtmlCurrentSourceJson) < 128<<10 {
@@ -152,12 +146,114 @@ func setupMetadataProjectionE2E(t *testing.T) metadataProjectionFixtureE2E {
 	if err = htmlsource.Validate(legacy, false); err != nil || legacy.HtmlCurrentMaterializationID.Valid {
 		t.Fatal("legacy origin fixture invalid")
 	}
-	digest := sha256.Sum256([]byte("synthetic ordinary PDF metadata control"))
-	static, err := f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Static PDF control", PdfStorageKey: pgtype.Text{String: "org/" + f.org.String() + "/documents/" + uuid.NewString() + ".pdf", Valid: true}, PdfSha256: digest[:], PdfStorageVersionID: pgtype.Text{String: "synthetic-static-version", Valid: true}, EvidenceVersionPinsRequired: true})
+	w = submitPDFIntakeE2E(f, f.ctx, cookie, "/api/v1/documents/import")
+	var uploaded struct {
+		Document struct {
+			ID uuid.UUID `json:"id"`
+		} `json:"document"`
+	}
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &uploaded) != nil || uploaded.Document.ID == uuid.Nil {
+		t.Fatalf("actual static PDF metadata intake=%d %s", w.Code, w.Body.String())
+	}
+	static, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: uploaded.Document.ID, OrgID: f.org})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return metadataProjectionFixtureE2E{f, renderer, storage, cookie, original, current, legacy, static}
+}
+
+func metadataPrepareNativePlanE2E(t *testing.T, f lifecycleAuthorizationFixture) {
+	t.Helper()
+	var id uuid.UUID
+	if err := f.pool.QueryRow(f.ctx, "SELECT id FROM billing_plans WHERE slug='pro'").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := f.s.HTMLCreationSessions.ControlledMeasurePlanSourceV1(f.ctx, id)
+	if owner != nil {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := owner.CloseV1(ctx); err != nil {
+				t.Error("metadata plan owner cleanup", err)
+			}
+		})
+	}
+	if err != nil || owner == nil {
+		t.Fatal("actual metadata plan source unavailable", err)
+	}
+	receipt, err := owner.ReceiptV1()
+	if err != nil || receipt.Kind != "plan" || receipt.SourceID != id || receipt.OrgID != uuid.Nil || receipt.WireBytes <= 0 || receipt.ServerVersionNum != 160015 || !receipt.MeasuredAt.Valid {
+		t.Fatal("metadata plan source lacks genuine receipt", err)
+	}
+	owner.CloseConsumerV1()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := owner.CloseV1(ctx); err != nil {
+		t.Fatal("metadata plan owner did not join", err)
+	}
+}
+
+func metadataNativeEnvelopeE2E(t *testing.T, f lifecycleAuthorizationFixture, cookie, name string) *generated.Document {
+	t.Helper()
+	if f.s.Envelopes == nil {
+		f.s.Envelopes = envelopes.New(f.q)
+	}
+	parent, err := nativeRevisionCreateE2E(t, f, name, json.RawMessage(`{"version":1,"blocks":[]}`), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+parent.ID.String()+"/promote-to-envelope", "{}", cookie); w.Code != http.StatusOK {
+		t.Fatalf("actual metadata parent promotion=%d %s", w.Code, w.Body.String())
+	}
+	return parent
+}
+
+func metadataAttachMeasuredE2E(t *testing.T, f lifecycleAuthorizationFixture, cookie string, parent, child uuid.UUID, position int) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"child_id": child, "position": position})
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/envelopes/"+parent.String()+"/attach", string(body), cookie); w.Code != http.StatusOK {
+		t.Fatalf("actual measured metadata child attachment=%d %s", w.Code, w.Body.String())
+	}
+}
+
+func metadataAssertLegacyNativeRefusalE2E(t *testing.T, m metadataProjectionFixtureE2E, parent *generated.Document, transport, credential string) {
+	t.Helper()
+	f := m.f
+	cacheState := func() string {
+		var state string
+		err := f.pool.QueryRow(f.ctx, `SELECT jsonb_build_object('policy',(SELECT to_jsonb(p) FROM document_signing_policy_sizes_v1 p WHERE p.document_id=$1),'response',(SELECT to_jsonb(r) FROM html_creation_response_sizes_v1 r WHERE r.document_id=$1),'report',(SELECT to_jsonb(s) FROM document_read_report_sizes_v1 s WHERE s.document_id=$1))::text`, m.legacy.ID).Scan(&state) //nolint:rawsql -- exact intentionally unmeasured historical source only
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	cacheBefore := cacheState()
+	var caches map[string]any
+	if json.Unmarshal([]byte(cacheBefore), &caches) != nil || len(caches) != 3 || caches["policy"] != nil || caches["response"] != nil || caches["report"] != nil {
+		t.Fatal("explicit legacy source unexpectedly has native measurements")
+	}
+	before := authoringMCPStateE2E(t, f)
+	states := map[uuid.UUID][]byte{}
+	for _, doc := range []*generated.Document{parent, m.current, m.reviewed, m.static, m.legacy} {
+		states[doc.ID] = metadataHistoryStateE2E(t, f, doc.ID)
+	}
+	events, renders, requests := metadataAuditCountE2E(t, f), len(m.renderer.sources()), m.storage.requests.Load()
+	if transport == "mcp" {
+		w := submitAuthoringMCPE2E(f, f.ctx, "attach_to_envelope", credential, map[string]any{"envelope_id": parent.ID, "child_id": m.legacy.ID, "position": 4})
+		if text := fieldMCPTextE2E(t, w, true); text != "envelope mutation failed" {
+			t.Fatalf("unmeasured legacy native MCP attachment=%q", text)
+		}
+	} else {
+		body, _ := json.Marshal(map[string]any{"child_id": m.legacy.ID, "position": 4})
+		w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/envelopes/"+parent.ID.String()+"/attach", string(body), credential)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "envelope editing capacity unavailable; retry later") {
+			t.Fatalf("unmeasured legacy native REST attachment=%d %s", w.Code, w.Body.String())
+		}
+	}
+	if authoringMCPStateE2E(t, f) != before || cacheState() != cacheBefore {
+		t.Fatal("legacy refusal changed complete document/topology/audit/cache state")
+	}
+	assertMetadataNoEffectsE2E(t, m, events, renders, requests, states)
 }
 
 func metadataFullDocumentE2E(t *testing.T, f lifecycleAuthorizationFixture, id uuid.UUID) *generated.Document {
@@ -437,31 +533,12 @@ func TestEnvelopeMetadataReadAndReorderPreserveHTMLPinsE2E(t *testing.T) {
 	// The creation fixture only installs dependencies for HTML creation.
 	// Envelope routes are mounted when their engine is explicitly configured.
 	f.s.Envelopes = envelopes.New(f.q)
-	created := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents", `{"name":"Metadata envelope","source_kind":"blocks","blocks_json":{"version":1,"blocks":[]},"variables_json":{}}`, m.cookie)
-	var createdParent documentResponse
-	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &createdParent) != nil || createdParent.ID == uuid.Nil {
-		t.Fatalf("actual metadata envelope parent=%d %s", created.Code, created.Body.String())
-	}
-	parent, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: createdParent.ID, OrgID: f.org})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if promoted := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents/"+parent.ID.String()+"/promote-to-envelope", "{}", m.cookie); promoted.Code != http.StatusOK {
-		t.Fatalf("actual metadata envelope promotion=%d %s", promoted.Code, promoted.Body.String())
-	}
-	children := []*generated.Document{m.current, m.reviewed, m.legacy, m.static}
+	parent := metadataNativeEnvelopeE2E(t, f, m.cookie, "Metadata envelope")
+	children := []*generated.Document{m.current, m.reviewed, m.static}
 	for i, doc := range children {
-		if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{ID: doc.ID, ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: int32(i + 1), Valid: true}, OrgID: f.org}); err != nil {
-			t.Fatal(err)
-		}
+		metadataAttachMeasuredE2E(t, f, m.cookie, parent.ID, doc.ID, i+1)
 	}
-	deleted := seedDocumentDeleteDraft(t, f.ctx, f.q, f.org, f.user.ID)
-	if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{ID: deleted.ID, ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: 5, Valid: true}, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.q.DeleteDraftDocument(f.ctx, generated.DeleteDraftDocumentParams{ID: deleted.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
+	expectedChildren := 3
 	states := map[uuid.UUID][]byte{}
 	for _, doc := range children {
 		states[doc.ID] = metadataHistoryStateE2E(t, f, doc.ID)
@@ -481,7 +558,7 @@ func TestEnvelopeMetadataReadAndReorderPreserveHTMLPinsE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		full, err := f.q.ListEnvelopeChildren(f.ctx, generated.ListEnvelopeChildrenParams{ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, OrgID: f.org})
-		if err != nil || len(full) != 5 || result.Count != len(full) || len(result.Children) != len(full) {
+		if err != nil || len(full) != expectedChildren || result.Count != len(full) || len(result.Children) != len(full) {
 			t.Fatal("envelope metadata changed existing deleted-child count semantics")
 		}
 		thin, err := f.q.ListEnvelopeChildMetadataForRead(f.ctx, generated.ListEnvelopeChildMetadataForReadParams{ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, OrgID: f.org})
@@ -509,7 +586,7 @@ func TestEnvelopeMetadataReadAndReorderPreserveHTMLPinsE2E(t *testing.T) {
 	if err != nil || len(foreign) != 0 {
 		t.Fatal("child metadata crossed tenant boundary")
 	}
-	ids := []string{m.static.ID.String(), m.legacy.ID.String(), m.reviewed.ID.String(), m.current.ID.String()}
+	ids := []string{m.static.ID.String(), m.reviewed.ID.String(), m.current.ID.String()}
 	body, err := json.Marshal(map[string]any{"child_ids": ids})
 	if err != nil {
 		t.Fatal(err)
@@ -529,5 +606,26 @@ func TestEnvelopeMetadataReadAndReorderPreserveHTMLPinsE2E(t *testing.T) {
 	if auditCount != 1 {
 		t.Fatal("reorder metadata publication lost its one intended audit event")
 	}
+	// Native editing requires measured, eligible children. The legacy source
+	// remains deliberately unmeasured and must refuse without cache backfill.
+	metadataAssertLegacyNativeRefusalE2E(t, m, parent, "rest", m.cookie)
+	states[m.legacy.ID] = metadataHistoryStateE2E(t, f, m.legacy.ID)
+	if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{ID: m.legacy.ID, ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: 4, Valid: true}, OrgID: f.org}); err != nil {
+		t.Fatal(err)
+	}
+	expectedChildren = 4
+	assertChildren(path+"/children", http.MethodGet, "")
+	// This explicit historical thin-read shape also preserves the original
+	// deleted-child count. It is added after all successful native mutations.
+	deleted := seedDocumentDeleteDraft(t, f.ctx, f.q, f.org, f.user.ID)
+	if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{ID: deleted.ID, ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: 5, Valid: true}, OrgID: f.org}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.q.DeleteDraftDocument(f.ctx, generated.DeleteDraftDocumentParams{ID: deleted.ID, OrgID: f.org}); err != nil {
+		t.Fatal(err)
+	}
+	expectedChildren = 5
+	assertChildren(path+"/children", http.MethodGet, "")
+	assertMetadataNoEffectsE2E(t, m, events+1, renders, requests, states)
 	t.Logf("bounded metadata proof retained %d HTML bytes in authoritative current document", len(metadataFullDocumentE2E(t, f, m.current.ID).HtmlCurrentSourceJson))
 }

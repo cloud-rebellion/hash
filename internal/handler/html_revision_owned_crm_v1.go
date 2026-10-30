@@ -24,7 +24,7 @@ func (a *crmMappingAdmission) checkOwnedLockedV1(ctx context.Context, db generat
 		return err
 	}
 	if db == nil || doc == nil || a.source == nil || a.source.doc == nil || doc.ID != a.source.doc.ID || doc.OrgID != actor.OrgID ||
-		a.witness.ExpectedOrgID != actor.OrgID || a.witness.ExpectedUserID != actor.UserID || len(doc.HtmlSourceJson) == 0 {
+		a.witness.ExpectedOrgID != actor.OrgID || a.witness.ExpectedUserID != actor.UserID {
 		return errCRMDocumentChanged
 	}
 	expected, err := time.Parse(time.RFC3339Nano, a.witness.ExpectedUpdatedAt)

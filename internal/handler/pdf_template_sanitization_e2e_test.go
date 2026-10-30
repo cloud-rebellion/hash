@@ -33,6 +33,9 @@ func setupPDFTemplateSanitizationE2E(t *testing.T) (lifecycleAuthorizationFixtur
 		t.Fatal("PDF template provenance fixture requires the source-built isolated HASH_E2E_PDF_WORKER_PATH")
 	}
 	f, peer := setupHTMLDocumentCreationE2E(t, &htmlCreationRendererE2E{})
+	// The existing operator Pro entitlement is unchanged. Native clone quota
+	// reads need this genuinely measured catalog source, not a repaired template.
+	metadataPrepareNativePlanE2E(t, f)
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 	w := submitPDFIntakeE2E(f, f.ctx, cookie, "/api/v1/templates")
 	if w.Code != http.StatusCreated {

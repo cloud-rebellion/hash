@@ -330,7 +330,13 @@ func TestRestoreInternalFailuresRollBackAndRetryE2E(t *testing.T) {
 				before := f.snapshot(t)
 				drop := blockAuthoringFaultE2E(t, f.blockAuthorizationFixture, fault)
 				response := f.submit(transport, credential)
-				assertRestoreErrorE2E(t, transport, response, http.StatusInternalServerError, "internal error")
+				message := "internal error"
+				if transport == "rest" {
+					// REST uses the shared safe operation label; MCP's existing
+					// sanitizer uses its generic internal-error message.
+					message = "mutate blocks"
+				}
+				assertRestoreErrorE2E(t, transport, response, http.StatusInternalServerError, message)
 				f.assertUnchanged(t, before)
 				drop()
 				response = f.submit(transport, credential)

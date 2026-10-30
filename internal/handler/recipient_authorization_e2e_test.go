@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -25,6 +26,60 @@ type recipientAuthorizationFixture struct {
 	lifecycleAuthorizationFixture
 	newEmail      string
 	originalAudit authoringAuditBaseline621
+}
+
+// The request must wait on THIS held parent's backend, in its actual selected
+// pool/native application. A matching historical SQL label in another session
+// is not evidence of reaching the authorization recheck under test.
+func awaitAuthoringParentWait624E2E(t *testing.T, f lifecycleAuthorizationFixture, held pgx.Tx, query string, native bool) {
+	t.Helper()
+	var holder int32
+	if err := held.QueryRow(f.ctx, "SELECT pg_backend_pid()").Scan(&holder); err != nil || holder <= 0 {
+		t.Fatal("actual parent holder identity unavailable", err)
+	}
+	application := f.pool.Config().ConnConfig.RuntimeParams["application_name"]
+	if native {
+		if configured, ok := htmlAuthoringNativeApplicationsE2E.Load(f.s.HTMLCreationSessions); ok {
+			var valid bool
+			application, valid = configured.(string)
+			if !valid {
+				t.Fatal("configured native backend identity is invalid")
+			}
+		} else if f.s.Send == nil || f.s.Send.WorkRuntime == nil || !f.s.Send.WorkRuntime.MatchesPoolV1(f.pool) || f.s.Send.WorkRuntime.SessionsV1() != f.s.HTMLCreationSessions {
+			t.Fatal("native backend identity is not bound to the actual fixture pool")
+		}
+	}
+	if application == "" {
+		t.Fatal("actual authoring application identity unavailable")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		err := f.pool.QueryRow(f.ctx, `SELECT count(*)::integer FROM pg_stat_activity a
+ WHERE a.datname=current_database() AND a.application_name=$1 AND a.state='active'
+ AND a.wait_event_type='Lock' AND a.wait_event IN('transactionid','tuple') AND a.query LIKE $2
+ AND ($3=ANY(pg_blocking_pids(a.pid)) OR EXISTS(SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) blocked(pid) WHERE $3=ANY(pg_blocking_pids(blocked.pid))))`, application, "%"+query+"%", holder).Scan(&waiting) //nolint:rawsql -- exact fixture-held parent and actual native/pool identity
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting == 1 {
+			return
+		}
+		if waiting > 1 {
+			t.Fatal("unexpected extra request waiting on the same parent")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("actual authoring operation did not wait on its held parent via %s", query)
+}
+
+func startAuthoringParentRequest624E2E(t *testing.T, held pgx.Tx, result chan<- *httptest.ResponseRecorder, request func() *httptest.ResponseRecorder) {
+	t.Helper()
+	finished := make(chan struct{})
+	// Test failure releases only this test's held lock and joins its real request
+	// before the original native fixture's cleanup assertions; no debt refund.
+	t.Cleanup(func() { joinHTMLAuthoringRequestE2E(t, func() {}, finished, held) })
+	go func() { defer close(finished); result <- request() }()
 }
 
 func setupRecipientAuthorizationE2E(t *testing.T, role string) recipientAuthorizationFixture {
@@ -221,8 +276,8 @@ func TestRecipientMutationRechecksSessionAfterDocumentWaitE2E(t *testing.T) {
 				}
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(operation, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder { return f.submit(operation, cookie) })
+				awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, "-- name: GetRecipientMutationSourceHeaderV1", true)
 				want := http.StatusForbidden
 				switch change {
 				case "demotion":
@@ -342,8 +397,8 @@ func TestRecipientCreateInheritsLockedDocumentDefaultsE2E(t *testing.T) {
 	}
 	result := make(chan *httptest.ResponseRecorder, 1)
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	go func() { result <- f.submit("create", cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+	startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder { return f.submit("create", cookie) })
+	awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, "-- name: GetRecipientMutationSourceHeaderV1", true)
 	if _, err := q.SetDocumentDefaultLocale(f.ctx, generated.SetDocumentDefaultLocaleParams{ID: f.doc.ID, OrgID: f.org, DefaultLocale: "sv"}); err != nil {
 		t.Fatal(err)
 	}

@@ -128,8 +128,12 @@ func TestFieldAuthoringRechecksSessionAfterDocumentWaitE2E(t *testing.T) {
 				}
 				cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- f.submit(operation, cookie) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder { return f.submit(operation, cookie) })
+				query := "-- name: GetDocumentForUpdate"
+				if operation == "create" {
+					query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
+				}
+				awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, query, operation == "create")
 				want := http.StatusForbidden
 				switch change {
 				case "demotion":
@@ -332,8 +336,8 @@ func TestFieldDeleteRechecksOriginalOwnerAfterDocumentWaitE2E(t *testing.T) {
 	}
 	result := make(chan *httptest.ResponseRecorder, 1)
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	go func() { result <- f.submit("delete", cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+	startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder { return f.submit("delete", cookie) })
+	awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, "-- name: GetDocumentForUpdate", false)
 	// Simulate a stale admission target. The engine must refuse rather than
 	// follow the field to another document and delete under the wrong lock.
 	if _, err := blocked.Exec(f.ctx, `UPDATE document_fields SET document_id=$2,recipient_id=NULL WHERE id=$1`, f.field.ID, sibling.ID); err != nil {
@@ -446,8 +450,8 @@ func TestFieldSignatureUsesFreshSourceAfterDocumentWaitE2E(t *testing.T) {
 			input.Type = "signature"
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submitInput(f.doc.ID, input, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder { return f.submitInput(f.doc.ID, input, cookie) })
+			awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, "-- name: GetHTMLRevisionDocumentReadHeaderV1", true)
 			next, want := "pdf", http.StatusCreated
 			if initial == "pdf" {
 				next, want = "blocks", http.StatusBadRequest

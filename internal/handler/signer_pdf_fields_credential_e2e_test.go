@@ -40,15 +40,15 @@ type signerPDFFieldFixture struct {
 }
 
 // Every draft/party/field/source pin and ordinary Send is produced by the
-// supported native APIs on the same original pool/runtime. An optional second
-// party signs for real before the freeze guard is tested; no sent/signature
+// supported native APIs on the same original pool/runtime. An optional text
+// field permits the real single-party signature/freeze case; no sent/signature
 // row or wire-size cache is manufactured.
-func newSignerPDFFieldFixture(t *testing.T, withPriorParty ...bool) *signerPDFFieldFixture {
+func newSignerPDFFieldFixture(t *testing.T, optionalText ...bool) *signerPDFFieldFixture {
 	t.Helper()
-	if len(withPriorParty) > 1 {
-		t.Fatal("one explicit prior-party option supported")
+	if len(optionalText) > 1 {
+		t.Fatal("one explicit optional-field option supported")
 	}
-	prior := len(withPriorParty) == 1 && withPriorParty[0]
+	optional := len(optionalText) == 1 && optionalText[0]
 	native, doc := nativeBindingDocument259(t, true)
 	f := native.f
 	rows, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
@@ -57,7 +57,7 @@ func newSignerPDFFieldFixture(t *testing.T, withPriorParty ...bool) *signerPDFFi
 	}
 	recipient := rows[0]
 	base := "/api/v1/documents/" + doc.ID.String()
-	text, err := json.Marshal(map[string]any{"recipient_id": recipient.ID.String(), "type": "text", "page": 1, "x_pct": 10, "y_pct": 10, "w_pct": 40, "h_pct": 5, "required": true, "label": "Reviewed reference"})
+	text, err := json.Marshal(map[string]any{"recipient_id": recipient.ID.String(), "type": "text", "page": 1, "x_pct": 10, "y_pct": 10, "w_pct": 40, "h_pct": 5, "required": !optional, "label": "Reviewed reference"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,27 +66,13 @@ func newSignerPDFFieldFixture(t *testing.T, withPriorParty ...bool) *signerPDFFi
 	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &created) != nil || created.ID == uuid.Nil {
 		t.Fatalf("genuine text field birth=%d %s", response.Code, response.Body.String())
 	}
-	var other uuid.UUID
-	if prior {
-		response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/recipients", `{"role":"provider","name":"Previously signed party","email":"prior-party@pdf-field.test","locale":"en"}`, native.cookie)
-		var party struct{ ID uuid.UUID }
-		if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &party) != nil || party.ID == uuid.Nil {
-			t.Fatalf("genuine prior party=%d %s", response.Code, response.Body.String())
-		}
-		other = party.ID
-		body, _ := json.Marshal(map[string]any{"recipient_id": other.String(), "type": "signature", "page": 1, "x_pct": 20, "y_pct": 80, "w_pct": 40, "h_pct": 10, "required": true})
-		response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/fields", string(body), native.cookie)
-		if response.Code != http.StatusCreated {
-			t.Fatalf("genuine prior party signature field=%d %s", response.Code, response.Body.String())
-		}
-	}
 	sourceBody, err := readDocumentArtifact(f.ctx, f.s.Storage, doc, doc.PdfStorageKey.String, doc.PdfSha256, doc.PdfStorageVersionID)
 	if err != nil || len(sourceBody) == 0 {
 		t.Fatal("genuine exact imported source bytes", err)
 	}
 	response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/send", `{"lawful_basis":"contract"}`, native.cookie)
 	var sent sendDocumentResponse
-	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &sent) != nil || len(sent.Links) != 1+map[bool]int{true: 1, false: 0}[prior] {
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &sent) != nil || len(sent.Links) != 1 {
 		t.Fatalf("genuine PDF field Send=%d %s", response.Code, response.Body.String())
 	}
 	token := ""
@@ -99,12 +85,7 @@ func newSignerPDFFieldFixture(t *testing.T, withPriorParty ...bool) *signerPDFFi
 		if link.RecipientID == recipient.ID {
 			token = raw
 		}
-		if link.RecipientID == other {
-			result, signErr := ordinaryPreparationSign249(t, native, raw, "Previously signed party")
-			if signErr != nil || result == nil || result.Completed {
-				t.Fatal("genuine earlier party did not leave the main party pending", signErr)
-			}
-		}
+
 	}
 	if token == "" {
 		t.Fatal("main party actual invitation missing")
@@ -199,12 +180,12 @@ func TestSignerPDFFieldFillRetainsOriginalTokenThroughDocumentAndAuditWaitsE2E(t
 			mutation.unblock()
 			awaitSignerFieldLock(t, f, held, result, query, event)
 			if scenario == "rotated_while_document_waits" {
-				if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_hash=$2 WHERE id=$1`, f.recipient.ID, auth.HashMagicToken(uuid.NewString())); err != nil { //nolint:rawsql
+				if _, err := held.Exec(f.ctx, `UPDATE recipients SET magic_token_hash=$2 WHERE id=$1`, f.recipient.ID, auth.HashMagicToken(uuid.NewString())); err != nil { //nolint:rawsql -- same blocker owns the parent required by recipient guards
 					t.Fatal(err)
 				}
 			} else {
 				if scenario == "extended_while_document_waits" {
-					if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, f.recipient.ID, time.Now().Add(time.Hour)); err != nil { //nolint:rawsql
+					if _, err := held.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, f.recipient.ID, time.Now().Add(time.Hour)); err != nil { //nolint:rawsql -- commit the independent change with its actual parent lock
 						t.Fatal(err)
 					}
 				} else if scenario == "document_extended_while_document_waits" {
@@ -237,14 +218,96 @@ func TestSignerPDFFieldFillRetainsOriginalTokenThroughDocumentAndAuditWaitsE2E(t
 	}
 }
 
+// A supported single-party optional field can remain unfilled through a real
+// signature. An already admitted fill must still refuse once that signature
+// completes the contract. No sent/signature row is manufactured.
 func TestSignerPDFFieldFillRefusesAnyPriorPartySignatureE2E(t *testing.T) {
 	f := newSignerPDFFieldFixture(t, true)
-	response := httptest.NewRecorder()
-	f.s.handleSignerSubmitFields(response, f.request(t))
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "frozen") {
-		t.Fatalf("fill after another party signed status=%d body=%s", response.Code, response.Body.String())
+	mutation := startSignerFieldsBeforeMutation621(t, f, f.request(t))
+	result, err := ordinaryPreparationSign249(t, f.native, f.token, f.recipient.Name)
+	if err != nil || result == nil || !result.Completed {
+		t.Fatal("real optional-field signature did not complete", err)
+	}
+	before := signerFieldEvidenceState624(t, f)
+	objects := signerFieldObjectState624(t, f)
+	mutation.unblock()
+	select {
+	case response := <-mutation.result:
+		if response.Code != http.StatusConflict {
+			t.Fatalf("admitted fill after prior signature=%d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("prior-signature fill refusal did not join")
 	}
 	f.assertNoFill(t)
+	if before != signerFieldEvidenceState624(t, f) || objects != signerFieldObjectState624(t, f) {
+		t.Fatal("prior-signature refusal changed source, evidence, audit or objects")
+	}
+}
+
+func signerFieldEvidenceState624(t *testing.T, f *signerPDFFieldFixture) string {
+	t.Helper()
+	var state string
+	if err := f.pool.QueryRow(f.ctx, `SELECT jsonb_build_object(
+ 'document',(SELECT to_jsonb(d) FROM documents d WHERE id=$1 AND org_id=$2),
+ 'recipients',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM recipients r WHERE document_id=$1),
+ 'fields',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM document_fields x WHERE document_id=$1),
+ 'signatures',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM signatures x WHERE document_id=$1),
+ 'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM events e WHERE org_id=$2),
+ 'versions',(SELECT jsonb_agg(to_jsonb(v) ORDER BY id) FROM document_versions v WHERE document_id=$1),
+ 'preparation',(SELECT to_jsonb(x) FROM document_ordinary_finalization_preparations_v1 x WHERE document_id=$1),
+ 'outputs',(SELECT jsonb_agg(to_jsonb(x) ORDER BY kind) FROM document_ordinary_finalization_outputs_v1 x WHERE document_id=$1),
+ 'intent',(SELECT to_jsonb(x) FROM document_finalization_intents x WHERE document_id=$1),
+ 'send_intent',(SELECT to_jsonb(x) FROM send_sealing_intents x WHERE document_id=$1),
+ 'mail',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM email_deliveries x WHERE to_email IN (SELECT email FROM recipients WHERE document_id=$1 UNION SELECT email FROM users WHERE org_id=$2)))::text`, f.doc.ID, f.doc.OrgID).Scan(&state); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- exact full source/evidence state before and after refusal
+	return state
+}
+func signerFieldObjectState624(t *testing.T, f *signerPDFFieldFixture) string {
+	t.Helper()
+	p := f.native.storagePeer.importStoragePeer
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	raw, err := json.Marshal([]any{p.puts, p.deletes, p.objects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// Mutable fillable values are currently single-party only. A two-party layout
+// must refuse before any send/evidence mutation; historical two-party fillable
+// recovery is not qualified by this current-source test.
+func TestSignerPDFNamedPartyFillableLayoutRefusesBeforeSendE2E(t *testing.T) {
+	native, doc := nativeBindingDocument259(t, true)
+	f := &signerPDFFieldFixture{ctx: native.f.ctx, pool: native.f.pool, q: native.f.q, s: native.f.s, doc: doc, native: native}
+	rows, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatal(err)
+	}
+	base := "/api/v1/documents/" + doc.ID.String()
+	text, _ := json.Marshal(map[string]any{"recipient_id": rows[0].ID.String(), "type": "text", "page": 1, "x_pct": 10, "y_pct": 10, "w_pct": 40, "h_pct": 5, "required": true})
+	if w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/fields", string(text), native.cookie); w.Code != http.StatusCreated {
+		t.Fatalf("actual text field=%d %s", w.Code, w.Body.String())
+	}
+	w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/recipients", `{"role":"provider","name":"Second real party","email":"second@fillable-refusal.test","locale":"en"}`, native.cookie)
+	var party struct{ ID uuid.UUID }
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &party) != nil || party.ID == uuid.Nil {
+		t.Fatal("actual second party missing")
+	}
+	field, _ := json.Marshal(map[string]any{"recipient_id": party.ID.String(), "type": "signature", "page": 1, "x_pct": 20, "y_pct": 80, "w_pct": 40, "h_pct": 10, "required": true})
+	if w = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/fields", string(field), native.cookie); w.Code != http.StatusCreated {
+		t.Fatalf("actual second signature field=%d %s", w.Code, w.Body.String())
+	}
+	before, objects := signerFieldEvidenceState624(t, f), signerFieldObjectState624(t, f)
+	w = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/send", `{"lawful_basis":"contract"}`, native.cookie)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "named-party PDF ceremonies support signature fields only") {
+		t.Fatalf("unsupported named-party fillable layout=%d %s", w.Code, w.Body.String())
+	}
+	if before != signerFieldEvidenceState624(t, f) || objects != signerFieldObjectState624(t, f) {
+		t.Fatal("refused named-party layout changed database, source/evidence, audit, mail or stored objects")
+	}
 }
 
 func TestSignerPDFFieldFillBeforeSignatureCommitsCurrentNoticeE2E(t *testing.T) {

@@ -101,8 +101,8 @@ func TestDocumentPatchRechecksOriginalSessionAfterParentWaitE2E(t *testing.T) {
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
 			input := f.input()
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(f.ctx, f.doc.ID, input, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			startAuthoringParentRequest624E2E(t, tx, result, func() *httptest.ResponseRecorder { return f.submit(f.ctx, f.doc.ID, input, cookie) })
+			awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, tx, "-- name: GetHTMLRevisionDocumentReadHeaderV1", true)
 			want := http.StatusForbidden
 			switch change {
 			case "demotion":
@@ -188,8 +188,8 @@ func TestDocumentPatchRechecksParentAfterWaitE2E(t *testing.T) {
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			input := f.input()
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- f.submit(f.ctx, f.doc.ID, input, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			startAuthoringParentRequest624E2E(t, tx, result, func() *httptest.ResponseRecorder { return f.submit(f.ctx, f.doc.ID, input, cookie) })
+			awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, tx, "-- name: GetHTMLRevisionDocumentReadHeaderV1", true)
 			want := http.StatusConflict
 			switch change {
 			case "deleted":

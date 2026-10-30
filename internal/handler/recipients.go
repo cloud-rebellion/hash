@@ -226,6 +226,8 @@ func (s *Server) writeRecipientMutationError(w http.ResponseWriter, operation st
 		writeError(w, http.StatusConflict, "recipient changes await the open privacy request review")
 	case errors.As(err, &validationErr):
 		writeError(w, http.StatusBadRequest, validationErr.Error())
+	case pdfadmission.IsInternalApplicationWriteFailureV1(err):
+		writeInternalErrorMsg(w, operation, err)
 	case errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1) || errors.Is(err, pdfadmission.ErrPlainRecipientWriterV1):
 		writeError(w, http.StatusServiceUnavailable, "recipient authoring temporarily unavailable")
 	default:

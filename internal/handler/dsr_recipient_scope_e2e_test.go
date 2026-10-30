@@ -43,11 +43,23 @@ func assertDSRRecipientScopeCountsE2E(t *testing.T, f recipientAuthorizationFixt
 	}
 }
 
+func dsrRecipientScopeCountsE2E(t *testing.T, f recipientAuthorizationFixture) (int, int) {
+	t.Helper()
+	var requests, events int
+	if err := f.pool.QueryRow(f.ctx, `SELECT
+		(SELECT count(*) FROM data_subject_requests WHERE org_id=$1),
+		(SELECT count(*) FROM events WHERE org_id=$1)`, f.org).Scan(&requests, &events); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- capture actual producer history before the operation
+	return requests, events
+}
+
 func TestDSRSenderRecipientScopeRecheckedAfterDocumentWaitE2E(t *testing.T) {
 	for _, parent := range []string{"explicit", "derived"} {
 		for _, change := range []string{"deleted", "relocated"} {
 			t.Run(parent+"/"+change, func(t *testing.T) {
 				f := setupRecipientAuthorizationE2E(t, "owner")
+				requestsBefore, eventsBefore := dsrRecipientScopeCountsE2E(t, f)
 				var siblingID uuid.UUID
 				if change == "relocated" {
 					sibling, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{
@@ -93,7 +105,7 @@ func TestDSRSenderRecipientScopeRecheckedAfterDocumentWaitE2E(t *testing.T) {
 				if response.Code != want {
 					t.Fatalf("stale DSR recipient=%d want%d %s", response.Code, want, response.Body.String())
 				}
-				assertDSRRecipientScopeCountsE2E(t, f, 0, 0)
+				assertDSRRecipientScopeCountsE2E(t, f, requestsBefore, eventsBefore)
 				live, err := f.q.GetUser(f.ctx, f.user.ID)
 				if err != nil || live.Role != f.user.Role || live.SessionGeneration != f.user.SessionGeneration {
 					t.Fatalf("fixture changed caller authority: err=%v", err)
@@ -110,6 +122,7 @@ func TestDSRSenderFreshRecipientScopePersistsE2E(t *testing.T) {
 	for _, parent := range []string{"explicit", "derived"} {
 		t.Run(parent, func(t *testing.T) {
 			f := setupRecipientAuthorizationE2E(t, "sender")
+			requestsBefore, eventsBefore := dsrRecipientScopeCountsE2E(t, f)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			response := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/dsr", senderDSRRecipientScopeInputE2E(f, parent == "explicit"), cookie)
 			if response.Code != http.StatusAccepted {
@@ -123,7 +136,7 @@ func TestDSRSenderFreshRecipientScopePersistsE2E(t *testing.T) {
 			if err != nil || stored.OrgID != f.org || !stored.DocumentID.Valid || uuid.UUID(stored.DocumentID.Bytes) != f.doc.ID || !stored.RecipientID.Valid || uuid.UUID(stored.RecipientID.Bytes) != f.recipient.ID || stored.SubjectEmail != f.recipient.Email || stored.SubjectName != f.recipient.Name || stored.Status != "open" {
 				t.Fatalf("persisted DSR scope or identity changed: err=%v", err)
 			}
-			assertDSRRecipientScopeCountsE2E(t, f, 1, 1)
+			assertDSRRecipientScopeCountsE2E(t, f, requestsBefore+1, eventsBefore+1)
 			var actor uuid.UUID
 			var requestID string
 			if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,payload_json->>'request_id' FROM events WHERE org_id=$1 AND kind=$2`, f.org, audit.KindDataSubjectRequested).Scan(&actor, &requestID); err != nil || actor != f.user.ID || requestID != stored.ID.String() {

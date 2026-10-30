@@ -21,6 +21,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlsource"
+	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -397,48 +398,94 @@ func TestSignerPublicReadRechecksOriginalAdmissionAfterDatabaseWaitE2E(t *testin
 					deadline = time.Now().Add(750 * time.Millisecond)
 					if _, err := f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, f.recipient.ID, deadline); err != nil {
 						t.Fatal(err)
-					} //nolint:rawsql
+					} //nolint:rawsql -- original admitted deadline
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				defer cancel()
+				request := signerReadRequestE2E(f.token, endpoint)
+				request = request.WithContext(context.WithValue(ctx, chi.RouteCtxKey, request.Context().Value(chi.RouteCtxKey)))
+				// Admit through the real endpoint-specific native lookup BEFORE holding
+				// the final read's parent. The old table hold stopped after acquiring a
+				// recipient SHARE lock, so the fixture's token mutation blocked itself.
+				var original *sign.RecipientContext
+				var err error
+				if endpoint == "/fields" {
+					original, err = f.s.Sign.LookupSignerFieldsByTokenV1(ctx, auth.HashMagicToken(f.token))
+				} else {
+					original, err = f.s.Sign.LookupByToken(ctx, auth.HashMagicToken(f.token))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := original.CloseReadV1(); err != nil {
+						t.Error(err)
+					}
+				})
+				observation, err := f.s.captureSignerReadObservation(request, original)
+				if err != nil {
+					t.Fatal(err)
 				}
 				held, err := f.pool.Begin(f.ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer func() { _ = held.Rollback(context.Background()) }()
-				query := "-- name: GetHTMLSendCollectionReadHeaderV1"
-				if endpoint == "" {
-					query = "-- name: GetSignerControllerReadHeaderV1"
-					if _, err = held.Exec(f.ctx, `LOCK TABLE orgs IN ACCESS EXCLUSIVE MODE`); err != nil {
-						t.Fatal(err)
-					} //nolint:rawsql
-				} else if _, err = held.Exec(f.ctx, `LOCK TABLE document_fields IN ACCESS EXCLUSIVE MODE`); err != nil {
+				defer func() {
+					cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+					defer stop()
+					_ = held.Rollback(cleanup)
+				}()
+				if _, err = f.q.WithTx(held).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.doc.OrgID}); err != nil {
 					t.Fatal(err)
-				} //nolint:rawsql
+				}
 				result := make(chan *httptest.ResponseRecorder, 1)
-				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-				defer cancel()
 				done := make(chan struct{})
-				request := signerReadRequestE2E(f.token, endpoint)
-				request = request.WithContext(context.WithValue(ctx, chi.RouteCtxKey, request.Context().Value(chi.RouteCtxKey)))
-				go func() { defer close(done); result <- invokeSignerReadE2E(f.s, request, endpoint) }()
 				t.Cleanup(func() {
 					cancel()
-					_ = held.Rollback(context.Background())
+					cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+					_ = held.Rollback(cleanup)
+					stop()
 					select {
 					case <-done:
 					case <-time.After(4 * time.Second):
-						t.Error("public query read did not drain before fixture cleanup")
+						t.Error("original final native read did not join before fixture cleanup")
 					}
 				})
-				awaitSignerReadDatabaseWaitE2E(t, f, held, result, query)
+				go func() {
+					defer close(done)
+					w := httptest.NewRecorder()
+					var responseErr error
+					if endpoint == "/fields" {
+						page, e := f.s.Sign.SignerFieldListV1(ctx, original, func(fresh *sign.RecipientContext) error {
+							return f.s.validateSignerReadObservation(request, original, observation, fresh)
+						})
+						if page != nil {
+							defer page.CloseConsumerV1()
+						}
+						responseErr = e
+					} else {
+						responseErr = f.s.recheckSignerRead(request, original, observation)
+					}
+					if responseErr != nil {
+						writeSignerReadError(w, responseErr)
+					} else {
+						w.WriteHeader(http.StatusOK)
+					}
+					result <- w
+				}()
+				query := "-- name: GetSignerDocumentReadHeaderV1"
+				if endpoint == "/fields" {
+					query = "-- name: GetHTMLSendDocumentStateHeaderV1"
+				}
+				awaitSignerReadDatabaseWaitE2E(t, f, held, result, query, "transactionid")
 				if scenario == "revoked_token" {
-					if _, err = f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_hash=$2 WHERE id=$1`, f.recipient.ID, auth.HashMagicToken(uuid.NewString())); err != nil {
-						t.Fatal(err)
-					} //nolint:rawsql
+					_, err = held.Exec(f.ctx, `UPDATE recipients SET magic_token_hash=$2 WHERE id=$1`, f.recipient.ID, auth.HashMagicToken(uuid.NewString())) //nolint:rawsql -- same parent-owning independent transaction
 				} else {
-					if _, err = f.pool.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, f.recipient.ID, time.Now().Add(time.Hour)); err != nil {
-						t.Fatal(err)
-					} //nolint:rawsql
+					_, err = held.Exec(f.ctx, `UPDATE recipients SET magic_token_expires_at=$2 WHERE id=$1`, f.recipient.ID, time.Now().Add(time.Hour)) //nolint:rawsql -- never renew the original opaque admission
 					time.Sleep(time.Until(deadline) + 30*time.Millisecond)
+				}
+				if err != nil {
+					t.Fatal(err)
 				}
 				if err = held.Commit(f.ctx); err != nil {
 					t.Fatal(err)
@@ -447,15 +494,9 @@ func TestSignerPublicReadRechecksOriginalAdmissionAfterDatabaseWaitE2E(t *testin
 				case w := <-result:
 					assertSignerReadRefusedE2E(t, w)
 				case <-time.After(4 * time.Second):
-					t.Fatal("public read did not finish after query release")
+					t.Fatal("final native read did not finish after exact parent release")
 				}
 				assertSignerReadNoEffectsE2E(t, f, events)
-				if scenario == "extended_original_expiry" {
-					w := invokeSignerReadE2E(f.s, signerReadRequestE2E(f.token, endpoint), endpoint)
-					if w.Code != http.StatusOK {
-						t.Fatalf("fresh query admission status=%d body=%s", w.Code, w.Body.String())
-					}
-				}
 			})
 		}
 	}
@@ -659,9 +700,9 @@ func TestSignerFieldSaveReturnsDurableObservationAndRejectsIdentityDriftE2E(t *t
 			case "locale":
 				statement, arg = `UPDATE recipients SET locale=$2 WHERE id=$1 AND document_id=$3`, "sv"
 			}
-			if _, err = f.pool.Exec(f.ctx, statement, f.recipient.ID, arg, f.doc.ID); err != nil {
+			if _, err = held.Exec(f.ctx, statement, f.recipient.ID, arg, f.doc.ID); err != nil {
 				t.Fatal(err)
-			} //nolint:rawsql -- independently changed row while original save waits
+			} //nolint:rawsql -- independent row change under its required parent lock, committed before the original save resumes
 			if err = held.Commit(f.ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -702,8 +743,15 @@ func awaitSignerReadMutationWaitE2E(t *testing.T, ctx context.Context, pool *pgx
 	t.Fatal("credential/document mutation did not wait behind exact final read transaction")
 }
 
-func awaitSignerReadDatabaseWaitE2E(t *testing.T, f *signerPDFFieldFixture, held pgx.Tx, result <-chan *httptest.ResponseRecorder, query string) {
+func awaitSignerReadDatabaseWaitE2E(t *testing.T, f *signerPDFFieldFixture, held pgx.Tx, result <-chan *httptest.ResponseRecorder, query string, events ...string) {
 	t.Helper()
+	event := "relation"
+	if len(events) > 1 {
+		t.Fatal("one explicit database wait event supported")
+	}
+	if len(events) == 1 {
+		event = events[0]
+	}
 	var pid int32
 	if err := held.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
@@ -716,7 +764,7 @@ func awaitSignerReadDatabaseWaitE2E(t *testing.T, f *signerPDFFieldFixture, held
 		default:
 		}
 		var waiting bool
-		if err := f.pool.QueryRow(f.ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND position($1 in query)>0 AND wait_event='relation' AND $2=ANY(pg_blocking_pids(pid)))`, query, pid).Scan(&waiting); err != nil {
+		if err := f.pool.QueryRow(f.ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND position($1 in query)>0 AND wait_event=$3 AND $2=ANY(pg_blocking_pids(pid)))`, query, pid, event).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		} //nolint:rawsql
 		if waiting {

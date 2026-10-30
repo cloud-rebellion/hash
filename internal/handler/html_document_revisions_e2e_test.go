@@ -24,7 +24,9 @@ import (
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -354,18 +356,66 @@ func closeUnlessClosedRevisionE2E(ch chan struct{}) {
 func TestHTMLDocumentRevisionAuditExpiryRollsBackAndCompensatesExactOwnedVersionE2E(t *testing.T) {
 	f, _, peer, doc, _ := setupHTMLRevisionE2E(t)
 	before := revisionStateE2E(t, f)
-	blocked, err := f.pool.Begin(f.ctx)
+	// Initial/pre-render/pre-store reads also take the org audit lock. Hold it
+	// only after the real candidate PUT, so this case exercises FINAL rollback
+	// and exact-version compensation rather than an earlier read refusal.
+	stored, acknowledge := make(chan struct{}, 1), make(chan struct{})
+	objectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			peer.ServeHTTP(w, r)
+			return
+		}
+		recorded := httptest.NewRecorder()
+		peer.ServeHTTP(recorded, r)
+		select {
+		case stored <- struct{}{}:
+		case <-r.Context().Done():
+			return
+		}
+		select {
+		case <-acknowledge:
+		case <-r.Context().Done():
+			return
+		}
+		for key, values := range recorded.Header() {
+			w.Header()[key] = append([]string(nil), values...)
+		}
+		w.WriteHeader(recorded.Code)
+		_, _ = w.Write(recorded.Body.Bytes())
+	}))
+	t.Cleanup(objectServer.Close)
+	var err error
+	f.s.Storage, err = storage.New(f.ctx, storage.Config{
+		Endpoint: strings.TrimPrefix(objectServer.URL, "http://"), Region: "us-east-1", Bucket: "hash-import-fixture",
+		AccessKey: "synthetic-html-access", SecretKey: "synthetic-html-secret", BucketLookup: "path",
+		AllowInsecureDevelopmentEndpoint: true, SkipTransientLifecycle: true,
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocked.Rollback(context.Background())
-	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, 2*time.Second)
 	in := revisionInputE2E(t, doc)
 	pending := beginHTMLRevisionRequestE2E(t, f, in, cookie)
-	defer pending.stop(t, func() { _ = blocked.Rollback(context.Background()) })
+	var blocked pgx.Tx
+	defer pending.stop(t, func() {
+		closeUnlessClosedRevisionE2E(acknowledge)
+		if blocked != nil {
+			_ = blocked.Rollback(context.Background())
+		}
+	})
+	select {
+	case <-stored:
+	case <-time.After(4 * time.Second):
+		t.Fatal("revision did not reach its actual candidate PUT")
+	}
+	blocked, err = f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
+		t.Fatal(err)
+	}
+	closeUnlessClosedRevisionE2E(acknowledge)
 	awaitHTMLAuthoringOperationLockE2E(t, f, "pg_advisory_xact_lock", "advisory")
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {

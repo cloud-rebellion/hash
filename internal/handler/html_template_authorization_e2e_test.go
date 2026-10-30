@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/auth"
+	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -967,122 +968,145 @@ func TestHTMLTemplateDSRRechecksNewAuthoringAfterAuditWaitE2E(t *testing.T) {
 }
 
 func htmlMigrationPartsE2E(t *testing.T) (string, string) {
- t.Helper()
- // Exercise the actual HTML migration with every currently applied dependent
- // migration reversed first. Running only73–76 against a current117 schema
- // leaves genuine later SQL-function dependencies on the removed columns.
- // Every byte below comes from the authored migrations; all tests execute this
- // inside their original rollback-only transaction, retaining every refusal
- // guard and restoring the current estate on rollback. No history is forged.
- entries, err := os.ReadDir("../db/migrations")
- if err != nil { t.Fatal(err) }
- var ups, downs []string
- for _, entry := range entries {
-  name := entry.Name()
-  if entry.IsDir() || !strings.HasSuffix(name,".sql") { continue }
-  prefix, _, ok := strings.Cut(name,"_")
-  version, parseErr := strconv.ParseInt(prefix,10,64)
-  if !ok || parseErr != nil { t.Fatal("unrecognized authored migration name",name) }
-  if version < 73 { continue }
-  raw, readErr := os.ReadFile("../db/migrations/"+name)
-  if readErr != nil { t.Fatal(readErr) }
-  sections := strings.SplitN(string(raw),"-- +goose Down",2)
-  if len(sections)!=2 { t.Fatal("dependent migration requires actual Up and Down",name) }
-  ups=append(ups,sections[0]);downs=append(downs,sections[1])
- }
- if len(ups)<4 { t.Fatal("HTML dependency migration chain missing") }
- for i,j:=0,len(downs)-1;i<j;i,j=i+1,j-1 { downs[i],downs[j]=downs[j],downs[i] }
- return strings.Join(ups,"\n"),strings.Join(downs,"\n")
+	t.Helper()
+	// This is the authored73–76 historical boundary, installed on an empty
+	// dedicated migration database. Later irreversible guards are never
+	// installed, bypassed or disabled to qualify this earlier Down contract.
+	entries, err := os.ReadDir("../db/migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ups, downs []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(name, "_")
+		version, parseErr := strconv.ParseInt(prefix, 10, 64)
+		if !ok || parseErr != nil {
+			t.Fatal("unrecognized authored migration name", name)
+		}
+		if version < 73 || version > 76 {
+			continue
+		}
+		raw, readErr := os.ReadFile("../db/migrations/" + name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		sections := strings.SplitN(string(raw), "-- +goose Down", 2)
+		if len(sections) != 2 {
+			t.Fatal("dependent migration requires actual Up and Down", name)
+		}
+		ups = append(ups, sections[0])
+		downs = append(downs, sections[1])
+	}
+	if len(ups) < 4 {
+		t.Fatal("HTML dependency migration chain missing")
+	}
+	for i, j := 0, len(downs)-1; i < j; i, j = i+1, j-1 {
+		downs[i], downs[j] = downs[j], downs[i]
+	}
+	return strings.Join(ups, "\n"), strings.Join(downs, "\n")
 }
 
 func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
-	database := isolateEmptyHTMLTemplateDatabaseE2E(t)
-	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	historical := migrationPG242(t)
+	if err := mdb.RunMigrationsUpToContext(historical.ctx, historical.db, 76); err != nil {
+		t.Fatal(err)
+	}
+	if head, err := mdb.GetMigrationVersionContext(historical.ctx, historical.db); err != nil || head != 76 {
+		t.Fatal("historical HTML boundary differs", head, err)
+	}
+	ctx, connection := historical.ctx, historical.admin
+	var org, user uuid.UUID
+	if err := connection.QueryRow(ctx, `INSERT INTO orgs(name,plan) VALUES('Historical HTML migration tenant','pro') RETURNING id`).Scan(&org); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- actual schema76 fixture identity
+	if err := connection.QueryRow(ctx, `INSERT INTO users(org_id,email,name,role) VALUES($1,$2,'Historical author','owner') RETURNING id`, org, uuid.NewString()+"@historical-html.test").Scan(&user); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- historical minimum columns, no modern generated projection
 	up, down := htmlMigrationPartsE2E(t)
 	t.Run("empty Down and Up", func(t *testing.T) {
-		tx, err := f.pool.Begin(f.ctx)
+		tx, err := connection.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(context.Background())
-		if _, err := tx.Exec(f.ctx, down); err != nil { //nolint:rawsql -- exact migration, transaction always rolled back
-			t.Fatal("empty HTML migration Down:", err)
-		}
+		if _, err = tx.Exec(ctx, down); err != nil {
+			t.Fatal("empty historical HTML migration Down:", err)
+		} //nolint:rawsql -- exact authored historical Down
 		var absent bool
-		if err := tx.QueryRow(f.ctx, `SELECT to_regclass('html_template_revisions') IS NULL`).Scan(&absent); err != nil || !absent { //nolint:rawsql
-			t.Fatalf("Down left HTML revision schema: absent=%t err=%v", absent, err)
-		}
-		if _, err := tx.Exec(f.ctx, up); err != nil { //nolint:rawsql -- exact migration reapplied inside rolled-back transaction
-			t.Fatal("HTML migration Up after empty Down:", err)
-		}
+		if err = tx.QueryRow(ctx, `SELECT to_regclass('html_template_revisions') IS NULL`).Scan(&absent); err != nil || !absent {
+			t.Fatal("Down left historical HTML schema", err)
+		} //nolint:rawsql
+		if _, err = tx.Exec(ctx, up); err != nil {
+			t.Fatal("historical HTML migration Up:", err)
+		} //nolint:rawsql
 	})
 	for _, kind := range []string{"master", "revision", "document source", "historical source"} {
 		t.Run(kind, func(t *testing.T) {
-			tx, err := f.pool.Begin(f.ctx)
+			tx, err := connection.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(context.Background())
-			q := f.q.WithTx(tx)
 			if kind == "master" || kind == "revision" {
 				input := htmlTemplateInputE2E(t, 0, "Rollback witness")
-				content, err := htmlmaster.CanonicalTemplate(input.HTMLMasterJSON, input.VariablesJSON)
-				if err != nil {
-					t.Fatal(err)
+				content, e := htmlmaster.CanonicalTemplate(input.HTMLMasterJSON, input.VariablesJSON)
+				if e != nil {
+					t.Fatal(e)
 				}
-				digest, _ := hex.DecodeString(content.SHA256)
-				template, err := q.CreateHTMLTemplate(f.ctx, generated.CreateHTMLTemplateParams{OrgID: f.org, Name: input.Name, HtmlMasterJson: content.MasterJSON,
-					VariablesJson: content.DefaultsJSON, CreatedBy: f.user.ID, HtmlContentSha256: digest})
+				digest, e := hex.DecodeString(content.SHA256)
+				if e != nil {
+					t.Fatal(e)
+				}
+				var template uuid.UUID
+				err = tx.QueryRow(ctx, `INSERT INTO templates(org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256) VALUES($1,$2,'html',$3,$4,$5,$6) RETURNING id`, org, input.Name, content.MasterJSON, content.DefaultsJSON, user, digest).Scan(&template) //nolint:rawsql -- exact schema76 source columns
 				if err != nil {
 					t.Fatal(err)
 				}
 				if kind == "revision" {
-					if _, err := q.InsertHTMLTemplateRevision(f.ctx, generated.InsertHTMLTemplateRevisionParams{TemplateID: template.ID, OrgID: f.org,
-						ExpectedVersion: 1, HtmlMasterJson: content.MasterJSON, VariablesJson: content.DefaultsJSON, ContentSha256: digest, CreatedBy: f.user.ID}); err != nil {
+					_, err = tx.Exec(ctx, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by) SELECT id,version,org_id,html_master_json,variables_json,html_content_sha256,created_by FROM templates WHERE id=$1 AND org_id=$2`, template, org) //nolint:rawsql -- actual historical immutable snapshot
+					if err != nil {
 						t.Fatal(err)
 					}
-					// Retain immutable history while no current HTML master remains;
-					// this independently exercises the revision-table rollback fence.
-					if _, err := tx.Exec(f.ctx, `UPDATE templates SET source_kind='blocks',blocks_json='{"version":1,"blocks":[]}',html_master_json=NULL,html_content_sha256=NULL WHERE id=$1`, template.ID); err != nil { //nolint:rawsql -- synthetic migration inventory shape, no guard disabled
-						t.Fatal(err)
-					}
+					_, err = tx.Exec(ctx, `UPDATE templates SET source_kind='blocks',blocks_json='{"version":1,"blocks":[]}',html_master_json=NULL,html_content_sha256=NULL WHERE id=$1`, template) //nolint:rawsql -- original independent revision-only inventory
 				}
 			} else {
+				var document uuid.UUID
 				digest := sha256.Sum256([]byte("synthetic migration PDF source"))
-				doc, err := q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{OrgID: f.org, SenderID: f.user.ID, Name: "Rollback source witness",
-					PdfStorageKey: pgtype.Text{String: "synthetic/migration.pdf", Valid: true}, PdfSha256: digest[:]})
+				err = tx.QueryRow(ctx, `INSERT INTO documents(org_id,sender_id,name,source_kind,pdf_storage_key,pdf_sha256) VALUES($1,$2,'Historical source witness','pdf','synthetic/migration.pdf',$3) RETURNING id`, org, user, digest[:]).Scan(&document) //nolint:rawsql -- schema76 source, no later columns/functions
 				if err != nil {
 					t.Fatal(err)
 				}
 				if kind == "document source" {
-					_, err = q.SetDocumentHTMLSource(f.ctx, generated.SetDocumentHTMLSourceParams{ID: doc.ID, OrgID: f.org, ExpectedUpdatedAt: doc.UpdatedAt, HtmlSourceJson: json.RawMessage(`{"synthetic_schema_witness":true}`)})
+					_, err = tx.Exec(ctx, `UPDATE documents SET html_source_json='{"synthetic_schema_witness":true}' WHERE id=$1 AND org_id=$2`, document, org) //nolint:rawsql -- original historical inventory stimulus
 				} else {
-					_, err = q.InsertDocumentVersion(f.ctx, generated.InsertDocumentVersionParams{DocumentID: doc.ID, OrgID: f.org, VersionNo: 1,
-						BlockTreeJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`), Name: doc.Name, SourceKind: "pdf",
-						CreatedVia: "human", SchemaVersion: 1, HtmlSourceJson: json.RawMessage(`{"synthetic_schema_witness":true}`)})
-				}
-				if err != nil {
-					t.Fatal(err)
+					_, err = tx.Exec(ctx, `INSERT INTO document_versions(document_id,org_id,version_no,block_tree_json,variables_json,name,source_kind,created_by,created_via,schema_version,html_source_json) VALUES($1,$2,1,'{"version":1,"blocks":[]}','{}','Historical source witness','pdf',$3,'human',1,'{"synthetic_schema_witness":true}')`, document, org, user) //nolint:rawsql -- schema76 immutable history stimulus
 				}
 			}
-			// Flush deferred FK/ceremony guard events created by this same
-			// transaction's synthetic witness. Otherwise ALTER TABLE can stop
-			// with 55006 before reaching the migration's retained-state refusal.
-			if _, err := tx.Exec(f.ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil { //nolint:rawsql -- exercise the real rollback fence, not pending-trigger setup
+			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = tx.Exec(f.ctx, down) //nolint:rawsql -- exact destructive migration must refuse retained state
+			if _, err = tx.Exec(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			} //nolint:rawsql -- flush real deferred trigger events before ALTER
+			_, err = tx.Exec(ctx, down) //nolint:rawsql -- authored rollback must refuse retained inventory
 			var pgerr *pgconn.PgError
 			if !errors.As(err, &pgerr) || pgerr.Code != "23514" || !strings.Contains(pgerr.Message, "prevent safe migration rollback") {
-				t.Fatalf("retained %s Down=%v", kind, err)
+				t.Fatalf("retained %s historical Down=%v", kind, err)
 			}
-			if err := tx.Rollback(f.ctx); err != nil {
+			if err = tx.Rollback(ctx); err != nil {
 				t.Fatal(err)
 			}
-			var exists bool
-			if err := f.pool.QueryRow(f.ctx, `SELECT to_regclass('html_template_revisions') IS NOT NULL`).Scan(&exists); err != nil || !exists { //nolint:rawsql -- failed Down must preserve schema
-				t.Fatalf("failed Down damaged HTML schema: exists=%t err=%v", exists, err)
-			}
+			var present bool
+			if err = connection.QueryRow(ctx, `SELECT to_regclass('html_template_revisions') IS NOT NULL`).Scan(&present); err != nil || !present {
+				t.Fatal("failed Down damaged historical schema", err)
+			} //nolint:rawsql
 		})
+	}
+	if head, err := mdb.GetMigrationVersionContext(ctx, historical.db); err != nil || head != 76 {
+		t.Fatal("historical migration history changed", head, err)
 	}
 }

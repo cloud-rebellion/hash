@@ -470,7 +470,7 @@ func TestHTMLBrandedSigningPageDatabaseGuardsAndRetainedRollbackE2E(t *testing.T
 			}
 		})
 	}
-	t.Run("token_rotation_ignores_unrelated_frozen_plan_locks", func(t *testing.T) {
+	t.Run("token_rotation_serializes_parent_but_ignores_frozen_field_plan", func(t *testing.T) {
 		target := rows[0].ID
 		before, requests := brandedTokenInventoryE2E(t, f, target), peer.requests.Load()
 		held, err := f.pool.Begin(f.ctx)
@@ -482,22 +482,67 @@ func TestHTMLBrandedSigningPageDatabaseGuardsAndRetainedRollbackE2E(t *testing.T
 		if err := held.QueryRow(f.ctx, `SELECT id FROM documents WHERE id=$1 AND org_id=$2 FOR SHARE`, doc.ID, f.org).Scan(&locked); err != nil || locked != doc.ID {
 			t.Fatal("hold exact fixture document share lock")
 		}
-		if _, err := held.Exec(f.ctx, `LOCK TABLE document_fields IN ACCESS EXCLUSIVE MODE`); err != nil {
+		fieldLock, err := f.pool.Begin(f.ctx)
+		if err != nil {
+			t.Fatal("begin independent frozen-field lock")
+		}
+		defer func() { _ = fieldLock.Rollback(context.Background()) }()
+		if _, err := fieldLock.Exec(f.ctx, `LOCK TABLE document_fields IN ACCESS EXCLUSIVE MODE`); err != nil {
 			t.Fatal("hold unrelated field-plan table lock")
 		}
-		// Token rotation is unrelated to the printed identities and field plan.
-		// Both locks remain held until this separate implicit transaction has
-		// committed; the old unconditional checker would wait and time out.
+		// Current admission guards serialize all recipient changes on the parent.
+		// Release only that legitimate fence after observing its actual waiter;
+		// the independent field-plan lock stays held through token COMMIT. The
+		// branded checker's identity-preserving fast path must not touch fields.
 		hash := sha256.Sum256([]byte("Synthetic branded-page token rotation regression"))
 		expiry := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
 		ctx, cancel := context.WithTimeout(f.ctx, time.Second)
 		defer cancel()
-		tag, err := f.pool.Exec(ctx, `UPDATE recipients SET magic_token_hash=$3,magic_token_expires_at=$4 WHERE document_id=$1 AND id=$2`, doc.ID, target, hash[:], expiry)
-		if err != nil || tag.RowsAffected() != 1 {
-			t.Fatal("unrelated synthetic token rotation did not commit within its bounded deadline")
+		type tokenResult struct {
+			tag pgconn.CommandTag
+			err error
+		}
+		done := make(chan tokenResult, 1)
+		joined := false
+		go func() {
+			tag, err := f.pool.Exec(ctx, `/* branded-token-parent-fence */ UPDATE recipients SET magic_token_hash=$3,magic_token_expires_at=$4 WHERE document_id=$1 AND id=$2`, doc.ID, target, hash[:], expiry)
+			done <- tokenResult{tag, err}
+		}()
+		defer func() {
+			cancel()
+			_ = held.Rollback(context.Background())
+			_ = fieldLock.Rollback(context.Background())
+			if !joined {
+				select {
+				case <-done:
+				case <-time.After(4 * time.Second):
+					t.Error("token rotation did not join before fixture cleanup")
+				}
+			}
+		}()
+		awaitSessionOperationLockE2E(t, f.ctx, f.pool, "branded-token-parent-fence", "transactionid")
+		var blockedByParent int
+		var parentPID int
+		if err := held.QueryRow(f.ctx, "SELECT pg_backend_pid()").Scan(&parentPID); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND query LIKE '%branded-token-parent-fence%' AND state='active' AND $1=ANY(pg_blocking_pids(pid))`, parentPID).Scan(&blockedByParent); err != nil || blockedByParent != 1 {
+			t.Fatal("token rotation did not retain the exact current parent fence", err)
 		}
 		if err := held.Rollback(f.ctx); err != nil {
-			t.Fatal("release frozen-plan fixture locks")
+			t.Fatal("release current recipient parent fence")
+		}
+		select {
+		case result := <-done:
+			joined = true
+			if result.err != nil || result.tag.RowsAffected() != 1 {
+				t.Fatal("token rotation touched the unrelated field plan or did not commit", result.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("token rotation did not commit within its original bounded deadline")
+		}
+		if err := fieldLock.Rollback(f.ctx); err != nil {
+			t.Fatal("release independent field-plan lock")
 		}
 		updated, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
 		if err != nil {

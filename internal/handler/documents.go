@@ -205,6 +205,10 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			defer result.CloseConsumerV1()
 		}
 		if err != nil {
+			if pdfadmission.IsInternalApplicationWriteFailureV1(err) {
+				s.writeDocumentCreationError(w, err)
+				return
+			}
 			if errors.Is(err, pdfadmission.ErrBlocksTemplateSourceV1) || errors.Is(err, pdfadmission.ErrBlocksWriterV1) || errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
 				writeError(w, http.StatusServiceUnavailable, "document creation capacity unavailable")
 				return

@@ -5,7 +5,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -23,7 +22,6 @@ import (
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/ownedaudit"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
-	"github.com/bright-interaction/hash/internal/versions"
 )
 
 // This admission is private server state, never decoded from a client proof.
@@ -168,62 +166,6 @@ func (a *crmMappingAdmission) persistOwnedV1(ctx context.Context, s *Server, tx 
 	return pending, nil, err
 }
 
-func (s *Server) commitCRMDocumentValues(ctx context.Context, actor authoring.Actor, id uuid.UUID, admission *crmMappingAdmission) (*generated.Document, error) {
-	ctx, cancel := context.WithTimeout(ctx, authoring.MutationTimeout)
-	defer cancel()
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = authoring.Rollback(ctx, tx) }()
-	if err = admission.checkLocked(ctx, s, tx, actor, id); err != nil {
-		return nil, err
-	}
-	guard, err := authoring.LockDraft(ctx, tx, actor, id)
-	if err != nil {
-		return nil, err
-	}
-	q := generated.New(tx)
-	doc := guard.Document
-	if admission.observation.ContentChanged {
-		if doc.SourceKind != "blocks" || len(doc.HtmlSourceJson) != 0 {
-			return nil, errCRMDocumentUnsupported
-		}
-		variables, err := json.Marshal(admission.observation.values)
-		if err != nil {
-			return nil, err
-		}
-		if _, err = q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{ID: id, OrgID: actor.OrgID, BlocksJson: doc.BlocksJson, VariablesJson: variables}); err != nil {
-			return nil, err
-		}
-	}
-	// Always advance the parent edit witness, including mapping-only/unlink.
-	updated, err := q.UpdateDraftDocumentDetailsV1(ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: id, OrgID: actor.OrgID, Name: doc.Name, ExpiresAt: doc.ExpiresAt})
-	if err != nil {
-		return nil, err
-	}
-	if admission.observation.ContentChanged {
-		if _, err = versions.New(q).Snapshot(ctx, versions.SnapshotInput{DocumentID: id, OrgID: actor.OrgID, Name: updated.Name, SourceKind: updated.SourceKind, BlocksJSON: updated.BlocksJson, VariablesJS: updated.VariablesJson, CreatedBy: &actor.UserID, Via: versions.ViaHuman, Summary: "Reviewed CRM information applied"}); err != nil {
-			return nil, err
-		}
-	}
-	pending, err := admission.persist(ctx, s, tx, actor, updated)
-	if err != nil {
-		return nil, err
-	}
-	if err = guard.Recheck(ctx); err != nil {
-		return nil, err
-	}
-	if err = admission.checkDeadline(); err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	s.Audit.Publish(pending)
-	return updated, nil
-}
-
 func (s *Server) handleCRMDocumentApply(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	actor, id, ok := s.crmDocumentActor(w, r)
@@ -309,7 +251,12 @@ func (s *Server) handleCRMDocumentApply(w http.ResponseWriter, r *http.Request) 
 			err = errHTMLDocumentRevisionConflict
 		}
 	} else {
-		updated, err = s.commitCRMDocumentValues(ctx, actor, id, admission)
+		inputOwner, _ := r.Context().Value(htmlAuthoringInputContextKeyV1{}).(*pdfadmission.ApplicationHTMLAuthoringInputV1)
+		var finish func()
+		updated, finish, err = s.commitCRMDocumentValuesOwnedV1(ctx, actor, id, admission, inputOwner)
+		if err == nil {
+			defer finish()
+		}
 	}
 	if err != nil {
 		s.writeCRMDocumentError(w, err)

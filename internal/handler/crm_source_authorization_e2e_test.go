@@ -194,6 +194,39 @@ func (f crmSourceFixtureE2E) assertNoDocumentEffects(t *testing.T, before string
 	}
 }
 
+// The native Send actor header retains the tenant NO KEY UPDATE before the
+// CRM account SHARE. A queued owner revocation must observe that actual first
+// lock, rather than pretend it has already reached its later account UPDATE.
+func awaitCRMSourceOwnerWaitE2E(t *testing.T, f crmSourceFixtureE2E) int32 {
+	t.Helper()
+	application := f.pool.Config().ConnConfig.RuntimeParams["application_name"]
+	if application == "" {
+		t.Fatal("CRM waiter requires its exact fixture application")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		var holder int32
+		err := f.pool.QueryRow(f.ctx, `SELECT count(*)::integer,coalesce(min(b.pid),0)::integer
+		 FROM pg_stat_activity a CROSS JOIN LATERAL unnest(pg_blocking_pids(a.pid)) AS b(pid)
+		 JOIN pg_stat_activity held ON held.pid=b.pid AND held.datname=a.datname AND held.application_name=a.application_name
+		 WHERE a.datname=current_database() AND a.application_name=$1 AND a.state='active' AND a.wait_event_type='Lock'
+		 AND a.query LIKE '%-- name: GetOrgForOwnerMutation%'`, application).Scan(&count, &holder) //nolint:rawsql -- exact queued owner request and actual same-fixture blocker
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count == 1 && holder > 0 {
+			return holder
+		}
+		if count > 1 {
+			t.Fatal("unexpected CRM owner lock dependency count", count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("queued CRM revocation did not reach the native Send tenant lock")
+	return 0
+}
+
 func TestCRMSourceGroupedPreviewReadsOneRecordForTwoDeclaredValuesE2E(t *testing.T) {
 	f := setupCRMSourceAuthorizationE2E(t)
 	before, accounts, records := f.lifecycleAuthorizationFixture.snapshot(t), f.source.accounts.Load(), f.source.deals.Load()
@@ -256,11 +289,23 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 			if wait == "record" {
 				paused := f.source.pauseRecord(t)
 				release = paused.finish
-				done := make(chan *httptest.ResponseRecorder, 1)
-				go func() { done <- f.lifecycleAuthorizationFixture.submit("send", f.cookie) }()
+				done, join := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+					request := f.lifecycleAuthorizationFixture
+					request.ctx = ctx
+					return request.submit("send", f.cookie)
+				})
+				defer func() { release(); join() }()
 				paused.await(t)
-				assertCRMConnectionSafeResponseE2E(t, f.submit(f.ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie), http.StatusOK)
+				revocation, joinRevocation := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+					return f.submit(ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie)
+				})
+				defer func() { release(); joinRevocation() }()
+				awaitCRMSourceOwnerWaitE2E(t, f)
+				// Revocation was queued while the actual provider read was blocked.
+				// That earlier owner waiter acquires the tenant lock before Send's
+				// next admission phase; do not deadlock the source behind a sync call.
 				release()
+				assertCRMConnectionSafeResponseE2E(t, receiveSessionOperationE2E(t, revocation), http.StatusOK)
 				if w := receiveSessionOperationE2E(t, done); w.Code != http.StatusConflict {
 					t.Fatalf("Send accepted revoked in-flight record: status=%d", w.Code)
 				}
@@ -273,8 +318,12 @@ func TestCRMSourceSendRejectsRevocationBeforeFinalAdmissionE2E(t *testing.T) {
 				if _, err := f.q.WithTx(tx).GetDocumentForUpdate(f.ctx, generated.GetDocumentForUpdateParams{ID: f.doc.ID, OrgID: f.org}); err != nil {
 					t.Fatal(err)
 				}
-				done := make(chan *httptest.ResponseRecorder, 1)
-				go func() { done <- f.lifecycleAuthorizationFixture.submit("send", f.cookie) }()
+				done, join := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+					request := f.lifecycleAuthorizationFixture
+					request.ctx = ctx
+					return request.submit("send", f.cookie)
+				}, tx)
+				defer join()
 				awaitNativeTemplateLockE2E(t, f.lifecycleAuthorizationFixture, tx, "GetHTMLSendDocumentStateHeaderV1", false)
 				assertCRMConnectionSafeResponseE2E(t, f.submit(f.ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie), http.StatusOK)
 				if err := tx.Commit(f.ctx); err != nil {
@@ -386,12 +435,24 @@ func TestCRMSourceReviewedSendFreezesExactValuesAndAuditLineageE2E(t *testing.T)
 func TestCRMSourceSendHoldsConnectionThroughAuditIntentCommitE2E(t *testing.T) {
 	f := setupCRMSourceAuthorizationE2E(t)
 	blocked := ownerOrgLockE2E(t, ownerOrgMutationFixture{lifecycleAuthorizationFixture: f.lifecycleAuthorizationFixture}, true)
-	admission := make(chan *httptest.ResponseRecorder, 1)
-	go func() { admission <- f.lifecycleAuthorizationFixture.submit("send", f.cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
-	revocation := make(chan *httptest.ResponseRecorder, 1)
-	go func() { revocation <- f.submit(f.ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: RevokeCRMConnection", "transactionid")
+	admission, joinAdmission := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+		request := f.lifecycleAuthorizationFixture
+		request.ctx = ctx
+		return request.submit("send", f.cookie)
+	}, blocked)
+	defer joinAdmission()
+	awaitNativeTemplateLockE2E(t, f.lifecycleAuthorizationFixture, blocked, "AcquireOrgChainLock", false)
+	var sendPID int32
+	if err := f.pool.QueryRow(f.ctx, `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND query LIKE '%-- name: AcquireOrgChainLock%' AND wait_event='advisory' AND state='active'`, f.pool.Config().ConnConfig.RuntimeParams["application_name"]).Scan(&sendPID); err != nil {
+		t.Fatal(err)
+	} //nolint:rawsql -- exact native Send audit waiter
+	revocation, joinRevocation := startNativeTemplateRequestE2E(t, f.lifecycleAuthorizationFixture, func(ctx context.Context) *httptest.ResponseRecorder {
+		return f.submit(ctx, http.MethodDelete, "", crmConnectionRevokeBodyE2E(2), f.cookie)
+	}, blocked)
+	defer joinRevocation()
+	if holder := awaitCRMSourceOwnerWaitE2E(t, f); holder != sendPID {
+		t.Fatal("CRM revocation waited behind an unrelated backend")
+	}
 	select {
 	case <-revocation:
 		t.Fatal("credential revocation crossed the final retained connection SHARE lock")

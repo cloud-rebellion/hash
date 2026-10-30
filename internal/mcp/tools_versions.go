@@ -242,7 +242,7 @@ func registerVersionTools(s *Server, d Deps) {
 			if errors.Is(err, pdfadmission.ErrBlocksRestoreVersionNotFoundV1) {
 				return result, errors.New("version not found")
 			}
-			return result, err
+			return result, canonicalBlockMutationErrorV1(err)
 		},
 	})
 }

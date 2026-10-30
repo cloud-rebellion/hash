@@ -145,6 +145,10 @@ func (w *ApplicationPlainDraftMutationWriterV1) PatchV1(ctx context.Context, p P
 	if !s.validV1(ctx) || s.attempted {
 		return nil, ErrBlocksWriterV1
 	}
+	return s.patchPlainV1(ctx, p)
+}
+
+func (s *applicationBlocksMutationStateV1) patchPlainV1(ctx context.Context, p PlainDraftPatchV1) (*generated.Document, error) {
 	s.attempted = true
 	old := s.snapshot.document
 	current := old
@@ -168,6 +172,11 @@ func (w *ApplicationPlainDraftMutationWriterV1) PatchV1(ctx context.Context, p P
 			return nil, err
 		}
 	}
+	return s.patchPlainDetailsV1(ctx, p, current)
+}
+
+func (s *applicationBlocksMutationStateV1) patchPlainDetailsV1(ctx context.Context, p PlainDraftPatchV1, current *generated.Document) (*generated.Document, error) {
+	old := s.snapshot.document
 	name := old.Name
 	if p.Name != "" {
 		name = p.Name

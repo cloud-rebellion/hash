@@ -184,17 +184,12 @@ func TestDocumentMetadataMCPReadProjectionE2E(t *testing.T) {
 	assertMetadataNoEffectsE2E(t, m, events, renders, requests, states)
 
 	t.Run("envelope thin publication retains keys and ordered children", func(t *testing.T) {
-		parent := seedDocumentDeleteDraft(t, f.ctx, f.q, f.org, f.user.ID)
-		if _, err := f.q.MarkAsEnvelope(f.ctx, generated.MarkAsEnvelopeParams{ID: parent.ID, OrgID: f.org}); err != nil {
-			t.Fatal(err)
-		}
+		parent := metadataNativeEnvelopeE2E(t, f, m.cookie, "Metadata MCP envelope")
 		for i, doc := range []*generated.Document{m.current, m.reviewed, m.static} {
-			if _, err := f.q.AttachToEnvelope(f.ctx, generated.AttachToEnvelopeParams{
-				ID: doc.ID, OrgID: f.org, ParentEnvelopeID: pgtype.UUID{Bytes: parent.ID, Valid: true}, EnvelopePosition: pgtype.Int4{Int32: int32(i + 1), Valid: true},
-			}); err != nil {
-				t.Fatal(err)
-			}
+			metadataAttachMeasuredE2E(t, f, m.cookie, parent.ID, doc.ID, i+1)
 		}
+		nativeEvents := metadataAuditCountE2E(t, f)
+
 		check := func(tool string, args map[string]any, ids []uuid.UUID) {
 			t.Helper()
 			var out struct {
@@ -221,7 +216,8 @@ func TestDocumentMetadataMCPReadProjectionE2E(t *testing.T) {
 		}
 		check("reorder_envelope_children", map[string]any{"envelope_id": parent.ID, "child_id_order": []uuid.UUID{m.static.ID, m.reviewed.ID, m.current.ID}}, []uuid.UUID{m.static.ID, m.reviewed.ID, m.current.ID})
 		check("list_envelope_children", map[string]any{"envelope_id": parent.ID}, []uuid.UUID{m.static.ID, m.reviewed.ID, m.current.ID})
-		assertMetadataNoEffectsE2E(t, m, events+1, renders, requests, states)
+		assertMetadataNoEffectsE2E(t, m, nativeEvents+1, renders, requests, states)
+		metadataAssertLegacyNativeRefusalE2E(t, m, parent, "mcp", orgKey.Plaintext)
 		var count int
 		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE document_id=$1 AND actor_user_id=$2 AND payload_json->>'tool'='reorder_envelope_children'`, parent.ID, f.user.ID).Scan(&count); err != nil {
 			t.Fatal(err)

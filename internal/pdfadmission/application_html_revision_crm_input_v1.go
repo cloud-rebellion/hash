@@ -42,13 +42,28 @@ type htmlCRMRevisionMappingV1 struct {
 	SourcePath string `json:"source_path"`
 }
 
+// The block-value/mapping-only route has exactly one original transaction.
+// Its real input capture is identical to HTML CRM revision, but only the final
+// Mutation stage is legal; ordinary/HTML four-stage ordering is unchanged.
+func (f *ApplicationSessionFactoryV1) NewCRMDocumentValuesOperationV1(ctx context.Context, org, document, actor uuid.UUID, input *ApplicationHTMLAuthoringInputV1, snapshot *crmconnection.Snapshot) (*ApplicationHTMLRevisionOperationV1, error) {
+	op, err := f.NewHTMLCRMRevisionOperationV1(ctx, org, document, actor, input, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	op.state.crmValuesOnly = true
+	return op, nil
+}
+
 // Count actual retained typed provider strings/maps and the scalar extraction
 // before copying or selecting them. The protected client already bounds every
 // response; these are logical native loans, not larger input/runtime limits or
 // a claim of measured process/provider capacity. Original snapshot retention,
 // selection scratch and the detached declaration coexist until source retirement.
 func htmlCRMRevisionSnapshotResourcesV1(snapshot *crmconnection.Snapshot) (int64, error) {
-	if snapshot == nil || len(snapshot.Records) > crmconnection.MaxUniqueRecords {
+	if snapshot == nil {
+		return 4096, nil // Explicit mapping-only/unlink has no provider response.
+	}
+	if len(snapshot.Records) > crmconnection.MaxUniqueRecords {
 		return 0, ErrHTMLRevisionOperationV1
 	}
 	n := int64(unsafe.Sizeof(*snapshot)) + 4096
@@ -143,12 +158,17 @@ func (f *ApplicationSessionFactoryV1) NewHTMLCRMRevisionOperationV1(ctx context.
 	if err := json.Unmarshal(bytes.Clone(raw), &body); err != nil {
 		return nil, err
 	}
-	if body.ExpectedOrgID != org || body.ExpectedUserID != actor || !body.Confirmed || len(body.ReviewedDigest) != 64 || len(body.Mappings) == 0 || len(body.Mappings) > crmconnection.MaxRecordReferences ||
-		snapshot.Identity.OrgID != org || snapshot.Identity.ID.String() != body.ExpectedConnectionID || strconv.FormatInt(snapshot.Identity.Generation, 10) != body.ExpectedConnectionGeneration {
+	if body.ExpectedOrgID != org || body.ExpectedUserID != actor || !body.Confirmed || len(body.ReviewedDigest) != 64 || body.Mappings == nil || len(body.Mappings) > crmconnection.MaxRecordReferences ||
+		(len(body.Mappings) > 0 && snapshot == nil) {
 		return nil, ErrHTMLRevisionOperationV1
 	}
-	if err := resolver.ValidateCRMSelection(*snapshot); err != nil {
-		return nil, err
+	if snapshot != nil {
+		if snapshot.Identity.OrgID != org || snapshot.Identity.ID.String() != body.ExpectedConnectionID || strconv.FormatInt(snapshot.Identity.Generation, 10) != body.ExpectedConnectionGeneration {
+			return nil, ErrHTMLRevisionOperationV1
+		}
+		if err := resolver.ValidateCRMSelection(*snapshot); err != nil {
+			return nil, err
+		}
 	}
 	// Price each selected value separately: many mappings may legitimately
 	// select the SAME provider scalar. A snapshot-sized envelope alone would
@@ -217,5 +237,7 @@ func (f *ApplicationSessionFactoryV1) NewHTMLCRMRevisionOperationV1(ctx context.
 		return nil, ErrHTMLRevisionOperationV1
 	}
 	accepted = true
-	return f.newHTMLRevisionOperationV1(ctx, org, document, actor, declaration, release), nil
+	op := f.newHTMLRevisionOperationV1(ctx, org, document, actor, declaration, release)
+	op.state.crmApply = true
+	return op, nil
 }

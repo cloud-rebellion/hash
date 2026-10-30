@@ -226,7 +226,7 @@ func (h *ApplicationPDFTemplateFieldsMutationV1) LogUpdatedV1(ctx context.Contex
 	hash := audit.ChainHashRecord(audit.HashInput{Prev: previous, OrgID: s.template.OrgID, ActorID: actor, Kind: audit.KindTemplateUpdated, CreatedAt: stamp, Payload: raw})
 	id, err := s.queries.InsertEventIdentityV1(ctx, generated.InsertEventIdentityV1Params{OrgID: s.template.OrgID, ActorUserID: pgtype.UUID{Bytes: actor, Valid: true}, Kind: audit.KindTemplateUpdated, PayloadJson: raw, PayloadHashed: raw, PrevHash: previous, RowHash: hash, CreatedAt: pgtype.Timestamptz{Time: stamp, Valid: true}})
 	if err != nil {
-		return err
+		return applicationInternalWriteErrorV1(ctx, applicationAuditIdentityWriteV1, err)
 	}
 	if id == uuid.Nil {
 		return ErrPDFTemplateSourceV1

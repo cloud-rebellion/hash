@@ -129,8 +129,10 @@ func TestRecipientMCPCredentialsRecheckedAfterDocumentWaitE2E(t *testing.T) {
 					t.Fatal(err)
 				}
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- submitRecipientMCPE2E(f, tool, mint.Plaintext, recipientMCPArgumentsE2E(f, tool)) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder {
+					return submitRecipientMCPE2E(f, tool, mint.Plaintext, recipientMCPArgumentsE2E(f, tool))
+				})
+				awaitAuthoringParentWait624E2E(t, f, blocked, "-- name: GetRecipientMutationSourceHeaderV1", true)
 				switch change {
 				case "key-delete":
 					response := submitSessionOperationE2E(f.s, http.MethodDelete, "/api/v1/api-keys/"+keyID.String(), "", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
@@ -272,10 +274,10 @@ func TestRecipientMCPRefusesConcurrentSoftDeleteE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitRecipientMCPE2E(f, tool, mint.Plaintext, recipientMCPArgumentsE2E(f, tool))
-			}()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder {
+				return submitRecipientMCPE2E(f, tool, mint.Plaintext, recipientMCPArgumentsE2E(f, tool))
+			})
+			awaitAuthoringParentWait624E2E(t, f, blocked, "-- name: GetRecipientMutationSourceHeaderV1", true)
 			if _, err := blocked.Exec(f.ctx, `UPDATE documents SET deleted_at=clock_timestamp() WHERE id=$1`, f.doc.ID); err != nil {
 				t.Fatal(err)
 			}
@@ -340,8 +342,10 @@ func TestRecipientMCPLockedDefaultAndNormalizedCRUDActorE2E(t *testing.T) {
 	}
 	args := map[string]any{"document_id": f.doc.ID, "name": "  New signer  ", "email": "  normalized@example.test  "}
 	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- submitRecipientMCPE2E(f, "add_recipient", mint.Plaintext, args) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+	startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder {
+		return submitRecipientMCPE2E(f, "add_recipient", mint.Plaintext, args)
+	})
+	awaitAuthoringParentWait624E2E(t, f, blocked, "-- name: GetRecipientMutationSourceHeaderV1", true)
 	deadline := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Microsecond)
 	if _, err := blocked.Exec(f.ctx, `UPDATE documents SET default_locale='sv',expires_at=$2 WHERE id=$1`, f.doc.ID, deadline); err != nil {
 		t.Fatal(err)

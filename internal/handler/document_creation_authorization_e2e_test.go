@@ -256,6 +256,7 @@ func TestDocumentCreationOriginalCredentialAfterQuotaWaitE2E(t *testing.T) {
 			t.Run(transport+"/"+change, func(t *testing.T) {
 				f, tpl := setupDocumentCreationE2E(t, "blocks")
 				f.s.Billing = billing.NewOperator(f.q, []config.OperatorEntitlement{{OrgID: f.org, PlanSlug: "pro", ReviewRef: "synthetic creation quota approval"}})
+				prepareNamedPDFLayoutPlanE2E(t, f, "pro")
 				credential, _, expiry := documentCreationCredentialE2E(t, f, transport, change == "expiry")
 				before := f.snapshot(t)
 				blocked, err := f.pool.Begin(f.ctx)
@@ -530,6 +531,7 @@ func TestDocumentCreationOperatorQuotaRollsBackE2E(t *testing.T) {
 			}
 			t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM billing_plans WHERE slug=$1`, slug) })
 			f.s.Billing = billing.NewOperator(f.q, []config.OperatorEntitlement{{OrgID: f.org, PlanSlug: slug, ReviewRef: "synthetic bounded creation"}})
+			prepareNamedPDFLayoutPlanE2E(t, f, slug)
 			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
 			before := f.snapshot(t)
 			w := submitDocumentCreationE2E(f, f.ctx, transport, credential, documentCreationArgsE2E(tpl))

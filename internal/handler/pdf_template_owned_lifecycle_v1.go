@@ -139,6 +139,10 @@ func (s *Server) finishOwnedPDFTemplateFieldsV1(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if pdfadmission.IsInternalApplicationWriteFailureV1(err) {
+			s.writeTemplateMutationError(w, "update template failed", err)
+			return
+		}
 		if errors.Is(err, pdfadmission.ErrPDFTemplateSourceV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) {
 			writeError(w, http.StatusServiceUnavailable, "PDF template temporarily unavailable")
 			return

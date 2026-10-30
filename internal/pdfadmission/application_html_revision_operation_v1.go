@@ -51,6 +51,8 @@ type applicationHTMLRevisionOperationV1 struct {
 	declaration   htmlRevisionDeclarationV1
 	releaseInput  func()
 	sourceUses    int
+	crmApply      bool
+	crmValuesOnly bool
 }
 type ApplicationHTMLRevisionSQLV1 struct{ state *applicationHTMLRevisionSQLV1 }
 type applicationHTMLRevisionSQLV1 struct {
@@ -105,11 +107,11 @@ func (h *ApplicationHTMLRevisionOperationV1) OpenSQLV1(purpose HTMLRevisionSQLPu
 	o := h.state
 	o.mu.Lock()
 	index := int(purpose - HTMLRevisionInitialReadV1)
-	if !o.usableV1() || o.attempted[index] || (o.workflow != 0 && purpose != HTMLRevisionInitialReadV1) {
+	if !o.usableV1() || o.attempted[index] || (o.workflow != 0 && purpose != HTMLRevisionInitialReadV1) || (o.crmValuesOnly && purpose != HTMLRevisionMutationV1) {
 		o.mu.Unlock()
 		return nil, ErrHTMLRevisionOperationV1
 	}
-	if index > 0 {
+	if index > 0 && !o.crmValuesOnly {
 		previousRetired := false
 		for previous := range o.stages {
 			if previous.purpose == purpose-1 {

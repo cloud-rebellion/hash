@@ -6,9 +6,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,8 +22,10 @@ import (
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/templatepin"
+	"github.com/bright-interaction/hash/internal/workguard"
 )
 
 func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing.T) {
@@ -409,6 +413,7 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		lease    *originalAutomationCallLeaseV1
 	}
 	completeResponses := make(chan completeAutomationResultV1, 2)
+	completeBaseline := automationDocumentRuntimeBaselineV1(t, owned)
 	completeStart := make(chan struct{})
 	var completeReady sync.WaitGroup
 	completeReady.Add(2)
@@ -422,21 +427,54 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	}
 	completeReady.Wait()
 	close(completeStart)
-	// Join both actual calls before an assertion can stop their consumer. The
-	// deferred close covers errors/status/divergence as well as the happy path.
-	completeJoined := [2]completeAutomationResultV1{<-completeResponses, <-completeResponses}
-	defer func() {
-		for i := range completeJoined {
-			lease := completeJoined[i].lease
-			completeJoined[i] = completeAutomationResultV1{}
-			lease.closeV1()
+	// Consume each response at its actual return, before awaiting its peer.
+	// Retaining the first response while joining the second invents overlap
+	// beyond the fixture's original single provider stream. Copy only the
+	// client-visible scalars, then retire that response's actual consumer.
+	type completeObservationV1 struct {
+		response automationSignatureRequestResponse
+		capacity bool
+		failure  string
+	}
+	var completeJoined [2]completeObservationV1
+	for i := range completeJoined {
+		returned := <-completeResponses
+		observed := &completeJoined[i]
+		observed.response = returned.response
+		observed.response.Status = strings.Clone(returned.response.Status)
+		if returned.err != nil {
+			observed.capacity = errors.Is(returned.err, workguard.ErrUnavailableV1) &&
+				!errors.Is(returned.err, context.Canceled) && !errors.Is(returned.err, context.DeadlineExceeded) &&
+				!errors.Is(returned.err, pdfadmission.ErrApplicationSessionUnknownV1) &&
+				!errors.Is(returned.err, pdfadmission.ErrApplicationSessionCommitUnknownV1) && ctx.Err() == nil
+			if !observed.capacity {
+				observed.failure = strings.Clone(returned.err.Error())
+			}
 		}
-	}()
+		lease := returned.lease
+		returned = completeAutomationResultV1{}
+		lease.closeV1()
+	}
+	assertAutomationDocumentRuntimeBaselineE2E(t, owned, completeBaseline)
 	var completeRequestID, completeDocumentID uuid.UUID
 	for i := range completeJoined {
 		result := &completeJoined[i]
-		if result.err != nil {
-			t.Fatal(result.err)
+		if result.failure != "" {
+			t.Fatal(result.failure)
+		}
+		if result.capacity {
+			// HTTP exposes this known bounded-capacity refusal as503. After BOTH
+			// calls and consumers have settled, one identical idempotent retry
+			// must recover the same ceremony; unknown outcomes are never retried.
+			retried, err, lease := originalAutomationProcessV1(t, server, ctx, completeConcurrent)
+			defer lease.closeV1()
+			if err != nil {
+				t.Fatal("settled identical capacity retry", err)
+			}
+			result.response = retried
+			result.response.Status = strings.Clone(retried.Status)
+			retried = automationSignatureRequestResponse{}
+			lease.closeV1()
 		}
 		if result.response.Status != "sent" {
 			t.Fatalf("complete concurrent status = %q, want sent", result.response.Status)
@@ -447,10 +485,9 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		} else if result.response.AutomationRequestID != completeRequestID || result.response.DocumentID != completeDocumentID {
 			t.Fatalf("complete concurrent commands diverged: %#v", result.response)
 		}
-		lease := result.lease
-		*result = completeAutomationResultV1{}
-		lease.closeV1()
+		*result = completeObservationV1{}
 	}
+	assertAutomationDocumentRuntimeBaselineE2E(t, owned, completeBaseline)
 	var completeDocumentCount, completeInviteEvents int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE id = $1`, completeDocumentID).Scan(&completeDocumentCount); err != nil { //nolint:rawsql
 		t.Fatal(err)

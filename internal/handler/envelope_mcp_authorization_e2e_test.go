@@ -157,6 +157,7 @@ func TestEnvelopeMCPAuditRollbackAndReviewedTopologyE2E(t *testing.T) {
 			mint, _ := mintAuthoringMCPE2E(t, f)
 			args := envelopeMCPArgsE2E(t, f, standalone, tool)
 			before := authoringMCPStateE2E(t, f)
+			originalEvents := blockOriginalEventsE2E(t, f)
 			drop := ownerOrgAuditFaultE2E(t, ownerOrgMutationFixture{lifecycleAuthorizationFixture: f}, true)
 			if got := fieldMCPTextE2E(t, submitAuthoringMCPE2E(f, f.ctx, tool, mint.Plaintext, args), true); got != "envelope mutation failed" {
 				t.Fatalf("audit no-row misclassified=%q", got)
@@ -172,10 +173,19 @@ func TestEnvelopeMCPAuditRollbackAndReviewedTopologyE2E(t *testing.T) {
 			var count int
 			var actor uuid.UUID
 			var payload string
-			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count != 1 {
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1`, f.org).Scan(&count); err != nil || count != len(originalEvents)+1 {
 				t.Fatal("topology audit count", count, err)
 			} //nolint:rawsql
-			if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,payload_json::text FROM events WHERE org_id=$1`, f.org).Scan(&actor, &payload); err != nil || actor != f.user.ID || !strings.Contains(payload, tool) {
+			currentEvents := blockOriginalEventsE2E(t, f)
+			for id, digest := range originalEvents {
+				if currentEvents[id] != digest {
+					t.Fatal("topology mutation changed original native setup history")
+				}
+			}
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE org_id=$1 AND payload_json->>'via'='mcp' AND payload_json->>'tool'=$2`, f.org, tool).Scan(&count); err != nil || count != 1 {
+				t.Fatal("MCP topology operation audit count", count, err)
+			}
+			if err := f.pool.QueryRow(f.ctx, `SELECT actor_user_id,payload_json::text FROM events WHERE org_id=$1 AND payload_json->>'via'='mcp' AND payload_json->>'tool'=$2`, f.org, tool).Scan(&actor, &payload); err != nil || actor != f.user.ID || !strings.Contains(payload, tool) {
 				t.Fatal("wrong topology actor/tool", err)
 			} //nolint:rawsql
 			root, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -365,7 +366,18 @@ func TestTemplateUpdateRetainsFreshOmittedContentE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Name != "Later name" || fresh.Version != current.Version+1 || string(fresh.BlocksJson) != string(current.BlocksJSON) || string(fresh.VariablesJson) != string(current.VariablesJSON) {
+	// HTTP encodes RawMessage without PostgreSQL jsonb's display whitespace.
+	// Compare the actual decoded content, keeping the exact next-version oracle.
+	var currentBlocks, freshBlocks, currentVariables, freshVariables any
+	for _, pair := range []struct {
+		raw []byte
+		out *any
+	}{{current.BlocksJSON, &currentBlocks}, {fresh.BlocksJson, &freshBlocks}, {current.VariablesJSON, &currentVariables}, {fresh.VariablesJson, &freshVariables}} {
+		if err := json.Unmarshal(pair.raw, pair.out); err != nil {
+			t.Fatal("actual template response/source JSON", err)
+		}
+	}
+	if fresh.Name != "Later name" || fresh.Version != current.Version+1 || !reflect.DeepEqual(freshBlocks, currentBlocks) || !reflect.DeepEqual(freshVariables, currentVariables) {
 		t.Fatal("waiting partial update replaced fresh omitted blocks/variables/version")
 	}
 	ownedBlocksTemplateExactSourceV1(t, f, template.ID)

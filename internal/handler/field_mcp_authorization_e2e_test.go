@@ -171,8 +171,14 @@ func TestFieldMCPCredentialsRecheckedAfterDocumentWaitE2E(t *testing.T) {
 					t.Fatal(err)
 				}
 				result := make(chan *httptest.ResponseRecorder, 1)
-				go func() { result <- submitFieldMCPE2E(f, tool, mint.Plaintext, fieldMCPArgumentsE2E(f, tool)) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder {
+					return submitFieldMCPE2E(f, tool, mint.Plaintext, fieldMCPArgumentsE2E(f, tool))
+				})
+				query := "-- name: GetDocumentForUpdate"
+				if tool == "add_document_field" {
+					query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
+				}
+				awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, query, tool == "add_document_field")
 				switch change {
 				case "key-delete":
 					response := submitSessionOperationE2E(f.s, http.MethodDelete, "/api/v1/api-keys/"+keyID.String(), "", dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour))
@@ -502,8 +508,14 @@ func TestFieldMCPConcurrentSoftDeleteAndRetainedEvidenceE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- submitFieldMCPE2E(f, tool, mint.Plaintext, fieldMCPArgumentsE2E(f, tool)) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+			startAuthoringParentRequest624E2E(t, blocked, result, func() *httptest.ResponseRecorder {
+				return submitFieldMCPE2E(f, tool, mint.Plaintext, fieldMCPArgumentsE2E(f, tool))
+			})
+			query := "-- name: GetDocumentForUpdate"
+			if tool == "add_document_field" {
+				query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
+			}
+			awaitAuthoringParentWait624E2E(t, f.lifecycleAuthorizationFixture, blocked, query, tool == "add_document_field")
 			if _, err := blocked.Exec(f.ctx, `UPDATE documents SET deleted_at=clock_timestamp() WHERE id=$1`, f.doc.ID); err != nil {
 				t.Fatal(err)
 			}

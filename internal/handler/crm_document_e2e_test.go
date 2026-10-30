@@ -111,9 +111,26 @@ func applyCRMSourceFixtureReviewE2E(t *testing.T, f lifecycleAuthorizationFixtur
 
 func TestCRMDocumentReviewedBlocksApplyPreservesManualTextAndSendLineageE2E(t *testing.T) {
 	f := setupCRMSourceAuthorizationE2E(t)
-	if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET variables_json=variables_json||'{"manual":"Human approved scope"}'::jsonb,updated_at=clock_timestamp() WHERE id=$1`, f.doc.ID); err != nil {
+	var err error
+	f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
+	if err != nil {
 		t.Fatal(err)
-	} //nolint:rawsql -- explicit manual draft edit
+	}
+	var manual map[string]string
+	if err := json.Unmarshal(f.doc.VariablesJson, &manual); err != nil {
+		t.Fatal(err)
+	}
+	manual["manual"] = "Human approved scope"
+	variables, err := json.Marshal(manual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the actual manual editor before the separate CRM review; a raw
+	// source UPDATE would invalidate its receipts before Apply even begins.
+	f.doc, err = nativeRevisionEditE2E(t, f.lifecycleAuthorizationFixture, f.doc, f.doc.BlocksJson, variables)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.source.setDeal(t, "New reviewed CRM AB")
 	c := crmDocumentReadContextE2E(t, f.lifecycleAuthorizationFixture, f.cookie)
 	if !c.MappingReviewRequired {

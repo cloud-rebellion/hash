@@ -7,6 +7,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
@@ -35,6 +36,7 @@ type originalPDFPreviewPeerE2E struct {
 	release     chan struct{}
 	releaseOnce sync.Once
 	calls       atomic.Int32
+	initialPuts int
 }
 
 func (p *originalPDFPreviewPeerE2E) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +59,11 @@ func (p *originalPDFPreviewPeerE2E) unblock() {
 
 func setupOriginalPDFPreviewE2E(t *testing.T, role string) (lifecycleAuthorizationFixture, *originalPDFPreviewPeerE2E, []byte) {
 	t.Helper()
+	return setupOriginalPDFPreviewSourceE2E(t, role, false)
+}
+
+func setupOriginalPDFPreviewSourceE2E(t *testing.T, role string, native bool) (lifecycleAuthorizationFixture, *originalPDFPreviewPeerE2E, []byte) {
+	t.Helper()
 	database := isolateHTMLTemplateDatabaseE2E(t)
 	f := setupHTMLTemplateAuthorizationE2E(t, database, role)
 	body := fieldBrowserPDF("Committed original PDF preview fixture")
@@ -67,6 +74,12 @@ func setupOriginalPDFPreviewE2E(t *testing.T, role string) (lifecycleAuthorizati
 		key:               key,
 		entered:           make(chan string, 1),
 		release:           make(chan struct{}),
+	}
+	if native {
+		// Only the positive concurrent edit needs a current measured source.
+		// Other cases retain explicit historical read-only coverage.
+		peer.objects = make(map[string][]byte)
+		peer.key = ""
 	}
 	server := httptest.NewServer(peer)
 	t.Cleanup(server.Close)
@@ -81,11 +94,36 @@ func setupOriginalPDFPreviewE2E(t *testing.T, role string) (lifecycleAuthorizati
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.doc, err = f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{
-		OrgID: f.org, SenderID: f.user.ID, Name: "Original PDF preview",
-		PdfStorageKey: pgtype.Text{String: key, Valid: true}, PdfSha256: digest[:],
-		PdfStorageVersionID: pgtype.Text{String: "import-version-1", Valid: true}, EvidenceVersionPinsRequired: true,
-	})
+	if native {
+		metadataPrepareNativePlanE2E(t, f)
+		cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
+		w := submitPDFImportE2E(f, f.ctx, cookie)
+		var uploaded struct {
+			Document struct{ ID uuid.UUID } `json:"document"`
+		}
+		if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &uploaded) != nil || uploaded.Document.ID == uuid.Nil {
+			t.Fatalf("actual original PDF intake=%d %s", w.Code, w.Body.String())
+		}
+		f.doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: uploaded.Document.ID, OrgID: f.org})
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer.mu.Lock()
+		peer.key = f.doc.PdfStorageKey.String
+		body = bytes.Clone(peer.objects[peer.key])
+		peer.initialPuts = peer.puts
+		peer.mu.Unlock()
+		actual := sha256.Sum256(body)
+		if len(body) == 0 || !bytes.Equal(actual[:], f.doc.PdfSha256) || f.doc.PdfStorageVersionID.String != "import-version-1" || peer.initialPuts != 1 {
+			t.Fatal("native original source lacks its actual exact stored bytes/version")
+		}
+	} else {
+		f.doc, err = f.q.CreatePDFDocument(f.ctx, generated.CreatePDFDocumentParams{
+			OrgID: f.org, SenderID: f.user.ID, Name: "Original PDF preview",
+			PdfStorageKey: pgtype.Text{String: key, Valid: true}, PdfSha256: digest[:],
+			PdfStorageVersionID: pgtype.Text{String: "import-version-1", Valid: true}, EvidenceVersionPinsRequired: true,
+		})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +133,25 @@ func setupOriginalPDFPreviewE2E(t *testing.T, role string) (lifecycleAuthorizati
 func beginOriginalPDFPreviewE2E(t *testing.T, f lifecycleAuthorizationFixture, peer *originalPDFPreviewPeerE2E, cookie string) <-chan *httptest.ResponseRecorder {
 	t.Helper()
 	result := make(chan *httptest.ResponseRecorder, 1)
+	ctx, cancel := context.WithCancel(f.ctx)
+	done := make(chan struct{})
 	go func() {
-		result <- submitSessionOperationE2E(f.s, http.MethodGet, "/api/v1/documents/"+f.doc.ID.String()+"/pdf", "", cookie)
+		defer close(done)
+		r := httptest.NewRequest(http.MethodGet, f.s.PublicURL+"/api/v1/documents/"+f.doc.ID.String()+"/pdf", nil).WithContext(ctx)
+		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
+		w := httptest.NewRecorder()
+		f.s.Routes().ServeHTTP(w, r)
+		result <- w
 	}()
+	t.Cleanup(func() {
+		cancel()
+		peer.unblock()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("original PDF request did not join before fixture teardown")
+		}
+	})
 	select {
 	case version := <-peer.entered:
 		if version != "import-version-1" {
@@ -113,7 +167,7 @@ func assertOriginalPDFPreviewStorageUnchangedE2E(t *testing.T, peer *originalPDF
 	t.Helper()
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
-	if peer.calls.Load() != 1 || peer.puts != 0 || peer.deletes != 0 || len(peer.objects) != 1 || !bytes.Equal(peer.objects[peer.key], body) {
+	if peer.calls.Load() != 1 || peer.puts != peer.initialPuts || peer.deletes != 0 || len(peer.objects) != 1 || !bytes.Equal(peer.objects[peer.key], body) {
 		t.Fatal("original PDF read changed storage or fetched a different version")
 	}
 }
@@ -121,7 +175,7 @@ func assertOriginalPDFPreviewStorageUnchangedE2E(t *testing.T, peer *originalPDF
 func TestOriginalPDFPreviewRechecksAfterObjectWaitE2E(t *testing.T) {
 	for _, change := range []string{"expiry", "logout", "membership-revoked", "document-change", "document-delete"} {
 		t.Run(change, func(t *testing.T) {
-			f, peer, body := setupOriginalPDFPreviewE2E(t, "sender")
+			f, peer, body := setupOriginalPDFPreviewSourceE2E(t, "sender", change == "document-change")
 			ttl := time.Hour
 			if change == "expiry" {
 				ttl = time.Second

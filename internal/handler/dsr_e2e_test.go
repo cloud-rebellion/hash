@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -28,7 +29,9 @@ import (
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/collab"
+	"github.com/bright-interaction/hash/internal/config"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/sign"
@@ -672,10 +675,48 @@ func browserMigrationPhaseContext368(parent context.Context) (context.Context, c
 // Pure DSR/component fixtures keep setupDSRE2E and its original pool unchanged.
 func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool, *generated.Queries, *Server, uuid.UUID, uuid.UUID, *generated.Document, *generated.Recipient) {
 	t.Helper()
-	n := nativeNegotiationStart262(t, false, false)
-	f := n.q.f
-	rc := n.q.lookupV1(t, n.token)
-	notice, err := f.s.signerPrivacyNotice(signerReadRequestE2E(n.token, ""), rc)
+	native := newOwnedAutomationAuthorizationFixtureV1(t)
+	f := native.f
+	// The shared provider fixture has an unrelated HTML template. DSR's
+	// tenant-wide separate-review guard must remain intact: this ordinary
+	// blocks journey belongs to a fresh tenant in the SAME owned database and
+	// runtime. Its records retire with that existing exact database owner.
+	org, err := f.q.CreateOrg(f.ctx, generated.CreateOrgParams{Name: "Plain DSR evidence tenant", Plan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := f.q.CreateUser(f.ctx, generated.CreateUserParams{OrgID: org.ID, Email: uuid.NewString() + "@dsr-owner.test", Name: "DSR owner", Role: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This fixture owns the server exclusively; keep its mutexes and runtime
+	// identity intact while selecting the new plain-evidence tenant.
+	f.org, f.user = org.ID, user
+	f.s.Billing = billing.NewOperator(f.q, []config.OperatorEntitlement{{OrgID: f.org, PlanSlug: "pro", ReviewRef: "synthetic plain DSR evidence fixture"}})
+	native.f = f
+	native.cookie = dsrSessionCookieE2E(t, f.s, user.ID, user.SessionGeneration, time.Hour)
+	ownedCreationPrepareProPlanV1(t, native)
+	draft, err := nativeRevisionCreateE2E(t, f, "Plain completed DSR evidence", json.RawMessage(`{"version":1,"blocks":[{"id":"terms","type":"paragraph","text":"Original agreed terms"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/v1/documents/" + draft.ID.String()
+	w := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/recipients", `{"name":"Original subject","email":"subject@plain-dsr.test","role":"signer","locale":"en"}`, native.cookie)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("genuine plain DSR recipient=%d %s", w.Code, w.Body.String())
+	}
+	w = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/send", `{"lawful_basis":"contract"}`, native.cookie)
+	var sent sendDocumentResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &sent) != nil || len(sent.Links) != 1 {
+		t.Fatalf("genuine plain DSR Send=%d %s", w.Code, w.Body.String())
+	}
+	link, err := url.Parse(sent.Links[0].URL)
+	if err != nil || !strings.HasPrefix(link.Path, "/sign/") {
+		t.Fatal("genuine plain DSR invitation missing", err)
+	}
+	token := strings.TrimPrefix(link.Path, "/sign/")
+	rc := native.lookupV1(t, token)
+	notice, err := f.s.signerPrivacyNotice(signerReadRequestE2E(token, ""), rc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,11 +729,11 @@ func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool,
 	if err != nil || closeErr != nil || result == nil || !result.Completed {
 		t.Fatal("genuine completed DSR signature/evidence", err, closeErr)
 	}
-	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: n.document.ID, OrgID: f.org})
-	if err != nil || doc.Status != "completed" || !doc.CompletedAt.Valid {
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: draft.ID, OrgID: f.org})
+	if err != nil || doc.Status != "completed" || !doc.CompletedAt.Valid || len(doc.HtmlSourceJson) != 0 {
 		t.Fatal("genuine completed DSR document", err)
 	}
-	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: n.recipient, OrgID: f.org})
+	recipient, err := f.q.GetRecipient(f.ctx, generated.GetRecipientParams{ID: sent.Links[0].RecipientID, OrgID: f.org})
 	if err != nil || recipient.Status != "signed" {
 		t.Fatal("genuine DSR signed subject", err)
 	}
@@ -713,6 +754,9 @@ func setupCompletedDSREvidenceE2E(t *testing.T) (context.Context, *pgxpool.Pool,
 			t.Fatal("completed DSR artifact bytes do not match actual retained output", readErr)
 		}
 	}
-	n.q.assertObserversOnlyV1(t)
+	if present, checkErr := f.q.HasHTMLAuthoringDataForDSR(f.ctx, f.org); checkErr != nil || present {
+		t.Fatal("plain completed DSR tenant unexpectedly contains separate-review authoring history", checkErr)
+	}
+	native.assertObserversOnlyV1(t)
 	return f.ctx, f.pool, f.q, f.s, f.org, f.user.ID, doc, recipient
 }

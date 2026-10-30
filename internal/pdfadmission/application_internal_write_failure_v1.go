@@ -21,6 +21,7 @@ const (
 	applicationBlocksMutationWriteV1
 	applicationBlocksVersionWriteV1
 	applicationCeremonyChangeDecisionWriteV1
+	applicationRecipientMutationWriteV1
 )
 
 // The private immutable tag describes only a known completed failure at one
@@ -44,10 +45,10 @@ func applicationInternalWriteErrorV1(ctx context.Context, phase applicationInter
 }
 
 func applicationInternalWritePhaseValidV1(phase applicationInternalWritePhaseV1) bool {
-	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1 || phase == applicationBlocksMutationWriteV1 || phase == applicationBlocksVersionWriteV1 || phase == applicationCeremonyChangeDecisionWriteV1
+	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1 || phase == applicationBlocksMutationWriteV1 || phase == applicationBlocksVersionWriteV1 || phase == applicationCeremonyChangeDecisionWriteV1 || phase == applicationRecipientMutationWriteV1
 }
 
-// Only these two generated fixed writes acquire a phase at the native Scan
+// Only these generated fixed writes acquire a phase at the native Scan
 // response seam. Reads, measurements and pre-dispatch refusals stay untagged.
 // This is error provenance only, never authority to dispatch or retry SQL.
 func applicationInternalWriteStatementPhaseV1(sql string) applicationInternalWritePhaseV1 {
@@ -56,6 +57,10 @@ func applicationInternalWriteStatementPhaseV1(sql string) applicationInternalWri
 		return applicationBlocksMutationWriteV1
 	case strings.HasPrefix(sql, "-- name: InsertDocumentVersion :one\n"):
 		return applicationBlocksVersionWriteV1
+	case strings.HasPrefix(sql, "-- name: CreateRecipient :one\n"),
+		strings.HasPrefix(sql, "-- name: UpdateRecipient :one\n"),
+		strings.HasPrefix(sql, "-- name: DeleteRecipient :one\n"):
+		return applicationRecipientMutationWriteV1
 	default:
 		return 0
 	}

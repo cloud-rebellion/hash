@@ -467,7 +467,15 @@ func createReviewedRecoverySentE2E(t *testing.T, q *ownedPublicReadFixtureV1) (*
 		t.Fatal("reviewed recovery requires two genuine parties", err)
 	}
 	for i, row := range rows {
-		body, marshalErr := json.Marshal(map[string]any{"recipient_id": row.ID.String(), "type": "signature", "page": 1, "x_pct": 12, "y_pct": 65 + i*15, "w_pct": 30, "h_pct": 8, "required": true})
+		current, loadErr := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		commitment, sourceErr := htmlsource.Commitment(current)
+		if sourceErr != nil {
+			t.Fatal(sourceErr)
+		}
+		body, marshalErr := json.Marshal(map[string]any{"recipient_id": row.ID.String(), "type": "signature", "page": 1, "x_pct": 12, "y_pct": 65 + i*15, "w_pct": 30, "h_pct": 8, "required": true, "expected_pdf_sha256": hex.EncodeToString(current.PdfSha256), "expected_html_source_commitment": commitment})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}

@@ -81,18 +81,24 @@ func (h *ApplicationBlocksTemplateSourceV1) readV1(ctx context.Context, id, org 
 	var created, updated pgtype.Timestamptz
 	var raw, master, variables, blocks, fields, sanitization int64
 	var measured, server int32
-	if update {
-		header, err := s.queries.GetNonHTMLTemplateSourceHeaderForUpdateV1(ctx, generated.GetNonHTMLTemplateSourceHeaderForUpdateV1Params{TemplateID: id, OrgID: org})
-		if err != nil {
-			return nil, err
+	readHeader := func() error {
+		if update {
+			header, err := s.queries.GetNonHTMLTemplateSourceHeaderForUpdateV1(ctx, generated.GetNonHTMLTemplateSourceHeaderForUpdateV1Params{TemplateID: id, OrgID: org})
+			if err != nil {
+				return err
+			}
+			actualID, actualOrg, kind, version, created, updated, raw, master, variables, blocks, fields, sanitization, measured, server = header.ID, header.OrgID, header.SourceKind, header.Version, header.CreatedAt, header.UpdatedAt, header.RawTextBytes, header.MasterWireBytes, header.VariablesWireBytes, header.BlocksWireBytes, header.FieldsWireBytes, header.SanitizationWireBytes, header.MeasurementServerVersionNum, header.ServerVersionNum
+		} else {
+			header, err := s.queries.GetNonHTMLTemplateSourceHeaderForShareV1(ctx, generated.GetNonHTMLTemplateSourceHeaderForShareV1Params{TemplateID: id, OrgID: org})
+			if err != nil {
+				return err
+			}
+			actualID, actualOrg, kind, version, created, updated, raw, master, variables, blocks, fields, sanitization, measured, server = header.ID, header.OrgID, header.SourceKind, header.Version, header.CreatedAt, header.UpdatedAt, header.RawTextBytes, header.MasterWireBytes, header.VariablesWireBytes, header.BlocksWireBytes, header.FieldsWireBytes, header.SanitizationWireBytes, header.MeasurementServerVersionNum, header.ServerVersionNum
 		}
-		actualID, actualOrg, kind, version, created, updated, raw, master, variables, blocks, fields, sanitization, measured, server = header.ID, header.OrgID, header.SourceKind, header.Version, header.CreatedAt, header.UpdatedAt, header.RawTextBytes, header.MasterWireBytes, header.VariablesWireBytes, header.BlocksWireBytes, header.FieldsWireBytes, header.SanitizationWireBytes, header.MeasurementServerVersionNum, header.ServerVersionNum
-	} else {
-		header, err := s.queries.GetNonHTMLTemplateSourceHeaderForShareV1(ctx, generated.GetNonHTMLTemplateSourceHeaderForShareV1Params{TemplateID: id, OrgID: org})
-		if err != nil {
-			return nil, err
-		}
-		actualID, actualOrg, kind, version, created, updated, raw, master, variables, blocks, fields, sanitization, measured, server = header.ID, header.OrgID, header.SourceKind, header.Version, header.CreatedAt, header.UpdatedAt, header.RawTextBytes, header.MasterWireBytes, header.VariablesWireBytes, header.BlocksWireBytes, header.FieldsWireBytes, header.SanitizationWireBytes, header.MeasurementServerVersionNum, header.ServerVersionNum
+		return nil
+	}
+	if err := readHeader(); err != nil {
+		return nil, err
 	}
 	if actualID != id || actualOrg != org || version < 1 || !applicationStampV1(created) || !applicationStampV1(updated) || raw < 0 {
 		return nil, ErrBlocksTemplateSourceV1
@@ -105,6 +111,21 @@ func (h *ApplicationBlocksTemplateSourceV1) readV1(ctx context.Context, id, org 
 	if afterHeader != nil {
 		if err := afterHeader(ctx); err != nil {
 			return nil, err
+		}
+	}
+	// PostgreSQL's locking parent can advance to a committed tuple after a
+	// wait while this statement's cache join retains its older MVCC snapshot.
+	// The parent lock is now held by this same transaction. One fresh scalar
+	// statement can observe that writer's matching cache; it cannot measure,
+	// repair, change scope or retry an unavailable/unknown SQL operation.
+	if master < 0 || variables < 0 || blocks < 0 || fields < 0 || sanitization < 0 || measured < 1 {
+		lockedID, lockedOrg, lockedKind, lockedVersion := actualID, actualOrg, kind, version
+		lockedCreated, lockedUpdated, lockedRaw := created, updated, raw
+		if err := readHeader(); err != nil {
+			return nil, err
+		}
+		if actualID != lockedID || actualOrg != lockedOrg || kind != lockedKind || version != lockedVersion || created != lockedCreated || updated != lockedUpdated || raw != lockedRaw {
+			return nil, ErrBlocksTemplateSourceV1
 		}
 	}
 	wire, err := htmlAuthoringSumV1(master, variables, blocks, fields, sanitization)

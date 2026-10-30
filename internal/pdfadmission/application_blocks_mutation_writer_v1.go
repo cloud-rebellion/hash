@@ -41,6 +41,9 @@ func (h *ApplicationSessionV1) NewBlocksMutationWriterV1(ctx context.Context, re
 	return h.newBlocksMutationWriterV1(ctx, reader, false)
 }
 func (h *ApplicationSessionV1) newBlocksMutationWriterV1(ctx context.Context, reader *ApplicationHTMLRevisionReaderV1, allowPDF bool) (*ApplicationBlocksMutationWriterV1, error) {
+	return h.newBlocksMutationWriterWithCRMV1(ctx, reader, allowPDF, false)
+}
+func (h *ApplicationSessionV1) newBlocksMutationWriterWithCRMV1(ctx context.Context, reader *ApplicationHTMLRevisionReaderV1, allowPDF, allowHTMLMapping bool) (*ApplicationBlocksMutationWriterV1, error) {
 	if h == nil || h.state == nil || reader == nil || reader.self != reader || reader.session != h {
 		return nil, ErrBlocksWriterV1
 	}
@@ -55,7 +58,8 @@ func (h *ApplicationSessionV1) newBlocksMutationWriterV1(ctx context.Context, re
 		}
 	}()
 	old := snapshot.document
-	if old == nil || old.ID != h.state.document || old.OrgID != h.state.org || (old.SourceKind != "blocks" && (!allowPDF || old.SourceKind != "pdf")) || old.Status != "draft" || len(old.HtmlSourceJson) != 0 || len(old.HtmlCurrentSourceJson) != 0 || old.HtmlCurrentMaterializationID.Valid {
+	htmlMapping := allowHTMLMapping && old != nil && len(old.HtmlSourceJson) > 0
+	if old == nil || old.ID != h.state.document || old.OrgID != h.state.org || old.Status != "draft" || (!htmlMapping && ((old.SourceKind != "blocks" && (!allowPDF || old.SourceKind != "pdf")) || len(old.HtmlSourceJson) != 0 || len(old.HtmlCurrentSourceJson) != 0 || old.HtmlCurrentMaterializationID.Valid)) {
 		return nil, ErrBlocksWriterV1
 	}
 	// The same fixed writer header also covers a historical restore's scalar

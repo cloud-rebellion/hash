@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/mcp"
+	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/storage"
 )
 
@@ -118,7 +121,19 @@ func (p *importStoragePeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func setupImportAuthorizationE2E(t *testing.T) (lifecycleAuthorizationFixture, *importStoragePeer) {
 	t.Helper()
-	f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+	f := setupNativeTemplateAuthorizationE2E(t, "sender")
+	worker := os.Getenv("HASH_E2E_PDF_WORKER_PATH")
+	if worker == "" {
+		t.Fatal("native PDF import authorization requires the source-built isolated worker")
+	}
+	if err := sanitize.ConfigurePDFWorker(f.ctx, worker, "production"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sanitize.ConfigurePDFWorker(context.Background(), "", "development"); err != nil {
+			t.Error(err)
+		}
+	})
 	f.enableMCP()
 	peer := &importStoragePeer{objects: make(map[string][]byte)}
 	server := httptest.NewServer(peer)
@@ -132,12 +147,22 @@ func setupImportAuthorizationE2E(t *testing.T) (lifecycleAuthorizationFixture, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Storage: f.s.Storage})
+	f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Storage: f.s.Storage, PDFCreationSessions: f.s.HTMLCreationSessions, Billing: f.s.Billing})
 	return f, peer
 }
 
 func submitPDFImportE2E(f lifecycleAuthorizationFixture, ctx context.Context, cookie string) *httptest.ResponseRecorder {
 	return submitPDFIntakeE2E(f, ctx, cookie, "/api/v1/documents/import")
+}
+
+func submitPDFImportMCPE2E(f lifecycleAuthorizationFixture, ctx context.Context, key, name string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "create_pdf_document", "arguments": map[string]any{"name": name, "pdf_base64": base64.StdEncoding.EncodeToString(fieldBrowserPDF("Synthetic authorized import"))}}})
+	r := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/mcp", bytes.NewReader(body)).WithContext(ctx)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	f.s.Routes().ServeHTTP(w, r)
+	return w
 }
 
 func submitPDFIntakeE2E(f lifecycleAuthorizationFixture, ctx context.Context, cookie, endpoint string) *httptest.ResponseRecorder {
@@ -168,9 +193,11 @@ func TestPDFTemplateAuditWaitExpiryCompensatesExactVersionE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- submitPDFIntakeE2E(f, f.ctx, cookie, "/api/v1/templates") }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
+	result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitPDFIntakeE2E(f, ctx, cookie, "/api/v1/templates")
+	}, blocked)
+	defer join()
+	awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)
@@ -200,9 +227,11 @@ func TestPDFTemplateRejectsDemotedAuthorAfterStorageWaitE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- submitPDFIntakeE2E(f, f.ctx, cookie, "/api/v1/templates") }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetUserForShare", "transactionid")
+	result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitPDFIntakeE2E(f, ctx, cookie, "/api/v1/templates")
+	}, blocked)
+	defer join()
+	awaitNativeTemplateLockE2E(t, f, blocked, "GetHTMLAuthoringActorHeaderV1", true)
 	if _, err := f.q.WithTx(blocked).UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "viewer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -249,9 +278,11 @@ func TestPDFImportRechecksOriginalSessionAfterMemberWaitE2E(t *testing.T) {
 				ttl = time.Second
 			}
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, ttl)
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() { result <- submitPDFImportE2E(f, f.ctx, cookie) }()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetUserForShare", "transactionid")
+			result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitPDFImportE2E(f, ctx, cookie)
+			}, blocked)
+			defer join()
+			awaitNativeTemplateLockE2E(t, f, blocked, "GetHTMLAuthoringActorHeaderV1", true)
 			want := http.StatusForbidden
 			switch change {
 			case "demotion":
@@ -291,9 +322,11 @@ func TestPDFImportAuditWaitExpiryCompensatesExactVersionE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Second)
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() { result <- submitPDFImportE2E(f, f.ctx, cookie) }()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
+	result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitPDFImportE2E(f, ctx, cookie)
+	}, blocked)
+	defer join()
+	awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
 	awaitSessionCookieExpiryE2E(t, f.s, cookie)
 	if err := blocked.Commit(f.ctx); err != nil {
 		t.Fatal(err)
@@ -318,7 +351,7 @@ func TestPDFImportAuthorizedRESTAndMCPE2E(t *testing.T) {
 				}
 			} else {
 				key, _ := mintRecipientMCPKeyE2E(t, f, false, 0)
-				w := submitRecipientMCPE2E(f, "create_pdf_document", key.Plaintext, map[string]any{"name": "Authorized imported proposal", "pdf_base64": base64.StdEncoding.EncodeToString(fieldBrowserPDF("Synthetic authorized import"))})
+				w := submitPDFImportMCPE2E(f, f.ctx, key.Plaintext, "Authorized imported proposal")
 				assertLifecycleMCPResultE2E(t, w, false)
 			}
 			var documents, events int
@@ -350,11 +383,11 @@ func TestPDFImportMCPRechecksAdmittedKeyAfterMemberWaitE2E(t *testing.T) {
 			if _, err := f.q.WithTx(blocked).UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "sender"}); err != nil {
 				t.Fatal(err)
 			}
-			result := make(chan *httptest.ResponseRecorder, 1)
-			go func() {
-				result <- submitRecipientMCPE2E(f, "create_pdf_document", key.Plaintext, map[string]any{"name": "Refused imported proposal", "pdf_base64": base64.StdEncoding.EncodeToString(fieldBrowserPDF("Synthetic authorized import"))})
-			}()
-			awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetUserForShare", "transactionid")
+			result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+				return submitPDFImportMCPE2E(f, ctx, key.Plaintext, "Refused imported proposal")
+			}, blocked)
+			defer join()
+			awaitNativeTemplateLockE2E(t, f, blocked, "GetHTMLAuthoringActorHeaderV1", true)
 			switch change {
 			case "key deletion":
 				_, err = f.pool.Exec(f.ctx, `DELETE FROM api_keys WHERE id=$1 AND org_id=$2`, keyID, f.org)
@@ -398,11 +431,11 @@ func TestPDFImportMCPAuditWaitExpiryCompensatesExactVersionE2E(t *testing.T) {
 	if err := f.q.WithTx(blocked).AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
 		t.Fatal(err)
 	}
-	result := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		result <- submitRecipientMCPE2E(f, "create_pdf_document", key.Plaintext, map[string]any{"name": "Refused expired import", "pdf_base64": base64.StdEncoding.EncodeToString(fieldBrowserPDF("Synthetic authorized import"))})
-	}()
-	awaitSessionOperationLockE2E(t, f.ctx, f.pool, "pg_advisory_xact_lock", "advisory")
+	result, join := startNativeTemplateRequestE2E(t, f, func(ctx context.Context) *httptest.ResponseRecorder {
+		return submitPDFImportMCPE2E(f, ctx, key.Plaintext, "Refused expired import")
+	}, blocked)
+	defer join()
+	awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", true)
 	for time.Now().Before(expires) {
 		time.Sleep(10 * time.Millisecond)
 	}

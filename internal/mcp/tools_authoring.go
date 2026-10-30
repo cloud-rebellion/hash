@@ -642,7 +642,8 @@ func registerAuthoringTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			return blockauthoring.MutatePlainDraftV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "set_variables"}, id, versions.ViaMCP, p.ExpectedUpdatedAt, checkDocumentObservation, blockauthoring.PlainDraftMutationInputV1{VariablesOnly: true, Variables: vars})
+			updated, err := blockauthoring.MutatePlainDraftV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "set_variables"}, id, versions.ViaMCP, p.ExpectedUpdatedAt, checkDocumentObservation, blockauthoring.PlainDraftMutationInputV1{VariablesOnly: true, Variables: vars})
+			return updated, canonicalBlockMutationErrorV1(err)
 
 		},
 	})
@@ -816,7 +817,8 @@ func mutateDocumentTree(r *http.Request, d Deps, orgID, userID uuid.UUID, docID 
 	if err != nil {
 		return nil, err
 	}
-	return blockauthoring.MutateTreeV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "mcp", Tool: toolName}, docID, via, expected, checkDocumentObservation, fn)
+	result, err := blockauthoring.MutateTreeV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit, SnapshotMutation: d.Versions != nil}, blockauthoring.ActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "mcp", Tool: toolName}, docID, via, expected, checkDocumentObservation, fn)
+	return result, canonicalBlockMutationErrorV1(err)
 }
 
 func updateTopLevelBlock(tree *blocks.Tree, blockID string, replacement blocks.Block) error {

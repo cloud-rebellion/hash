@@ -19,11 +19,8 @@ import (
 
 	"github.com/bright-interaction/hash/internal/actiontoken"
 	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
-	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,65 +32,83 @@ type changeResolutionFixture struct {
 	org    uuid.UUID
 	owner  uuid.UUID
 	cookie string
+	owned  *ownedPublicReadFixtureV1
 }
 
 func setupChangeResolutionE2E(t *testing.T) changeResolutionFixture {
 	t.Helper()
-	ctx, pool, q, s, org, owner := setupDSRE2E(t)
-	s.Sign = &sign.Engine{Pool: pool, Queries: q, Audit: s.Audit}
-	s.ActionSecret = strings.Repeat("resolution-fixture-", 4)
-	user, err := q.GetUser(ctx, owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := json.Marshal(auth.SessionPayload{UserID: owner, Generation: user.SessionGeneration})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return changeResolutionFixture{ctx, pool, q, s, org, owner, s.Cookies.Mint(payload, time.Hour)}
+	owned := newOwnedAutomationAuthorizationFixtureV1(t)
+	ownedCreationPrepareProPlanV1(t, owned)
+	f := owned.f
+	f.s.ActionSecret = strings.Repeat("resolution-fixture-", 4)
+	f.s.Sign.ActionSecret = f.s.ActionSecret
+	return changeResolutionFixture{ctx: f.ctx, pool: f.pool, q: f.q, s: f.s, org: f.org,
+		owner: f.user.ID, cookie: owned.cookie, owned: owned}
 }
 
 func (f changeResolutionFixture) seed(t *testing.T) (*generated.Document, *generated.ChangeRequest) {
 	t.Helper()
-	doc, err := f.q.CreateBlocksDocument(f.ctx, generated.CreateBlocksDocumentParams{
-		OrgID: f.org, SenderID: f.owner, Name: "Resolution fidelity " + uuid.NewString(),
-		BlocksJson:    json.RawMessage(`{"version":1,"blocks":[{"id":"payment-term","type":"paragraph","text":"Original payment term"}]}`),
-		VariablesJson: json.RawMessage(`{}`),
-	})
+	if f.owned == nil || f.s.Sign.WorkRuntime != f.owned.runtime {
+		t.Fatal("resolution fixture requires its original genuine runtime")
+	}
+	// Use the supported creator, recipient writer, normal Send and notice-bound
+	// participant change producer. Raw sent/request rows omit the native owned
+	// source and event measurements required by the actual resolution workflow.
+	response := submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, "/api/v1/documents",
+		`{"name":"Resolution fidelity","source_kind":"blocks","blocks_json":{"version":1,"blocks":[{"id":"payment-term","type":"paragraph","text":"Original payment term"},{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]},"variables_json":{}}`, f.cookie)
+	var created struct{ ID uuid.UUID }
+	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &created) != nil || created.ID == uuid.Nil {
+		t.Fatalf("native resolution document creation=%d %s", response.Code, response.Body.String())
+	}
+	base := "/api/v1/documents/" + created.ID.String()
+	party, err := json.Marshal(map[string]string{"role": "signer", "email": uuid.NewString() + "@resolution.test", "name": "Resolution signer", "locale": "en"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, hash, err := auth.MintMagicToken()
-	if err != nil {
-		t.Fatal(err)
+	response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/recipients", string(party), f.cookie)
+	var recipient struct{ ID uuid.UUID }
+	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &recipient) != nil || recipient.ID == uuid.Nil {
+		t.Fatalf("native resolution recipient creation=%d %s", response.Code, response.Body.String())
 	}
-	recipient, err := f.q.CreateRecipient(f.ctx, generated.CreateRecipientParams{
-		DocumentID: doc.ID, Role: "signer", Email: uuid.NewString() + "@resolution.test", Name: "Resolution signer",
-		MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, Locale: "en",
-	})
-	if err != nil {
-		t.Fatal(err)
+	response = submitSessionOperationContextE2E(f.ctx, f.s, http.MethodPost, base+"/send", `{"lawful_basis":"contract"}`, f.cookie)
+	var sent sendDocumentResponse
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &sent) != nil || sent.Status != "sent" || len(sent.Links) != 1 || sent.Links[0].RecipientID != recipient.ID {
+		t.Fatalf("native resolution Send=%d %s", response.Code, response.Body.String())
 	}
-	if _, err = f.q.ConfirmDocumentLawfulBasis(f.ctx, generated.ConfirmDocumentLawfulBasisParams{
-		DocumentID: doc.ID, OrgID: f.org, LawfulBasis: "contract", Via: "test",
-		ConfirmedBy: pgtype.UUID{Bytes: f.owner, Valid: true},
-	}); err != nil {
-		t.Fatal(err)
+	invitation, err := url.Parse(sent.Links[0].URL)
+	if err != nil || !strings.HasPrefix(invitation.Path, "/sign/") {
+		t.Fatal("native resolution invitation missing", err)
 	}
-	// These receipts establish a synthetic sent state; this fixture has no
-	// storage objects, SMTP worker, or live delivery side effects.
-	doc = sendDSRDocumentE2E(t, f.ctx, f.pool, f.q, doc, recipient)
-	doc, err = f.q.RequestChangesOnDocument(f.ctx, generated.RequestChangesOnDocumentParams{ID: doc.ID, OrgID: f.org})
-	if err != nil {
-		t.Fatal(err)
+	token := strings.TrimPrefix(invitation.Path, "/sign/")
+	bootstrap := f.owned.requestV1(token, "")
+	var page signerContextResponse
+	if bootstrap.Code != http.StatusOK || json.Unmarshal(bootstrap.Body.Bytes(), &page) != nil || page.DocumentID != created.ID || page.Privacy.NoticeDigest == "" {
+		t.Fatalf("native resolution notice bootstrap=%d", bootstrap.Code)
 	}
-	cr, err := f.q.CreateChangeRequest(f.ctx, generated.CreateChangeRequestParams{
-		DocumentID: doc.ID, RecipientID: pgtype.UUID{Bytes: recipient.ID, Valid: true}, Message: "Revise the payment term.",
-		BlockID: "payment-term", Quote: "Original payment term", Proposed: "Revised payment term",
-	})
-	if err != nil {
-		t.Fatal(err)
+	request := httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/sign/"+token+"/request-changes",
+		strings.NewReader(`{"message":"Revise the payment term.","block_id":"payment-term","quote":"Original payment term","proposed":"Revised payment term"}`)).WithContext(f.ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", f.s.PublicURL)
+	request.Header.Set(signerNoticeDigestHeader, page.Privacy.NoticeDigest)
+	response = httptest.NewRecorder()
+	f.s.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("native resolution participant change=%d %s", response.Code, response.Body.String())
 	}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: created.ID, OrgID: f.org})
+	if err != nil || doc.Status != "changes_requested" {
+		t.Fatal("native resolution paused document missing", err)
+	}
+	changes, err := f.q.ListChangeRequests(f.ctx, doc.ID)
+	if err != nil || len(changes) != 1 || changes[0].Status != "open" {
+		t.Fatal("native resolution request missing", err)
+	}
+	cr, err := f.q.GetChangeRequest(f.ctx, generated.GetChangeRequestParams{ID: changes[0].ID, OrgID: f.org})
+	if err != nil || cr.RecipientID.Bytes != recipient.ID || !cr.RecipientID.Valid || cr.BlockID != "payment-term" {
+		t.Fatal("native resolution original request differs", err)
+	}
+	nativeBindingMeasurement259(t, f.owned.f, doc.ID)
+	f.owned.assertObserversOnlyV1(t)
 	return doc, cr
 }
 
@@ -115,6 +130,7 @@ func (f changeResolutionFixture) submit(t *testing.T, endpoint string, documentI
 		req = httptest.NewRequest(http.MethodPost, f.s.PublicURL+"/api/v1/documents/"+documentID.String()+"/change-requests/"+requestID.String()+"/"+action, nil)
 		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: f.cookie})
 	}
+	req = req.WithContext(f.ctx)
 	req.Header.Set("Origin", f.s.PublicURL)
 	w := httptest.NewRecorder()
 	f.s.Routes().ServeHTTP(w, req)
@@ -134,6 +150,11 @@ func (f changeResolutionFixture) snapshot(t *testing.T, documentID uuid.UUID) st
 		'signatures', (SELECT coalesce(jsonb_agg(to_jsonb(sg) ORDER BY sg.id),'[]'::jsonb) FROM signatures sg WHERE sg.document_id=$1),
 		'versions', (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.id),'[]'::jsonb) FROM document_versions v WHERE v.document_id=$1),
 		'events', (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM events e WHERE e.document_id=$1),
+		'policy_sizes', (SELECT to_jsonb(m) FROM document_signing_policy_sizes_v1 m WHERE m.document_id=$1),
+		'response_sizes', (SELECT to_jsonb(m) FROM html_creation_response_sizes_v1 m WHERE m.document_id=$1),
+		'report_sizes', (SELECT to_jsonb(m) FROM document_read_report_sizes_v1 m WHERE m.document_id=$1),
+		'event_sizes', (SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY m.event_id),'[]'::jsonb) FROM html_snapshot_event_payload_sizes_v1 m WHERE m.document_id=$1),
+		'field_sizes', (SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY m.field_id),'[]'::jsonb) FROM field_signing_policy_sizes_v1 m WHERE m.document_id=$1),
 		'outbox', (SELECT coalesce(jsonb_agg(to_jsonb(ed) ORDER BY ed.id),'[]'::jsonb) FROM email_deliveries ed WHERE ed.to_email IN (SELECT email FROM recipients WHERE document_id=$1))
 	)::text`, documentID).Scan(&state) //nolint:rawsql -- exact synthetic negotiation state in one database snapshot
 	if err != nil {
@@ -203,7 +224,8 @@ func TestChangeResolutionFailureFidelityAndRollbackE2E(t *testing.T) {
 				countResolutionEvents := func() int {
 					var count int
 					if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events WHERE document_id=$1
-						AND kind=$2 AND payload_json->>'change_request'=$3`, doc.ID, audit.KindChangesRequested, cr.ID.String()).Scan(&count); err != nil { //nolint:rawsql
+						AND kind=$2 AND payload_json->>'change_request'=$3
+						AND payload_json->>'resolution'='approved'`, doc.ID, audit.KindChangesRequested, cr.ID.String()).Scan(&count); err != nil { //nolint:rawsql
 						t.Fatal(err)
 					}
 					return count

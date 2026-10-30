@@ -433,6 +433,9 @@ var errBlockObservationMalformed = errors.New("expected_updated_at must be RFC33
 var errBlockObservationStale = errors.New("Document changed since observation. Fetch and review before replacing the block.")
 
 func mapMutationStatus(err error) int {
+	if pdfadmission.IsInternalApplicationWriteFailureV1(err) {
+		return http.StatusInternalServerError
+	}
 	if errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, pdfadmission.ErrBlocksWriterV1) || errors.Is(err, pdfadmission.ErrHTMLRevisionReadV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) {
 		return http.StatusServiceUnavailable
 	}

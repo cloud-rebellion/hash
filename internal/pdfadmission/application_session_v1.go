@@ -1260,11 +1260,12 @@ func (r *applicationOwnedRowV1) Scan(dest ...any) error {
 		return err
 	}
 	defer done()
+	writePhase := applicationInternalWriteStatementPhaseV1(r.sql)
 	err = tx.QueryRow(owned, r.sql, r.args...).Scan(dest...)
 	r.args = nil
 	r.sql = ""
 	if err != nil {
-		return applicationSessionErrorV1(r.ctx, nil, err)
+		return applicationInternalWriteErrorV1(r.ctx, writePhase, applicationSessionErrorV1(r.ctx, nil, err))
 	}
 	return nil
 }

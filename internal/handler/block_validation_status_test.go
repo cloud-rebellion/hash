@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"net/http"
 	"testing"
 )
@@ -29,5 +32,16 @@ func TestCanonicalBlockValidationReturnsClientError(t *testing.T) {
 	}
 	if got := mapMutationStatus(errors.New("database unavailable")); got != http.StatusInternalServerError {
 		t.Fatal("internal failure hidden as invalid input")
+	}
+}
+
+func TestBlockMutationUntaggedNativeFailureRemainsUnavailable(t *testing.T) {
+	// A server/no-row cause alone does not prove a completed fixed write.
+	// These errors must not jump ahead of the native availability boundary.
+	for _, cause := range []error{pgx.ErrNoRows, &pgconn.PgError{Code: "P0001"}, pdfadmission.ErrApplicationSessionUnknownV1} {
+		err := errors.Join(pdfadmission.ErrApplicationSessionV1, cause)
+		if got := mapMutationStatus(err); got != http.StatusServiceUnavailable {
+			t.Fatalf("untagged native failure mapped to%d, want503", got)
+		}
 	}
 }

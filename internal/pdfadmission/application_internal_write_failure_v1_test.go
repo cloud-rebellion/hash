@@ -10,7 +10,9 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -20,7 +22,7 @@ import (
 // by the existing original500 and freshM94 PostgreSQL journeys.
 func TestInternalWriteFailurePreservesNativeAvailabilityV1(t *testing.T) {
 	server := func(code string) error { return &pgconn.PgError{Code: code, Message: "private driver detail"} }
-	for _, phase := range []applicationInternalWritePhaseV1{applicationAuditIdentityWriteV1, applicationCeremonyReopenWriteV1} {
+	for _, phase := range []applicationInternalWritePhaseV1{applicationAuditIdentityWriteV1, applicationCeremonyReopenWriteV1, applicationBlocksMutationWriteV1, applicationBlocksVersionWriteV1} {
 		for _, tc := range []struct {
 			name     string
 			cause    error
@@ -86,5 +88,65 @@ func TestInternalWriteFailurePreservesNativeAvailabilityV1(t *testing.T) {
 	original := applicationSessionErrorV1(context.Background(), nil, pgx.ErrNoRows)
 	if IsInternalApplicationWriteFailureV1(applicationInternalWriteErrorV1(ctx, applicationCeremonyReopenWriteV1, original)) || IsInternalApplicationWriteFailureV1(applicationInternalWriteErrorV1(context.Background(), 0, original)) {
 		t.Fatal("cancelled context or unknown phase acquired an internal-write result")
+	}
+}
+
+type internalWriteFaultRowV1 struct{ err error }
+
+func (r internalWriteFaultRowV1) Scan(...any) error { return r.err }
+
+// Drive the real generated methods through the native QueryRow/Scan seam.
+// A named read or a fresh-measurement failure cannot acquire write provenance.
+func TestNativeFixedBlockWritesClassifyOnlyCompletedResponsesV1(t *testing.T) {
+	for _, operation := range []struct {
+		name  string
+		write bool
+		run   func(context.Context, *generated.Queries) error
+	}{
+		{"block mutation", true, func(ctx context.Context, q *generated.Queries) error {
+			_, err := q.UpdateDocumentBlocks(ctx, generated.UpdateDocumentBlocksParams{})
+			return err
+		}},
+		{"version snapshot", true, func(ctx context.Context, q *generated.Queries) error {
+			_, err := q.InsertDocumentVersion(ctx, generated.InsertDocumentVersionParams{})
+			return err
+		}},
+		{"document read", false, func(ctx context.Context, q *generated.Queries) error {
+			_, err := q.GetDocument(ctx, generated.GetDocumentParams{})
+			return err
+		}},
+		{"fresh measurement", false, func(ctx context.Context, q *generated.Queries) error {
+			_, err := q.MeasureNativeBlocksResponseV1(ctx, generated.MeasureNativeBlocksResponseV1Params{})
+			return err
+		}},
+	} {
+		for _, fault := range []struct {
+			name      string
+			err       error
+			completed bool
+		}{
+			{"exception", &pgconn.PgError{Code: "P0001", Message: "private test SQL detail"}, true},
+			{"no row", pgx.ErrNoRows, true},
+			{"retry", &pgconn.PgError{Code: "40001"}, false},
+			{"cancel", context.Canceled, false},
+			{"unknown", ErrApplicationSessionUnknownV1, false},
+		} {
+			t.Run(operation.name+"/"+fault.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				tx := &applicationSessionTxTestV1{row: internalWriteFaultRowV1{fault.err}}
+				h := &ApplicationSessionV1{state: &applicationOwnedSessionV1{tx: tx, changed: make(chan struct{})}}
+				err := h.WithTxV1(ctx, func(owned context.Context, db generated.DBTX) error { return operation.run(owned, generated.New(db)) })
+				if got, want := IsInternalApplicationWriteFailureV1(err), operation.write && fault.completed; got != want {
+					t.Fatalf("native response classification=%t want%t", got, want)
+				}
+				if !errors.Is(err, fault.err) || !errors.Is(err, ErrApplicationSessionV1) {
+					t.Fatal("native response lost original error causes")
+				}
+				if strings.Contains(err.Error(), "private test SQL detail") {
+					t.Fatal("native response exposed SQL detail")
+				}
+			})
+		}
 	}
 }

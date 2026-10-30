@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,6 +18,8 @@ type applicationInternalWritePhaseV1 uint8
 const (
 	applicationAuditIdentityWriteV1 applicationInternalWritePhaseV1 = iota + 1
 	applicationCeremonyReopenWriteV1
+	applicationBlocksMutationWriteV1
+	applicationBlocksVersionWriteV1
 )
 
 // The private immutable tag describes only a known completed failure at one
@@ -40,7 +43,21 @@ func applicationInternalWriteErrorV1(ctx context.Context, phase applicationInter
 }
 
 func applicationInternalWritePhaseValidV1(phase applicationInternalWritePhaseV1) bool {
-	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1
+	return phase == applicationAuditIdentityWriteV1 || phase == applicationCeremonyReopenWriteV1 || phase == applicationBlocksMutationWriteV1 || phase == applicationBlocksVersionWriteV1
+}
+
+// Only these two generated fixed writes acquire a phase at the native Scan
+// response seam. Reads, measurements and pre-dispatch refusals stay untagged.
+// This is error provenance only, never authority to dispatch or retry SQL.
+func applicationInternalWriteStatementPhaseV1(sql string) applicationInternalWritePhaseV1 {
+	switch {
+	case strings.HasPrefix(sql, "-- name: UpdateDocumentBlocks :one\n"):
+		return applicationBlocksMutationWriteV1
+	case strings.HasPrefix(sql, "-- name: InsertDocumentVersion :one\n"):
+		return applicationBlocksVersionWriteV1
+	default:
+		return 0
+	}
 }
 
 // IsInternalApplicationWriteFailureV1 recognizes only the private phase tag.

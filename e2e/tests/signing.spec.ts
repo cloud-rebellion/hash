@@ -68,7 +68,9 @@ test.describe('signing flow', () => {
     const newToken = 'new-route-token-regression-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const oldPath = `/sign/${oldToken}`;
     const newPath = `/sign/${newToken}`;
-    const oldArtifactPath = '/sign/old-artifact-credential-must-not-leak/final-pdf';
+    const oldArtifactToken = 'o'.repeat(43);
+    const oldArtifactPath = `/sign/${oldArtifactToken}/final-pdf`;
+    const oldAuditPath = `/sign/${oldArtifactToken}/audit-cert`;
     const oldDocumentName = 'Old token regression document';
     const newDocumentName = 'New token regression document';
     const oldRecipientName = 'Old Route Recipient';
@@ -115,6 +117,24 @@ test.describe('signing flow', () => {
         await route.fulfill({ status: 200, json: contexts.get(pathname) });
         return;
       }
+      const packageContext = pathname.endsWith('/package')
+        ? contexts.get(pathname.slice(0, -'/package'.length))
+        : undefined;
+      if (request.method() === 'GET' && packageContext) {
+        // Ordinary ceremonies still verify the scoped package descriptor before
+        // signing. Match the real no-package response, not an unavailable route.
+        await route.fulfill({
+          status: 200,
+          headers: {
+            'Cache-Control': 'no-store',
+            'X-Hash-Document-Id': packageContext.document_id,
+            'X-Hash-Recipient-Id': packageContext.recipient.id,
+            'X-Hash-Notice-Digest': packageContext.privacy.notice_digest
+          },
+          json: { package: null }
+        });
+        return;
+      }
       if (request.method() === 'GET' && pathname.endsWith('/document')) {
         const isOld = pathname.startsWith(oldPath);
         await route.fulfill({
@@ -141,7 +161,7 @@ test.describe('signing flow', () => {
         await oldSignResponseReleased;
         await route.fulfill({
           status: 200,
-          json: { status: 'completed', completed: true, final_pdf_url: oldArtifactPath }
+          json: { status: 'completed', completed: true, final_pdf_url: oldArtifactPath, audit_cert_url: oldAuditPath }
         });
         markOldSignResponseDelivered();
         return;
@@ -195,6 +215,7 @@ test.describe('signing flow', () => {
       await oldSignResponseDelivered;
       await expect(page.getByRole('heading', { name: 'Signed', exact: true })).toHaveCount(0);
       await expect(page.locator(`a[href="${oldArtifactPath}"]`)).toHaveCount(0);
+      await expect(page.locator(`a[href="${oldAuditPath}"]`)).toHaveCount(0);
       await expect(page.getByPlaceholder('Type your full name')).toHaveValue(newRecipientName);
       await expect(newNotice).toBeVisible();
     } finally {

@@ -69,6 +69,7 @@ test.describe('MCP authoring loop', () => {
     // Step 3: signature field
     await tool(request, 'add_signature_field', {
       document_id: docID,
+      expected_updated_at: (await tool(request, 'get_document', { id: docID })).updated_at,
       recipient_role: 'client',
       label: 'Client signature'
     });
@@ -98,7 +99,11 @@ test.describe('MCP authoring loop', () => {
     });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'append_block',
-      arguments: { document_id: doc.id, block: { type: 'not_a_real_type', text: 'x' } }
+      arguments: {
+        document_id: doc.id,
+        expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
+        block: { id: 'invalid-type', type: 'not_a_real_type', text: 'x' }
+      }
     });
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toMatch(/unknown block type/);
@@ -111,6 +116,7 @@ test.describe('MCP authoring loop', () => {
     });
     await tool(request, 'import_markdown', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       markdown: '# Imported title\n\nA paragraph.\n\n- one\n- two\n'
     });
     const fetched = await tool(request, 'get_document', { id: doc.id });

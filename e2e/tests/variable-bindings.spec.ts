@@ -34,6 +34,7 @@ test.describe('variable bindings (Phase 8.2)', () => {
     });
     await tool(request, 'set_variables', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       variables: { client_name: 'Acme AB', amount: 'SEK 50,000' }
     });
     const preview = await tool(request, 'preview_resolved_variables', {
@@ -52,6 +53,7 @@ test.describe('variable bindings (Phase 8.2)', () => {
     });
     await tool(request, 'set_variables', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       variables: { tier: 'starter' }
     });
     const preview = await tool(request, 'preview_resolved_variables', {
@@ -83,7 +85,7 @@ test.describe('variable bindings (Phase 8.2)', () => {
     expect(orgRow.resolved_from).toBe('source');
   });
 
-  test('bind to CRM deal returns ErrNotConfigured fallback when creds absent', async ({ request }) => {
+  test('unconfigured CRM refuses preview; optional scanner source uses fallback', async ({ request }) => {
     const doc = await tool(request, 'create_document', {
       name: 'CRM bind unconfigured',
       source_kind: 'blocks',
@@ -93,23 +95,50 @@ test.describe('variable bindings (Phase 8.2)', () => {
       document_id: doc.id,
       variable: 'deal_amount',
       deal_id: 'deal_test',
-      path: 'deal.amount',
+      path: 'value',
       fallback: 'TBD'
     });
-    const preview = await tool(request, 'preview_resolved_variables', {
-      document_id: doc.id
+    // Real CRM observations require an active verified connection. A stored
+    // fallback must not disguise an unconfigured CRM as a successful preview.
+    const before = await tool(request, 'get_document', { id: doc.id });
+    const bindingsBefore = await tool(request, 'list_variable_bindings', { document_id: doc.id });
+    const refused = await rpcRaw(request, 'tools/call', {
+      name: 'preview_resolved_variables',
+      arguments: { document_id: doc.id }
     });
-    // No creds in test env => binding errors, fallback used.
+    expect(refused.error).toBeFalsy();
+    expect(refused.result.isError).toBe(true);
+    expect(refused.result.content[0].text).toBe('source plugin not configured');
+    expect(await tool(request, 'get_document', { id: doc.id })).toEqual(before);
+    expect(await tool(request, 'list_variable_bindings', { document_id: doc.id })).toEqual(bindingsBefore);
+
+    // Optional HTTP-source fallback is still supported. This browser stack
+    // deliberately configures neither HASH_SCANNER_URL nor HASH_SCANNER_TOKEN.
+    await tool(request, 'unbind_variable', { document_id: doc.id, variable: 'deal_amount' });
+    await tool(request, 'bind_variable_to_scanner_finding', {
+      document_id: doc.id,
+      variable: 'deal_amount',
+      scan_id: 'scan_test',
+      path: 'summary.critical_count',
+      fallback: 'TBD'
+    });
+    const scannerBefore = await tool(request, 'list_variable_bindings', { document_id: doc.id });
+    const preview = await tool(request, 'preview_resolved_variables', { document_id: doc.id });
     expect(preview.variables.deal_amount).toBe('TBD');
     const row = preview.report.find((r: { variable: string }) => r.variable === 'deal_amount');
+    expect(row.source_kind).toBe('scanner.finding');
     expect(row.resolved_from).toBe('fallback');
+    expect(await tool(request, 'list_variable_bindings', { document_id: doc.id })).toEqual(scannerBefore);
   });
 
   test('list_variable_bindings returns every binding with last_value', async ({ request }) => {
     const doc = await tool(request, 'create_document', {
       name: 'List bindings',
       source_kind: 'blocks',
-      blocks_json: { version: 1, blocks: [] }
+      blocks_json: {
+        version: 1,
+        blocks: [{ id: 's', type: 'signature_field', attrs: { recipient_role: 'signer' } }]
+      }
     });
     await tool(request, 'bind_variable_to_org_setting', {
       document_id: doc.id,
@@ -121,8 +150,20 @@ test.describe('variable bindings (Phase 8.2)', () => {
       variable: 'org_id',
       path: 'org.id'
     });
-    // Force resolution so last_value gets populated.
-    await tool(request, 'preview_resolved_variables', { document_id: doc.id });
+    // Preview is read-only: only the real Send transaction persists observations.
+    const preview = await tool(request, 'preview_resolved_variables', { document_id: doc.id });
+    const beforeSend = await tool(request, 'list_variable_bindings', { document_id: doc.id });
+    expect(beforeSend.count).toBe(2);
+    expect(beforeSend.bindings.every(
+      (b: { last_value: string; last_resolved?: string }) => b.last_value === '' && !b.last_resolved
+    )).toBe(true);
+    await tool(request, 'add_recipient', {
+      document_id: doc.id,
+      role: 'signer',
+      email: `binding-observations-${Date.now()}@example.com`,
+      name: 'Binding Observations'
+    });
+    await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
 
     const list = await tool(request, 'list_variable_bindings', {
       document_id: doc.id
@@ -131,6 +172,10 @@ test.describe('variable bindings (Phase 8.2)', () => {
     const names = list.bindings.map((b: { variable: string }) => b.variable).sort();
     expect(names).toEqual(['org_id', 'org_name']);
     expect(list.bindings.every((b: { last_value: string }) => b.last_value !== '')).toBe(true);
+    for (const binding of list.bindings) {
+      expect(binding.last_value).toBe(preview.variables[binding.variable]);
+      expect(binding.last_resolved).toBeTruthy();
+    }
   });
 
   test('unbind_variable removes the binding', async ({ request }) => {
@@ -175,7 +220,7 @@ test.describe('variable bindings (Phase 8.2)', () => {
       arguments: { document_id: doc.id, variable: 'x', path: 'org.name' }
     });
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toMatch(/frozen|status/i);
+    expect(res.result.content[0].text).toBe('document not editable (must be draft)');
   });
 });
 

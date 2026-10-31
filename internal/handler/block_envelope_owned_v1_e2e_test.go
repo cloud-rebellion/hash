@@ -13,11 +13,15 @@ import (
 	"fmt"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/mcp"
 	sendengine "github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -25,6 +29,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // This journey uses public actual creators/topology/recipients and real native
@@ -35,13 +40,46 @@ func TestOwnedBlockEnvelopeSendAndTwoPartyEvidenceE2E(t *testing.T) {
 	testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t, false)
 }
 
+// These real MCP journeys keep the original direct/component controls above
+// and below, while exercising production Billing/EIDAS and nested child roles.
+func TestOwnedBlockEnvelopeMCPMockSubscriptionE2E(t *testing.T) {
+	testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t, false, ownedEnvelopeMCPMock165V1)
+}
+
+func TestOwnedBlockEnvelopeMCPOperatorProE2E(t *testing.T) {
+	testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t, false, ownedEnvelopeMCPOperator165V1)
+}
+
+type ownedEnvelopeMCPProfile165V1 uint8
+
+const (
+	ownedEnvelopeMCPMock165V1 ownedEnvelopeMCPProfile165V1 = iota + 1
+	ownedEnvelopeMCPOperator165V1
+)
+
 func TestOwnedBlockEnvelopeCommentFinalizationAndFrozenEvidenceE2E(t *testing.T) {
 	testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t, true)
 }
 
-func testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t *testing.T, commentBoundary bool) {
+func testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t *testing.T, commentBoundary bool, profile ...ownedEnvelopeMCPProfile165V1) {
 	t.Helper()
-	q := newOwnedPublicReadFixtureV1(t)
+	if len(profile) > 1 || len(profile) == 1 && profile[0] != ownedEnvelopeMCPMock165V1 && profile[0] != ownedEnvelopeMCPOperator165V1 {
+		t.Fatal("unsupported explicit envelope MCP profile")
+	}
+	fullMCP := len(profile) == 1
+	var q *ownedPublicReadFixtureV1
+	if fullMCP {
+		// Chosen before fixture DB/pool/runtime birth. Global128 and every
+		// byte, DB, SQL, provider and physical worker limit stay unchanged.
+		limits := workguard.LimitsV1{
+			Global:       workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 8, ProviderStreams: 1},
+			Organisation: workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 384 << 20, SQLSessions: 4, ProviderStreams: 1},
+			MaxGrants:    128, MaxOrganisationGrants: 96,
+		}
+		q = newOwnedPublicReadFixtureAllocated257dV1(t, true, limits)
+	} else {
+		q = newOwnedPublicReadFixtureV1(t)
+	}
 	ownedCreationPrepareProPlanV1(t, q)
 	f := q.f
 	f.s.Envelopes = envelopes.New(f.q)
@@ -52,6 +90,67 @@ func testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t *testing.T, commentBou
 			return nil, nil
 		}
 		return f.s.Envelopes.Children(ctx, doc.ID, doc.OrgID)
+	}
+	var callMCP func(string, map[string]any) json.RawMessage
+	if fullMCP {
+		// Operator mode keeps the fixture's genuinely measured Pro entitlement.
+		// Mock mode matches the actual supported browser subscription seed.
+		if profile[0] == ownedEnvelopeMCPMock165V1 {
+			// Match browser CI's actual supported development subscription. The
+			// unlimited enterprise plan is deliberately invalid in operator mode.
+			f.s.Billing = billing.New(f.q, billing.MockProvider{}, f.s.PublicURL, f.s.PublicURL+"/webhooks/billing/mock")
+			var enterprise uuid.UUID
+			if err := f.pool.QueryRow(f.ctx, "SELECT id FROM billing_plans WHERE slug='enterprise'").Scan(&enterprise); err != nil || enterprise == uuid.Nil {
+				t.Fatal("actual enterprise catalog identity unavailable", err)
+			} //nolint:rawsql -- fixed scalar identity, never a catalog body/cache write
+			measured, err := q.runtime.SessionsV1().ControlledMeasurePlanSourceV1(f.ctx, enterprise)
+			if measured != nil {
+				t.Cleanup(func() {
+					cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := measured.CloseV1(cleanup); err != nil {
+						t.Error("enterprise source cleanup", err)
+					}
+				})
+			}
+			if err != nil || measured == nil {
+				t.Fatal("genuine enterprise catalog measurement failed", err)
+			}
+			receipt, err := measured.ReceiptV1()
+			if err != nil || receipt.Kind != "plan" || receipt.SourceID != enterprise || receipt.OrgID != uuid.Nil || receipt.WireBytes <= 0 || receipt.ServerVersionNum != 160015 || !receipt.CreatedAt.Valid || !receipt.MeasuredAt.Valid {
+				t.Fatal("enterprise catalog receipt differs", err)
+			}
+			measured.CloseConsumerV1()
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = measured.CloseV1(cleanup)
+			cancel()
+			if err != nil {
+				t.Fatal("enterprise source owner did not retire", err)
+			}
+			// Same real row/period/provider as the checked-in browser CI seed;
+			// this grants no operator exemption and fabricates no measured source.
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			end := pgtype.Timestamptz{Time: now.Add(24 * time.Hour), Valid: true}
+			subscription, err := f.q.UpsertOrgSubscription(f.ctx, generated.UpsertOrgSubscriptionParams{OrgID: f.org, PlanID: enterprise, Provider: "mock", Status: "trialing", CurrentPeriodStart: pgtype.Timestamptz{Time: now, Valid: true}, CurrentPeriodEnd: end, TrialEndsAt: end})
+			if err != nil || subscription == nil || subscription.ID == uuid.Nil || subscription.OrgID != f.org || subscription.PlanID != enterprise || subscription.Provider != "mock" || subscription.Status != "trialing" || !subscription.CurrentPeriodEnd.Valid || !subscription.CurrentPeriodEnd.Time.Equal(end.Time) {
+				t.Fatal("actual browser enterprise subscription differs", err)
+			}
+		}
+		f.s.Send.Billing = f.s.Billing
+		f.s.Send.EIDAS = eidas.New(f.q)
+		f.s.APIKeys = &auth.PgVerifier{Queries: f.q}
+		f.s.MCP = mcp.New(mcp.Deps{Pool: f.pool, Queries: f.q, Audit: f.s.Audit, Send: f.s.Send, Versions: f.s.Versions, Envelopes: f.s.Envelopes, Billing: f.s.Billing, Storage: f.s.Storage, PDFCreationSessions: q.runtime.SessionsV1(), PublicURL: f.s.PublicURL})
+		mint, err := auth.MintAPIKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = f.q.CreateAPIKey(f.ctx, generated.CreateAPIKeyParams{OrgID: f.org, UserID: f.user.ID, Name: "Synthetic exact browser envelope", KeyPrefix: mint.Prefix, KeyHash: mint.Hash, Scopes: []string{"read", "write:authoring", "write:workflow"}}); err != nil {
+			t.Fatal(err)
+		}
+		callMCP = func(tool string, args map[string]any) json.RawMessage {
+			response := submitAuthoringMCPE2E(f, f.ctx, tool, mint.Plaintext, args)
+			return json.RawMessage(fieldMCPTextE2E(t, response, false))
+		}
 	}
 	create := func(name, role string) uuid.UUID {
 		tree := map[string]any{"version": 1, "blocks": []any{}}
@@ -72,22 +171,66 @@ func testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t *testing.T, commentBou
 		}
 		return result.ID
 	}
-	root := create("Owned envelope", "")
-	children := []uuid.UUID{create("Buyer terms", "buyer"), create("Seller terms", "seller")}
-	base := "/api/v1/documents/" + root.String()
-	if w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/promote-to-envelope", "{}", q.cookie); w.Code != http.StatusOK {
-		t.Fatalf("actual promote=%d %s", w.Code, w.Body.String())
-	}
-	for i, child := range children {
-		raw := fmt.Sprintf("{\"child_id\":\"%s\",\"position\":%d}", child, i+1)
-		if w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/envelopes/"+root.String()+"/attach", raw, q.cookie); w.Code != http.StatusOK {
-			t.Fatalf("actual attach=%d %s", w.Code, w.Body.String())
+	var root uuid.UUID
+	var children []uuid.UUID
+	if fullMCP {
+		unique := "envelope-sign-" + uuid.NewString()
+		createChild := func(name string, tree map[string]any) uuid.UUID {
+			raw := callMCP("create_document", map[string]any{"name": name, "source_kind": "blocks", "blocks_json": tree})
+			var row struct{ ID uuid.UUID }
+			if err := json.Unmarshal(raw, &row); err != nil || row.ID == uuid.Nil {
+				t.Fatal("actual browser child creator omitted identity", err)
+			}
+			return row.ID
 		}
-	}
-	for i, role := range []string{"buyer", "seller"} {
-		raw, _ := json.Marshal(map[string]any{"email": role + "@family.example.test", "name": "Synthetic " + role, "role": role, "order_index": i, "locale": "en"})
-		if w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/recipients", string(raw), q.cookie); w.Code != http.StatusCreated {
-			t.Fatalf("actual family recipient=%d %s", w.Code, w.Body.String())
+		childA := createChild("Envelope MSA "+unique, map[string]any{"version": 1, "blocks": []any{
+			map[string]any{"id": "msa-proof", "type": "paragraph", "text": "ENVELOPE MSA CONTENT " + unique},
+			map[string]any{"id": "msa-signer", "type": "signature_field", "attrs": map[string]any{"recipient_role": "signer"}},
+		}})
+		childB := createChild("Envelope DPA "+unique, map[string]any{"version": 1, "blocks": []any{
+			map[string]any{"id": "dpa-proof", "type": "paragraph", "text": "ENVELOPE DPA CONTENT " + unique},
+			map[string]any{"id": "dpa-approval-callout", "type": "callout", "attrs": map[string]any{"tone": "info"}, "content": []any{
+				map[string]any{"id": "dpa-approver", "type": "signature_field", "attrs": map[string]any{"recipient_role": "approver"}},
+			}},
+		}})
+		children = []uuid.UUID{childA, childB}
+		var envelope struct{ ID uuid.UUID }
+		if err := json.Unmarshal(callMCP("create_envelope", map[string]any{"name": "Envelope signing proof " + unique, "child_ids": children}), &envelope); err != nil || envelope.ID == uuid.Nil {
+			t.Fatal("actual browser MCP envelope creator omitted identity", err)
+		}
+		root = envelope.ID
+		for _, role := range []string{"signer", "approver"} {
+			name := "Envelope Signer"
+			if role == "approver" {
+				name = "Envelope Approver"
+			}
+			callMCP("add_recipient", map[string]any{"document_id": root, "role": role, "email": role + "-" + unique + "@example.com", "name": name})
+		}
+		rootDoc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: root, OrgID: f.org})
+		var shell struct {
+			Blocks []json.RawMessage `json:"blocks"`
+		}
+		if err != nil || rootDoc == nil || !rootDoc.IsEnvelope || rootDoc.ParentEnvelopeID.Valid || json.Unmarshal(rootDoc.BlocksJson, &shell) != nil || len(shell.Blocks) != 0 {
+			t.Fatal("actual MCP envelope is not a genuine empty root", err)
+		}
+	} else {
+		root = create("Owned envelope", "")
+		children = []uuid.UUID{create("Buyer terms", "buyer"), create("Seller terms", "seller")}
+		base := "/api/v1/documents/" + root.String()
+		if w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/promote-to-envelope", "{}", q.cookie); w.Code != http.StatusOK {
+			t.Fatalf("actual promote=%d %s", w.Code, w.Body.String())
+		}
+		for i, child := range children {
+			raw := fmt.Sprintf("{\"child_id\":\"%s\",\"position\":%d}", child, i+1)
+			if w := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/envelopes/"+root.String()+"/attach", raw, q.cookie); w.Code != http.StatusOK {
+				t.Fatalf("actual attach=%d %s", w.Code, w.Body.String())
+			}
+		}
+		for i, role := range []string{"buyer", "seller"} {
+			raw, _ := json.Marshal(map[string]any{"email": role + "@family.example.test", "name": "Synthetic " + role, "role": role, "order_index": i, "locale": "en"})
+			if w := submitSessionOperationE2E(f.s, http.MethodPost, base+"/recipients", string(raw), q.cookie); w.Code != http.StatusCreated {
+				t.Fatalf("actual family recipient=%d %s", w.Code, w.Body.String())
+			}
 		}
 	}
 	original := make([]*generated.Document, 0, len(children))
@@ -107,13 +250,45 @@ func testOwnedBlockEnvelopeSendAndTwoPartyEvidence165V1(t *testing.T, commentBou
 		}
 		return nil
 	}}
-	sent, err := f.s.Send.Send(f.ctx, actor, root)
+	var err error
+	var sent sendengine.SendResult
+	if fullMCP {
+		// Only a public response view is decoded here. The real MCP dispatcher
+		// retains/closes the actual Send result owner through response writing.
+		raw := callMCP("send_document", map[string]any{"document_id": root, "lawful_basis": "contract"})
+		var outcome struct {
+			DocumentID uuid.UUID `json:"document_id"`
+			sendengine.SendResult
+		}
+		if err = json.Unmarshal(raw, &outcome); err != nil || outcome.DocumentID != root {
+			t.Fatal("actual MCP Send outcome is not this envelope", err)
+		}
+		sent = outcome.SendResult
+	} else {
+		sent, err = f.s.Send.Send(f.ctx, actor, root)
+	}
 	defer sent.CloseConsumerV1()
 	if err != nil || sent.Status != "sent" || len(sent.Links) != 2 {
 		t.Fatalf("actual owned family Send=%+v err=%v", sent, err)
 	}
-	parties := make([]signerBrowserPartyE2E, 0, len(sent.Links))
-	for _, link := range sent.Links {
+	links := sent.Links
+	if fullMCP {
+		// Match the browser's explicit signer-then-approver interaction order;
+		// these are the unchanged actual public links, never minted test data.
+		links = make([]sendengine.SignLink, 0, 2)
+		for _, role := range []string{"signer", "approver"} {
+			for _, link := range sent.Links {
+				if link.Role == role {
+					links = append(links, link)
+				}
+			}
+		}
+		if len(links) != 2 || links[0].Role != "signer" || links[1].Role != "approver" {
+			t.Fatal("actual browser role links differ")
+		}
+	}
+	parties := make([]signerBrowserPartyE2E, 0, len(links))
+	for _, link := range links {
 		u, err := url.Parse(link.URL)
 		if err != nil {
 			t.Fatal(err)

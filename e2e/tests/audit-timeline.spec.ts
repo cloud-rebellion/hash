@@ -35,11 +35,13 @@ test.describe('audit timeline (Phase 8.8)', () => {
     // Two edits + an attach metadata = three updated events.
     await tool(request, 'update_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block_id: 'h',
       block: { id: 'h', type: 'heading', attrs: { level: 1 }, text: 'NDA v2' }
     });
     await tool(request, 'append_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block: { id: 'p', type: 'paragraph', text: 'New clause.' }
     });
 
@@ -63,6 +65,7 @@ test.describe('audit timeline (Phase 8.8)', () => {
     for (let i = 0; i < 4; i++) {
       await tool(request, 'update_block', {
         document_id: doc.id,
+        expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
         block_id: 'p',
         block: { id: 'p', type: 'paragraph', text: `edit ${i}` }
       });
@@ -88,6 +91,7 @@ test.describe('audit timeline (Phase 8.8)', () => {
     });
     await tool(request, 'append_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block: { id: 'p', type: 'paragraph', text: 'hi' }
     });
     const only = await tool(request, 'get_document_timeline', {
@@ -112,6 +116,7 @@ test.describe('audit timeline (Phase 8.8)', () => {
     });
     await tool(request, 'update_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block_id: 'p',
       block: { id: 'p', type: 'paragraph', text: 'Edited.' }
     });

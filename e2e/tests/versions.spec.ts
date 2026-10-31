@@ -37,6 +37,7 @@ test.describe('document versioning (Phase 8.1)', () => {
     // Step 2: edit the title. Snapshot v2.
     await tool(request, 'set_document_blocks', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       blocks_json: {
         version: 1,
         blocks: [{ id: 'h', type: 'heading', attrs: { level: 1 }, text: 'After first edit' }]
@@ -46,6 +47,7 @@ test.describe('document versioning (Phase 8.1)', () => {
     // Step 3: append a paragraph. Snapshot v3.
     await tool(request, 'append_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block: { id: 'p', type: 'paragraph', text: 'A new clause.' }
     });
 
@@ -75,11 +77,13 @@ test.describe('document versioning (Phase 8.1)', () => {
     // Modify p1; add p2; remove nothing.
     await tool(request, 'update_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block_id: 'p1',
       block: { id: 'p1', type: 'paragraph', text: 'Edited wording.' }
     });
     await tool(request, 'append_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block: { id: 'p2', type: 'paragraph', text: 'Brand new clause.' }
     });
 
@@ -113,6 +117,7 @@ test.describe('document versioning (Phase 8.1)', () => {
     // Make a destructive edit.
     await tool(request, 'update_block', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       block_id: 'p',
       block: { id: 'p', type: 'paragraph', text: 'Replaced.' }
     });
@@ -120,6 +125,7 @@ test.describe('document versioning (Phase 8.1)', () => {
     // Restore to v1 (the very first snapshot).
     const restored = await tool(request, 'restore_document_version', {
       document_id: doc.id,
+      expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at,
       target_version: 1
     });
     expect(restored.restored_from_v).toBe(1);
@@ -153,7 +159,11 @@ test.describe('document versioning (Phase 8.1)', () => {
     await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'restore_document_version',
-      arguments: { document_id: doc.id, target_version: 1 }
+      arguments: {
+        document_id: doc.id,
+        target_version: 1,
+        expected_updated_at: (await tool(request, 'get_document', { id: doc.id })).updated_at
+      }
     });
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toMatch(/draft|status/i);

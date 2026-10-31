@@ -69,15 +69,33 @@ jobs:
       - name: Build the minimal Hash renderer
         run: docker build --file gotenberg/Dockerfile --tag hash-gotenberg:e2e .
 
+      - name: Build the existing owned MinIO test image
+        run: |
+          set -eu
+          image_file="$(mktemp "$RUNNER_TEMP/hash-minio-e2e-image.XXXXXX")"
+          trap 'rm -f "$image_file"' EXIT INT TERM HUP
+          docker build --iidfile "$image_file" --file docker/minio/Dockerfile docker/minio
+          minio_image="$(cat "$image_file")"
+          case "$minio_image" in
+            sha256:*) image_hex=${minio_image#sha256:} ;;
+            *) echo 'MinIO build returned no exact image ID' >&2; exit 1 ;;
+          esac
+          case "$image_hex" in
+            ""|*[!a-f0-9]*) echo 'MinIO build returned an invalid image ID' >&2; exit 1 ;;
+          esac
+          test "${#image_hex}" -eq 64
+          printf 'HASH_E2E_MINIO_IMAGE=%s\n' "$minio_image" >> "$GITHUB_ENV"
+
       - name: Start E2E dependencies
         run: |
+          set -eu
           docker run -d --name pg -p 5432:5432 \
             -e POSTGRES_USER=hash -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=hash \
             postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
             -e MINIO_KMS_SECRET_KEY=hash-e2e-key:qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0= \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+            "$HASH_E2E_MINIO_IMAGE" server /data
           docker run -d --name gotenberg -p 3000:3000 \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
             --cap-drop ALL --security-opt no-new-privileges:true \

@@ -514,6 +514,7 @@ func TestProviderPartialRejectsUnboundAndForgedState(t *testing.T) {
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			f := newProviderPartialFixture(t, presign.InputReviewedDocument)
 			change(f)
 			if err := f.validate(); !errors.Is(err, ErrInvalid) {

@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ type fakeVersionedS3 struct {
 	ignoreSSECKey             bool
 	omitSSES3ResponseMetadata bool
 	denyExactDelete           bool
+	exactDeleteError          *minio.ErrorResponse
 	retentionMode             minio.RetentionMode
 	retentionUntil            time.Time
 	retentionGetCalls         int
@@ -181,6 +183,12 @@ func (f *fakeVersionedS3) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			f.logicalDeleted = true
 			w.Header().Set("X-Amz-Delete-Marker", "true")
 		} else if versionID == objectVersion {
+			if f.exactDeleteError != nil {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(f.exactDeleteError.StatusCode)
+				_ = xml.NewEncoder(w).Encode(f.exactDeleteError)
+				return
+			}
 			if f.denyExactDelete {
 				writeFakeS3Error(w, r, http.StatusForbidden, "AccessDenied")
 				return
@@ -517,6 +525,10 @@ func TestExplicitRetentionDeleteDenialRejectsAmbiguousFailures(t *testing.T) {
 	}{
 		{name: "explicit provider forbidden", err: minio.ErrorResponse{StatusCode: http.StatusForbidden}, want: true},
 		{name: "explicit provider forbidden pointer", err: &minio.ErrorResponse{StatusCode: http.StatusForbidden}, want: true},
+		{name: "explicit MinIO WORM", err: minio.ErrorResponse{StatusCode: http.StatusBadRequest, Code: "InvalidRequest", Message: "Object is WORM protected and cannot be overwritten"}, want: true},
+		{name: "explicit MinIO WORM wrapped pointer", err: fmt.Errorf("provider: %w", &minio.ErrorResponse{StatusCode: http.StatusBadRequest, Code: "InvalidRequest", Message: "Object is WORM protected and cannot be overwritten"}), want: true},
+		{name: "other invalid request", err: minio.ErrorResponse{StatusCode: http.StatusBadRequest, Code: "InvalidRequest", Message: "invalid version"}},
+		{name: "untyped WORM message", err: errors.New("Object is WORM protected and cannot be overwritten")},
 		{name: "bad request", err: minio.ErrorResponse{StatusCode: http.StatusBadRequest}},
 		{name: "transport failure", err: errors.New("connection reset")},
 		{name: "nil", err: nil},
@@ -524,6 +536,90 @@ func TestExplicitRetentionDeleteDenialRejectsAmbiguousFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := isExplicitRetentionDeleteDenial(test.err); got != test.want {
 				t.Fatalf("isExplicitRetentionDeleteDenial() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestVerifyRetentionConformanceMinIOXMLDenial(t *testing.T) {
+	const wormMessage = "Object is WORM protected and cannot be overwritten"
+	for _, tc := range []struct {
+		name, code, message string
+		status              int
+		want                bool
+	}{
+		{"explicit-WORM", "InvalidRequest", wormMessage, http.StatusBadRequest, true},
+		{"other-InvalidRequest", "InvalidRequest", "invalid version", http.StatusBadRequest, false},
+		{"wrong-code", "AccessDenied", wormMessage, http.StatusBadRequest, false},
+		{"wrong-status", "InvalidRequest", wormMessage, http.StatusConflict, false},
+		{"missing-message", "InvalidRequest", "", http.StatusBadRequest, false},
+		{"changed-message", "InvalidRequest", wormMessage + ".", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte("reserved bootstrap control marker")
+			digest := sha256.Sum256(payload)
+			deadline := time.Date(2033, time.January, 2, 3, 4, 5, 0, time.UTC)
+			fake := &fakeVersionedS3{
+				encryptionMode: encrypt.S3, payload: append([]byte(nil), payload...),
+				retentionMode: minio.Compliance, retentionUntil: deadline,
+				exactDeleteError: &minio.ErrorResponse{StatusCode: tc.status, Code: tc.code, Message: tc.message},
+			}
+			client, _ := newFakeDataPlaneClient(t, fake)
+			err := client.VerifyRetentionConformance(context.Background(), BootstrapEstateMarkerKey,
+				"provider-version-1", digest[:], deadline.Add(-time.Hour))
+			if (err == nil) != tc.want {
+				t.Fatalf("XML retention denial accepted=%t, want %t: %v", err == nil, tc.want, err)
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if fake.exactDeleted || fake.logicalDeleted || !bytes.Equal(fake.payload, payload) || !fake.retentionUntil.Equal(deadline) {
+				t.Fatal("retention check changed or deleted the control version")
+			}
+			deletes := 0
+			for _, request := range fake.requests {
+				if request.version != "provider-version-1" {
+					t.Fatal("retention check used an unpinned object request")
+				}
+				if request.method == http.MethodDelete {
+					deletes++
+				}
+			}
+			if deletes != 1 || fake.retentionPutCalls != 1 || (tc.want && fake.retentionGetCalls != 3) {
+				t.Fatalf("retention proof calls: deletes=%d put=%d get=%d", deletes, fake.retentionPutCalls, fake.retentionGetCalls)
+			}
+		})
+	}
+}
+
+func TestVerifyRetentionConformanceMinIODenialStillChecksExactState(t *testing.T) {
+	for _, changed := range []string{"bytes", "deadline"} {
+		t.Run(changed, func(t *testing.T) {
+			payload := []byte("reserved bootstrap control marker")
+			digest := sha256.Sum256(payload)
+			deadline := time.Date(2033, time.January, 2, 3, 4, 5, 0, time.UTC)
+			fake := &fakeVersionedS3{
+				encryptionMode: encrypt.S3, payload: append([]byte(nil), payload...),
+				retentionMode: minio.Compliance, retentionUntil: deadline,
+				exactDeleteError: &minio.ErrorResponse{StatusCode: http.StatusBadRequest, Code: "InvalidRequest", Message: "Object is WORM protected and cannot be overwritten"},
+			}
+			fake.afterRequest = func(r *http.Request) {
+				if r.Method == http.MethodDelete {
+					if changed == "bytes" {
+						fake.payload = []byte("changed control marker")
+					} else {
+						fake.retentionUntil = deadline.Add(time.Hour)
+					}
+				}
+			}
+			client, _ := newFakeDataPlaneClient(t, fake)
+			err := client.VerifyRetentionConformance(context.Background(), BootstrapEstateMarkerKey,
+				"provider-version-1", digest[:], deadline.Add(-time.Hour))
+			want := "control bytes did not survive"
+			if changed == "deadline" {
+				want = "deadline did not survive"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("post-denial %s drift was not refused: %v", changed, err)
 			}
 		})
 	}

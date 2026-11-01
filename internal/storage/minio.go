@@ -831,11 +831,18 @@ func isExplicitRetentionDeleteDenial(err error) bool {
 		return false
 	}
 	var response minio.ErrorResponse
-	if errors.As(err, &response) {
-		return response.StatusCode == http.StatusForbidden
+	if !errors.As(err, &response) {
+		var responsePointer *minio.ErrorResponse
+		if !errors.As(err, &responsePointer) || responsePointer == nil {
+			return false
+		}
+		response = *responsePointer
 	}
-	var responsePointer *minio.ErrorResponse
-	return errors.As(err, &responsePointer) && responsePointer != nil && responsePointer.StatusCode == http.StatusForbidden
+	// MinIO reports its explicit ObjectLocked denial as this exact 400 tuple.
+	// Other InvalidRequest errors cannot prove retention enforcement.
+	return response.StatusCode == http.StatusForbidden ||
+		(response.StatusCode == http.StatusBadRequest && response.Code == "InvalidRequest" &&
+			response.Message == "Object is WORM protected and cannot be overwritten")
 }
 
 // PutStream uploads from an io.Reader of known length only in disposable

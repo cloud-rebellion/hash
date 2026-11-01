@@ -45,7 +45,7 @@ printf 'e2e profile evidence: %s\n' "$evidence"
 
 # These two bounded binaries are built before any timed test. Keep the caller's
 # normal Go/module caches; remove only this invocation's temporary directory.
-go build -o "$scratch/hash-pdf-worker" ./cmd/pdfworker
+CGO_ENABLED=0 go build -o "$scratch/hash-pdf-worker" ./cmd/pdfworker
 go build -tags=e2e -o "$scratch/profile-preflight" ./scripts/e2eprofile
 go test -c -tags=e2e -p=2 -o "$scratch/handler.test" ./internal/handler
 migration_digest=$("$scratch/profile-preflight" "$PWD" "$scratch/hash-pdf-worker")

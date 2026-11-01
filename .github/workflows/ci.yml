@@ -113,7 +113,7 @@ jobs:
             echo "$name did not become ready" >&2
             return 1
           }
-          wait_for postgres docker exec pg pg_isready -U hash -d hash
+          wait_for postgres docker exec pg pg_isready -h 127.0.0.1 -U hash -d hash
           wait_for minio curl -sf http://localhost:9000/minio/health/ready
           wait_for gotenberg curl -sf http://localhost:3000/health
 

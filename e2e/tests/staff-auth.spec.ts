@@ -274,7 +274,8 @@ test.describe('native staff account browser journey', () => {
       await noStoredSecrets(page, [originalPassword, verification.token]);
 
       stage = 'real logout and password login';
-      await page.getByRole('button', { name: 'Sign out everywhere', exact: true }).click();
+      await page.getByRole('button', { name: `Account menu: ${ownerEmail}`, exact: true }).click();
+      await page.locator('#hash-account-panel').getByRole('button', { name: 'Sign out everywhere', exact: true }).click();
       await atPath(page, '/');
       requireCheck(await sessionStatus(page, origin) === 401, 'Logout left the browser session active');
       await login(page, ownerEmail, originalPassword);

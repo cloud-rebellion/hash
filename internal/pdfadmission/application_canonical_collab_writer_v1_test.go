@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) CloudRebellion
+
 package pdfadmission
 
 import (

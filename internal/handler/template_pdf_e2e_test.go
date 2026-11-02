@@ -1,5 +1,8 @@
 //go:build e2e
 
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) CloudRebellion
+
 package handler
 
 import (

@@ -29,6 +29,7 @@
 
 :root,
 [data-theme='light'] {
+  color-scheme: light;
   --t-bg: #f7f7f7;
   --t-bg-surface: #ffffff;
   --t-bg-elevated: #fafafa;
@@ -45,6 +46,26 @@
   --t-warning: #d97706;
   --t-danger: #dc2626;
   --t-info: #4f46e5;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --t-bg: #101216;
+  --t-bg-surface: #191c22;
+  --t-bg-elevated: #20242c;
+  --t-bg-hover: #2b303a;
+  --t-border: #373d49;
+  --t-border-light: #2c323d;
+  --t-text-primary: #f3f4f6;
+  --t-text-secondary: #c5cbd5;
+  --t-text-muted: #929dac;
+  --t-accent: #f1f3f5;
+  --t-accent-hover: #ffffff;
+  --t-accent-foreground: #15181d;
+  --t-success: #4ade80;
+  --t-warning: #fbbf24;
+  --t-danger: #fb7185;
+  --t-info: #a5b4fc;
 }
 
 body {
@@ -86,6 +107,13 @@ body {
 
 .btn:active {
   transform: scale(0.98);
+}
+
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .btn-primary {

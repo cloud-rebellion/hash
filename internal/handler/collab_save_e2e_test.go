@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bright-interaction/hash/internal/auth"
-	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/google/uuid"
 )
@@ -30,22 +28,8 @@ func (p canonicalSavePeer) DisplayName() string                { return "save fi
 func (p canonicalSavePeer) Send(context.Context, []byte) error { return nil }
 
 func TestCollabSaveAuthenticatedAtomicReceiptE2E(t *testing.T) {
-	ctx, _, q, s, org, user := setupDSRE2E(t)
-	var err error
-	s.Cookies, err = auth.NewSignedCookie(hex.EncodeToString(bytes.Repeat([]byte{27}, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.PublicURL = "https://hash.example.test"
-	s.Collab = collab.NewHub(q)
-	s.Collab.FlushEvery = 0
-	defer s.Collab.Shutdown(ctx)
-	payload, _ := json.Marshal(auth.SessionPayload{UserID: user})
-	cookie := s.Cookies.Mint(payload, time.Hour)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, Name: "coordinated save", SenderID: user, BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture, doc, cookie := setupNativeCanonicalCollabE2E(t, "coordinated save")
+	ctx, q, s, org, user := fixture.f.ctx, fixture.f.q, fixture.f.s, fixture.f.org, fixture.f.user.ID
 	peer := canonicalSavePeer{id: "fixture-peer", user: user}
 	joined, err := s.Collab.Join(ctx, doc.ID, org, peer)
 	if err != nil {

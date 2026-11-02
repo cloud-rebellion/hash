@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { ui } from '$lib/staffPreferences';
   import { ShieldCheck, ShieldAlert, Key, Upload, FileCheck2, CheckCircle2, XCircle } from 'lucide-svelte';
 
   type VerifyBundleCheck = {
@@ -33,6 +34,7 @@
   let payload = $state('');
   let sig = $state('');
   let result = $state<'idle' | 'valid' | 'untrusted' | 'invalid' | 'error'>('idle');
+  let checking = $state(false);
   let errorMsg = $state<string | null>(null);
 
   let dragging = $state(false);
@@ -55,6 +57,8 @@
 
   async function check(e: Event) {
     e.preventDefault();
+    if (checking) return;
+    checking = true;
     result = 'idle';
     errorMsg = null;
     try {
@@ -77,10 +81,11 @@
     } catch (e) {
       result = 'error';
       errorMsg = (e as Error).message;
-    }
+    } finally { checking = false; }
   }
 
   async function verifyBundle(file: File) {
+    if (bundleLoading) return;
     bundleError = null;
     bundleReport = null;
     bundleLoading = true;
@@ -106,6 +111,7 @@
   function onDrop(e: DragEvent) {
     e.preventDefault();
     dragging = false;
+    if (bundleLoading) return;
     const file = e.dataTransfer?.files?.[0];
     if (!file) return;
     if (!file.name.toLowerCase().endsWith('.pdf')) {
@@ -128,111 +134,70 @@
   }
 </script>
 
-<div class="min-h-screen bg-bg">
-  <header class="border-b border-border-light px-6 py-4">
-    <a href="/" class="font-display font-extralight text-lg">Hash</a>
-  </header>
-
-  <main class="max-w-3xl mx-auto px-6 py-12">
-    <p class="page-eyebrow mb-3">Audit certificate verification</p>
-    <h1 class="page-title mb-3">Verify a Hash-issued signature</h1>
-    <p class="text-text-secondary text-sm mb-8 leading-relaxed max-w-2xl">
-      Every Hash audit certificate carries an ed25519 signature over its body.
-      Paste the public key, the certificate body bytes, and the signature; the server
-      computes <code class="font-mono text-xs">ed25519.verify(pub, sha256("hash:audit-cert:v1:" || body), sig)</code>
-      and tells you whether they match.
-    </p>
-
-    <div class="card p-4 mb-6 border border-warning/40">
-      <p class="text-sm font-medium mb-1">Online, server-assisted verification</p>
-      <p class="text-text-secondary text-xs leading-relaxed">
-        Everything pasted here, and every evidence bundle selected below, is uploaded to and processed
-        by this Hash server. Do not submit a confidential contract unless you are authorised to disclose
-        it to this server operator. Hash does not currently provide an offline browser verifier.
-      </p>
-    </div>
-
-    {#if serverPubKey}
-      <div class="card p-4 mb-6">
-        <div class="flex items-center gap-2 text-text-muted text-xs mb-2">
-          <Key class="size-3.5" />
-          <span class="font-mono uppercase tracking-widest">This server's public key</span>
-        </div>
-        <code class="block break-all text-xs font-mono">{serverPubKey}</code>
-      </div>
-    {/if}
-
+<div class="max-w-5xl mx-auto px-5 sm:px-6 py-8 sm:py-10">
+  <div class="mb-7"><p class="page-eyebrow mb-2">{$ui('Trust & evidence')}</p><h1 class="page-title">{$ui('Verify document evidence')}</h1><p class="text-sm text-text-secondary mt-3 max-w-2xl">{$ui('Check that a completed document and its signing evidence match the package issued by Hash.')}</p></div>
+  <div class="grid sm:grid-cols-3 gap-4 mb-7">
+    <div class="card p-5"><span class="text-xs font-mono text-text-muted">01</span><h2 class="font-medium text-sm mt-2">{$ui('Export the evidence')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Open a completed document and choose Export evidence package.')}</p></div>
+    <div class="card p-5"><span class="text-xs font-mono text-text-muted">02</span><h2 class="font-medium text-sm mt-2">{$ui('Choose the evidence PDF')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Use the exported package, which includes the document and its audit evidence.')}</p></div>
+    <div class="card p-5"><span class="text-xs font-mono text-text-muted">03</span><h2 class="font-medium text-sm mt-2">{$ui('Review the result')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Hash checks the file hashes, audit events, cryptographic signatures and issuer keys.')}</p></div>
+  </div>
+  <div class="rounded-xl border border-info/20 bg-info/5 p-4 text-sm text-text-secondary mb-7"><p class="font-medium text-text-primary mb-1">{$ui('Checked by this Hash server')}</p><p>{$ui('Selecting a PDF uploads the complete evidence package to this server. Only upload documents you are authorized to share. This page does not verify files offline.')}</p></div>
     <section class="mb-8">
-      <h2 class="text-base font-medium mb-2">Drop a Hash evidence bundle PDF</h2>
-      <p class="text-text-muted text-xs mb-3 max-w-2xl">
-        The bundle is the file you download from <code class="font-mono text-[11px]">Export evidence package</code>
-        on a completed top-level document or envelope. The exact contract and ceremony events are checked
-        against both signed commitments. A certificate key may match this verifier's current or retained
-        historical Hash keys; the newly exported manifest must match the current export key.
-        Selecting a file uploads the complete bundle, including its contract content, to this server.
-      </p>
-      <label
-        class="block cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors"
-        class:border-border-light={!dragging}
-        class:border-accent={dragging}
-        class:bg-bg-elevated={dragging}
-        ondragover={(e) => { e.preventDefault(); dragging = true; }}
-        ondragleave={() => { dragging = false; }}
-        ondrop={onDrop}
-      >
-        <input type="file" accept="application/pdf,.pdf" class="hidden" onchange={onPick} />
-        <Upload class="size-6 mx-auto mb-2 text-text-muted" />
-        <p class="text-sm font-medium">Drop your evidence bundle PDF here</p>
-        <p class="text-text-muted text-xs mt-1">or click to choose a file</p>
+      <h2 class="text-lg font-medium mb-2">{$ui('Verify an evidence package')}</h2>
+      <p class="text-text-secondary text-sm mb-4">{$ui('Choose a Hash evidence bundle PDF. A regular contract PDF on its own does not contain the full verification package.')}</p>
+      <label for="evidence-bundle" class="block rounded-2xl border-2 border-dashed p-7 sm:p-10 text-center transition-colors" class:border-border={!dragging} class:border-accent={dragging} class:bg-bg-elevated={dragging} ondragover={e => { e.preventDefault(); if (!bundleLoading) dragging = true; }} ondragleave={() => dragging = false} ondrop={onDrop}>
+        <Upload class="size-8 mx-auto mb-3 text-text-secondary" />
+        <span class="block text-sm font-medium mb-4">{$ui('Drop your evidence PDF here, or choose a file')}</span>
+        <input id="evidence-bundle" type="file" accept="application/pdf,.pdf" disabled={bundleLoading} aria-label={$ui('Choose evidence PDF')} class="block mx-auto max-w-full text-sm text-text-secondary file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-4 file:py-2.5 file:font-medium file:text-accent-foreground" onchange={onPick} />
       </label>
 
       {#if bundleLoading}
-        <p class="text-text-muted text-xs mt-3">Verifying…</p>
+        <p class="text-text-muted text-xs mt-3">{$ui('Verifying…')}</p>
       {/if}
       {#if bundleError}
         <div class="card p-4 mt-4 border border-danger/30">
-          <p class="text-danger text-sm">{bundleError}</p>
+          <p class="text-danger text-sm">{$ui(bundleError)}</p>
         </div>
       {/if}
       {#if bundleReport}
-        <div class="card p-6 mt-4 space-y-4">
+        <div class="card p-6 mt-4 space-y-4" role="status" aria-live="polite">
           <div class="flex items-start gap-3">
             {#if bundleReport.ok}
               <ShieldCheck class="size-7 text-success shrink-0" />
               <div>
-                <h3 class="text-lg font-medium text-success">Core Hash bundle verified</h3>
-                <p class="text-text-muted text-xs">Artifact hashes, signed identity, ceremony event rows, both signatures, and both issuer keys verified. Optional extension warnings are reported separately.</p>
+                <h3 class="text-lg font-medium text-success">{$ui('Core Hash bundle verified')}</h3>
+                <p class="text-text-muted text-xs">{$ui('Artifact hashes, signed identity, ceremony event rows, both signatures, and both issuer keys verified. Optional extension warnings are reported separately.')}</p>
               </div>
             {:else}
               <ShieldAlert class="size-7 text-danger shrink-0" />
               <div>
-                <h3 class="text-lg font-medium text-danger">Verification failed</h3>
-                <p class="text-text-muted text-xs">An artifact, signed commitment, signature, or trusted-key check failed. See details below.</p>
+                <h3 class="text-lg font-medium text-danger">{$ui('Verification failed')}</h3>
+                <p class="text-text-muted text-xs">{$ui('An artifact, signed commitment, signature, or trusted-key check failed. See details below.')}</p>
               </div>
             {/if}
           </div>
 
           <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
             {#if bundleReport.document_name}
-              <div><dt class="text-text-muted">Document</dt><dd>{bundleReport.document_name}</dd></div>
+              <div><dt class="text-text-muted">{$ui('Document')}</dt><dd>{bundleReport.document_name}</dd></div>
             {/if}
             {#if bundleReport.document_id}
-              <div><dt class="text-text-muted">Document ID</dt><dd class="font-mono break-all">{bundleReport.document_id}</dd></div>
+              <div><dt class="text-text-muted">{$ui('Document ID')}</dt><dd class="font-mono break-all">{bundleReport.document_id}</dd></div>
             {/if}
             {#if bundleReport.issuer}
-              <div><dt class="text-text-muted">Issuer</dt><dd>{bundleReport.issuer}</dd></div>
+              <div><dt class="text-text-muted">{$ui('Issuer')}</dt><dd>{bundleReport.issuer}</dd></div>
             {/if}
             {#if bundleReport.generated_at}
-              <div><dt class="text-text-muted">Generated</dt><dd>{bundleReport.generated_at}</dd></div>
+              <div><dt class="text-text-muted">{$ui('Generated')}</dt><dd>{bundleReport.generated_at}</dd></div>
             {/if}
           </dl>
 
           <div>
-            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Cryptographic signatures and issuer trust</h4>
+            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">{$ui('Cryptographic signatures and issuer trust')}</h4>
             <div class="flex items-center gap-2 text-sm">
               {#if bundleReport.signature_valid && bundleReport.manifest_signature_valid && bundleReport.key_trusted}
                 <CheckCircle2 class="size-4 text-success" />
-                <span><strong>Both Ed25519 signatures valid</strong>; the certificate key is current or retained historical, and the export-manifest key is current.</span>
+                <span><strong>{$ui('Both Ed25519 signatures valid')}</strong>; the certificate key is current or retained historical, and the export-manifest key is current.</span>
               {:else}
                 <XCircle class="size-4 text-danger" />
                 <span>{bundleReport.signature_note ?? 'certificate/manifest signature or issuer trust could not be verified'}</span>
@@ -247,7 +212,7 @@
           </div>
 
           <div>
-            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Artifact hashes</h4>
+            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">{$ui('Artifact hashes')}</h4>
             <ul class="space-y-1 text-xs">
               {#each bundleReport.checks as c (c.name)}
                 <li class="flex items-center gap-2">
@@ -258,13 +223,13 @@
                   {/if}
                   <code class="font-mono">{c.name}</code>
                   <span class="text-text-muted">·</span>
-                  <span class="text-text-muted">expected</span>
+                  <span class="text-text-muted">{$ui('expected')}</span>
                   <code class="font-mono text-[10px]">{abbrev(c.expected)}</code>
                   {#if c.detail}
                     <span class="text-danger">({c.detail})</span>
                   {:else if !c.ok}
                     <span class="text-text-muted">·</span>
-                    <span class="text-text-muted">actual</span>
+                    <span class="text-text-muted">{$ui('actual')}</span>
                     <code class="font-mono text-[10px] text-danger">{abbrev(c.actual)}</code>
                   {/if}
                 </li>
@@ -274,7 +239,7 @@
 
           {#if bundleReport.errors && bundleReport.errors.length}
             <div>
-              <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Errors</h4>
+              <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">{$ui('Errors')}</h4>
               <ul class="text-xs text-danger space-y-1">
                 {#each bundleReport.errors as e}<li>{e}</li>{/each}
               </ul>
@@ -283,7 +248,7 @@
 
           {#if bundleReport.warnings && bundleReport.warnings.length}
             <div class="card p-3 border border-warning/40">
-              <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Warnings</h4>
+              <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">{$ui('Warnings')}</h4>
               <ul class="text-xs text-warning space-y-1">
                 {#each bundleReport.warnings as warning}<li>{warning}</li>{/each}
               </ul>
@@ -293,53 +258,56 @@
       {/if}
     </section>
 
-    <h2 class="text-base font-medium mb-2 flex items-center gap-2">
-      <FileCheck2 class="size-4 text-text-muted" />
-      Or verify a single (payload, signature) pair
-    </h2>
-    <p class="text-text-muted text-xs mb-3 max-w-2xl">
-      Use this if you've extracted the signed cert payload + signature manually (for example from a bundle you opened in your PDF reader).
-    </p>
-
+    <details class="card p-5 sm:p-6 mt-8">
+      <summary class="cursor-pointer font-medium flex items-center gap-2"><FileCheck2 class="size-4" />{$ui('Advanced: verify an audit certificate')}</summary>
+      <p class="text-text-secondary text-sm my-4">{$ui('Use this when you already have the certificate body, signature and public key. For a complete exported package, use the PDF check above.')}</p>
+    {#if serverPubKey}
+      <div class="card p-4 mb-6">
+        <div class="flex items-center gap-2 text-text-muted text-xs mb-2">
+          <Key class="size-3.5" />
+          <span class="font-mono uppercase tracking-widest">{$ui("This server's public key")}</span>
+        </div>
+        <code class="block break-all text-xs font-mono">{serverPubKey}</code>
+      </div>
+    {/if}
     <form onsubmit={check} class="card p-6 space-y-4">
       <div>
-        <label class="block text-sm font-medium mb-1" for="pub">Public key (base64)</label>
+        <label class="block text-sm font-medium mb-1" for="pub">{$ui('Public key (base64)')}</label>
         <input id="pub" bind:value={pubKey} required class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated font-mono text-xs" />
       </div>
       <div>
-        <label class="block text-sm font-medium mb-1" for="payload">Certificate body (the bytes that were signed)</label>
+        <label class="block text-sm font-medium mb-1" for="payload">{$ui('Certificate body (the bytes that were signed)')}</label>
         <textarea id="payload" bind:value={payload} rows="6" required class="w-full p-2 rounded-md border border-border-light bg-bg-elevated font-mono text-xs"></textarea>
       </div>
       <div>
-        <label class="block text-sm font-medium mb-1" for="sig">Signature (base64)</label>
+        <label class="block text-sm font-medium mb-1" for="sig">{$ui('Signature (base64)')}</label>
         <input id="sig" bind:value={sig} required class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated font-mono text-xs" />
       </div>
-      <button type="submit" class="btn btn-primary">Verify</button>
+      <button type="submit" class="btn btn-primary" disabled={checking}>{$ui(checking ? 'Verifying…' : 'Verify certificate')}</button>
 
       {#if result === 'valid'}
         <div class="flex items-center gap-2 text-success p-3 rounded-md bg-bg-elevated">
           <ShieldCheck class="size-5" />
-          <span><strong>Authentic Hash evidence.</strong> The signature is valid and the public key is trusted by this Hash verifier.</span>
+          <span><strong>{$ui('Authentic Hash evidence.')}</strong> {$ui('The signature is valid and the public key is trusted by this Hash verifier.')}</span>
         </div>
       {:else if result === 'untrusted'}
         <div class="flex items-center gap-2 text-danger p-3 rounded-md bg-bg-elevated">
           <ShieldAlert class="size-5" />
-          <span><strong>Cryptographically valid, but not trusted as Hash-issued.</strong> The supplied key is not in this verifier's current or historical issuer set.</span>
+          <span><strong>{$ui('Cryptographically valid, but not trusted as Hash-issued.')}</strong> {$ui("The supplied key is not in this verifier's current or historical issuer set.")}</span>
         </div>
       {:else if result === 'invalid'}
         <div class="flex items-center gap-2 text-danger p-3 rounded-md bg-bg-elevated">
           <ShieldAlert class="size-5" />
-          <span><strong>Invalid.</strong> The signature does not match the body bytes for this public key.</span>
+          <span><strong>{$ui('Invalid.')}</strong> {$ui('The signature does not match the body bytes for this public key.')}</span>
         </div>
       {:else if result === 'error'}
-        <div class="text-danger text-sm">Error: {errorMsg}</div>
+        <div class="text-danger text-sm">{$ui('Error')}: {$ui(errorMsg ?? "")}</div>
       {/if}
     </form>
 
     <p class="text-text-muted text-xs mt-6">
-      Independent offline verification can implement the same primitive in a local Ed25519 library,
-      but this page itself is not offline. Algorithm: ed25519. Pre-hash domain separator:
+      {$ui('Independent offline verification can use a local Ed25519 library. This page uses the Hash server. Algorithm: ed25519. Domain separator:')}
       <code class="font-mono">hash:audit-cert:v1:</code>
     </p>
-  </main>
+    </details>
 </div>

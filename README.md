@@ -39,6 +39,9 @@ are not the operator's terms or privacy policy. Configure your actual operator
 and privacy contact, and publish notices, any applicable DPA, sub-processor and
 retention schedules for your deployment.
 
+See [the workspace guide](docs/INTERFACE.md) for document and template previews,
+profile settings, Swedish/English, appearance and HTTP MCP setup.
+
 ## Reusable HTML designs
 
 In Templates, create an HTML design with its print CSS, declared values, saved

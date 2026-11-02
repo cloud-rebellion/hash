@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { runRiskAnalysis, type RiskAnalyzeResult, type RiskFinding } from '$lib/api/client';
   import { ShieldAlert, Sparkles, Globe, ChevronDown, ChevronUp } from 'lucide-svelte';
 
@@ -49,52 +50,47 @@
 <section class="card p-5 mb-6">
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <ShieldAlert class="size-4" /> AI risk analysis
+      <ShieldAlert class="size-4" /> {$ui("AI risk analysis")}
     </h2>
     <button class="btn btn-primary text-xs" onclick={analyze} disabled={running}>
-      <Sparkles class="size-3" /> {running ? 'Analyzing...' : 'Run analysis'}
+      <Sparkles class="size-3" /> {$ui(running ? 'Analyzing...' : 'Run analysis')}
     </button>
   </div>
 
   <p class="text-sm text-text-secondary mb-3 leading-relaxed">
-    Surfaces liability, IP, auto-renewal, jurisdiction, payment-terms,
-    indemnification and data-protection risks across the block tree.
-    Selected document content is transmitted to the configured AI provider. Shield applies
-    redaction and an operator-configured endpoint policy, but that hostname policy does not prove
-    provider residency. Run analysis only after the provider, location, and transfer terms are in
-    the approved sub-processor schedule.
+    {$ui("Surfaces liability, IP, auto-renewal, jurisdiction, payment-terms, indemnification and data-protection risks across the block tree. Selected document content is transmitted to the configured AI provider. Shield applies redaction and an operator-configured endpoint policy, but that hostname policy does not prove provider residency. Run analysis only after the provider, location, and transfer terms are in the approved sub-processor schedule.")}
   </p>
 
   <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-3 items-end mb-4">
     <label class="text-sm">
       <span class="text-xs uppercase tracking-widest text-text-muted font-mono flex items-center gap-1">
-        <Globe class="size-3" /> Locale
+        <Globe class="size-3" /> {$ui("Locale")}
       </span>
       <select bind:value={locale} class="block px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">
-        <option value="en">English</option>
-        <option value="sv">Svenska</option>
-        <option value="de">Deutsch</option>
-        <option value="fr">Français</option>
+        <option value="en">{$ui("English")}</option>
+        <option value="sv">{$ui("Svenska")}</option>
+        <option value="de">{$ui("Deutsch")}</option>
+        <option value="fr">{$ui("Français")}</option>
       </select>
     </label>
     <label class="text-sm">
-      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Sender context (optional)</span>
+      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Sender context (optional)")}</span>
       <input
         type="text"
         bind:value={senderContext}
-        placeholder="e.g. SaaS subscription, 12-month term, EUR billing"
+        placeholder={$ui("e.g. SaaS subscription, 12-month term, EUR billing")}
         class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
       />
     </label>
   </div>
 
   {#if error}
-    <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">{error}</div>
+    <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">{$ui(error)}</div>
   {/if}
 
   {#if result}
     {#if result.findings.length === 0}
-      <p class="text-sm text-text-muted">No findings. Document parses clean against the standard risk taxonomy.</p>
+      <p class="text-sm text-text-muted">{$ui("No findings. Document parses clean against the standard risk taxonomy.")}</p>
     {:else}
       <ul class="divide-y divide-border-light">
         {#each result.findings as f, idx (f.block_id + ':' + idx)}
@@ -110,7 +106,7 @@
                     <span class="font-mono uppercase tracking-widest">{f.severity}</span>
                     <span class="text-text-muted">{f.category}</span>
                     {#if f.block_id}
-                      <span class="text-text-muted font-mono">block #{f.block_id.slice(0, 8)}</span>
+                      <span class="text-text-muted font-mono">{$ui("block #")}{f.block_id.slice(0, 8)}</span>
                     {/if}
                   </div>
                   <div class="text-sm">{f.summary}</div>
@@ -125,12 +121,12 @@
                 <div class="mt-2 pl-1 space-y-2 text-sm">
                   {#if f.suggestion}
                     <p>
-                      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Suggestion</span>
+                      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Suggestion")}</span>
                       <br />{f.suggestion}
                     </p>
                   {/if}
                   <button class="btn btn-secondary text-xs" onclick={(e) => { e.stopPropagation(); dismissed[key] = true; }}>
-                    Dismiss
+                    {$ui("Dismiss")}
                   </button>
                 </div>
               {/if}
@@ -139,9 +135,8 @@
         {/each}
       </ul>
       <p class="text-xs text-text-muted mt-3">
-        Shield active: {result.shield_active ? 'yes' : 'no'} ·
-        Provider: {result.provider || 'unknown'} ·
-        {visibleFindings.length} active finding{visibleFindings.length === 1 ? '' : 's'}.
+        {$ui("Shield active:")} {$ui(result.shield_active ? 'yes' : 'no')} {$ui("· Provider:")} {result.provider || 'unknown'} ·
+        {visibleFindings.length} {$ui("active finding")}{$ui(visibleFindings.length === 1 ? '' : 's')}.
       </p>
     {/if}
   {/if}

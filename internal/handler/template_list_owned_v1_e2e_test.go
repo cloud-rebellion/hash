@@ -11,6 +11,7 @@ import (
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/google/uuid"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -58,16 +59,26 @@ func TestOwnedTemplateListActualMixedPageAndNoRepairE2E(t *testing.T) {
 	}
 	read := func(path string) ([]templateResponse, int64) {
 		t.Helper()
-		w := ownedBlocksTemplateCallV1(t, f, cookie, http.MethodGet, path, nil)
+		request := ownedBlocksTemplateRequestV1(t, f, cookie, http.MethodGet, path, nil)
+		if f.s.Environment == "production" {
+			request.Header.Set(hashProxyAuthHeader, f.s.ProxyAuth)
+			request.Header.Set(hashProxyClientIPHeader, "192.0.2.50")
+		}
+		w := httptest.NewRecorder()
+		f.s.Routes().ServeHTTP(w, request)
 		if w.Code != http.StatusOK {
 			t.Fatalf("actual template list=%d %s", w.Code, w.Body.String())
 		}
 		var out struct {
-			Templates []templateResponse
-			Total     int64
+			Templates                 []templateResponse
+			Total                     int64
+			StarterTemplatesAvailable *bool `json:"starter_templates_available"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
+		}
+		if out.StarterTemplatesAvailable == nil || *out.StarterTemplatesAvailable != (f.s.Environment != "production") {
+			t.Fatalf("starter capability disagrees with the actual server environment %q", f.s.Environment)
 		}
 		return out.Templates, out.Total
 	}
@@ -108,6 +119,13 @@ func TestOwnedTemplateListActualMixedPageAndNoRepairE2E(t *testing.T) {
 	if seen[first.ID].ContentSHA256 != first.ContentSHA256 || seen[second.ID].ContentSHA256 != second.ContentSHA256 || seen[html.ID].ContentSHA256 == "" {
 		t.Fatal("mixed-kind native list changed original content commitments")
 	}
+	originalEnvironment, originalProxyAuth := f.s.Environment, f.s.ProxyAuth
+	f.s.ProxyAuth = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, environment := range []string{"production", "development", "test"} {
+		f.s.Environment = environment
+		read("/api/v1/templates?limit=1")
+	}
+	f.s.Environment, f.s.ProxyAuth = originalEnvironment, originalProxyAuth
 	one, total := read("/api/v1/templates?limit=1")
 	next, _ := read("/api/v1/templates?limit=1&offset=1")
 	if len(one) != 1 || len(next) != 1 || total != 3 || one[0].ID == next[0].ID {

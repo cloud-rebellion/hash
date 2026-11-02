@@ -7,6 +7,7 @@
   the editor and the Go renderer in lockstep.
 -->
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { Editor } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import { onDestroy, onMount, untrack } from 'svelte';
@@ -84,7 +85,8 @@
   $effect(() => {
     const locked = externalBusy, currentEditor = editor, currentProvider = provider, stamp = doc.updated_at;
     untrack(() => {
-      currentEditor?.setEditable(!locked && doc.status === 'draft' && !saveConflict && !collaborationRejected);
+      // Permission/timestamp synchronization is not a content edit.
+      currentEditor?.setEditable(!locked && doc.status === 'draft' && !saveConflict && !collaborationRejected, false);
       if (locked && !wasExternallyBusy) {
         externalQuiesced = !!currentEditor && connected && syncReady && !!canonicalGeneration && !dirty && !saving && !saveQueued
           && !saveConflict && !collaborationRejected && showImport === 'none' && !showTableModal;
@@ -624,17 +626,14 @@
 <div class="block-editor-v2">
   {#if saveConflict}
     <div role="alert" class="collaboration-warning">
-      <p>The document changed since your last save. Your edits have not been saved.
-        Download your local draft before reloading the current document.</p>
-      <button type="button" class="btn" onclick={downloadLocalDraft}>Download local draft</button>
+      <p>{$ui("The document changed since your last save. Your edits have not been saved. Download your local draft before reloading the current document.")}</p>
+      <button type="button" class="btn" onclick={downloadLocalDraft}>{$ui("Download local draft")}</button>
     </div>
   {/if}
   {#if collaborationRejected}
     <div role="alert" class="collaboration-warning">
-      <p>Live collaboration was stopped. Other editors may not receive your changes.
-        Download your local draft before reloading, then check your access and document status.
-        If access is valid, ask an administrator to check the document’s collaboration history.</p>
-      <button type="button" class="btn" onclick={downloadLocalDraft}>Download local draft</button>
+      <p>{$ui("Live collaboration was stopped. Other editors may not receive your changes. Download your local draft before reloading, then check your access and document status. If access is valid, ask an administrator to check the document’s collaboration history.")}</p>
+      <button type="button" class="btn" onclick={downloadLocalDraft}>{$ui("Download local draft")}</button>
     </div>
   {/if}
   {#if collaborationRejected || saveConflict}
@@ -644,54 +643,54 @@
     {/key}
   {/if}
   <fieldset disabled={externalBusy} class="min-w-0 border-0 p-0 m-0">
-  {#if externalBusy}<p class="text-sm text-text-muted" role="status">Document information is being updated. Your local wording is retained.</p>{/if}
+  {#if externalBusy}<p class="text-sm text-text-muted" role="status">{$ui("Document information is being updated. Your local wording is retained.")}</p>{/if}
   <div class="toolbar">
-    <button type="button" class="tool" onclick={() => setHeading(1)} title="H1"><Hash class="size-3.5" /> H1</button>
-    <button type="button" class="tool" onclick={() => setHeading(2)} title="H2"><Hash class="size-3.5" /> H2</button>
-    <button type="button" class="tool" onclick={setParagraph} title="Paragraph"><FileText class="size-3.5" /> P</button>
+    <button type="button" class="tool" onclick={() => setHeading(1)} title={$ui("H1")}><Hash class="size-3.5" /> {$ui("H1")}</button>
+    <button type="button" class="tool" onclick={() => setHeading(2)} title={$ui("H2")}><Hash class="size-3.5" /> {$ui("H2")}</button>
+    <button type="button" class="tool" onclick={setParagraph} title={$ui("Paragraph")}><FileText class="size-3.5" /> {$ui("P")}</button>
     <span class="sep"></span>
-    <button type="button" class="tool" onclick={toggleBullet} title="Bullet list">• List</button>
-    <button type="button" class="tool" onclick={toggleQuote} title="Quote"><Quote class="size-3.5" /></button>
-    <button type="button" class="tool" onclick={toggleCode} title="Code"><CodeIcon class="size-3.5" /></button>
-    <button type="button" class="tool" onclick={insertHR} title="Divider"><Minus class="size-3.5" /></button>
+    <button type="button" class="tool" onclick={toggleBullet} title={$ui("Bullet list")}>{$ui("• List")}</button>
+    <button type="button" class="tool" onclick={toggleQuote} title={$ui("Quote")}><Quote class="size-3.5" /></button>
+    <button type="button" class="tool" onclick={toggleCode} title={$ui("Code")}><CodeIcon class="size-3.5" /></button>
+    <button type="button" class="tool" onclick={insertHR} title={$ui("Divider")}><Minus class="size-3.5" /></button>
     <span class="sep"></span>
-    <button type="button" class="tool tool-accent" onclick={insertSignatureField} title="Signature field">
-      <Signature class="size-3.5" /> Sig field
+    <button type="button" class="tool tool-accent" onclick={insertSignatureField} title={$ui("Signature field")}>
+      <Signature class="size-3.5" /> {$ui("Sig field")}
     </button>
-    <button type="button" class="tool" onclick={insertPageBreak} title="Page break">⤓ Page break</button>
-    <button type="button" class="tool" onclick={openNewTable} title="Insert table"><TableIcon class="size-3.5" /> Table</button>
+    <button type="button" class="tool" onclick={insertPageBreak} title={$ui("Page break")}>{$ui("⤓ Page break")}</button>
+    <button type="button" class="tool" onclick={openNewTable} title={$ui("Insert table")}><TableIcon class="size-3.5" /> {$ui("Table")}</button>
     <span class="sep"></span>
 
     <div class="var-form">
       <Variable class="size-3.5" />
-      <input bind:value={varName} placeholder="var.name" class="var-input" />
-      <input bind:value={varDefault} placeholder="default" class="var-input narrow" />
-      <button type="button" class="tool" onclick={insertVariable} disabled={!varName.trim()}>Insert</button>
+      <input bind:value={varName} placeholder={$ui("var.name")} class="var-input" />
+      <input bind:value={varDefault} placeholder={$ui("default")} class="var-input narrow" />
+      <button type="button" class="tool" onclick={insertVariable} disabled={!varName.trim()}>{$ui("Insert")}</button>
     </div>
 
     <span class="sep"></span>
-    <button type="button" class="tool" onclick={() => (showImport = 'html')}>Import HTML</button>
-    <button type="button" class="tool" onclick={() => (showImport = 'md')}>Import MD</button>
+    <button type="button" class="tool" onclick={() => (showImport = 'html')}>{$ui("Import HTML")}</button>
+    <button type="button" class="tool" onclick={() => (showImport = 'md')}>{$ui("Import MD")}</button>
 
     <div class="status">
       <span class="status-text" title={connected ? `${peerCount} collaborator${peerCount === 1 ? '' : 's'}` : 'Connecting…'}>
         <Users class="size-3.5 inline" />
         {peerCount}
-        {#if !connected}<span class="status-error"> · offline</span>{/if}
+        {#if !connected}<span class="status-error"> {$ui("· offline")}</span>{/if}
       </span>
       {#if saving}
-        <span class="status-text">Saving…</span>
+        <span class="status-text">{$ui("Saving…")}</span>
       {:else if saveConflict}
-        <button type="button" class="tool tool-primary" onclick={downloadLocalDraft}>Download local draft</button>
+        <button type="button" class="tool tool-primary" onclick={downloadLocalDraft}>{$ui("Download local draft")}</button>
       {:else if dirty}
         <button type="button" class="tool tool-primary" onclick={manualSave}>
-          <Save class="size-3.5" /> Save
+          <Save class="size-3.5" /> {$ui("Save")}
         </button>
       {:else}
-        <span class="status-text">Saved</span>
+        <span class="status-text">{$ui("Saved")}</span>
       {/if}
       {#if error}
-        <span class="status-text status-error">{error}</span>
+        <span class="status-text status-error">{$ui(error)}</span>
       {/if}
     </div>
   </div>
@@ -699,7 +698,7 @@
   {#if showImport !== 'none'}
     <div class="card p-4 mb-3">
       <label class="block text-sm font-medium mb-1" for="import-text">
-        Replace document with {showImport === 'html' ? 'HTML' : 'Markdown'}
+        {$ui("Replace document with")} {$ui(showImport === 'html' ? 'HTML' : 'Markdown')}
       </label>
       <textarea
         id="import-text"
@@ -708,8 +707,8 @@
         class="w-full p-2 rounded-md border border-border-light bg-bg-elevated font-mono text-xs"
       ></textarea>
       <div class="flex gap-2 mt-2">
-        <button type="button" class="btn btn-primary" onclick={runImport}>Replace</button>
-        <button type="button" class="btn btn-secondary" onclick={() => (showImport = 'none')}>Cancel</button>
+        <button type="button" class="btn btn-primary" onclick={runImport}>{$ui("Replace")}</button>
+        <button type="button" class="btn btn-secondary" onclick={() => (showImport = 'none')}>{$ui("Cancel")}</button>
       </div>
     </div>
   {/if}
@@ -723,12 +722,11 @@
     <div class="tbl-modal">
       <fieldset disabled={externalBusy} class="min-w-0 border-0 p-0 m-0">
       <div class="tbl-modal-head">
-        <h3>{editingTable === 'new' ? 'Insert table' : 'Edit table'}</h3>
-        <button type="button" class="tbl-x" onclick={closeTableModal} aria-label="Close"><X class="size-4" /></button>
+        <h3>{$ui(editingTable === 'new' ? 'Insert table' : 'Edit table')}</h3>
+        <button type="button" class="tbl-x" onclick={closeTableModal} aria-label={$ui("Close")}><X class="size-4" /></button>
       </div>
       <p class="tbl-hint">
-        Each column is a header; each row is a line item. Type <code>{'{{namn}}'}</code> in any cell
-        to drop in a placeholder that gets filled per document.
+        {$ui("Each column is a header; each row is a line item. Type")} <code>{'{{namn}}'}</code> {$ui("in any cell to drop in a placeholder that gets filled per document.")}
       </p>
 
       <div class="tbl-scroll">
@@ -740,14 +738,14 @@
                 <th>
                   <div class="tbl-colhead">
                     <input class="tbl-input tbl-input-head" bind:value={tCols[ci]} placeholder={`Kolumn ${ci + 1}`} />
-                    <button type="button" class="tbl-mini" title="Remove column" onclick={() => removeTableColumn(ci)} disabled={tCols.length <= 1}>
+                    <button type="button" class="tbl-mini" title={$ui("Remove column")} onclick={() => removeTableColumn(ci)} disabled={tCols.length <= 1}>
                       <X class="size-3" />
                     </button>
                   </div>
                 </th>
               {/each}
               <th class="tbl-addcol">
-                <button type="button" class="tbl-mini" title="Add column" onclick={addTableColumn}><Plus class="size-3" /></button>
+                <button type="button" class="tbl-mini" title={$ui("Add column")} onclick={addTableColumn}><Plus class="size-3" /></button>
               </th>
             </tr>
           </thead>
@@ -759,7 +757,7 @@
                   <td><input class="tbl-input" bind:value={tRows[ri][ci]} placeholder="…" /></td>
                 {/each}
                 <td class="tbl-rowdel">
-                  <button type="button" class="tbl-mini" title="Remove row" onclick={() => removeTableRow(ri)}><X class="size-3" /></button>
+                  <button type="button" class="tbl-mini" title={$ui("Remove row")} onclick={() => removeTableRow(ri)}><X class="size-3" /></button>
                 </td>
               </tr>
             {/each}
@@ -768,11 +766,11 @@
       </div>
 
       <div class="tbl-actions">
-        <button type="button" class="tool" onclick={addTableRow}><Plus class="size-3.5" /> Add row</button>
+        <button type="button" class="tool" onclick={addTableRow}><Plus class="size-3.5" /> {$ui("Add row")}</button>
         <span style="flex:1"></span>
-        <button type="button" class="btn btn-secondary" onclick={closeTableModal}>Cancel</button>
+        <button type="button" class="btn btn-secondary" onclick={closeTableModal}>{$ui("Cancel")}</button>
         <button type="button" class="btn btn-primary" onclick={saveTable}>
-          {editingTable === 'new' ? 'Insert table' : 'Save table'}
+          {$ui(editingTable === 'new' ? 'Insert table' : 'Save table')}
         </button>
       </div>
       </fieldset>

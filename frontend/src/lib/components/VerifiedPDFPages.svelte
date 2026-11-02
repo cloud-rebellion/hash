@@ -5,8 +5,8 @@
   import { captureFlarePDFViewError } from '$lib/flare-client';
 
   type Proof = { key: string; allPagesSeen: boolean };
-  let { bytes, proofKey, expectedPages, onProof, ariaLabel = "Saved design preview", onRetirement, onOwner }: {
-    bytes: Uint8Array; proofKey: string; expectedPages: number; onProof: (proof: Proof) => void; ariaLabel?: string; onRetirement?: (retirement: Promise<void>) => void; onOwner?: (owner: { retire(): Promise<void> }) => void;
+  let { bytes, proofKey, expectedPages, onProof, ariaLabel = "Saved design preview", onRetirement, onOwner, translate = (text: string) => text }: {
+    bytes: Uint8Array; proofKey: string; expectedPages: number; onProof: (proof: Proof) => void; ariaLabel?: string; onRetirement?: (retirement: Promise<void>) => void; onOwner?: (owner: { retire(): Promise<void> }) => void; translate?: (text: string) => string;
   } = $props();
   const sourceKey = untrack(() => proofKey);
   let loadedPDF = $state.raw<PdfDoc | null>(null);
@@ -92,15 +92,15 @@
   onDestroy(() => { void retire(); });
 </script>
 
-{#if loading}<p class="text-sm" role="status">Loading verified PDF pages…</p>{/if}
-{#if error}<div role="alert" class="text-danger text-sm space-y-2"><p>{error}</p>{#if loadedPDF}<button type="button" class="btn btn-secondary" disabled={rendering} onclick={() => render(page)}>Retry this page</button>{/if}</div>{/if}
+{#if loading}<p class="text-sm" role="status">{translate('Loading verified PDF pages…')}</p>{/if}
+{#if error}<div role="alert" class="text-danger text-sm space-y-2"><p>{translate(error)}</p>{#if loadedPDF}<button type="button" class="btn btn-secondary" disabled={rendering} onclick={() => render(page)}>{translate('Retry this page')}</button>{/if}</div>{/if}
 <div class="max-w-full overflow-auto border border-border-light rounded-md bg-bg-elevated p-2">
-  <canvas width="0" height="0" bind:this={canvas} aria-label={`${ariaLabel}, page ${page}`} class="max-w-full h-auto mx-auto"></canvas>
+  <canvas width="0" height="0" bind:this={canvas} aria-label={`${ariaLabel}, ${translate('page')} ${page}`} class="max-w-full h-auto mx-auto"></canvas>
 </div>
 {#if loadedPDF}
   <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-    <button type="button" class="btn btn-secondary" disabled={loading || rendering || page <= 1} onclick={() => render(page - 1)}>Previous page</button>
-    <p role="status">Page {page} of {expectedPages}{rendering ? ' · Rendering…' : ''}</p>
-    <button type="button" class="btn btn-secondary" disabled={loading || rendering || page >= expectedPages} onclick={() => render(page + 1)}>Next page</button>
+    <button type="button" class="btn btn-secondary" disabled={loading || rendering || page <= 1} onclick={() => render(page - 1)}>{translate('Previous page')}</button>
+    <p role="status">{translate('Page')} {page} {translate('of')} {expectedPages}{rendering ? ' · ' + translate('Rendering…') : ''}</p>
+    <button type="button" class="btn btn-secondary" disabled={loading || rendering || page >= expectedPages} onclick={() => render(page + 1)}>{translate('Next page')}</button>
   </div>
 {/if}

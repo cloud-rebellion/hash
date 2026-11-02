@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount, onDestroy } from 'svelte';
   import { FileSignature } from 'lucide-svelte';
   import { consumeStaffAuthToken, staffPasswordError, type StaffAuthMode } from '$lib/staffAuth';
@@ -98,73 +99,73 @@
 </script>
 
 <svelte:head>
-  <title>{copy.title} · Hash</title>
+  <title>{$ui(copy.title)} · Hash</title>
   <meta name="referrer" content="no-referrer" />
   <meta name="robots" content="noindex, nofollow" />
 </svelte:head>
 
-<main class="min-h-screen flex items-center justify-center px-6 py-12">
+<main lang={$staffLocale} class="min-h-screen flex items-center justify-center px-6 py-12">
   <div class="w-full max-w-md">
-    <a href="/" class="mb-8 flex items-center justify-center gap-2" aria-label="Hash home">
+    <a href="/" class="mb-8 flex items-center justify-center gap-2" aria-label={$ui('Hash home')}>
       <FileSignature class="size-5 text-accent" aria-hidden="true" />
       <span class="font-display text-xl font-extralight tracking-tight">Hash</span>
     </a>
     <section class="card p-6 sm:p-8" aria-labelledby="staff-auth-title">
-      <p class="page-eyebrow mb-3">Your workspace</p>
-      <h1 id="staff-auth-title" class="font-display text-3xl font-extralight tracking-tight mb-3">{copy.title}</h1>
-      <p class="text-sm text-text-secondary leading-relaxed mb-6">{copy.description}</p>
+      <p class="page-eyebrow mb-3">{$ui("Your workspace")}</p>
+      <h1 id="staff-auth-title" class="font-display text-3xl font-extralight tracking-tight mb-3">{$ui(copy.title)}</h1>
+      <p class="text-sm text-text-secondary leading-relaxed mb-6">{$ui(copy.description)}</p>
 
-      {#if error}<p id="staff-auth-error" class="mb-4 text-sm text-danger" role="alert">{error}</p>{/if}
+      {#if error}<p id="staff-auth-error" class="mb-4 text-sm text-danger" role="alert">{$ui(error)}</p>{/if}
       {#if complete}
         <div class="text-sm text-text-secondary space-y-4" role="status" aria-live="polite">
           {#if mode === 'register'}
-            <p>If registration can proceed, verification instructions have been queued. Check your inbox and open the email link to finish setting up your workspace.</p>
+            <p>{$ui("If registration can proceed, verification instructions have been queued. Check your inbox and open the email link to finish setting up your workspace.")}</p>
           {:else if mode === 'forgot'}
-            <p>If this email has a Hash account, password reset instructions have been queued. Check your inbox for the link.</p>
+            <p>{$ui("If this email has a Hash account, password reset instructions have been queued. Check your inbox for the link.")}</p>
           {:else if mode === 'reset'}
-            <p>Your password has been changed. Sign in with your new password.</p>
+            <p>{$ui("Your password has been changed. Sign in with your new password.")}</p>
           {:else}
-            <p>Sign-in confirmed. Opening your workspace…</p>
+            <p>{$ui("Sign-in confirmed. Opening your workspace…")}</p>
           {/if}
-          <a class="btn btn-secondary" href="/login">Back to sign in</a>
+          <a class="btn btn-secondary" href="/login">{$ui("Back to sign in")}</a>
         </div>
       {:else}
         <form method="POST" action={endpoint} onsubmit={submit} aria-busy={busy} aria-describedby={error ? 'staff-auth-error' : undefined}>
           <fieldset disabled={busy} class="space-y-4">
             {#if mode === 'register'}
-              <div><label for="staff-name" class="block text-sm font-medium mb-1.5">Your name</label><input id="staff-name" name="name" type="text" autocomplete="name" maxlength="200" required bind:value={name} class={inputClass} /></div>
-              <div><label for="staff-company" class="block text-sm font-medium mb-1.5">Company name</label><input id="staff-company" name="company_name" type="text" autocomplete="organization" maxlength="200" required bind:value={company} class={inputClass} /></div>
+              <div><label for="staff-name" class="block text-sm font-medium mb-1.5">{$ui("Your name")}</label><input id="staff-name" name="name" type="text" autocomplete="name" maxlength="200" required bind:value={name} class={inputClass} /></div>
+              <div><label for="staff-company" class="block text-sm font-medium mb-1.5">{$ui("Company name")}</label><input id="staff-company" name="company_name" type="text" autocomplete="organization" maxlength="200" required bind:value={company} class={inputClass} /></div>
             {/if}
             {#if mode === 'login' || mode === 'register' || mode === 'forgot'}
-              <div><label for="staff-email" class="block text-sm font-medium mb-1.5">Email</label><input id="staff-email" name="email" type="email" autocomplete={mode === 'login' ? 'username' : 'email'} maxlength="254" spellcheck="false" autocapitalize="none" required bind:value={email} class={inputClass} /></div>
+              <div><label for="staff-email" class="block text-sm font-medium mb-1.5">{$ui("Email")}</label><input id="staff-email" name="email" type="email" autocomplete={mode === 'login' ? 'username' : 'email'} maxlength="254" spellcheck="false" autocapitalize="none" required bind:value={email} class={inputClass} /></div>
             {/if}
             {#if mode === 'login' || mode === 'verify' || newPassword}
               <div>
-                <label for="staff-password" class="block text-sm font-medium mb-1.5">{newPassword ? 'New password' : 'Password'}</label>
+                <label for="staff-password" class="block text-sm font-medium mb-1.5">{$ui(newPassword ? 'New password' : 'Password')}</label>
                 <input id="staff-password" name="password" type="password" autocomplete={newPassword ? 'new-password' : 'current-password'} minlength={newPassword ? 12 : undefined} maxlength="1024" required bind:value={password} class={inputClass} aria-describedby={newPassword ? 'staff-password-help' : undefined} />
-                {#if newPassword}<p id="staff-password-help" class="text-xs text-text-secondary mt-2">Use at least 12 characters. A longer, unique passphrase works well.</p>{/if}
+                {#if newPassword}<p id="staff-password-help" class="text-xs text-text-secondary mt-2">{$ui("Use at least 12 characters. A longer, unique passphrase works well.")}</p>{/if}
               </div>
             {/if}
             {#if newPassword}
-              <div><label for="staff-confirmation" class="block text-sm font-medium mb-1.5">Confirm password</label><input id="staff-confirmation" name="password_confirmation" type="password" autocomplete="new-password" maxlength="1024" required bind:value={confirmation} class={inputClass} /></div>
+              <div><label for="staff-confirmation" class="block text-sm font-medium mb-1.5">{$ui("Confirm password")}</label><input id="staff-confirmation" name="password_confirmation" type="password" autocomplete="new-password" maxlength="1024" required bind:value={confirmation} class={inputClass} /></div>
             {/if}
-            <button class="btn btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed" type="submit" disabled={busy || (tokenMode && !token)}>{busy ? 'Please wait…' : copy.button}</button>
+            <button class="btn btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed" type="submit" disabled={busy || (tokenMode && !token)}>{$ui(busy ? 'Please wait…' : copy.button)}</button>
           </fieldset>
         </form>
       {/if}
 
       {#if mode === 'login'}
         <div class="mt-5 text-sm space-y-3">
-          <a href="/forgot-password" class="block text-text-secondary underline underline-offset-4">Forgot your password?</a>
-          <p class="text-text-secondary">New to Hash? <a href="/register" class="text-text-primary underline underline-offset-4">Create a workspace</a></p>
-          {#if oidcEnabled}<a class="btn btn-secondary w-full" href="/auth/login" data-sveltekit-reload>Continue with single sign-on</a>{/if}
+          <a href="/forgot-password" class="block text-text-secondary underline underline-offset-4">{$ui("Forgot your password?")}</a>
+          <p class="text-text-secondary">{$ui("New to Hash?")} <a href="/register" class="text-text-primary underline underline-offset-4">{$ui("Create a workspace")}</a></p>
+          {#if oidcEnabled}<a class="btn btn-secondary w-full" href="/auth/login" data-sveltekit-reload>{$ui("Continue with single sign-on")}</a>{/if}
         </div>
       {:else if mode === 'reset'}
-        <a href="/forgot-password" class="mt-5 block text-sm text-text-secondary underline underline-offset-4">Request a new reset link</a>
+        <a href="/forgot-password" class="mt-5 block text-sm text-text-secondary underline underline-offset-4">{$ui("Request a new reset link")}</a>
       {:else if mode === 'verify'}
-        <a href="/register" class="mt-5 block text-sm text-text-secondary underline underline-offset-4">Back to create workspace</a>
+        <a href="/register" class="mt-5 block text-sm text-text-secondary underline underline-offset-4">{$ui("Back to create workspace")}</a>
       {:else}
-        <p class="mt-5 text-sm text-text-secondary">Already have an account? <a href="/login" class="text-text-primary underline underline-offset-4">Sign in</a></p>
+        <p class="mt-5 text-sm text-text-secondary">{$ui("Already have an account?")} <a href="/login" class="text-text-primary underline underline-offset-4">{$ui("Sign in")}</a></p>
       {/if}
     </section>
   </div>

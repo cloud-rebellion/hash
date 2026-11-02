@@ -82,6 +82,10 @@ func (c SaveCheckpoint) ResponseFrame(peerID string, nonce []byte) ([]byte, erro
 }
 
 func (r *Room) checkpointLocked(peerID string) (SaveCheckpoint, error) {
+	return r.checkpointAdmittedLockedV1(peerID, nil, nil)
+}
+
+func (r *Room) checkpointAdmittedLockedV1(peerID string, expected *[32]byte, admit func(int) error) (SaveCheckpoint, error) {
 	if r.closed || r.closing || r.stale || r.generation <= 0 {
 		return SaveCheckpoint{}, ErrGeneration
 	}
@@ -104,7 +108,15 @@ func (r *Room) checkpointLocked(peerID string) (SaveCheckpoint, error) {
 	h.Write(r.state)
 	var token [32]byte
 	copy(token[:], h.Sum(nil))
-	return SaveCheckpoint{Generation: r.generation, Revision: r.stateRevision, Token: token, State: append([]byte(nil), r.state...), PendingUpdates: r.pending}, nil
+	if expected != nil && subtle.ConstantTimeCompare(expected[:], token[:]) != 1 {
+		return SaveCheckpoint{}, ErrSaveCheckpoint
+	}
+	if admit != nil {
+		if err := admit(len(r.state)); err != nil {
+			return SaveCheckpoint{}, err
+		}
+	}
+	return SaveCheckpoint{Generation: r.generation, Revision: r.stateRevision, Token: token, State: append([]byte{}, r.state...), PendingUpdates: r.pending}, nil
 }
 
 // CommitSaveCheckpoint follows the same document-before-room lock contract as
@@ -113,9 +125,23 @@ func (r *Room) checkpointLocked(peerID string) (SaveCheckpoint, error) {
 // Even an unchanged canonical tree must advance that generation, fencing older
 // background flushes. An error leaves the room and its pending edits unchanged.
 func (r *Room) CommitSaveCheckpoint(peerID string, token [32]byte, commit func(SaveCheckpoint) error) error {
+	return r.commitSaveCheckpointAdmittedV1(peerID, token, nil, commit)
+}
+
+// CommitSaveCheckpointWithStateAdmissionV1 prices the actual locked replay
+// length before making its detached copy. Admission is not commit authority;
+// the existing peer/token/generation fences and acknowledged callback remain.
+func (r *Room) CommitSaveCheckpointWithStateAdmissionV1(peerID string, token [32]byte, admit func(int) error, commit func(SaveCheckpoint) error) error {
+	if admit == nil {
+		return ErrSaveCheckpoint
+	}
+	return r.commitSaveCheckpointAdmittedV1(peerID, token, admit, commit)
+}
+
+func (r *Room) commitSaveCheckpointAdmittedV1(peerID string, token [32]byte, admit func(int) error, commit func(SaveCheckpoint) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	checkpoint, err := r.checkpointLocked(peerID)
+	checkpoint, err := r.checkpointAdmittedLockedV1(peerID, &token, admit)
 	if err != nil {
 		return err
 	}

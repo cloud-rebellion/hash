@@ -593,6 +593,7 @@ func (s *Server) Routes() http.Handler {
 			r.With(crmDocumentRateLimit(30)).Post("/{id}/html/crm/records/search", s.handleCRMTemplateSearch)
 			r.With(crmDocumentRateLimit(30)).Post("/{id}/html/crm/observations", s.handleCRMTemplateObservations)
 			r.Get("/{id}", s.handleGetTemplate)
+			r.Get("/{id}/pdf", s.handleGetTemplatePDF)
 			r.Patch("/{id}", s.handleUpdateTemplate)
 			r.Delete("/{id}", s.handleArchiveTemplate)
 		})

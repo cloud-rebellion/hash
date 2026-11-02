@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { fetchVerifiedHTMLRevisionPDF, getHTMLDocumentHistory, getHTMLRevisionSource, type DocumentResponse, type HTMLDocumentSource, type HTMLHistoryEntry } from '$lib/api/client';
   import { validateHTMLHistory, validateHTMLSource } from '$lib/htmlRevision';
@@ -68,29 +69,29 @@
   onDestroy(() => { disposed = true; listOperation++; selectionOperation++; abort?.abort(); });
 </script>
 
-<section class="card p-6 mb-6 space-y-4 min-w-0" aria-label="HTML PDF revision history">
-  <div class="flex flex-wrap justify-between items-center gap-3"><h2 class="font-display text-lg">PDF revision history</h2>
-    <button type="button" class="btn btn-secondary" disabled={loading} onclick={refresh}>Refresh PDF history</button></div>
-  <p class="text-sm text-text-secondary">Each revision retains its exact PDF, declared information and wording. Opening an earlier revision is read-only and does not restore, approve or send it.</p>
-  {#if loading}<p role="status" class="text-sm">Loading immutable PDF history…</p>{/if}
-  {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
+<section class="card p-6 mb-6 space-y-4 min-w-0" aria-label={$ui("HTML PDF revision history")}>
+  <div class="flex flex-wrap justify-between items-center gap-3"><h2 class="font-display text-lg">{$ui("PDF revision history")}</h2>
+    <button type="button" class="btn btn-secondary" disabled={loading} onclick={refresh}>{$ui("Refresh PDF history")}</button></div>
+  <p class="text-sm text-text-secondary">{$ui("Each revision retains its exact PDF, declared information and wording. Opening an earlier revision is read-only and does not restore, approve or send it.")}</p>
+  {#if loading}<p role="status" class="text-sm">{$ui("Loading immutable PDF history…")}</p>{/if}
+  {#if error}<p role="alert" class="text-sm text-danger">{$ui(error)}</p>{/if}
   {#if rows.length}<ol class="space-y-3">
     {#each rows as row (row.sequence)}<li class="border border-border-light rounded-md p-3 space-y-2">
-      <p class="text-sm">PDF revision {row.sequence}{isCurrentRevision(row) ? ' · Current PDF' : ''} · {row.page_count} {row.page_count === 1 ? 'page' : 'pages'}</p>
+      <p class="text-sm">{$ui("PDF revision")} {row.sequence}{$ui(isCurrentRevision(row) ? ' · Current PDF' : '')} · {row.page_count} {$ui(row.page_count === 1 ? 'page' : 'pages')}</p>
       <p class="text-xs text-text-secondary">{new Date(row.created_at).toLocaleString()}</p>
       {#if row.summary}<p class="text-sm whitespace-pre-wrap break-words">{row.summary}</p>{/if}
-      <button type="button" class="btn btn-secondary" onclick={() => openRevision(row)}>Open PDF revision {row.sequence}</button>
+      <button type="button" class="btn btn-secondary" onclick={() => openRevision(row)}>{$ui("Open PDF revision")} {row.sequence}</button>
     </li>{/each}
-  </ol>{:else if !loading}<p class="text-sm">No immutable PDF revisions were returned. Refresh history before proceeding.</p>{/if}
-  {#if opening}<p role="status" class="text-sm">Verifying the selected revision’s source and PDF…</p>{/if}
+  </ol>{:else if !loading}<p class="text-sm">{$ui("No immutable PDF revisions were returned. Refresh history before proceeding.")}</p>{/if}
+  {#if opening}<p role="status" class="text-sm">{$ui("Verifying the selected revision’s source and PDF…")}</p>{/if}
   {#if selected && bytes}<div class="space-y-4 border-t border-border-light pt-4">
-    <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="font-display">Read-only PDF revision {selected.materialization_revision}</h3>
-      <button type="button" class="btn btn-secondary" onclick={closeRevision}>Close revision</button></div>
+    <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="font-display">{$ui("Read-only PDF revision")} {selected.materialization_revision}</h3>
+      <button type="button" class="btn btn-secondary" onclick={closeRevision}>{$ui("Close revision")}</button></div>
     {#key proofKey}<VerifiedPDFPages {bytes} {proofKey} expectedPages={selected.page_count} onProof={() => {}} />{/key}
-    <details class="text-sm space-y-3"><summary>Information and wording retained in this revision</summary>
+    <details class="text-sm space-y-3"><summary>{$ui("Information and wording retained in this revision")}</summary>
       <dl class="space-y-3 mt-3">{#each selected.values as value (value.name)}<div><dt class="font-medium">{value.name.replaceAll('_', ' ')}</dt><dd class="whitespace-pre-wrap break-words">{value.text || '(blank)'}</dd></div>{/each}
         {#each selected.sections as section (section.name)}<div><dt class="font-medium">{section.name.replaceAll('_', ' ')}</dt><dd class="whitespace-pre-wrap break-words">{section.text || '(blank)'}</dd>
-          {#if section.text !== section.default_text}<p class="text-xs text-warning">This wording differs from the approved template.</p>{/if}</div>{/each}</dl>
+          {#if section.text !== section.default_text}<p class="text-xs text-warning">{$ui("This wording differs from the approved template.")}</p>{/if}</div>{/each}</dl>
     </details>
   </div>{/if}
 </section>

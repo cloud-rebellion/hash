@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import {
     cancelBillingSubscription,
@@ -188,56 +189,56 @@
 
 <div class="max-w-5xl mx-auto px-6 py-12">
   <header class="mb-8">
-    <p class="page-eyebrow mb-2">Settings</p>
-    <h1 class="page-title">Billing &amp; plan</h1>
+    <p class="page-eyebrow mb-2">{$ui("Settings")}</p>
+    <h1 class="page-title">{$ui("Billing & plan")}</h1>
     {#if !loading && error === null && provider === 'operator'}
-      <p class="text-text-muted text-sm mt-2">Internal operator mode. Your approved plan limits and features apply; payments and subscriptions are managed outside Hash. Contact your operator to change access.</p>
+      <p class="text-text-muted text-sm mt-2">{$ui("Internal operator mode. Your approved plan limits and features apply; payments and subscriptions are managed outside Hash. Contact your operator to change access.")}</p>
     {/if}
     {#if !loading && error === null && !billingEnabled}
-      <p class="text-text-muted text-sm mt-2">Billing is not enabled on this Hash instance.</p>
+      <p class="text-text-muted text-sm mt-2">{$ui("Billing is not enabled on this Hash instance.")}</p>
     {/if}
   </header>
 
   {#if error}
-    <div class="card p-4 mb-6 border border-danger/30 text-danger text-sm">{error}</div>
+    <div class="card p-4 mb-6 border border-danger/30 text-danger text-sm">{$ui(error)}</div>
   {/if}
 
   {#if loading}
-    <p class="text-text-muted">Loading…</p>
+    <p class="text-text-muted">{$ui("Loading…")}</p>
   {:else}
     {#if currentPlan}
       <section class="card p-6 mb-8">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <p class="text-xs font-mono uppercase tracking-widest text-text-muted mb-1">Current plan</p>
+            <p class="text-xs font-mono uppercase tracking-widest text-text-muted mb-1">{$ui("Current plan")}</p>
             <h2 class="text-xl font-medium">{currentPlan.name}</h2>
             {#if subscription}
               <p class="text-text-muted text-sm mt-2">
-                Status: <strong>{subscription.status}</strong>
+                {$ui("Status:")} <strong>{subscription.status}</strong>
                 {#if subscription.current_period_end}
-                  · {subscription.cancel_at_period_end ? 'access until' : 'renews'} {new Date(subscription.current_period_end).toLocaleDateString()}
+                  · {$ui(subscription.cancel_at_period_end ? 'access until' : 'renews')} {new Date(subscription.current_period_end).toLocaleDateString()}
                 {/if}
                 {#if subscription.cancel_at_period_end}
-                  · <span class="text-warn">cancel scheduled</span>
+                  · <span class="text-warn">{$ui("cancel scheduled")}</span>
                 {/if}
               </p>
             {:else if provider === 'operator'}
-              <p class="text-text-muted text-sm mt-2">Approved internal entitlement. Quotas reset each UTC calendar month.</p>
+              <p class="text-text-muted text-sm mt-2">{$ui("Approved internal entitlement. Quotas reset each UTC calendar month.")}</p>
             {:else}
-              <p class="text-text-muted text-sm mt-2">No active paid subscription. You are on the free tier.</p>
+              <p class="text-text-muted text-sm mt-2">{$ui("No active paid subscription. You are on the free tier.")}</p>
             {/if}
           </div>
           {#if paymentsEnabled && canCancel(subscription)}
             <button class="btn btn-secondary" onclick={cancel} disabled={cancelling} aria-busy={cancelling}>
-              {cancelling ? 'Scheduling cancellation…' : 'Cancel at period end'}
+              {$ui(cancelling ? 'Scheduling cancellation…' : 'Cancel at period end')}
             </button>
           {/if}
         </div>
         <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 mt-6 text-xs">
-          <div><dt class="text-text-muted">Documents / mo</dt><dd>{quotaLabel(currentPlan.document_quota_monthly)}</dd></div>
-          <div><dt class="text-text-muted">Recipients / mo</dt><dd>{quotaLabel(currentPlan.recipient_quota_monthly)}</dd></div>
-          <div><dt class="text-text-muted">AES</dt><dd>Unavailable</dd></div>
-          <div><dt class="text-text-muted">QES</dt><dd>Unavailable</dd></div>
+          <div><dt class="text-text-muted">{$ui("Documents / mo")}</dt><dd>{quotaLabel(currentPlan.document_quota_monthly)}</dd></div>
+          <div><dt class="text-text-muted">{$ui("Recipients / mo")}</dt><dd>{quotaLabel(currentPlan.recipient_quota_monthly)}</dd></div>
+          <div><dt class="text-text-muted">{$ui("AES")}</dt><dd>{$ui("Unavailable")}</dd></div>
+          <div><dt class="text-text-muted">{$ui("QES")}</dt><dd>{$ui("Unavailable")}</dd></div>
         </dl>
       </section>
     {/if}
@@ -245,10 +246,10 @@
     {#if paymentsEnabled}
       <section class="mb-8">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="text-base font-medium flex items-center gap-2"><Sparkles class="size-4" /> Plans</h3>
+        <h3 class="text-base font-medium flex items-center gap-2"><Sparkles class="size-4" /> {$ui("Plans")}</h3>
         <div class="flex items-center gap-2 text-xs">
-          <button class="btn btn-secondary" class:btn-primary={interval === 'monthly'} onclick={() => interval = 'monthly'}>Monthly</button>
-          <button class="btn btn-secondary" class:btn-primary={interval === 'yearly'} onclick={() => interval = 'yearly'}>Yearly</button>
+          <button class="btn btn-secondary" class:btn-primary={interval === 'monthly'} onclick={() => interval = 'monthly'}>{$ui("Monthly")}</button>
+          <button class="btn btn-secondary" class:btn-primary={interval === 'yearly'} onclick={() => interval = 'yearly'}>{$ui("Yearly")}</button>
         </div>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -257,20 +258,20 @@
             <h4 class="text-lg font-medium">{plan.name}</h4>
             <p class="text-3xl font-light my-3">
               {formatPrice(priceFor(plan), plan.currency)}
-              <span class="text-xs text-text-muted font-normal">/{interval === 'yearly' ? 'year' : 'month'}</span>
+              <span class="text-xs text-text-muted font-normal">/{$ui(interval === 'yearly' ? 'year' : 'month')}</span>
             </p>
             <ul class="text-xs text-text-muted space-y-1 mb-4 flex-1">
-              <li>{quotaLabel(plan.document_quota_monthly)} documents / month</li>
-              <li>{quotaLabel(plan.recipient_quota_monthly)} recipients / month</li>
-              <li>SES signing (AES / QES unavailable)</li>
-              {#if plan.features?.branding}<li>Custom branding</li>{/if}
-              {#if plan.features?.evidence_bundle}<li>Cryptographically verifiable evidence bundles</li>{/if}
-              {#if plan.features?.mcp}<li>MCP API access</li>{/if}
-              {#if plan.features?.white_label}<li>White-label</li>{/if}
+              <li>{quotaLabel(plan.document_quota_monthly)} {$ui("documents / month")}</li>
+              <li>{quotaLabel(plan.recipient_quota_monthly)} {$ui("recipients / month")}</li>
+              <li>{$ui("SES signing (AES / QES unavailable)")}</li>
+              {#if plan.features?.branding}<li>{$ui("Custom branding")}</li>{/if}
+              {#if plan.features?.evidence_bundle}<li>{$ui("Cryptographically verifiable evidence bundles")}</li>{/if}
+              {#if plan.features?.mcp}<li>{$ui("MCP API access")}</li>{/if}
+              {#if plan.features?.white_label}<li>{$ui("White-label")}</li>{/if}
             </ul>
             {#if currentPlan?.slug === plan.slug}
               <span class="btn btn-secondary w-full cursor-default" aria-disabled="true">
-                <CheckCircle2 class="size-4" /> Current plan
+                <CheckCircle2 class="size-4" /> {$ui("Current plan")}
               </span>
             {:else if plan.monthly_price_cents > 0}
               <button
@@ -283,7 +284,7 @@
                 {checkoutPlanSlug === plan.slug ? 'Opening checkout…' : `Upgrade to ${plan.name}`}
               </button>
             {:else}
-              <span class="btn btn-secondary w-full cursor-default" aria-disabled="true">Free tier</span>
+              <span class="btn btn-secondary w-full cursor-default" aria-disabled="true">{$ui("Free tier")}</span>
             {/if}
           </div>
         {/each}
@@ -294,15 +295,15 @@
     {#if invoices.length > 0}
       <section>
         <h3 class="text-base font-medium flex items-center gap-2 mb-4">
-          <Receipt class="size-4" /> Invoices
+          <Receipt class="size-4" /> {$ui("Invoices")}
         </h3>
         <div class="card overflow-hidden">
           <table class="w-full text-sm">
             <thead class="bg-bg-elevated text-text-muted text-xs">
               <tr>
-                <th class="text-left p-3">Date</th>
-                <th class="text-left p-3">Status</th>
-                <th class="text-right p-3">Amount</th>
+                <th class="text-left p-3">{$ui("Date")}</th>
+                <th class="text-left p-3">{$ui("Status")}</th>
+                <th class="text-right p-3">{$ui("Amount")}</th>
                 <th class="text-right p-3"></th>
               </tr>
             </thead>
@@ -312,9 +313,9 @@
                   <td class="p-3">{new Date(inv.created_at).toLocaleDateString()}</td>
                   <td class="p-3">
                     {#if inv.status === 'paid'}
-                      <span class="inline-flex items-center gap-1 text-success"><CheckCircle2 class="size-3.5" /> Paid</span>
+                      <span class="inline-flex items-center gap-1 text-success"><CheckCircle2 class="size-3.5" /> {$ui("Paid")}</span>
                     {:else if inv.status === 'failed'}
-                      <span class="inline-flex items-center gap-1 text-danger"><XCircle class="size-3.5" /> Failed</span>
+                      <span class="inline-flex items-center gap-1 text-danger"><XCircle class="size-3.5" /> {$ui("Failed")}</span>
                     {:else}
                       <span class="text-text-muted capitalize">{inv.status}</span>
                     {/if}
@@ -322,7 +323,7 @@
                   <td class="p-3 text-right font-mono">{formatPrice(inv.amount_cents, inv.currency)}</td>
                   <td class="p-3 text-right">
                     {#if inv.hosted_invoice_url}
-                      <a class="text-accent text-xs" href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer">View</a>
+                      <a class="text-accent text-xs" href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer">{$ui("View")}</a>
                     {/if}
                   </td>
                 </tr>
@@ -335,8 +336,7 @@
 
     {#if billingEnabled && provider === 'mock'}
       <p class="text-text-muted text-xs mt-6">
-        This Hash instance is running the <code class="font-mono">mock</code> billing provider.
-        Switch <code class="font-mono">HASH_BILLING_PROVIDER=mollie</code> + set the Mollie env vars to take real payments.
+        {$ui("This Hash instance is running the")} <code class="font-mono">mock</code> {$ui("billing provider. Switch")} <code class="font-mono">HASH_BILLING_PROVIDER=mollie</code> {$ui("+ set the Mollie env vars to take real payments.")}
       </p>
     {/if}
   {/if}

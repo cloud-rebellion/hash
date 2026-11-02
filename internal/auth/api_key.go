@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// APIKeyFormat is `mth_<prefix>_<secret>`. New credentials use a type-prefixed
+// APIKeyFormat is `hash_<prefix>_<secret>`. New credentials use a type-prefixed
 // 128-bit routing prefix (`a` for org API keys and `d` for document-agent
 // tokens); the secret is 32 base64url chars (24 bytes of entropy). Hash stored
 // in DB is the sha256 of the full key (bytes).
@@ -26,6 +26,7 @@ import (
 // credentials. They are never minted again: 32 bits was too small for a shared
 // lookup namespace and a collision could make an otherwise valid key
 // unavailable.
+// Already-issued mth_ credentials remain valid using their original full bytes.
 type MintedKey struct {
 	Plaintext string // returned to caller once; never stored
 	Prefix    string
@@ -65,17 +66,22 @@ func mintNamespacedKey(namespace string) (*MintedKey, error) {
 	}
 	prefix := namespace + hex.EncodeToString(prefBytes)
 	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
-	plain := "mth_" + prefix + "_" + secret
+	plain := "hash_" + prefix + "_" + secret
 	hash := sha256.Sum256([]byte(plain))
 	return &MintedKey{Plaintext: plain, Prefix: prefix, Hash: hash[:]}, nil
 }
 
 // ParseAPIKey splits an inbound key into prefix and full-bytes for hashing.
 func ParseAPIKey(k string) (prefix string, fullBytes []byte, err error) {
-	if !strings.HasPrefix(k, "mth_") {
-		return "", nil, errors.New("api key missing mth_ prefix")
+	var rest string
+	switch {
+	case strings.HasPrefix(k, "hash_"):
+		rest = strings.TrimPrefix(k, "hash_")
+	case strings.HasPrefix(k, "mth_"):
+		rest = strings.TrimPrefix(k, "mth_")
+	default:
+		return "", nil, errors.New("api key missing supported prefix")
 	}
-	rest := strings.TrimPrefix(k, "mth_")
 	parts := strings.SplitN(rest, "_", 2)
 	if len(parts) != 2 || !validCredentialPrefix(parts[0]) || parts[1] == "" {
 		return "", nil, errors.New("malformed api key")

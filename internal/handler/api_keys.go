@@ -88,7 +88,7 @@ func apiKeyCreationScopes(raw json.RawMessage) ([]string, error) {
 	return scopes, nil
 }
 
-// handleCreateAPIKey mints a fresh `mth_<prefix>_<secret>` key, hashes it,
+// handleCreateAPIKey mints a fresh `hash_<prefix>_<secret>` key, hashes it,
 // stores the hash, and returns the plaintext exactly once. Caller is
 // responsible for displaying + copying the plaintext immediately; it can
 // never be retrieved again.

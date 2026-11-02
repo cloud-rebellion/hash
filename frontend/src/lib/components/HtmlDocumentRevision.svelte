@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getDocument, getHTMLDocumentSource, reviseHTMLDocument, type DocumentResponse, type HTMLDocumentSource } from '$lib/api/client';
@@ -143,40 +144,40 @@
   onDestroy(() => { disposed = true; operation++; onStateChange?.(true); onSourceChange?.(null); onEditorStateChange?.(false); });
 </script>
 
-<section class="card p-6 mb-6 space-y-4" aria-label="Revise HTML document">
-  <h2 class="font-display text-lg">Document values and wording</h2>
-  <p class="text-sm text-text-secondary">The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review{retained?.source_schema_version === 3 ? ', and both signature locations are regenerated for the new PDF' : ' and field placement'} before sending.</p>
-  {#if loading}<p role="status" class="text-sm">Loading retained document source…</p>{/if}
-  {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
-  {#if needsRefresh || uncertain}<div class="text-sm space-y-2"><p>Your local inputs are retained. Inspect the saved revision before another write.</p>
-    {#if acknowledgedDocument}<p>Revision {acknowledgedDocument.html_materialization_revision} was acknowledged as saved.</p>{/if}
-    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={inspectLatest}>Inspect current HTML revision</button></div>
-  {:else if !me || (!retained && !loading)}<button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={loadInitial}>Reload session and source</button>{/if}
-  {#if latestSource && latestDocument}<div class="text-sm space-y-2"><p>Saved PDF revision {latestSource.materialization_revision} · {latestDocument.status}. Loading it replaces local document inputs.</p>
-    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={adoptLatest}>Load saved HTML revision</button></div>{/if}
+<section class="card p-6 mb-6 space-y-4" aria-label={$ui("Revise HTML document")}>
+  <h2 class="font-display text-lg">{$ui("Document values and wording")}</h2>
+  <p class="text-sm text-text-secondary">{$ui("The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review")}{$ui(retained?.source_schema_version === 3 ? ', and both signature locations are regenerated for the new PDF' : ' and field placement')} {$ui("before sending.")}</p>
+  {#if loading}<p role="status" class="text-sm">{$ui("Loading retained document source…")}</p>{/if}
+  {#if error}<p role="alert" class="text-sm text-danger">{$ui(error)}</p>{/if}
+  {#if needsRefresh || uncertain}<div class="text-sm space-y-2"><p>{$ui("Your local inputs are retained. Inspect the saved revision before another write.")}</p>
+    {#if acknowledgedDocument}<p>{$ui("Revision")} {acknowledgedDocument.html_materialization_revision} {$ui("was acknowledged as saved.")}</p>{/if}
+    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={inspectLatest}>{$ui("Inspect current HTML revision")}</button></div>
+  {:else if !me || (!retained && !loading)}<button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={loadInitial}>{$ui("Reload session and source")}</button>{/if}
+  {#if latestSource && latestDocument}<div class="text-sm space-y-2"><p>{$ui("Saved PDF revision")} {latestSource.materialization_revision} · {latestDocument.status}{$ui(". Loading it replaces local document inputs.")}</p>
+    <button type="button" class="btn btn-secondary" disabled={busy || externalBusy || reconciliationBusy} onclick={adoptLatest}>{$ui("Load saved HTML revision")}</button></div>{/if}
   {#if retained}
-    <p class="text-xs text-text-secondary">Retained template version {retained.template_version} · PDF revision {retained.materialization_revision}</p>
+    <p class="text-xs text-text-secondary">{$ui("Retained template version")} {retained.template_version} {$ui("· PDF revision")} {retained.materialization_revision}</p>
     {#if retained.contract_profile}<div class="border border-border-light rounded-md p-4 text-sm space-y-2">
-      <p class="font-medium">Reviewed {retained.contract_profile.kind === 'proposal' ? 'proposal' : 'ordinary B2B services'} profile · version {retained.contract_profile.version}</p>
-      <p>Both parties sign. Representative names and email addresses come from these printed values. Changing them updates the intended signer, renders a fresh PDF and {retained.source_schema_version === 3 ? 'regenerates the signature locations for fresh review' : 'clears review and signature placement'}. Declared identity and authority are assertions; Hash does not independently verify them or determine legal sufficiency.</p>
+      <p class="font-medium">{$ui("Reviewed")} {$ui(retained.contract_profile.kind === 'proposal' ? 'proposal' : 'ordinary B2B services')} {$ui("profile · version")} {retained.contract_profile.version}</p>
+      <p>{$ui("Both parties sign. Representative names and email addresses come from these printed values. Changing them updates the intended signer, renders a fresh PDF and")} {$ui(retained.source_schema_version === 3 ? 'regenerates the signature locations for fresh review' : 'clears review and signature placement')}{$ui(". Declared identity and authority are assertions; Hash does not independently verify them or determine legal sufficiency.")}</p>
     </div>{/if}
-    {#if retained.source_schema_version === 3}<p class="text-sm" role="note">The appended signing page and its branding stay fixed to the approved design. Both signature locations are generated automatically and cannot be moved or reassigned. Party details must fit its bounded layout and bundled Latin font.</p>{/if}
-    {#if !retained.can_edit || document.status !== 'draft'}<p role="note" class="text-sm">This document cannot currently be revised here. If a recipient has entered a field value, signed or accepted, preserve that evidence and create a superseding document instead.</p>
-    {:else if !authority}<p role="note" class="text-sm">The original sender or an owner must revise this document.</p>{/if}
+    {#if retained.source_schema_version === 3}<p class="text-sm" role="note">{$ui("The appended signing page and its branding stay fixed to the approved design. Both signature locations are generated automatically and cannot be moved or reassigned. Party details must fit its bounded layout and bundled Latin font.")}</p>{/if}
+    {#if !retained.can_edit || document.status !== 'draft'}<p role="note" class="text-sm">{$ui("This document cannot currently be revised here. If a recipient has entered a field value, signed or accepted, preserve that evidence and create a superseding document instead.")}</p>
+    {:else if !authority}<p role="note" class="text-sm">{$ui("The original sender or an owner must revise this document.")}</p>{/if}
     <form onsubmit={save} class="space-y-4">
       <fieldset disabled={!canSave} class="space-y-4 min-w-0">
         {#each valueGroups as group (group.id)}<section class="space-y-3" aria-label={group.label}><h3 class="font-medium">{group.label}</h3>
-          {#each group.values as field (field.name)}<label class="block text-sm break-words">{field.label}{field.required ? ' (required)' : ''}
+          {#each group.values as field (field.name)}<label class="block text-sm break-words">{field.label}{$ui(field.required ? ' (required)' : '')}
             <textarea bind:value={values[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea>
-            <span class="text-xs text-text-secondary">Up to {field.max_chars} characters.</span></label>{/each}
+            <span class="text-xs text-text-secondary">{$ui("Up to")} {field.max_chars} {$ui("characters.")}</span></label>{/each}
         </section>{/each}
-        {#each retained.sections as section (section.name)}<div class="space-y-2"><label class="block text-sm break-words">Document wording: {section.name.replaceAll('_', ' ')}
+        {#each retained.sections as section (section.name)}<div class="space-y-2"><label class="block text-sm break-words">{$ui("Document wording:")} {section.name.replaceAll('_', ' ')}
           <textarea bind:value={sections[section.name]} rows="5" maxlength={section.max_chars * 2} class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea></label>
-          <details class="text-xs text-text-secondary"><summary>Approved template wording</summary><p class="whitespace-pre-wrap break-words mt-2">{section.default_text}</p></details>
-          {#if sections[section.name] !== section.default_text}<p role="note" class="text-xs text-warning">This wording differs from the approved template. Human review of the exact rendered PDF is required; Hash does not determine legal completeness.</p>{/if}</div>{/each}
-        <label class="block text-sm">Revision summary<textarea bind:value={summary} rows="2" maxlength="1000" class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea><span class="text-xs text-text-secondary">Optional, up to 500 characters. This appears in document history.</span></label>
+          <details class="text-xs text-text-secondary"><summary>{$ui("Approved template wording")}</summary><p class="whitespace-pre-wrap break-words mt-2">{section.default_text}</p></details>
+          {#if sections[section.name] !== section.default_text}<p role="note" class="text-xs text-warning">{$ui("This wording differs from the approved template. Human review of the exact rendered PDF is required; Hash does not determine legal completeness.")}</p>{/if}</div>{/each}
+        <label class="block text-sm">{$ui("Revision summary")}<textarea bind:value={summary} rows="2" maxlength="1000" class="mt-1 block w-full border border-border-light rounded-md bg-bg-elevated px-3 py-2"></textarea><span class="text-xs text-text-secondary">{$ui("Optional, up to 500 characters. This appears in document history.")}</span></label>
       </fieldset>
-      <button type="submit" class="btn btn-primary" disabled={!canSave || !dirty}>{busy ? 'Saving and rendering revision…' : 'Save revision and render PDF'}</button>
+      <button type="submit" class="btn btn-primary" disabled={!canSave || !dirty}>{$ui(busy ? 'Saving and rendering revision…' : 'Save revision and render PDF')}</button>
     </form>
   {/if}
 </section>

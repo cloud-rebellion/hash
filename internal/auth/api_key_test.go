@@ -36,6 +36,9 @@ func TestCredentialMintsUseDisjointHighEntropyPrefixes(t *testing.T) {
 		t.Fatal("org and document credential namespaces overlapped")
 	}
 	for _, key := range []*MintedKey{orgKey, docKey} {
+		if !strings.HasPrefix(key.Plaintext, "hash_") {
+			t.Fatal("new credential does not use the Hash product prefix")
+		}
 		prefix, full, err := ParseAPIKey(key.Plaintext)
 		if err != nil || prefix != key.Prefix || string(full) != key.Plaintext {
 			t.Fatalf("parse minted key = %q/%q/%v", prefix, full, err)

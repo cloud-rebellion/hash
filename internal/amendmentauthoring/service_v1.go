@@ -14,6 +14,7 @@ import (
 	"github.com/bright-interaction/hash/internal/ownedaudit"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"sync"
 	"time"
 )
@@ -291,6 +292,49 @@ func InventoryV1(ctx context.Context, d DependenciesV1, actor authoring.Actor, o
 	})
 	return result, failure
 }
+
+// A missing relation is a genuine scalar absence, not permission to read a
+// complete source. Run this lookup only after the original parent/member,
+// credential and privacy gates, but before requiring document-body caches.
+// Linked documents continue through the unchanged full native body/relation
+// reader. Every unavailable or conflicting authority remains a real error.
+func relationReadGateV1(ctx context.Context, db generated.DBTX, actor authoring.Actor) (func(pdfadmission.HTMLRevisionReadAccessV1, *generated.User) error, **guardV1) {
+	gate, guard := readGateV1(ctx, db, actor, false)
+	return func(access pdfadmission.HTMLRevisionReadAccessV1, user *generated.User) error {
+		if err := gate(access, user); err != nil {
+			return err
+		}
+		var id uuid.UUID
+		err := db.QueryRow(ctx, `SELECT id FROM document_amendments_v1 WHERE document_id=$1 AND org_id=$2`, access.DocumentID, actor.OrgID).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if *guard == nil {
+				return auth.ErrMutationPermissionRevoked
+			}
+			if err := (*guard).recheck(ctx); err != nil {
+				return err
+			}
+			return pgx.ErrNoRows
+		}
+		if err != nil {
+			return err
+		}
+		if id == uuid.Nil {
+			return amendments.ErrUnavailableV1
+		}
+		return nil
+	}, guard
+}
+
+// A genuine negative lookup is not a successful absence response if the
+// owned native session reports uncertain cleanup. Do not let errors.Is on a
+// joined ErrNoRows hide that operational refusal as an ordinary HTTP404.
+func relationFailureAfterCleanupV1(failure, cleanupFailure error) error {
+	if cleanupFailure != nil && errors.Is(failure, pgx.ErrNoRows) {
+		return errors.Join(amendments.ErrUnavailableV1, cleanupFailure)
+	}
+	return errors.Join(failure, cleanupFailure)
+}
+
 func RelationV1(ctx context.Context, d DependenciesV1, actor authoring.Actor, candidate uuid.UUID) (result *ResultV1, failure error) {
 	if d.Sessions == nil || actor.Authorize == nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || candidate == uuid.Nil {
 		return nil, amendments.ErrUnavailableV1
@@ -301,13 +345,15 @@ func RelationV1(ctx context.Context, d DependenciesV1, actor authoring.Actor, ca
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
+		var cleanupFailure error
 		if session != nil {
-			failure = errors.Join(failure, session.CloseV1(cleanup))
+			cleanupFailure = session.CloseV1(cleanup)
 		}
 		if admission != nil {
 			_, e := admission.ReconcileCleanupV1(cleanup)
-			failure = errors.Join(failure, e)
+			cleanupFailure = errors.Join(cleanupFailure, e)
 		}
+		failure = relationFailureAfterCleanupV1(failure, cleanupFailure)
 		if failure != nil {
 			result.CloseConsumerV1()
 		}
@@ -328,7 +374,7 @@ func RelationV1(ctx context.Context, d DependenciesV1, actor authoring.Actor, ca
 		if e != nil {
 			return e
 		}
-		gate, guard := readGateV1(call, db, actor, false)
+		gate, guard := relationReadGateV1(call, db, actor)
 		_, e = reader.ReadDocumentWithActorV1(call, actor.UserID, func(a pdfadmission.HTMLRevisionReadAccessV1) error {
 			if a.DocumentID != candidate || a.OrgID != actor.OrgID {
 				return authoring.ErrDocumentNotFound

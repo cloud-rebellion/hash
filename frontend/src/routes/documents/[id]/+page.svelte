@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
  import type { PackageSendObservation } from '$lib/packageSend';
   import { preSignDocumentMatchesResult, type PreSignResult } from '$lib/presignExecution';
   import { onDestroy, onMount, untrack } from 'svelte';
@@ -58,6 +59,7 @@
   let generatedPlacementReady = $state(false);
   let htmlRevisionBlocked = $state(true);
   let htmlEditorClean = $state(false), blocksEditorClean = $state(false);
+  let crmDetailsOpen = $state(false);
   let crmBlocked = $state(true), crmBusy = $state(false), crmReviewRequired = $state(false), senderMutationBusy = $state(false);
   let attachmentPackageSend=$state<PackageSendObservation | undefined>(undefined);
   let attachmentReviewRequest=$state({ revision: 0, inspect: false }), attachmentReviewRevision=$state(0);
@@ -361,9 +363,13 @@
   async function saveAsTemplate() {
     const scope = captureDocument();
     if (!scope || !doc || crmBusy || savingTemplate) return;
+    if (doc.source_kind === 'blocks' && doc.status === 'draft' && !blocksEditorClean) {
+      error = 'Wait for the document to finish saving before creating a template.';
+      return;
+    }
     const submittedDocument = doc;
     const name = window.prompt('Template name?', `${doc.name} (mall)`);
-    if (!name) return;
+    if (!name || !isCurrentDocument(scope) || doc !== submittedDocument || (doc.status === 'draft' && !blocksEditorClean)) return;
     savingTemplate = true;
     error = null;
     try {
@@ -512,36 +518,37 @@
 
 <div class="px-6 py-10 max-w-6xl mx-auto">
   <a class="text-sm text-text-secondary hover:underline inline-flex items-center gap-1 mb-4" href="/documents">
-    <ArrowLeft class="size-3" /> Back to documents
+    <ArrowLeft class="size-3" /> {$ui("Back to documents")}
   </a>
 
   {#if loading}
-    <p class="text-text-muted">Loading…</p>
+    <p class="text-text-muted">{$ui("Loading…")}</p>
   {:else if error && !doc}
-    <div class="card p-6 text-danger">{error}</div>
+    <div class="card p-6 text-danger">{$ui(error)}</div>
   {:else if doc && doc.id === $page.params.id}
     {#key doc.id}
     {@const documentScope = { id: doc.id, routeRevision, documentRevision }}
-    {#if error}<div role="alert" class="card p-4 text-danger mb-4">{error}</div>{/if}
+    {#if error}<div role="alert" class="card p-4 text-danger mb-4">{$ui(error)}</div>{/if}
     <div class="mb-6 space-y-2">
-      <p class="page-eyebrow">Document · {doc.status}</p>
+      {#if doc.source_kind === 'blocks' && doc.status === 'draft' && !blocksEditorClean}<p class="text-sm text-text-secondary" role="status">{$ui("Save as template becomes available after this document is fully saved.")}</p>{/if}
+      <p class="page-eyebrow">{$ui('Document')} · {$ui(doc.status)}</p>
       <div class="flex flex-col items-start gap-4 sm:flex-row sm:items-baseline sm:justify-between">
         <h1 class="page-title min-w-0 w-full break-words sm:flex-1">{doc.name}</h1>
         <div class="flex max-w-full flex-wrap gap-2">
           <button class="btn btn-secondary" onclick={() => (showPreview = !showPreview)}>
-            <Eye class="size-4" /> {showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview'}
+            <Eye class="size-4" /> {$ui(showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview')}
           </button>
           {#if doc.source_kind === 'blocks'}
-            <button class="btn btn-secondary" disabled={savingTemplate || crmBusy} onclick={saveAsTemplate}>
-              <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template'}
+            <button class="btn btn-secondary" disabled={savingTemplate || crmBusy || (doc.status === 'draft' && !blocksEditorClean)} onclick={saveAsTemplate}>
+              <Save class="size-4" /> {$ui(savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template')}
             </button>
           {:else if doc.status === 'draft' && !doc.has_html_source}
             <button class="btn btn-secondary" onclick={() => (showPDFSave = !showPDFSave)}>
-              <Save class="size-4" /> {savedTemplateFlash ? 'Saved!' : 'Save as template'}
+              <Save class="size-4" /> {$ui(savedTemplateFlash ? 'Saved!' : 'Save as template')}
             </button>
           {/if}
           <a class="btn btn-secondary" href="/settings/api-keys">
-            <Sparkles class="size-4" /> Attach AI
+            <Sparkles class="size-4" /> {$ui("Attach AI")}
           </a>
         </div>
       </div>
@@ -561,15 +568,20 @@
         onStateChange={(state)=>{if(capturedAmendmentScope===amendmentScope && isCurrentDocument(documentScope)){amendmentLookupBlocked=state.blocked;amendmentLinked=state.linked;amendmentNotice=state.notice;amendmentBusy=state.busy;amendmentDirty=state.dirty;}}} />
       {/key}
     {/if}
-    {#if amendmentNotice}<p class="card p-4 mb-6 text-sm" role="note">This document accompanies an agreed notice. Review and issue its email notice in Later amendments above. It does not use the signing or acknowledgement Send action.</p>{/if}
+    {#if amendmentNotice}<p class="card p-4 mb-6 text-sm" role="note">{$ui("This document accompanies an agreed notice. Review and issue its email notice in Later amendments above. It does not use the signing or acknowledgement Send action.")}</p>{/if}
     {#if crmEditable}
+      <details bind:open={crmDetailsOpen} class="mb-6 rounded-xl border border-border-light bg-bg-surface">
+        <summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui('CRM data')}<span class="ml-2 text-xs text-text-muted">{$ui('Optional connection')}{#if crmBlocked || crmReviewRequired} · {$ui('Review required')}{/if}</span></summary>
+        <div class="px-4 pb-4">
       <CRMDocumentPanel document={doc} actor={{ org_id: doc.org_id, user_id: viewerUserID, role: viewerRole === 'owner' ? 'owner' : 'sender' }}
         editorClean={crmEditorClean} otherBusy={crmOtherBusy} reconciliationBusy={crmReconciliationBusy} refreshRevision={crmRefreshRevision}
         onApplied={(updated,reconciliation) => receiveCRMDocument(updated, documentScope,reconciliation)}
         onStateChange={(blocked, busy, localIntent) => { if (isCurrentDocument(documentScope)) { crmBlocked = blocked; crmBusy = busy; crmLocalIntent=localIntent===true; } }} />
+        </div>
+      </details>
     {/if}
     {#if doc.has_html_source}
-      {#if doc.status !== 'draft'}<details class="mb-6"><summary class="cursor-pointer text-sm text-text-secondary">Saved document information and intended parties</summary>
+      {#if doc.status !== 'draft'}<details class="mb-6"><summary class="cursor-pointer text-sm text-text-secondary">{$ui("Saved document information and intended parties")}</summary>
         <HtmlDocumentRevision document={doc} onRevised={(updated) => receiveHTMLDocument(updated, documentScope)}
           onStateChange={(blocked) => { if (isCurrentDocument(documentScope)) htmlRevisionBlocked = blocked; }}
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
@@ -595,50 +607,49 @@
     {#if doc.status === 'draft'}
       <div class="card p-4 mb-6 flex items-center justify-between gap-4">
         <div>
-          <p class="text-sm font-medium">Signeringsläge</p>
+          <p class="text-sm font-medium">{$ui("Signing mode")}</p>
           <p class="text-xs text-text-muted">
-            {doc.requires_signature
-              ? 'Kräver signatur: mottagarna signerar dokumentet.'
-              : 'Bara läsa och acceptera: mottagarna öppnar och klickar Acceptera. Ingen signatur.'}
+            {$ui(doc.requires_signature
+              ? 'Signature required: recipients sign the document.'
+              : 'Read and acknowledge: recipients open the document and click Accept. No signature.')}
           </p>
         </div>
         <button class="btn btn-secondary whitespace-nowrap" disabled={amendmentReadOnly || savingMode || crmBusy || attachmentBarrier || crmLocalIntent || (doc.has_html_source === true && (htmlRevisionBlocked || !htmlSource || !!htmlSource.contract_profile))} onclick={toggleSignatureMode}>
-          {savingMode ? 'Sparar…' : doc.requires_signature ? 'Byt till acceptera' : 'Kräv signatur'}
+          {$ui(savingMode ? "Saving…" : doc.requires_signature ? "Switch to acknowledgement" : "Require signature")}
         </button>
       </div>
-      {#if htmlSource?.contract_profile}<p class="text-sm text-text-secondary mb-6" role="note">The reviewed contract design requires both parties to sign. Its ceremony cannot be changed to acknowledgement.</p>{/if}
+      {#if htmlSource?.contract_profile}<p class="text-sm text-text-secondary mb-6" role="note">{$ui("The reviewed contract design requires both parties to sign. Its ceremony cannot be changed to acknowledgement.")}</p>{/if}
     {/if}
 
     {#if doc.status === 'changes_requested'}
       <div class="card p-5 mb-6 border-l-4 border-warning">
-        <h2 class="font-display font-extralight text-lg mb-1">Ändringar begärda</h2>
+        <h2 class="font-display font-extralight text-lg mb-1">{$ui("Changes requested")}</h2>
         <p class="text-sm text-text-secondary mb-3 leading-relaxed">
-          En part har begärt ändringar. Signering är pausad. Revidera dokumentet,
-          gör ändringarna och skicka det för signering igen.
+          {$ui("A party requested changes. Signing is paused. Revise the document, make the changes and send it for signature again.")}
         </p>
         {#if !doc.has_html_source}<div class="flex flex-wrap items-center gap-2 mb-4 text-xs">
-          <span class="uppercase tracking-widest text-text-muted font-mono">Vid godkännande</span>
+          <span class="uppercase tracking-widest text-text-muted font-mono">{$ui("On approval")}</span>
           <button
             class="px-2 py-1 rounded-md border {approvalMode === 'accept' ? 'border-accent text-accent' : 'border-border-light text-text-muted'}"
             onclick={() => changeApprovalMode('accept')}
             disabled={savingApprovalMode}
-          >Markera godkänd (ändra vid revidering)</button>
+          >{$ui("Mark approved (edit when revising)")}</button>
           <button
             class="px-2 py-1 rounded-md border {approvalMode === 'auto_apply' ? 'border-accent text-accent' : 'border-border-light text-text-muted'}"
             onclick={() => changeApprovalMode('auto_apply')}
             disabled={savingApprovalMode}
-          >Tillämpa föreslagen text automatiskt</button>
-          <span class="text-text-muted">(global inställning)</span>
-        </div>{:else}<p class="text-sm text-text-secondary mb-4">Approving a request records your decision. It does not apply proposed wording. Reopen the document, update its declared values or wording, and review the newly rendered PDF before sending again.</p>{/if}
+          >{$ui("Apply proposed text automatically")}</button>
+          <span class="text-text-muted">{$ui("(workspace setting)")}</span>
+        </div>{:else}<p class="text-sm text-text-secondary mb-4">{$ui("Approving a request records your decision. It does not apply proposed wording. Reopen the document, update its declared values or wording, and review the newly rendered PDF before sending again.")}</p>{/if}
 
         {#if changeRequestRefreshError}
           <div role="alert" class="text-danger mb-4">
-            <p>{changeRequestRefreshError}</p>
-            <button type="button" class="btn btn-secondary" disabled={refreshingChanges} onclick={() => doc && loadChangeRequests(doc.id)}>Retry change request refresh</button>
+            <p>{$ui(changeRequestRefreshError)}</p>
+            <button type="button" class="btn btn-secondary" disabled={refreshingChanges} onclick={() => doc && loadChangeRequests(doc.id)}>{$ui("Retry change request refresh")}</button>
           </div>
         {/if}
         <button type="button" class="btn btn-secondary mb-4" disabled={refreshingChanges} onclick={() => doc && loadChangeRequests(doc.id)}>
-          {refreshingChanges ? 'Refreshing change requests…' : 'Refresh change requests'}
+          {$ui(refreshingChanges ? 'Refreshing change requests…' : 'Refresh change requests')}
         </button>
 
         {#if changeRequests.length}
@@ -646,19 +657,19 @@
             {#each changeRequests as cr (cr.id)}
               <li data-change-request-id={cr.id} class="rounded-md border border-border-light bg-bg-elevated p-3">
                 <p class="text-xs text-text-muted mb-1">
-                  {cr.recipient_name || 'Mottagare'}{cr.recipient_email ? ` · ${cr.recipient_email}` : ''}
-                  · {new Date(cr.created_at).toLocaleString()}
-                  {#if cr.resolution === 'approved'}· <span class="text-success">godkänd</span>{:else if cr.resolution === 'denied'}· <span class="text-danger">nekad</span>{/if}
+                  {cr.recipient_name || $ui('Recipient')}{cr.recipient_email ? ` · ${cr.recipient_email}` : ''}
+                  · {new Date(cr.created_at).toLocaleString($staffLocale === 'sv' ? 'sv-SE' : 'en-GB')}
+                  {#if cr.resolution === 'approved'}· <span class="text-success">{$ui("approved")}</span>{:else if cr.resolution === 'denied'}· <span class="text-danger">{$ui("declined")}</span>{/if}
                 </p>
                 {#if cr.quote}
-                  <p class="text-sm border-l-2 border-accent pl-2 mb-1"><span class="text-text-muted text-xs">Markerat: </span>{cr.quote}</p>
+                  <p class="text-sm border-l-2 border-accent pl-2 mb-1"><span class="text-text-muted text-xs">{$ui("Selected:")} </span>{cr.quote}</p>
                 {/if}
                 {#if cr.message}<p class="text-sm whitespace-pre-wrap mb-1">{cr.message}</p>{/if}
-                {#if cr.proposed}<p class="text-sm text-success"><span class="text-text-muted text-xs">Föreslår: </span>{cr.proposed}</p>{/if}
+                {#if cr.proposed}<p class="text-sm text-success"><span class="text-text-muted text-xs">{$ui("Proposed:")} </span>{cr.proposed}</p>{/if}
                 {#if cr.status === 'open'}
                   <div class="flex gap-2 mt-2">
-                    <button class="btn btn-primary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, true)}>Godkänn</button>
-                    <button class="btn btn-secondary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, false)}>Neka</button>
+                    <button class="btn btn-primary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, true)}>{$ui("Approve")}</button>
+                    <button class="btn btn-secondary text-xs" disabled={!!resolvingId || revising} onclick={() => resolveCr(cr, false)}>{$ui("Decline")}</button>
                   </div>
                 {/if}
               </li>
@@ -666,16 +677,16 @@
           </ul>
         {/if}
         <button class="btn btn-primary" disabled={amendmentReadOnly || revising || !!resolvingId} onclick={revise}>
-          {revising ? 'Reviderar…' : 'Revidera och redigera'}
+          {$ui(revising ? "Revising…" : "Revise and edit")}
         </button>
       </div>
     {/if}
 
     {#if preSignPresentationBlocked}
-      <p role="alert" class="text-sm text-warning">The original pre-signing result needs inspection. The current PDF remains hidden until its exact retained derivative is confirmed.</p>
+      <p role="alert" class="text-sm text-warning">{$ui("The original pre-signing result needs inspection. The current PDF remains hidden until its exact retained derivative is confirmed.")}</p>
     {:else if doc.pre_sign}
       {#if doc.pre_sign.publication === 'sealing'}
-        <p role="status" class="text-sm text-text-secondary">Hash is securing the provider-signed agreement. The original source is retained in history; the current derivative is not available yet.</p>
+        <p role="status" class="text-sm text-text-secondary">{$ui("Hash is securing the provider-signed agreement. The original source is retained in history; the current derivative is not available yet.")}</p>
       {:else}
         {#if ['completed', 'declined', 'voided', 'expired'].includes(doc.status) && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id))}
           {#key `${amendmentScope}:${doc.pre_sign.execution.sha256}`}
@@ -685,10 +696,10 @@
               onStateChange={(state) => { if (supersessionScope === amendmentScope && isCurrentDocument(documentScope)) { supersessionBusy = state.busy; supersessionPending = state.pending; } }} />
           {/key}
         {/if}
-        <p class="text-sm text-text-secondary mb-3">Provider-signed agreement · {doc.pre_sign.page_count} pages</p>
-        <p class="text-xs text-text-muted break-all mb-3">PDF SHA-256: {doc.pre_sign.visible_pdf_sha256}</p>
+        <p class="text-sm text-text-secondary mb-3">{$ui("Provider-signed agreement ·")} {doc.pre_sign.page_count} {$ui("pages")}</p>
+        <p class="text-xs text-text-muted break-all mb-3">{$ui("PDF SHA-256:")} {doc.pre_sign.visible_pdf_sha256}</p>
         {#key `${doc.id}:${doc.pre_sign.execution.sha256}:${doc.pre_sign.visible_pdf_sha256}`}
-          <iframe title="Provider-signed agreement" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
+          <iframe title={$ui("Provider-signed agreement")} src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
         {/key}
       {/if}
     {:else if doc.status === 'draft' && doc.source_kind === 'blocks'}
@@ -697,12 +708,12 @@
           onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) blocksEditorClean = clean; }} />
       </div>
       {#if showPreview}
-        <p class="text-sm text-text-muted mb-3" role="note">Preview shows the saved document. Unsaved edits remain available when you return to editing.</p>
-        <iframe title="preview" src={previewURL(doc.id)} sandbox="" class="w-full h-[80vh] card"></iframe>
+        <p class="text-sm text-text-muted mb-3" role="note">{$ui("Preview shows the saved document. Unsaved edits remain available when you return to editing.")}</p>
+        <iframe title={$ui("preview")} src={previewURL(doc.id)} sandbox="" class="w-full h-[80vh] card"></iframe>
       {/if}
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
-        {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">Load and reconcile the retained document values before viewing or changing signature locations.</p>
+        {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Load and reconcile the retained document values before viewing or changing signature locations.")}</p>
         {:else}
         {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
           hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource}
@@ -713,11 +724,11 @@
         {/if}
       </div>
       {#if showPreview}
-        <iframe title="preview" src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
+        <iframe title={$ui("preview")} src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
       {/if}
     {:else if showPreview}
       <iframe
-        title="preview"
+        title={$ui("preview")}
         src={doc.source_kind === 'pdf' ? documentPdfURL(doc.id) : previewURL(doc.id)}
         sandbox={doc.source_kind === 'blocks' ? '' : undefined}
         class="w-full h-[80vh] card"
@@ -725,7 +736,7 @@
     {:else if doc.source_kind === 'blocks'}
       <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
-      {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">Loading and verifying the saved signature locations…</p>
+      {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Loading and verifying the saved signature locations…")}</p>
       {:else}
       {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
         hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource} readonly={true} onSignatureFieldsChange={(fields) => {
@@ -750,7 +761,7 @@
         attachmentsBlocked={doc.status==='draft' && doc.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id && (!attachmentEligible || attachmentSendBlocked)} attachmentsMessage={attachmentMessage} packageSend={attachmentPackageSend} packageReviewRevision={attachmentReviewRevision} packageReconciliationBusy={attachmentReconciliationBusy || attachmentBusy} onPackageReviewRequired={(inspect)=>requestPackageReview(inspect,documentScope)}
         externalMutationBusy={attachmentBarrier || amendmentBusy} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
         crmBlocked={crmEditable && (crmBlocked || crmReviewRequired)} {crmBusy} {crmReviewRevision}
-        onCRMReviewRequired={() => requestCRMReview(documentScope)}
+        onCRMReviewRequired={() => { crmDetailsOpen = true; requestCRMReview(documentScope); }}
         onMutationStateChange={(busy) => { if (isCurrentDocument(documentScope)) senderMutationBusy = busy; }}
         generatedPlacementRequired={htmlSource?.source_schema_version === 3}
         {generatedPlacementReady}
@@ -766,22 +777,22 @@
       />
       {#if doc.status !== 'draft' || doc.has_html_source}
         <section class="card p-5 mb-6">
-          <h2 class="font-display font-extralight text-lg mb-1">Kommentarer</h2>
+          <h2 class="font-display font-extralight text-lg mb-1">{$ui("Comments")}</h2>
           <p class="text-sm text-text-secondary mb-4 leading-relaxed">
-            Ställ och besvara frågor med motparten. Varje inlägg mejlas till den andra parten.
+            {$ui("Ask and answer questions with the other party. Each message is emailed to the other party.")}
           </p>
-          <nav aria-label="Message history" class="flex gap-2 mb-3">
+          <nav aria-label={$ui("Message history")} class="flex gap-2 mb-3">
             <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !olderCommentCursor}
-              onclick={() => doc && olderCommentCursor && loadComments(doc.id, { kind: 'before', cursor: olderCommentCursor })}>Older</button>
+              onclick={() => doc && olderCommentCursor && loadComments(doc.id, { kind: 'before', cursor: olderCommentCursor })}>{$ui("Older")}</button>
             <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !newerCommentCursor}
-              onclick={() => doc && newerCommentCursor && loadComments(doc.id, { kind: 'after', cursor: newerCommentCursor })}>Newer</button>
-            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => doc && loadComments(doc.id)}>Latest</button>
+              onclick={() => doc && newerCommentCursor && loadComments(doc.id, { kind: 'after', cursor: newerCommentCursor })}>{$ui("Newer")}</button>
+            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => doc && loadComments(doc.id)}>{$ui("Latest")}</button>
           </nav>
-          <p role="status" aria-live="polite">{commentLoading ? 'Loading messages…' : ''}</p>
+          <p role="status" aria-live="polite">{$ui(commentLoading ? 'Loading messages…' : '')}</p>
           {#if commentRefreshError}
             <div role="alert" class="text-danger mb-4">
-              <p>{commentRefreshError}</p>
-              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>Retry message refresh</button>
+              <p>{$ui(commentRefreshError)}</p>
+              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>{$ui("Retry message refresh")}</button>
             </div>
           {/if}
           {#if comments.length}
@@ -790,31 +801,31 @@
                 <li class="rounded-md border border-border-light p-3 {c.author_side === 'sender' ? 'bg-bg-elevated' : ''}">
                   <p class="text-xs text-text-muted mb-1">
                     {c.author_name}
-                    <span class="uppercase tracking-wide">· {c.author_side === 'sender' ? 'vi' : 'motpart'}</span>
-                    · {new Date(c.created_at).toLocaleString()}
+                    <span class="uppercase tracking-wide">· {$ui(c.author_side === 'sender' ? "us" : "other party")}</span>
+                    · {new Date(c.created_at).toLocaleString($staffLocale === 'sv' ? 'sv-SE' : 'en-GB')}
                   </p>
                   <p class="text-sm whitespace-pre-wrap">{c.body}</p>
                 </li>
               {/each}
             </ul>
           {:else}
-            <p class="text-text-muted text-sm mb-4">Inga kommentarer än.</p>
+            <p class="text-text-muted text-sm mb-4">{$ui("No comments yet.")}</p>
           {/if}
           <textarea
             bind:value={commentBody}
             rows="2"
-            placeholder="Skriv en kommentar…"
+            placeholder={$ui("Write a comment…")}
             class="w-full p-2 rounded-md border border-border-light bg-bg-elevated text-sm mb-2"
           ></textarea>
           <button class="btn btn-primary" disabled={postingComment || !commentBody.trim()} onclick={sendComment}>
-            {postingComment ? 'Skickar…' : 'Skicka kommentar'}
+            {$ui(postingComment ? "Sending…" : "Send comment")}
           </button>
         </section>
       {/if}
-      <RiskPanel documentID={doc.id} />
-      <EnvelopePanel documentID={doc.id} isEnvelope={!!doc.is_envelope} />
+      <details class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("AI review")}</summary><div class="px-4 pb-4"><RiskPanel documentID={doc.id} /></div></details>
+      <details open={!!doc.is_envelope} class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("Combine documents")}</summary><div class="px-4 pb-4"><EnvelopePanel documentID={doc.id} isEnvelope={!!doc.is_envelope} /></div></details>
       <TimelinePanel documentID={doc.id} />
-      <AgentTokensPanel documentID={doc.id} />
+      <details class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("AI access for this document")}</summary><div class="px-4 pb-4"><AgentTokensPanel documentID={doc.id} /></div></details>
     </div>
     {/key}
   {/if}

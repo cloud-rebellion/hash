@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { ui } from '$lib/staffPreferences';
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -51,9 +52,9 @@
 
 <form method="POST" action="/auth/logout" onsubmit={submit} class="inline shrink-0" aria-busy={busy}>
   <button class="btn btn-secondary {compact ? 'btn-sm' : ''}" type="submit" disabled={busy}>
-    {busy ? 'Signing out…' : 'Sign out everywhere'}
+    {busy ? $ui('Signing out…') : $ui('Sign out everywhere')}
   </button>
   {#if error}
-    <p class="text-xs text-danger mt-1" role="alert">{error}</p>
+    <p class="text-xs text-danger mt-1" role="alert">{$ui(error)}</p>
   {/if}
 </form>

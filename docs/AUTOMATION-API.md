@@ -45,7 +45,7 @@ inputs are rejected. For an ordinary document:
 
 ```http
 POST /api/automation/v1/documents/09bc3de6-931a-4b7c-a3ec-07f6fd8b103b/send
-Authorization: Bearer mth_<prefix>_<secret>
+Authorization: Bearer hash_<prefix>_<secret>
 Content-Type: application/json
 
 {"lawful_basis":"contract"}
@@ -100,7 +100,7 @@ This template command does not execute delegated/pre-sign package signatures.
 Required headers:
 
 ```http
-Authorization: Bearer mth_<prefix>_<secret>
+Authorization: Bearer hash_<prefix>_<secret>
 Content-Type: application/json
 Idempotency-Key: <stable request or delivery id>
 ```

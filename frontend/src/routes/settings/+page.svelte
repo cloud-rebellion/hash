@@ -1,87 +1,62 @@
 <script lang="ts">
-  import {
-    KeyRound,
-    Webhook,
-    Receipt,
-    Palette,
-    ShieldCheck,
-    Scale,
-    UserSearch,
-    Bot,
-    Users,
-    Link2,
-  } from 'lucide-svelte';
+  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, Link2, ArrowUpRight } from 'lucide-svelte';
+  import { ui } from '$lib/staffPreferences';
+  import MCPConnectionGuide from '$lib/components/MCPConnectionGuide.svelte';
 
   const groups = [
-    {
-      title: 'Developer',
-      items: [
-        { href: '/settings/api-keys', label: 'API keys', desc: 'Mint automation + MCP keys.', icon: KeyRound },
-        { href: '/settings/webhooks', label: 'Webhooks', desc: 'Outbound HMAC-signed delivery.', icon: Webhook },
-      ],
-    },
-    {
-      title: 'Team',
-      items: [
-        { href: '/settings/members', label: 'Members & roles', desc: 'Owner / sender / viewer access.', icon: Users },
-        { href: '/settings/signing-policies', label: 'Signing workflows and policies', desc: 'Owner-reviewed rules; execution unavailable.', icon: ShieldCheck },
-        { href: '/settings/signing-authority', label: 'My signing authority', desc: 'Named self-grants, limits and revocation.', icon: KeyRound },
-      ],
-    },
-    {
-      title: 'AI',
-      items: [
-        { href: '/settings/ai', label: 'AI provider', desc: 'Bring your own model + key.', icon: Bot },
-      ],
-    },
-    {
-      title: 'Integrations',
-      items: [
-        { href: '/settings/integrations/brightcrm', label: 'BrightCRM connection', desc: 'Owner-managed CRM account access.', icon: Link2 },
-      ],
-    },
-    {
-      title: 'Brand',
-      items: [{ href: '/settings/branding', label: 'Branding', desc: 'Colors, logo, fonts.', icon: Palette }],
-    },
-    {
-      title: 'Compliance',
-      items: [
-        { href: '/settings/compliance', label: 'Compliance kit', desc: 'DPA, RoPA, EDPB flags.', icon: ShieldCheck },
-        { href: '/settings/eidas-rules', label: 'eIDAS routing', desc: 'SES active; AES / QES unavailable.', icon: Scale },
-        { href: '/settings/dsr', label: 'Data subject rights', desc: 'Articles 15 - 22 inbox.', icon: UserSearch },
-        { href: '/settings/audit-chain', label: 'Audit chain verify', desc: 'Walk the hash chain end-to-end.', icon: ShieldCheck },
-      ],
-    },
-    {
-      title: 'Billing',
-      items: [{ href: '/settings/billing', label: 'Plans + invoices', desc: 'Subscriptions and quotas.', icon: Receipt }],
-    },
+    { title: 'Workspace', description: 'People, presentation and your plan.', items: [
+      { href: '/settings/members', label: 'Members & roles', desc: 'Manage who can view, prepare and send documents.', icon: Users },
+      { href: '/settings/branding', label: 'Branding', desc: 'Choose your workspace logo, colors and fonts.', icon: Palette },
+      { href: '/settings/billing', label: 'Plans & invoices', desc: 'Review subscriptions, quotas and invoices.', icon: Receipt },
+    ] },
+    { title: 'Documents & signing', description: 'Signing rules and your authority to sign.', items: [
+      { href: '/settings/signing-policies', label: 'Signing workflows and policies', desc: 'Review owner-approved rules; execution is unavailable.', icon: ShieldCheck },
+      { href: '/settings/signing-authority', label: 'My signing authority', desc: 'Review your named authority, limits and revocation.', icon: KeyRound },
+      { href: '/settings/eidas-rules', label: 'Signature levels', desc: 'Simple signatures are active; AES and QES are unavailable.', icon: Scale },
+    ] },
+    { title: 'Connections & automation', description: 'Connect Hash with your applications and AI tools.', items: [
+      { href: '/settings/api-keys', label: 'API keys', desc: 'Workspace owners manage scoped API and MCP access.', icon: KeyRound },
+      { href: '/settings/webhooks', label: 'Webhooks', desc: 'Deliver signed status updates to another application.', icon: Webhook },
+      { href: '/settings/ai', label: 'AI provider', desc: 'Configure the model provider used by AI features.', icon: Bot },
+      { href: '/settings/integrations/brightcrm', label: 'BrightCRM connection', desc: 'Manage an optional CRM account connection.', icon: Link2 },
+    ] },
+    { title: 'Privacy & evidence', description: 'Privacy requests, compliance records and audit checks.', items: [
+      { href: '/settings/compliance', label: 'Compliance kit', desc: 'Review compliance records and configured advisory flags.', icon: ShieldCheck },
+      { href: '/settings/dsr', label: 'Data subject rights', desc: 'Manage requests for access, correction and erasure.', icon: UserSearch },
+      { href: '/settings/audit-chain', label: 'Audit chain verification', desc: 'Check the integrity of the retained event chain.', icon: ShieldCheck },
+    ] },
   ];
 </script>
 
-<div class="px-6 py-10 max-w-5xl mx-auto">
-  <div class="mb-8 space-y-2">
-    <p class="page-eyebrow">Settings</p>
-    <h1 class="page-title">Workspace</h1>
+<div class="mx-auto max-w-6xl px-6 py-10 space-y-8">
+  <div class="space-y-2">
+    <p class="page-eyebrow">{$ui('Workspace')}</p>
+    <h1 class="page-title">{$ui('Settings')}</h1>
+    <p class="max-w-2xl text-sm text-text-secondary">{$ui('Find the controls for your workspace in one place. Some changes require an owner.')}</p>
   </div>
 
-  <div class="space-y-8">
-    {#each groups as g (g.title)}
-      <section>
-        <h2 class="text-xs uppercase tracking-widest text-text-muted font-mono mb-3">{g.title}</h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {#each g.items as item (item.href)}
-            <a class="card p-4 hover:border-border-strong transition-colors" href={item.href}>
-              <div class="flex items-center gap-2 mb-1">
-                <item.icon class="size-4" />
-                <span class="font-medium">{item.label}</span>
+  <div class="grid gap-5 lg:grid-cols-2">
+    {#each groups as group (group.title)}
+      <section class="card overflow-hidden">
+        <div class="border-b border-border bg-bg-elevated px-5 py-4">
+          <h2 class="font-display text-lg text-text-primary">{$ui(group.title)}</h2>
+          <p class="mt-1 text-xs text-text-secondary">{$ui(group.description)}</p>
+        </div>
+        <div class="divide-y divide-border">
+          {#each group.items as item (item.href)}
+            <a href={item.href} class="group flex items-start gap-3 px-5 py-4 transition-colors hover:bg-bg-hover focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent">
+              <span class="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-bg-elevated"><item.icon class="size-4" /></span>
+              <div class="min-w-0 flex-1">
+                <span class="text-sm font-medium text-text-primary">{$ui(item.label)}</span>
+                <p class="mt-1 text-xs leading-relaxed text-text-secondary">{$ui(item.desc)}</p>
               </div>
-              <p class="text-sm text-text-secondary">{item.desc}</p>
+              <ArrowUpRight class="mt-1 size-4 shrink-0 text-text-secondary" />
             </a>
           {/each}
         </div>
       </section>
     {/each}
   </div>
+
+  <MCPConnectionGuide />
 </div>

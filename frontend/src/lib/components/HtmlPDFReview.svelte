@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { fetchVerifiedDocumentPDF, reviewHTMLDocument, type DocumentResponse } from '$lib/api/client';
   import type { PdfDoc } from '$lib/pdf';
@@ -141,43 +142,43 @@
   });
 </script>
 
-<section class="card p-6 mb-6 space-y-4" aria-label="Review generated PDF">
+<section class="card p-6 mb-6 space-y-4" aria-label={$ui("Review generated PDF")}>
   <div>
-    <h2 class="font-display text-lg">Review the generated PDF</h2>
-    <p class="text-sm text-text-secondary mt-1">Check the printed information, wording, page breaks and layout before sending. This review applies to this exact PDF.</p>
-    {#if hasSigningPage}<p class="text-sm mt-2">Review the final signing page too: both company and representative details, saved branding, and the two generated signature locations.</p>{/if}
+    <h2 class="font-display text-lg">{$ui("Review the generated PDF")}</h2>
+    <p class="text-sm text-text-secondary mt-1">{$ui("Check the printed information, wording, page breaks and layout before sending. This review applies to this exact PDF.")}</p>
+    {#if hasSigningPage}<p class="text-sm mt-2">{$ui("Review the final signing page too: both company and representative details, saved branding, and the two generated signature locations.")}</p>{/if}
   </div>
-  {#if revisionBlocked}<p role="note" class="text-sm text-warning">Save or reconcile the document values and wording before approving or sending. This PDF does not include unsaved local changes.</p>{/if}
-  {#if loading}<p role="status" class="text-sm">Loading and verifying the PDF…</p>{/if}
+  {#if revisionBlocked}<p role="note" class="text-sm text-warning">{$ui("Save or reconcile the document values and wording before approving or sending. This PDF does not include unsaved local changes.")}</p>{/if}
+  {#if loading}<p role="status" class="text-sm">{$ui("Loading and verifying the PDF…")}</p>{/if}
   {#if error}
-    <p role="alert" class="text-sm text-danger">{error}</p>
-    {#if !activePDF}<button type="button" class="btn btn-secondary" disabled={loading} onclick={loadPreview}>Retry PDF preview</button>{/if}
-    {#if activePDF}<button type="button" class="btn btn-secondary" disabled={rendering || busy} onclick={() => renderPage(pageNumber)}>Retry this page</button>{/if}
-    <button type="button" class="btn btn-secondary" disabled={busy} onclick={onRefresh}>Refresh document</button>
+    <p role="alert" class="text-sm text-danger">{$ui(error)}</p>
+    {#if !activePDF}<button type="button" class="btn btn-secondary" disabled={loading} onclick={loadPreview}>{$ui("Retry PDF preview")}</button>{/if}
+    {#if activePDF}<button type="button" class="btn btn-secondary" disabled={rendering || busy} onclick={() => renderPage(pageNumber)}>{$ui("Retry this page")}</button>{/if}
+    <button type="button" class="btn btn-secondary" disabled={busy} onclick={onRefresh}>{$ui("Refresh document")}</button>
   {/if}
   <div class="overflow-auto border border-border-light rounded-md bg-bg-elevated p-2">
     <canvas width="0" height="0" bind:this={canvas} aria-label={`Generated PDF, page ${pageNumber}`} class="max-w-full h-auto mx-auto"></canvas>
   </div>
   {#if pageCount > 0}
-    {#if !pageCountMatches}<p role="alert" class="text-sm text-danger">This PDF’s page count differs from its retained source. Refresh this document before reviewing it.</p>{/if}
+    {#if !pageCountMatches}<p role="alert" class="text-sm text-danger">{$ui("This PDF’s page count differs from its retained source. Refresh this document before reviewing it.")}</p>{/if}
     <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-      <button type="button" class="btn btn-secondary" disabled={loading || rendering || busy || pageNumber <= 1} onclick={() => renderPage(pageNumber - 1)}>Previous page</button>
-      <p role="status">Page {pageNumber} of {pageCount}{rendering ? ' · Rendering…' : ''}</p>
-      <button type="button" class="btn btn-secondary" disabled={loading || rendering || busy || pageNumber >= pageCount} onclick={() => renderPage(pageNumber + 1)}>Next page</button>
+      <button type="button" class="btn btn-secondary" disabled={loading || rendering || busy || pageNumber <= 1} onclick={() => renderPage(pageNumber - 1)}>{$ui("Previous page")}</button>
+      <p role="status">{$ui("Page")} {pageNumber} {$ui("of")} {pageCount}{$ui(rendering ? ' · Rendering…' : '')}</p>
+      <button type="button" class="btn btn-secondary" disabled={loading || rendering || busy || pageNumber >= pageCount} onclick={() => renderPage(pageNumber + 1)}>{$ui("Next page")}</button>
     </div>
   {/if}
   {#if document.html_review_required}
     {#if canReview}
       <label class="flex gap-3 items-start text-sm">
         <input type="checkbox" bind:checked={acknowledged} disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !!error} class="mt-1" />
-        <span>I have reviewed every page of this PDF and approve its printed content and layout{hasSigningPage ? ', including both printed parties and signature locations on the final signing page' : ''}.</span>
+        <span>{$ui("I have reviewed every page of this PDF and approve its printed content and layout")}{$ui(hasSigningPage ? ', including both printed parties and signature locations on the final signing page' : '')}.</span>
       </label>
-      {#if !allPagesSeen && pageCount > 0}<p class="text-sm text-text-secondary">Open every page before approving this PDF.</p>{/if}
-      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !acknowledged || !!error} onclick={approve}>{busy ? 'Recording review…' : 'Approve this PDF for sending'}</button>
+      {#if !allPagesSeen && pageCount > 0}<p class="text-sm text-text-secondary">{$ui("Open every page before approving this PDF.")}</p>{/if}
+      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !acknowledged || !!error} onclick={approve}>{$ui(busy ? 'Recording review…' : 'Approve this PDF for sending')}</button>
     {:else}
-      <p class="text-sm" role="note">The document's sender or an owner must review this PDF before it can be sent.</p>
+      <p class="text-sm" role="note">{$ui("The document's sender or an owner must review this PDF before it can be sent.")}</p>
     {/if}
   {:else}
-    <p class="text-sm text-success" role="status">This exact PDF has been reviewed. {hasSigningPage ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.'}</p>
+    <p class="text-sm text-success" role="status">{$ui("This exact PDF has been reviewed.")} {$ui(hasSigningPage ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}</p>
   {/if}
 </section>

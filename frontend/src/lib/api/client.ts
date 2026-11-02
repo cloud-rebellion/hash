@@ -122,12 +122,12 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
   return (await res.json()) as T;
 }
 
-export async function listTemplates(): Promise<{ templates: TemplateResponse[]; total: number }> {
+export async function listTemplates(): Promise<{ templates: TemplateResponse[]; total: number; starter_templates_available: boolean }> {
   return request('GET', '/api/v1/templates');
 }
 
-export async function getTemplate(id: string): Promise<TemplateResponse> {
-  return request('GET', `/api/v1/templates/${encodeURIComponent(id)}`);
+export async function getTemplate(id: string, signal?: AbortSignal): Promise<TemplateResponse> {
+  return request('GET', `/api/v1/templates/${encodeURIComponent(id)}`, undefined, signal);
 }
 
 export interface HTMLTemplateInput {
@@ -307,6 +307,20 @@ export async function fetchVerifiedDocumentPDF(documentID: string, expectedSHA25
     credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
   });
   if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  return readVerifiedPDF(res, expectedSHA256);
+}
+
+export async function fetchVerifiedTemplatePDF(templateID: string, version: number, expectedSHA256: string, signal: AbortSignal): Promise<Uint8Array> {
+  if (!Number.isInteger(version) || version < 1 || !/^[a-f0-9]{64}$/.test(expectedSHA256)) throw new Error('Refresh this template before opening its preview.');
+  const query = new URLSearchParams({ version: String(version), sha256: expectedSHA256 });
+  const res = await fetch(`/api/v1/templates/${encodeURIComponent(templateID)}/pdf?${query}`, {
+    credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
+  });
+  if (!res.ok) throw new APIError(res.status, await friendlyError(res));
+  if (res.headers.get('X-Hash-Template-Id') !== templateID || res.headers.get('X-Hash-Template-Version') !== String(version) || res.headers.get('X-Hash-PDF-SHA256') !== expectedSHA256) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error('The template changed. Refresh its preview.');
+  }
   return readVerifiedPDF(res, expectedSHA256);
 }
 

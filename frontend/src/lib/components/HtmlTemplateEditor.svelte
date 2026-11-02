@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getTemplate, createHTMLTemplate, updateHTMLTemplate, previewHTMLTemplate, approveHTMLTemplate,
@@ -340,158 +341,159 @@
 </script>
 
 <div class="px-6 py-10 max-w-6xl mx-auto space-y-6">
-  <a href="/templates" class="text-sm text-text-secondary hover:underline">Back to templates</a>
-  <header class="space-y-2"><p class="page-eyebrow">Reusable design</p><h1 class="page-title">{saved ? 'Edit HTML design' : 'New HTML design'}</h1>
-    <p class="text-sm text-text-secondary">Preserve the HTML/CSS layout, declare the information that changes, and save a revision for an owner to review. This does not send a document.</p></header>
-  {#if loading}<p role="status">Loading design and permissions…</p>{/if}
-  {#if error}<p role="alert" class="card p-4 text-danger text-sm">{error}</p>{/if}
-  {#if !loading && !me}<button class="btn btn-secondary" onclick={knownID ? readLatest : loadInitial}>{knownID ? 'Reload session and inspect saved revision' : 'Reload session'}</button>{/if}
-  {#if saved}<div class="text-sm space-y-1"><p>Saved version {saved.version} · {approved ? 'Approved revision' : 'Awaiting owner approval'}{dirty ? ' · Unsaved changes' : ''}</p>
-    {#if approved}<p class="text-text-secondary">Approved {new Date(saved.html_approval!.approved_at!).toLocaleString()}. Any saved source, default, wording or asset change creates a new revision for review.</p>{/if}
-    {#if !sourceID}<a href={`/templates/${saved.id}/html`} class="underline">Open this saved design’s permanent editor link</a>{/if}</div>{/if}
-  {#if needsRefresh || writeUncertain}<div class="card p-4 space-y-3 text-sm"><p>Your local inputs are retained. Inspect the current saved revision before another write.</p>
-    {#if acknowledgedSave}<p>Save acknowledged for version {acknowledgedSave.version}. <a class="underline" href={`/templates/${acknowledgedSave.id}/html`}>Open that saved design</a>.</p>{/if}
-    {#if knownID}<button class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>Check current saved revision</button>{:else}<a href="/templates" class="underline">Check the template library</a>{/if}</div>{/if}
-  {#if latest}<div class="card p-4 space-y-3 text-sm"><p>Current saved version {latest.version} · {isApprovedHTMLTemplate(latest) ? 'Approved' : 'Unapproved'}. Loading it will replace local editor and preview inputs.</p>
-    <button class="btn btn-secondary" disabled={!!busy} onclick={adoptLatest}>Load this saved revision</button></div>{/if}
+  <a href="/templates" class="text-sm text-text-secondary hover:underline">{$ui("Back to templates")}</a>
+  <header class="space-y-2"><p class="page-eyebrow">{$ui("Reusable design")}</p><h1 class="page-title">{$ui(saved ? 'Edit HTML design' : 'New HTML design')}</h1>
+    <p class="text-sm text-text-secondary">{$ui("Preserve the HTML/CSS layout, declare the information that changes, and save a revision for an owner to review. This does not send a document.")}</p></header>
+  {#if loading}<p role="status">{$ui("Loading design and permissions…")}</p>{/if}
+  {#if error}<p role="alert" class="card p-4 text-danger text-sm">{$ui(error)}</p>{/if}
+  {#if !loading && !me}<button class="btn btn-secondary" onclick={knownID ? readLatest : loadInitial}>{$ui(knownID ? 'Reload session and inspect saved revision' : 'Reload session')}</button>{/if}
+  {#if saved}<div class="text-sm space-y-1"><p>{$ui("Saved version")} {saved.version} · {$ui(approved ? 'Approved revision' : 'Awaiting owner approval')}{$ui(dirty ? ' · Unsaved changes' : '')}</p>
+    {#if approved}<p class="text-text-secondary">{$ui("Approved")} {new Date(saved.html_approval!.approved_at!).toLocaleString()}{$ui(". Any saved source, default, wording or asset change creates a new revision for review.")}</p>{/if}
+    {#if !sourceID}<a href={`/templates/${saved.id}/html`} class="underline">{$ui("Open this saved design’s permanent editor link")}</a>{/if}</div>{/if}
+  {#if needsRefresh || writeUncertain}<div class="card p-4 space-y-3 text-sm"><p>{$ui("Your local inputs are retained. Inspect the current saved revision before another write.")}</p>
+    {#if acknowledgedSave}<p>{$ui("Save acknowledged for version")} {acknowledgedSave.version}. <a class="underline" href={`/templates/${acknowledgedSave.id}/html`}>{$ui("Open that saved design")}</a>.</p>{/if}
+    {#if knownID}<button class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>{$ui("Check current saved revision")}</button>{:else}<a href="/templates" class="underline">{$ui("Check the template library")}</a>{/if}</div>{/if}
+  {#if latest}<div class="card p-4 space-y-3 text-sm"><p>{$ui("Current saved version")} {latest.version} · {$ui(isApprovedHTMLTemplate(latest) ? 'Approved' : 'Unapproved')}{$ui(". Loading it will replace local editor and preview inputs.")}</p>
+    <button class="btn btn-secondary" disabled={!!busy} onclick={adoptLatest}>{$ui("Load this saved revision")}</button></div>{/if}
   {#if !loading}
-    {#if !canWrite}<p role="note" class="text-sm">A sender or owner in this organisation may edit and preview designs. An owner must approve them.</p>{/if}
+    {#if !canWrite}<p role="note" class="text-sm">{$ui("A sender or owner in this organisation may edit and preview designs. An owner must approve them.")}</p>{/if}
     <form onsubmit={save} class="space-y-6">
       <fieldset disabled={!canWrite || !!busy || writeUncertain || needsRefresh} class="space-y-6 min-w-0">
-        <section class="card p-6 space-y-4" aria-label="Design source">
-          <label class="block text-sm">Design name<input bind:value={draft.name} required maxlength="200" class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
-          <p class="text-sm text-text-secondary">Use an HTML body fragment and separate print CSS. Scripts, event handlers, remote resources and forms are refused. Values use declared text markers.</p>
-          <label class="block text-sm">HTML body fragment<textarea bind:value={draft.html} spellcheck={false} rows="14" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
-          <label class="block text-sm">Print CSS<textarea bind:value={draft.css} spellcheck={false} rows="9" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
+        <section class="card p-6 space-y-4" aria-label={$ui("Design source")}>
+          <label class="block text-sm">{$ui("Design name")}<input bind:value={draft.name} required maxlength="200" class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
+          <p class="text-sm text-text-secondary">{$ui("Use an HTML body fragment and separate print CSS. Scripts, event handlers, remote resources and forms are refused. Values use declared text markers.")}</p>
+          <label class="block text-sm">{$ui("HTML body fragment")}<textarea bind:value={draft.html} spellcheck={false} rows="14" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
+          <label class="block text-sm">{$ui("Print CSS")}<textarea bind:value={draft.css} spellcheck={false} rows="9" class="mt-1 block w-full max-w-full px-3 py-2 font-mono text-xs rounded-md border border-border-light bg-bg-elevated"></textarea></label>
         </section>
-        <section class="card p-6 space-y-4" aria-label="Reviewed contract profile">
-          <h2 class="font-display text-lg">Contract checks and intended parties</h2>
+        <section class="card p-6 space-y-4" aria-label={$ui("Reviewed contract profile")}>
+          <h2 class="font-display text-lg">{$ui("Contract checks and intended parties")}</h2>
           <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version !== 1} onchange={changeProfile} class="mt-1" />
-            <span>Declare a reviewed proposal or ordinary B2B services profile. Hash requires both named parties and the mapped information before sending.</span></label>
-          <p class="text-sm text-text-secondary">Map these checks to values and wording printed by this design. An owner reviews the exact revision. These checks do not establish legal sufficiency, verify identity or prove representative authority.</p>
+            <span>{$ui("Declare a reviewed proposal or ordinary B2B services profile. Hash requires both named parties and the mapped information before sending.")}</span></label>
+          <p class="text-sm text-text-secondary">{$ui("Map these checks to values and wording printed by this design. An owner reviews the exact revision. These checks do not establish legal sufficiency, verify identity or prove representative authority.")}</p>
           {#if draft.contract_profile}
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <label class="text-sm">Profile identifier<input bind:value={draft.contract_profile.id} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-              <label class="text-sm">Profile version<input type="number" bind:value={draft.contract_profile.version} required min="1" max="1000000" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-              <label class="text-sm">Contract type<select value={draft.contract_profile.kind} onchange={changeProfileKind} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"><option value="proposal">Proposal</option><option value="b2b_services">Ordinary B2B services</option></select></label>
+              <label class="text-sm">{$ui("Profile identifier")}<input bind:value={draft.contract_profile.id} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">{$ui("Profile version")}<input type="number" bind:value={draft.contract_profile.version} required min="1" max="1000000" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">{$ui("Contract type")}<select value={draft.contract_profile.kind} onchange={changeProfileKind} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"><option value="proposal">{$ui("Proposal")}</option><option value="b2b_services">{$ui("Ordinary B2B services")}</option></select></label>
             </div>
             {#each draft.contract_profile.parties as party (party.slot)}
-              <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">{party.slot === 'provider' ? 'Our company (provider)' : 'Customer'}</h3>
+              <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">{$ui(party.slot === 'provider' ? 'Our company (provider)' : 'Customer')}</h3>
                 {#each htmlPartyBindings as binding (binding)}<label class="block text-sm">{htmlPartyLabels[binding]}
                   <select bind:value={party[binding]} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" required>
-                    <option value="">Choose a required printed value…</option>
+                    <option value="">{$ui("Choose a required printed value…")}</option>
                     {#each draft.values.filter((value) => value.required && value.name) as value (value.key)}<option value={value.name}>{value.name.replaceAll('_', ' ')}</option>{/each}
                   </select></label>{/each}
               </div>
             {/each}
-            <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">Commercial terms</h3>
-              <p class="text-sm text-text-secondary">Required term names: {requiredHTMLContractTerms(draft.contract_profile.kind).join(', ')}. Each needs its own printed value or wording section.</p>
+            <div class="border border-border-light rounded-md p-4 space-y-3"><h3 class="font-medium">{$ui("Commercial terms")}</h3>
+              <p class="text-sm text-text-secondary">{$ui("Required term names:")} {requiredHTMLContractTerms(draft.contract_profile.kind).join(', ')}{$ui(". Each needs its own printed value or wording section.")}</p>
               {#each draft.contract_profile.terms as term, index (index)}<div class="grid grid-cols-1 sm:grid-cols-[1fr_2fr_auto] gap-3 items-end">
-                <label class="text-sm">Term name<input bind:value={term.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-                <label class="text-sm">Printed information<select value={term.section !== undefined ? `section:${term.section}` : term.value ? `value:${term.value}` : ''} onchange={(event) => changeTermBinding(index, event)} required class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
-                  <option value="">Choose its own value or wording section…</option>
+                <label class="text-sm">{$ui("Term name")}<input bind:value={term.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+                <label class="text-sm">{$ui("Printed information")}<select value={term.section !== undefined ? `section:${term.section}` : term.value ? `value:${term.value}` : ''} onchange={(event) => changeTermBinding(index, event)} required class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
+                  <option value="">{$ui("Choose its own value or wording section…")}</option>
                   <optgroup label="Required printed values">{#each draft.values.filter((value) => value.required && value.name) as value (value.key)}<option value={`value:${value.name}`}>{value.name.replaceAll('_', ' ')}</option>{/each}</optgroup>
                   <optgroup label="Approved wording sections">{#each draft.sections.filter((section) => section.name) as section (section.key)}<option value={`section:${section.name}`}>{section.name.replaceAll('_', ' ')}</option>{/each}</optgroup>
                 </select></label>
-                <button type="button" class="btn btn-secondary text-xs" onclick={() => { if (draft.contract_profile) draft.contract_profile.terms = draft.contract_profile.terms.filter((_, i) => i !== index); }}>Remove</button>
+                <button type="button" class="btn btn-secondary text-xs" onclick={() => { if (draft.contract_profile) draft.contract_profile.terms = draft.contract_profile.terms.filter((_, i) => i !== index); }}>{$ui("Remove")}</button>
               </div>{/each}
-              <button type="button" class="btn btn-secondary" disabled={draft.contract_profile.terms.length >= 16} onclick={() => draft.contract_profile?.terms.push({ name: '', value: '' })}>Add another term</button>
+              <button type="button" class="btn btn-secondary" disabled={draft.contract_profile.terms.length >= 16} onclick={() => draft.contract_profile?.terms.push({ name: '', value: '' })}>{$ui("Add another term")}</button>
             </div>
-            <fieldset disabled={!canApprove || !!busy} class="border border-border-light rounded-md p-4 space-y-4" aria-label="Later-change policy in this agreement">
-              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={!!draft.contract_profile.amendment_policy} onchange={changeAmendmentPolicy} /><span>Include an owner-reviewed policy for later changes, using an existing printed agreement clause.</span></label>
-              <p class="text-sm text-text-secondary">Optional. Choose only processes the agreement permits. Hash records your declaration; it does not interpret the legal effect of the clause. Approval still requires review of the complete PDF.</p>
+            <fieldset disabled={!canApprove || !!busy} class="border border-border-light rounded-md p-4 space-y-4" aria-label={$ui("Later-change policy in this agreement")}>
+              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={!!draft.contract_profile.amendment_policy} onchange={changeAmendmentPolicy} /><span>{$ui("Include an owner-reviewed policy for later changes, using an existing printed agreement clause.")}</span></label>
+              <p class="text-sm text-text-secondary">{$ui("Optional. Choose only processes the agreement permits. Hash records your declaration; it does not interpret the legal effect of the clause. Approval still requires review of the complete PDF.")}</p>
               {#if draft.contract_profile.amendment_policy}
                 {@const policy = draft.contract_profile.amendment_policy}
-                <label class="block text-sm">Printed contract term<select class="input w-full mt-1" bind:value={policy.term} required><option value="">Choose an existing term</option>{#each draft.contract_profile.terms.filter(term => term.name) as term, index (index)}<option value={term.name}>{term.name.replaceAll('_', ' ')}</option>{/each}</select></label>
-                {#if amendmentClause}<div class="space-y-2"><p class="text-sm font-medium">Current design wording for this term</p><blockquote class="whitespace-pre-wrap break-words border-l-2 border-border-light pl-3 text-sm">{amendmentClause}</blockquote></div>{:else}<p class="text-sm text-text-secondary">The selected term needs actual wording. Edit its existing printed value or wording section below. For a value populated later, each document must supply the exact clause before its PDF can be sent.</p>{/if}
-                <label class="block text-sm">Clause reference quoted in that wording<input class="input w-full mt-1" bind:value={policy.clause_reference} required maxlength="512" /></label>
-                <fieldset class="space-y-2"><legend class="text-sm mb-2">Processes permitted by this clause</legend>{#each htmlAmendmentModes as mode}<label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={policy.allowed_modes.includes(mode)} onchange={(event) => changeAmendmentMode(mode, event.currentTarget.checked)} /><span>{htmlAmendmentModeLabels[mode]}</span></label>{/each}</fieldset>
-                {#if policy.allowed_modes.includes('agreed_notice')}<label class="flex gap-2 text-sm"><input type="checkbox" checked={policy.allowed_channels.includes('email')} onchange={(event) => { if (canApprove && !busy) policy.allowed_channels = event.currentTarget.checked ? ['email'] : []; }} />The printed clause permits notice by email</label>{/if}
-                <label class="block text-sm">Timing or other conditions quoted exactly from the clause<textarea class="input w-full mt-1" bind:value={policy.effective_condition} required maxlength="2048"></textarea></label>
-                <p class="text-sm text-text-secondary">The selected wording is already part of the document. This setting adds no hidden clause and generates no legal text. The exact clause and saved document version are preserved when that agreement is sent.</p>
+                <label class="block text-sm">{$ui("Printed contract term")}<select class="input w-full mt-1" bind:value={policy.term} required><option value="">{$ui("Choose an existing term")}</option>{#each draft.contract_profile.terms.filter(term => term.name) as term, index (index)}<option value={term.name}>{term.name.replaceAll('_', ' ')}</option>{/each}</select></label>
+                {#if amendmentClause}<div class="space-y-2"><p class="text-sm font-medium">{$ui("Current design wording for this term")}</p><blockquote class="whitespace-pre-wrap break-words border-l-2 border-border-light pl-3 text-sm">{amendmentClause}</blockquote></div>{:else}<p class="text-sm text-text-secondary">{$ui("The selected term needs actual wording. Edit its existing printed value or wording section below. For a value populated later, each document must supply the exact clause before its PDF can be sent.")}</p>{/if}
+                <label class="block text-sm">{$ui("Clause reference quoted in that wording")}<input class="input w-full mt-1" bind:value={policy.clause_reference} required maxlength="512" /></label>
+                <fieldset class="space-y-2"><legend class="text-sm mb-2">{$ui("Processes permitted by this clause")}</legend>{#each htmlAmendmentModes as mode}<label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={policy.allowed_modes.includes(mode)} onchange={(event) => changeAmendmentMode(mode, event.currentTarget.checked)} /><span>{htmlAmendmentModeLabels[mode]}</span></label>{/each}</fieldset>
+                {#if policy.allowed_modes.includes('agreed_notice')}<label class="flex gap-2 text-sm"><input type="checkbox" checked={policy.allowed_channels.includes('email')} onchange={(event) => { if (canApprove && !busy) policy.allowed_channels = event.currentTarget.checked ? ['email'] : []; }} />{$ui("The printed clause permits notice by email")}</label>{/if}
+                <label class="block text-sm">{$ui("Timing or other conditions quoted exactly from the clause")}<textarea class="input w-full mt-1" bind:value={policy.effective_condition} required maxlength="2048"></textarea></label>
+                <p class="text-sm text-text-secondary">{$ui("The selected wording is already part of the document. This setting adds no hidden clause and generates no legal text. The exact clause and saved document version are preserved when that agreement is sent.")}</p>
               {/if}
-              {#if !canApprove}<p class="text-sm text-text-secondary">An owner can change this optional setting. Existing saved settings remain part of this design revision.</p>{/if}
+              {#if !canApprove}<p class="text-sm text-text-secondary">{$ui("An owner can change this optional setting. Existing saved settings remain part of this design revision.")}</p>{/if}
             </fieldset>
-            <p class="text-sm text-text-secondary">Both representatives will sign; their names and email addresses come from the printed document values. Changing those values creates a fresh PDF for review. Pre-signing on someone’s behalf is unavailable.</p>
-            <div class="border border-border-light rounded-md p-4 space-y-4" aria-label="Appended signing page">
-              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 3} onchange={changeSigningPage} class="mt-1" /><span>Append a branded signing page with fixed signature locations for both parties.</span></label>
-              <p class="text-sm text-text-secondary">The saved page uses the same printed party details. Its appearance and signature locations require owner review of the complete PDF. Colours, fonts and logo stay fixed in documents made from this approved design.</p>
+            <p class="text-sm text-text-secondary">{$ui("Both representatives will sign; their names and email addresses come from the printed document values. Changing those values creates a fresh PDF for review. Pre-signing on someone’s behalf is unavailable.")}</p>
+            <div class="border border-border-light rounded-md p-4 space-y-4" aria-label={$ui("Appended signing page")}>
+              <label class="flex items-start gap-3 text-sm"><input type="checkbox" checked={draft.schema_version === 3} onchange={changeSigningPage} class="mt-1" /><span>{$ui("Append a branded signing page with fixed signature locations for both parties.")}</span></label>
+              <p class="text-sm text-text-secondary">{$ui("The saved page uses the same printed party details. Its appearance and signature locations require owner review of the complete PDF. Colours, fonts and logo stay fixed in documents made from this approved design.")}</p>
               {#if draft.signing_page}
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {#each htmlSigningPageColours as colour (colour)}<label class="text-sm">{htmlSigningPageColourLabels[colour]}<input type="color" value={draft.signing_page.branding[colour]} oninput={(event) => { if (draft.signing_page) draft.signing_page.branding[colour] = event.currentTarget.value.toUpperCase(); }} class="mt-1 block w-full h-10 border border-border-light rounded-md bg-bg-elevated" /></label>{/each}
                 </div>
-                <p class="text-sm text-text-secondary">Text and secondary text require at least 4.5:1 contrast with the background; headings and signatures require 3:1. Preview the saved page to inspect readability.</p>
-                <p class="text-sm">Heading and body font: bundled Inter, saved with this page design. This page supports the bundled Latin glyphs; other scripts require a future approved page design.</p>
-                <label class="block text-sm">Signing-page logo<select value={draft.signing_page.logo_asset} onchange={changeSigningLogo} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
-                  <option value="">No logo (saved choice)</option>
+                <p class="text-sm text-text-secondary">{$ui("Text and secondary text require at least 4.5:1 contrast with the background; headings and signatures require 3:1. Preview the saved page to inspect readability.")}</p>
+                <p class="text-sm">{$ui("Heading and body font: bundled Inter, saved with this page design. This page supports the bundled Latin glyphs; other scripts require a future approved page design.")}</p>
+                <label class="block text-sm">{$ui("Signing-page logo")}<select value={draft.signing_page.logo_asset} onchange={changeSigningLogo} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated">
+                  <option value="">{$ui("No logo (saved choice)")}</option>
                   {#each draft.assets.filter((asset) => ['image/png', 'image/jpeg'].includes(asset.media_type)) as asset (asset.name)}<option value={asset.name}>{asset.name.replaceAll('_', ' ')}</option>{/each}
                 </select></label>
-                {#if draft.signing_page.logo_asset}<label class="block text-sm">Logo description (80 characters and display units)<input bind:value={draft.signing_page.logo_alt} required maxlength="160" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>{/if}
-                <p class="text-sm text-text-secondary">Choose a local image added below, or approve the explicit no-logo choice. Review its size and readability on the final preview page.</p>
+                {#if draft.signing_page.logo_asset}<label class="block text-sm">{$ui("Logo description (80 characters and display units)")}<input bind:value={draft.signing_page.logo_alt} required maxlength="160" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>{/if}
+                <p class="text-sm text-text-secondary">{$ui("Choose a local image added below, or approve the explicit no-logo choice. Review its size and readability on the final preview page.")}</p>
               {/if}
             </div>
             {#if profileProblem}<p class="text-sm text-warning" role="status">{profileProblem}</p>{/if}
-          {:else}<p class="text-sm text-text-secondary">This generic version 1 design has no declared contract profile. Its owner and sender must review completeness and intended parties themselves.</p>{/if}
+          {:else}<p class="text-sm text-text-secondary">{$ui("This generic version 1 design has no declared contract profile. Its owner and sender must review completeness and intended parties themselves.")}</p>{/if}
         </section>
-        <section class="card p-6 space-y-4" aria-label="Declared values and defaults">
-          <h2 class="font-display text-lg">Declared values and saved defaults</h2>
-          <p class="text-sm text-text-secondary">Use an empty text marker such as <code class="break-all">&lt;span data-hash-value="company_name"&gt;&lt;/span&gt;</code>. Names use lowercase letters, digits and underscores. Required defaults may stay blank until a document is populated.</p>
+        <section class="card p-6 space-y-4" aria-label={$ui("Declared values and defaults")}>
+          <h2 class="font-display text-lg">{$ui("Declared values and saved defaults")}</h2>
+          <p class="text-sm text-text-secondary">{$ui("Use an empty text marker such as")} <code class="break-all">&lt;span data-hash-value="company_name"&gt;&lt;/span&gt;</code>{$ui(". Names use lowercase letters, digits and underscores. Required defaults may stay blank until a document is populated.")}</p>
           {#each draft.values as value (value.key)}<div class="border border-border-light rounded-md p-4 space-y-3">
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><label class="text-sm">Value name<input bind:value={value.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-              <label class="text-sm">Character limit<input type="number" bind:value={value.max_chars} required min="1" max="8192" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label></div>
-            <label class="flex items-center gap-2 text-sm"><input type="checkbox" bind:checked={value.required} /> Required when populated</label>
-            <label class="block text-sm">Saved default text<textarea bind:value={value.default_value} rows="2" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>
-            <button type="button" class="btn btn-secondary text-xs" onclick={() => draft.values = draft.values.filter((row) => row.key !== value.key)}>Remove declaration</button>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><label class="text-sm">{$ui("Value name")}<input bind:value={value.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">{$ui("Character limit")}<input type="number" bind:value={value.max_chars} required min="1" max="8192" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label></div>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" bind:checked={value.required} /> {$ui("Required when populated")}</label>
+            <label class="block text-sm">{$ui("Saved default text")}<textarea bind:value={value.default_value} rows="2" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>
+            <button type="button" class="btn btn-secondary text-xs" onclick={() => draft.values = draft.values.filter((row) => row.key !== value.key)}>{$ui("Remove declaration")}</button>
           </div>{/each}
-          <button type="button" class="btn btn-secondary" disabled={draft.values.length >= 64} onclick={addValue}>Add declared value</button>
+          <button type="button" class="btn btn-secondary" disabled={draft.values.length >= 64} onclick={addValue}>{$ui("Add declared value")}</button>
         </section>
-        <section class="card p-6 space-y-4" aria-label="Approved wording sections">
-          <h2 class="font-display text-lg">Wording sections</h2>
-          <p class="text-sm text-text-secondary">Use one empty text marker per section, such as <code class="break-all">&lt;div data-hash-section="scope"&gt;&lt;/div&gt;</code>. Formatting belongs outside the marker. An owner reviews every saved wording change; Hash does not determine legal completeness.</p>
+        <section class="card p-6 space-y-4" aria-label={$ui("Approved wording sections")}>
+          <h2 class="font-display text-lg">{$ui("Wording sections")}</h2>
+          <p class="text-sm text-text-secondary">{$ui("Use one empty text marker per section, such as")} <code class="break-all">&lt;div data-hash-section="scope"&gt;&lt;/div&gt;</code>{$ui(". Formatting belongs outside the marker. An owner reviews every saved wording change; Hash does not determine legal completeness.")}</p>
           {#each draft.sections as section (section.key)}<div class="border border-border-light rounded-md p-4 space-y-3">
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><label class="text-sm">Section name<input bind:value={section.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-              <label class="text-sm">Character limit<input type="number" bind:value={section.max_chars} required min="1" max="32768" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label></div>
-            <label class="block text-sm">Saved wording<textarea bind:value={section.default_text} rows="5" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>
-            <button type="button" class="btn btn-secondary text-xs" onclick={() => draft.sections = draft.sections.filter((row) => row.key !== section.key)}>Remove section</button>
-          </div>{/each}<button type="button" class="btn btn-secondary" disabled={draft.sections.length >= 64} onclick={addSection}>Add wording section</button>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><label class="text-sm">{$ui("Section name")}<input bind:value={section.name} required maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+              <label class="text-sm">{$ui("Character limit")}<input type="number" bind:value={section.max_chars} required min="1" max="32768" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label></div>
+            <label class="block text-sm">{$ui("Saved wording")}<textarea bind:value={section.default_text} rows="5" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>
+            <button type="button" class="btn btn-secondary text-xs" onclick={() => draft.sections = draft.sections.filter((row) => row.key !== section.key)}>{$ui("Remove section")}</button>
+          </div>{/each}<button type="button" class="btn btn-secondary" disabled={draft.sections.length >= 64} onclick={addSection}>{$ui("Add wording section")}</button>
         </section>
-        <section class="card p-6 space-y-4" aria-label="Local design assets">
-          <h2 class="font-display text-lg">Local images and fonts</h2><p class="text-sm text-text-secondary">PNG, JPEG, WOFF and WOFF2 only: 2 MiB per file, 16 files / 8 MiB total. Reference them as <code>hash-asset:asset_name</code> in supported image or font locations. Files are validated and scanned on save; inspect them in the PDF preview.</p>
-          {#each draft.assets as asset (asset.name)}<div class="border border-border-light rounded-md p-3 text-sm space-y-2"><p class="break-words">{asset.name} · {asset.media_type} · {Math.ceil(assetByteLength(asset) / 1024)} KiB</p><p class="font-mono text-xs break-all">SHA-256 {asset.sha256}</p>
-            <button type="button" class="btn btn-secondary text-xs" disabled={draft.signing_page?.logo_asset === asset.name} onclick={() => draft.assets = draft.assets.filter((row) => row.name !== asset.name)}>Remove asset</button>
-            {#if draft.signing_page?.logo_asset === asset.name}<p class="text-text-secondary">This is the saved signing-page logo. Choose another image or no logo before removing it.</p>{/if}</div>{/each}
-          <label class="block text-sm">New asset name<input bind:value={assetName} maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
-          <label class="block text-sm">Local file<input type="file" bind:this={assetFile} onchange={() => { pendingAssetFile = assetFile?.files?.[0] ?? null; }} accept=".png,.jpg,.jpeg,.woff,.woff2" class="mt-1 block w-full text-sm" /></label>
-          <button type="button" class="btn btn-secondary" disabled={draft.assets.length >= 16} onclick={addAsset}>Add local asset</button>
-          {#if assetDraftDirty}<p class="text-sm text-text-secondary">This local selection is not part of the design until added.</p><button type="button" class="btn btn-secondary text-xs" onclick={() => { assetName = ''; pendingAssetFile = null; if (assetFile) assetFile.value = ''; }}>Clear local selection</button>{/if}
+        <section class="card p-6 space-y-4" aria-label={$ui("Local design assets")}>
+          <h2 class="font-display text-lg">{$ui("Local images and fonts")}</h2><p class="text-sm text-text-secondary">{$ui("PNG, JPEG, WOFF and WOFF2 only: 2 MiB per file, 16 files / 8 MiB total. Reference them as")} <code>hash-asset:asset_name</code> {$ui("in supported image or font locations. Files are validated and scanned on save; inspect them in the PDF preview.")}</p>
+          {#each draft.assets as asset (asset.name)}<div class="border border-border-light rounded-md p-3 text-sm space-y-2"><p class="break-words">{asset.name} · {asset.media_type} · {Math.ceil(assetByteLength(asset) / 1024)} {$ui("KiB")}</p><p class="font-mono text-xs break-all">{$ui("SHA-256")} {asset.sha256}</p>
+            <button type="button" class="btn btn-secondary text-xs" disabled={draft.signing_page?.logo_asset === asset.name} onclick={() => draft.assets = draft.assets.filter((row) => row.name !== asset.name)}>{$ui("Remove asset")}</button>
+            {#if draft.signing_page?.logo_asset === asset.name}<p class="text-text-secondary">{$ui("This is the saved signing-page logo. Choose another image or no logo before removing it.")}</p>{/if}</div>{/each}
+          <label class="block text-sm">{$ui("New asset name")}<input bind:value={assetName} maxlength="64" class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated" /></label>
+          <label class="block text-sm">{$ui("Local file")}<input type="file" bind:this={assetFile} onchange={() => { pendingAssetFile = assetFile?.files?.[0] ?? null; }} accept=".png,.jpg,.jpeg,.woff,.woff2" class="mt-1 block w-full text-sm" /></label>
+          <button type="button" class="btn btn-secondary" disabled={!pendingAssetFile || draft.assets.length >= 16} onclick={addAsset}>{$ui("Add local asset")}</button>
+          {#if !pendingAssetFile}<p class="text-sm text-text-secondary">{$ui("Choose a local file before adding an asset.")}</p>{/if}
+          {#if assetDraftDirty}<p class="text-sm text-text-secondary">{$ui("This local selection is not part of the design until added.")}</p><button type="button" class="btn btn-secondary text-xs" onclick={() => { assetName = ''; pendingAssetFile = null; if (assetFile) assetFile.value = ''; }}>{$ui("Clear local selection")}</button>{/if}
         </section>
       </fieldset>
-      <div class="flex flex-wrap gap-2"><button class="btn btn-primary" type="submit" disabled={!canWrite || !!busy || needsRefresh || writeUncertain || (!!saved && !dirty)}>{busy === 'save' ? 'Saving revision…' : saved ? 'Save new revision' : 'Save design'}</button>
-        {#if saved}<button type="button" class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>Inspect saved revision</button>{/if}</div>
+      <div class="flex flex-wrap gap-2"><button class="btn btn-primary" type="submit" disabled={!canWrite || !!busy || needsRefresh || writeUncertain || (!!saved && !dirty)}>{$ui(busy === 'save' ? 'Saving revision…' : saved ? 'Save new revision' : 'Save design')}</button>
+        {#if saved}<button type="button" class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>{$ui("Inspect saved revision")}</button>{/if}</div>
     </form>
   {/if}
   {#if saved}
-    <section class="card p-6 space-y-4" aria-label="Saved design preview and approval">
-      <h2 class="font-display text-lg">Preview saved revision {saved.version}</h2>
-      <p class="text-sm text-text-secondary">These values and wording samples are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.</p>
-      {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.</p>{/if}
-      {#if dirty}<p class="text-sm text-warning" role="note">Save the editor changes before generating a new preview.</p>{/if}
+    <section class="card p-6 space-y-4" aria-label={$ui("Saved design preview and approval")}>
+      <h2 class="font-display text-lg">{$ui("Preview saved revision")} {saved.version}</h2>
+      <p class="text-sm text-text-secondary">{$ui("These values and wording samples are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.")}</p>
+      {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">{$ui("This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.")}</p>{/if}
+      {#if dirty}<p class="text-sm text-warning" role="note">{$ui("Save the editor changes before generating a new preview.")}</p>{/if}
       <fieldset disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} class="space-y-3">
-        {#each htmlTemplateFields(saved) as field (field.name)}<label class="block text-sm capitalize">Preview {field.label}{field.required ? ' (required)' : ''}<textarea bind:value={samples[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
-        {#each saved.html_master_json?.sections ?? [] as section (section.name)}<label class="block text-sm capitalize">Preview-only {section.name.replaceAll('_', ' ')} wording<textarea bind:value={sectionSamples[section.name]} rows="4" maxlength={section.max_chars * 2} placeholder={section.default_text ? undefined : 'Enter synthetic wording for owner preview'} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
+        {#each htmlTemplateFields(saved) as field (field.name)}<label class="block text-sm capitalize">{$ui("Preview")} {field.label}{$ui(field.required ? ' (required)' : '')}<textarea bind:value={samples[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
+        {#each saved.html_master_json?.sections ?? [] as section (section.name)}<label class="block text-sm capitalize">{$ui("Preview-only")} {section.name.replaceAll('_', ' ')} {$ui("wording")}<textarea bind:value={sectionSamples[section.name]} rows="4" maxlength={section.max_chars * 2} placeholder={section.default_text ? undefined : 'Enter synthetic wording for owner preview'} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
       </fieldset>
-      <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{busy === 'preview' ? 'Rendering saved design…' : 'Generate PDF preview'}</button>
+      <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{$ui(busy === 'preview' ? 'Rendering saved design…' : 'Generate PDF preview')}</button>
       {#if preview}
         {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} />{/key}
-        {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">This preview is no longer current. Generate a new preview before approving.</p>{/if}
+        {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">{$ui("This preview is no longer current. Generate a new preview before approving.")}</p>{/if}
         {#if canApprove && !approved}
-          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>I have reviewed every PDF page, saved source, defaults, wording, local assets{saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : ''}{saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : ''}, and approve this exact design revision. Preview sample values and wording are separate from saved defaults.</span></label>
-          {#if !allPagesSeen}<p class="text-sm text-text-secondary">Open every page before approving this revision.</p>{/if}
-          <button type="button" class="btn btn-primary" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision'}</button>
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>{$ui("I have reviewed every PDF page, saved source, defaults, wording, local assets")}{$ui(saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : '')}{$ui(saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : '')}{$ui(", and approve this exact design revision. Preview sample values and wording are separate from saved defaults.")}</span></label>
+          {#if !allPagesSeen}<p class="text-sm text-text-secondary">{$ui("Open every page before approving this revision.")}</p>{/if}
+          <button type="button" class="btn btn-primary" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{$ui(busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision')}</button>
         {/if}
       {/if}
-      {#if !canApprove && !approved}<p role="note" class="text-sm">An owner must open this saved revision and generate their own preview before approving it.</p>{/if}
-      {#if approved}<p role="status" class="text-sm text-success">This saved revision is approved. Return to the template library to populate a fresh document.</p>{/if}
+      {#if !canApprove && !approved}<p role="note" class="text-sm">{$ui("An owner must open this saved revision and generate their own preview before approving it.")}</p>{/if}
+      {#if approved}<p role="status" class="text-sm text-success">{$ui("This saved revision is approved. Return to the template library to populate a fresh document.")}</p>{/if}
     </section>
   {/if}
 </div>

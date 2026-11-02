@@ -44,7 +44,7 @@ func (s *Server) listOwnedTemplatesV1(w http.ResponseWriter, r *http.Request, us
 		}
 		out = append(out, response)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"templates": out, "total": result.Total, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"templates": out, "total": result.Total, "limit": limit, "offset": offset, "starter_templates_available": s.Environment != "production"})
 }
 
 // This is the existing list-only public metadata projection. It never creates

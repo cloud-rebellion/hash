@@ -126,14 +126,17 @@ test('shared logout form binds the actual submit handler, busy controls and acce
   expect(binding(form, 'onsubmit')).toBe('submit'); expect(binding(form, 'aria-busy')).toBe('busy');
   expect(textAttribute(button, 'type')).toBe('submit'); expect(binding(button, 'disabled')).toBe('busy');
   const alert = nodes.find(node => node.type === 'RegularElement' && textAttribute(node, 'role') === 'alert');
-  expect(alert).toBeDefined(); expect(alert.fragment.nodes.some((node: any) => node.type === 'ExpressionTag' && node.expression.name === 'error')).toBe(true);
+  expect(alert).toBeDefined(); expect(alert.fragment.nodes.some((node: any) => node.type === 'ExpressionTag' && node.expression.type === 'CallExpression' && node.expression.callee.name === '$ui' && node.expression.arguments[0].name === 'error')).toBe(true);
 });
 
-for (const [route, compact] of [['+layout.svelte', true], ['+page.svelte', false]] as const) {
+for (const [route, file, importPath, compact] of [
+  ['ProfileMenu.svelte', './ProfileMenu.svelte', './LogoutButton.svelte', true],
+  ['+page.svelte', '../../routes/+page.svelte', '$lib/components/LogoutButton.svelte', false]
+] as const) {
   test(`${route} integrates the shared logout component with its existing button size`, () => {
-    const text = readFileSync(new URL(`../../routes/${route}`, import.meta.url), 'utf8');
+    const text = readFileSync(new URL(file, import.meta.url), 'utf8');
     const parsed: any = parse(text, { modern: true });
-    const imported = parsed.instance.content.body.find((node: any) => node.type === 'ImportDeclaration' && node.source.value === '$lib/components/LogoutButton.svelte');
+    const imported = parsed.instance.content.body.find((node: any) => node.type === 'ImportDeclaration' && node.source.value === importPath);
     expect(imported).toBeDefined(); expect(imported.specifiers).toHaveLength(1); expect(imported.specifiers[0].local.name).toBe('LogoutButton');
     const nodes = astNodes(parsed), callers = nodes.filter(node => node.type === 'Component' && node.name === 'LogoutButton');
     expect(callers).toHaveLength(1); expect(attribute(callers[0], 'compact') === true).toBe(compact);

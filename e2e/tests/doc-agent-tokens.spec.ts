@@ -34,7 +34,7 @@ test.describe('per-document agent tokens (v1.1)', () => {
     expect(mintRes.status()).toBe(201);
     const minted = await mintRes.json();
     expect(typeof minted.token).toBe('string');
-    expect(minted.token.startsWith('mth_')).toBe(true);
+    expect(minted.token.startsWith('hash_')).toBe(true);
     expect(minted.prefix).toMatch(/^d[0-9a-f]{32}$/);
     expect(minted.scopes).toEqual(['read']);
 

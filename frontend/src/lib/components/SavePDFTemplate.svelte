@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { listFields, listRecipients, savePDFSigningTemplate, type DocumentResponse } from '$lib/api/client';
 
@@ -54,30 +55,30 @@
   }
 </script>
 
-<section class="card p-6 mb-6" aria-label="Save PDF signing layout">
-  <h2 class="font-display text-lg mb-2">Save PDF signing layout</h2>
-  <p class="text-sm text-text-secondary mb-4">The PDF text and signature positions are reused. Choose a name for each party slot; new contracts ask for fresh names and email addresses.</p>
+<section class="card p-6 mb-6" aria-label={$ui("Save PDF signing layout")}>
+  <h2 class="font-display text-lg mb-2">{$ui("Save PDF signing layout")}</h2>
+  <p class="text-sm text-text-secondary mb-4">{$ui("The PDF text and signature positions are reused. Choose a name for each party slot; new contracts ask for fresh names and email addresses.")}</p>
   {#if document.updated_at !== sourceStamp || document.status !== 'draft'}
-    <p role="alert" class="text-sm text-danger mb-4">The draft changed. Close this form and reopen it to review the current layout.</p>
+    <p role="alert" class="text-sm text-danger mb-4">{$ui("The draft changed. Close this form and reopen it to review the current layout.")}</p>
   {/if}
   {#if loading}
-    <p>Loading signature assignments…</p>
+    <p>{$ui("Loading signature assignments…")}</p>
   {:else}
     <form onsubmit={save} class="space-y-4">
-      <label class="block text-sm">Template name
+      <label class="block text-sm">{$ui("Template name")}
         <input bind:value={name} required maxlength="200" disabled={saving} class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
       </label>
       {#each parties as party (party.recipient_id)}
         <fieldset class="border border-border-light rounded-md p-4 space-y-2" disabled={saving}>
-          <legend class="text-sm px-1">Signature positions currently assigned to {party.source_name}</legend>
-          <label class="block text-sm">Party label <input bind:value={party.label} required maxlength="100" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
-          <label class="block text-sm">Party role <input bind:value={party.role} required pattern={'[a-z][a-z0-9_-]{0,63}'} maxlength="64" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
+          <legend class="text-sm px-1">{$ui("Signature positions currently assigned to")} {party.source_name}</legend>
+          <label class="block text-sm">{$ui("Party label")} <input bind:value={party.label} required maxlength="100" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
+          <label class="block text-sm">{$ui("Party role")} <input bind:value={party.role} required pattern={'[a-z][a-z0-9_-]{0,63}'} maxlength="64" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
         </fieldset>
       {/each}
-      {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
+      {#if error}<p role="alert" class="text-sm text-danger">{$ui(error)}</p>{/if}
       <div class="flex gap-2">
-        <button class="btn btn-primary" type="submit" disabled={saving || !parties.length || document.updated_at !== sourceStamp || document.status !== 'draft'}>{saving ? 'Saving…' : 'Save template'}</button>
-        <button class="btn btn-secondary" type="button" disabled={saving} onclick={onClose}>Cancel</button>
+        <button class="btn btn-primary" type="submit" disabled={saving || !parties.length || document.updated_at !== sourceStamp || document.status !== 'draft'}>{$ui(saving ? 'Saving…' : 'Save template')}</button>
+        <button class="btn btn-secondary" type="button" disabled={saving} onclick={onClose}>{$ui("Cancel")}</button>
       </div>
     </form>
   {/if}

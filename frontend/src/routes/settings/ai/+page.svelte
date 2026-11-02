@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import {
     getOrgAIProvider,
@@ -91,23 +92,17 @@
 
 <div class="px-6 py-10 max-w-3xl mx-auto">
   <div class="mb-8 space-y-2">
-    <p class="page-eyebrow">Settings · AI</p>
-    <h1 class="page-title">AI provider</h1>
+    <p class="page-eyebrow">{$ui("Settings · AI")}</p>
+    <h1 class="page-title">{$ui("AI provider")}</h1>
   </div>
 
   <p class="text-sm text-text-secondary mb-6 leading-relaxed">
-    Bring your own AI: route this org's risk analysis, clarification and
-    negotiation calls to your own provider and key instead of the platform
-    default. Your key is encrypted at rest and never shown again. Shield
-    tokenization masks configured terms and recognised patterns before a prompt
-    is sent, but it is not complete anonymisation and may not detect a personal
-    name that appears only in free-form clause text. Approve the provider and
-    data-processing scope accordingly.
+    {$ui("Bring your own AI: route this org's risk analysis, clarification and negotiation calls to your own provider and key instead of the platform default. Your key is encrypted at rest and never shown again. Shield tokenization masks configured terms and recognised patterns before a prompt is sent, but it is not complete anonymisation and may not detect a personal name that appears only in free-form clause text. Approve the provider and data-processing scope accordingly.")}
   </p>
 
   {#if error}
     <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-4">
-      {error}
+      {$ui(error)}
     </div>
   {/if}
 
@@ -120,14 +115,11 @@
   {:else if cfg && !cfg.byoai_available}
     <div class="card p-5 border-l-4 border-warning">
       <h2 class="font-display font-extralight text-lg mb-1 flex items-center gap-2">
-        <TriangleAlert class="size-4" /> Not available on this instance
+        <TriangleAlert class="size-4" /> {$ui("Not available on this instance")}
       </h2>
       <p class="text-sm text-text-secondary leading-relaxed">
-        This Hash instance has no AI key-encryption key configured, so a
-        bring-your-own key cannot be stored securely. All AI calls use the
-        platform default provider. Ask your operator to set
-        <code class="font-mono text-xs">HASH_AI_SHIELD_KEY</code> to enable
-        this.
+        {$ui("This Hash instance has no AI key-encryption key configured, so a bring-your-own key cannot be stored securely. All AI calls use the platform default provider. Ask your operator to set")}
+        <code class="font-mono text-xs">HASH_AI_SHIELD_KEY</code> {$ui("to enable this.")}
       </p>
     </div>
   {:else if cfg}
@@ -135,7 +127,7 @@
       <div class="flex items-center justify-between mb-4">
         <h2 class="font-display font-extralight text-lg flex items-center gap-2">
           <Bot class="size-4" />
-          {cfg.configured ? 'Your provider' : 'Use your own provider'}
+          {$ui(cfg.configured ? 'Your provider' : 'Use your own provider')}
         </h2>
         {#if cfg.configured}
           <span
@@ -143,30 +135,30 @@
               ? 'text-success border-success'
               : 'text-text-muted border-border-light'}"
           >
-            {cfg.enabled ? 'active' : 'disabled'}
+            {$ui(cfg.enabled ? 'active' : 'disabled')}
           </span>
         {/if}
       </div>
 
       {#if !cfg.configured}
         <p class="text-sm text-text-muted mb-4">
-          Currently using the platform default provider. Configure your own below.
+          {$ui("Currently using the platform default provider. Configure your own below.")}
         </p>
       {/if}
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
         <label class="flex flex-col gap-2 text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Provider</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Provider")}</span>
           <select
             bind:value={fProvider}
             class="px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
-            <option value="mistral">Mistral (EU)</option>
-            <option value="anthropic">Anthropic</option>
+            <option value="mistral">{$ui("Mistral (EU)")}</option>
+            <option value="anthropic">{$ui("Anthropic")}</option>
           </select>
         </label>
         <label class="flex flex-col gap-2 text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Model</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Model")}</span>
           <input
             type="text"
             bind:value={fModel}
@@ -175,7 +167,7 @@
           />
         </label>
         <label class="flex flex-col gap-2 text-sm sm:col-span-2">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Base URL</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Base URL")}</span>
           <input
             type="text"
             bind:value={fBaseURL}
@@ -183,11 +175,11 @@
             class="px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
           <span class="text-xs text-text-muted">
-            Point at an EU-hosted endpoint to keep AI processing in-region.
+            {$ui("Point at an EU-hosted endpoint to keep AI processing in-region.")}
           </span>
         </label>
         <label class="flex flex-col gap-2 text-sm sm:col-span-2">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">API key</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("API key")}</span>
           <input
             type="password"
             bind:value={fKey}
@@ -206,7 +198,7 @@
       </div>
 
       <label class="flex items-center gap-2 text-sm mb-4">
-        <input type="checkbox" bind:checked={fEnabled} /> Route this org's AI calls to this provider
+        <input type="checkbox" bind:checked={fEnabled} /> {$ui("Route this org's AI calls to this provider")}
       </label>
 
       <div class="flex items-center gap-3">
@@ -215,21 +207,21 @@
           onclick={save}
           disabled={saving}
         >
-          {saving ? 'Saving...' : cfg.configured ? 'Save changes' : 'Save provider'}
+          {$ui(saving ? 'Saving...' : cfg.configured ? 'Save changes' : 'Save provider')}
         </button>
         {#if cfg.configured}
           <button class="btn btn-secondary" onclick={remove}>
-            <Trash2 class="size-4" /> Remove
+            <Trash2 class="size-4" /> {$ui("Remove")}
           </button>
         {/if}
         {#if saved}
           <span class="text-xs text-success flex items-center gap-1">
-            <ShieldCheck class="size-3" /> Saved
+            <ShieldCheck class="size-3" /> {$ui("Saved")}
           </span>
         {/if}
         {#if cfg.configured && cfg.updated_at}
           <span class="text-xs text-text-muted ml-auto">
-            Updated {new Date(cfg.updated_at).toLocaleString()}
+            {$ui("Updated")} {new Date(cfg.updated_at).toLocaleString()}
           </span>
         {/if}
       </div>

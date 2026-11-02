@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/stores';
@@ -650,20 +651,20 @@
   }
 </script>
 
-<section class="card p-5 mb-6 min-w-0" aria-label="Recipients and sending">
+<section class="card p-5 mb-6 min-w-0" aria-label={$ui("Recipients and sending")}>
   {#if documentChanged}
     <div role="alert" class="mb-4 text-danger">
-      <p>The current document differs from this retained recipient draft. Sending and recipient changes are blocked.</p>
-      <button type="button" class="btn btn-secondary" onclick={discardRetainedDraft}>Discard retained draft and open current document</button>
+      <p>{$ui("The current document differs from this retained recipient draft. Sending and recipient changes are blocked.")}</p>
+      <button type="button" class="btn btn-secondary" onclick={discardRetainedDraft}>{$ui("Discard retained draft and open current document")}</button>
     </div>
   {/if}
   <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <Users class="size-4" /> {modeCopy.sectionTitle}
+      <Users class="size-4" /> {$ui(modeCopy.sectionTitle)}
     </h2>
     {#if editable && !recipientIdentityLocked}
       <button class="btn btn-secondary text-xs" onclick={openAdd} disabled={otherMutationBusy || documentChanged || saving || !!busy}>
-        <Plus class="size-3" /> Add recipient
+        <Plus class="size-3" /> {$ui("Add recipient")}
       </button>
     {/if}
   </div>
@@ -671,14 +672,14 @@
   {#if editable}
     <div class="flex flex-wrap items-center gap-2 mb-4 pb-4 border-b border-border-light">
       <span class="text-xs uppercase tracking-widest text-text-muted font-mono">
-        {requiresSignature ? 'Default email language' : 'Ceremony language'}
+        {$ui(requiresSignature ? 'Default email language' : 'Ceremony language')}
       </span>
       {#if requiresSignature}
         <select
           bind:value={docLocale}
           onchange={changeDocLocale}
           disabled={otherMutationBusy || documentChanged || savingLocale || !!busy || saving}
-          aria-label="Default email language"
+          aria-label={$ui("Default email language")}
           class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm"
         >
           {#each LOCALES as l (l.code)}
@@ -686,57 +687,57 @@
           {/each}
         </select>
       {:else}
-        <span class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm">English</span>
+        <span class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm">{$ui("English")}</span>
       {/if}
       <span class="text-xs text-text-muted">
-        {savingLocale ? 'Saving...' : modeCopy.defaultLanguageHelp}
+        {$ui(savingLocale ? 'Saving...' : modeCopy.defaultLanguageHelp)}
       </span>
     </div>
   {/if}
 
   <p class="text-sm text-text-secondary mb-4 leading-relaxed">
     {#if editable}
-      {modeCopy.editableDescription}
+      {$ui(modeCopy.editableDescription)}
     {:else if isLive}
-      {modeCopy.liveDescription}
+      {$ui(modeCopy.liveDescription)}
     {:else if isCompleted}
-      {modeCopy.completedDescription}
+      {$ui(modeCopy.completedDescription)}
     {:else}
-      This document is {status}. No further sending actions are available.
+      {$ui("This document is")} {$ui(status)}{$ui(". No further sending actions are available.")}
     {/if}
   </p>
   {#if status==='sealing' || packageUncertain || pendingPackageAttempt}
-    <div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 text-sm space-y-2" aria-label="Package Send status">
-      <p>{packageUncertain ? 'Send needs inspection. Do not repeat the earlier action.' : status==='sealing' ? 'Hash is securing the complete contract package. Invitations will be queued when that finishes.' : 'This package has a persisted Send attempt.'}</p>
-      <button class="btn btn-secondary" disabled={checkingPackage || !!busy} onclick={reconcilePackageSend}>{checkingPackage ? 'Checking…' : 'Check Send status'}</button>
+    <div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 text-sm space-y-2" aria-label={$ui("Package Send status")}>
+      <p>{$ui(packageUncertain ? 'Send needs inspection. Do not repeat the earlier action.' : status==='sealing' ? 'Hash is securing the complete contract package. Invitations will be queued when that finishes.' : 'This package has a persisted Send attempt.')}</p>
+      <button class="btn btn-secondary" disabled={checkingPackage || !!busy} onclick={reconcilePackageSend}>{$ui(checkingPackage ? 'Checking…' : 'Check Send status')}</button>
     </div>
   {/if}
   {#if packageReviewRequired}
     <div class="rounded-md border border-warning p-4 mb-4 text-sm space-y-2" role="alert">
-      <p>The saved document or attachment selection needs a fresh review before Send can be retried.</p>
-      <button class="btn btn-secondary" disabled={packageReconciliationBusy || crmBusy || !!busy || saving || savingLocale || !!removingID || checkingPackage} onclick={reconcilePackageSelection}>Inspect saved document and attachments</button>
-      <p>Inspect the current files, then choose Use inspected saved agreement and attachments in the attachment section.</p>
+      <p>{$ui("The saved document or attachment selection needs a fresh review before Send can be retried.")}</p>
+      <button class="btn btn-secondary" disabled={packageReconciliationBusy || crmBusy || !!busy || saving || savingLocale || !!removingID || checkingPackage} onclick={reconcilePackageSelection}>{$ui("Inspect saved document and attachments")}</button>
+      <p>{$ui("Inspect the current files, then choose Use inspected saved agreement and attachments in the attachment section.")}</p>
     </div>
   {/if}
-  {#if intendedParties.length}<div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 space-y-3 text-sm" aria-label="Required contract parties">
-    <p class="font-medium">Both declared parties must sign</p>
-    <p>These representatives match the printed contract. Change identity details in document values and review the fresh PDF; this section can change their email language.</p>
-    {#each intendedParties as party (party.slot)}<div class="space-y-1 break-words"><p><strong>{party.slot === 'provider' ? 'Our company' : 'Customer'}:</strong> {party.company_name} · {party.company_id}</p><p>{party.name} · {party.email}</p><p class="text-xs text-text-secondary">Declared authority: {party.representative_authority}</p></div>{/each}
-    <p class="text-xs text-text-secondary">Identity and authority are declarations, not independent verification. These checks do not establish legal sufficiency.</p>
+  {#if intendedParties.length}<div class="rounded-md border border-border-light bg-bg-elevated p-4 mb-4 space-y-3 text-sm" aria-label={$ui("Required contract parties")}>
+    <p class="font-medium">{$ui("Both declared parties must sign")}</p>
+    <p>{$ui("These representatives match the printed contract. Change identity details in document values and review the fresh PDF; this section can change their email language.")}</p>
+    {#each intendedParties as party (party.slot)}<div class="space-y-1 break-words"><p><strong>{$ui(party.slot === 'provider' ? 'Our company' : 'Customer')}:</strong> {party.company_name} · {party.company_id}</p><p>{party.name} · {party.email}</p><p class="text-xs text-text-secondary">{$ui("Declared authority:")} {party.representative_authority}</p></div>{/each}
+    <p class="text-xs text-text-secondary">{$ui("Identity and authority are declarations, not independent verification. These checks do not establish legal sufficiency.")}</p>
     {#if partyConflicts.length && !loading}<ul class="list-disc pl-5 text-warning" role="alert">{#each partyConflicts as issue, index (index)}<li>{issue}</li>{/each}</ul>{/if}
   </div>{/if}
 
   {#if editable && requiresSignature && signerRoles.length > 0}
     <div class="rounded-md border border-border-light bg-bg-elevated p-3 mb-4 text-sm">
-      <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-2">Required signature fields</p>
+      <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-2">{$ui("Required signature fields")}</p>
       <ul class="space-y-1">
         {#each signatureFields as f}
           {@const filled = recipients.some((r) => r.role === f.role.trim().toLowerCase())}
           <li class="flex items-center gap-2">
             <span class="inline-block size-1.5 rounded-full {filled ? 'bg-success' : 'bg-warning'}"></span>
             <span>{f.label}</span>
-            <span class="text-text-muted text-xs">· role: {f.role}</span>
-            {#if !filled}<span class="text-warning text-xs">missing a recipient with this role</span>{/if}
+            <span class="text-text-muted text-xs">{$ui("· role:")} {f.role}</span>
+            {#if !filled}<span class="text-warning text-xs">{$ui("missing a recipient with this role")}</span>{/if}
           </li>
         {/each}
       </ul>
@@ -745,13 +746,13 @@
 
   {#if error}
     <div role="alert" class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
-      {error}
+      {$ui(error)}
     </div>
   {/if}
   {#if recipientRefreshError}
     <div role="alert" class="mb-4 text-danger">
-      <p>Recipients could not be refreshed. {recipientRefreshError}</p>
-      <button type="button" class="btn btn-secondary" disabled={loading || documentChanged} onclick={refresh}>Retry recipient refresh</button>
+      <p>{$ui("Recipients could not be refreshed.")} {recipientRefreshError}</p>
+      <button type="button" class="btn btn-secondary" disabled={loading || documentChanged} onclick={refresh}>{$ui("Retry recipient refresh")}</button>
     </div>
   {/if}
 
@@ -759,37 +760,33 @@
     {#if sendErr.status === 402}
       <div class="card p-4 mb-4 border-l-4 border-warning">
         <h3 class="font-display font-extralight text-base mb-1 flex items-center gap-2">
-          <CreditCard class="size-4" /> Plan limit reached
+          <CreditCard class="size-4" /> {$ui("Plan limit reached")}
         </h3>
         <p class="text-sm text-text-secondary mb-3 leading-relaxed">{sendErr.message}</p>
         <a class="btn btn-primary text-xs" href={sendErr.upgradeURL || '/settings/billing'}>
-          <ArrowUpRight class="size-3" /> Upgrade plan
+          <ArrowUpRight class="size-3" /> {$ui("Upgrade plan")}
         </a>
       </div>
     {:else if sendErr.status === 409 && !sendErr.requiredTier && /\bCRM\b/i.test(sendErr.message)}
       <div class="card p-4 mb-4 border-l-4 border-warning" role="alert">
-        <p class="text-sm mb-3">CRM information or its mapping review changed. Refresh it and review the exact values before sending.</p>
-        <button type="button" class="btn btn-secondary" disabled={otherMutationBusy || !!busy} onclick={() => onCRMReviewRequired?.()}>Refresh CRM information</button>
+        <p class="text-sm mb-3">{$ui("CRM information or its mapping review changed. Refresh it and review the exact values before sending.")}</p>
+        <button type="button" class="btn btn-secondary" disabled={otherMutationBusy || !!busy} onclick={() => onCRMReviewRequired?.()}>{$ui("Refresh CRM information")}</button>
       </div>
     {:else if sendErr.status === 409 && sendErr.requiredTier}
       <div class="card p-4 mb-4 border-l-4 border-warning">
         <h3 class="font-display font-extralight text-base mb-1 flex items-center gap-2">
-          <ShieldAlert class="size-4" /> {requiresSignature ? 'Signature tier unavailable' : 'Ceremony assurance tier unavailable'}
+          <ShieldAlert class="size-4" /> {$ui(requiresSignature ? 'Signature tier unavailable' : 'Ceremony assurance tier unavailable')}
         </h3>
         <p class="text-sm text-text-secondary mb-2 leading-relaxed">
           {#if requiresSignature}
-            This document requires <strong>{sendErr.requiredTier}</strong> signing.
-            Hash currently supports production signing at SES only, so this send is blocked
-            and will not be silently downgraded.
+            {$ui("This document requires")} <strong>{sendErr.requiredTier}</strong> {$ui("signing. Hash currently supports production signing at SES only, so this send is blocked and will not be silently downgraded.")}
           {:else}
-            This document requires <strong>{sendErr.requiredTier}</strong> assurance.
-            Hash currently supports production acknowledgement ceremonies at SES only, so this
-            send is blocked and will not be silently downgraded.
+            {$ui("This document requires")} <strong>{sendErr.requiredTier}</strong> {$ui("assurance. Hash currently supports production acknowledgement ceremonies at SES only, so this send is blocked and will not be silently downgraded.")}
           {/if}
         </p>
         {#if sendErr.matchedRules && sendErr.matchedRules.length}
           <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-1">
-            Triggered by
+            {$ui("Triggered by")}
           </p>
           <ul class="text-sm text-text-secondary list-disc pl-5 mb-3">
             {#each sendErr.matchedRules as rule}
@@ -797,7 +794,7 @@
             {/each}
           </ul>
         {/if}
-        <a class="btn btn-secondary text-xs" href="/settings/eidas-rules">Review unavailable-tier rules</a>
+        <a class="btn btn-secondary text-xs" href="/settings/eidas-rules">{$ui("Review unavailable-tier rules")}</a>
       </div>
     {:else}
       <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
@@ -809,43 +806,43 @@
   {#if showForm}
     <div class="card p-4 mb-4">
       <h3 class="font-display font-extralight text-base mb-3">
-        {editingId ? 'Edit recipient' : 'New recipient'}
+        {$ui(editingId ? 'Edit recipient' : 'New recipient')}
       </h3>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <label class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Name</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Name")}</span>
           <input
             type="text"
             disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fName}
-            placeholder="Jane Andersson"
+            placeholder={$ui("Jane Andersson")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
         <label class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Email</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Email")}</span>
           <input
             type="email"
             disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fEmail}
-            placeholder="jane@example.com"
+            placeholder={$ui("jane@example.com")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
         <label class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Role</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Role")}</span>
           <select
             disabled={otherMutationBusy || recipientIdentityLocked}
             bind:value={fRole}
             class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
             {#each roleOptions as o}
-              <option value={o.value}>{o.label}</option>
+              <option value={o.value}>{$ui(o.label)}</option>
             {/each}
           </select>
         </label>
         <div class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Language</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Language")}</span>
           {#if requiresSignature}
             <select
               bind:value={fLocale}
@@ -856,37 +853,37 @@
               {/each}
             </select>
           {:else}
-            <div class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">English</div>
+            <div class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">{$ui("English")}</div>
           {/if}
-          <span class="text-xs text-text-muted">{modeCopy.recipientLanguageHelp}</span>
+          <span class="text-xs text-text-muted">{$ui(modeCopy.recipientLanguageHelp)}</span>
         </div>
       </div>
       <div class="flex flex-wrap gap-2">
         <button class="btn btn-primary" onclick={submitForm} disabled={otherMutationBusy || documentChanged || saving || !!busy || savingLocale}>
-          {saving ? 'Saving...' : editingId ? 'Save changes' : 'Add recipient'}
+          {$ui(saving ? 'Saving...' : editingId ? 'Save changes' : 'Add recipient')}
         </button>
-        <button class="btn btn-secondary" onclick={() => closeForm()} disabled={saving || !!busy}>Cancel</button>
+        <button class="btn btn-secondary" onclick={() => closeForm()} disabled={saving || !!busy}>{$ui("Cancel")}</button>
       </div>
     </div>
   {/if}
 
   {#if loading && !recipients.length}
-    <p class="text-text-muted text-sm">Loading...</p>
+    <p class="text-text-muted text-sm">{$ui("Loading...")}</p>
   {:else if recipients.length === 0}
     <p class="text-text-muted text-sm mb-4">
-      No recipients yet.{#if editable}{' '}{modeCopy.emptyRecipients}{/if}
+      {$ui("No recipients yet.")}{#if editable}{' '}{$ui(modeCopy.emptyRecipients)}{/if}
     </p>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll all recipient columns.) -->
-    <div class="max-w-full overflow-x-auto mb-4" role="region" aria-label="Recipient details" tabindex="0">
+    <div class="max-w-full overflow-x-auto mb-4" role="region" aria-label={$ui("Recipient details")} tabindex="0">
     <table class="recipient-table w-full text-sm">
       <thead>
         <tr class="text-left text-xs uppercase tracking-widest text-text-muted">
-          <th class="py-2">Recipient</th>
-          <th>Role</th>
-          <th>Status</th>
+          <th class="py-2">{$ui("Recipient")}</th>
+          <th>{$ui("Role")}</th>
+          <th>{$ui("Status")}</th>
           {#if editable}
-            <th class="text-right">Actions</th>
+            <th class="text-right">{$ui("Actions")}</th>
           {/if}
         </tr>
       </thead>
@@ -897,9 +894,9 @@
               <div class="font-medium">{r.name}</div>
               <div class="text-xs text-text-muted">{r.email}</div>
             </td>
-            <td class="capitalize"><span class="mobile-recipient-label" aria-hidden="true">Role: </span>{r.role}<span class="text-text-muted normal-case"> · {r.locale}</span></td>
+            <td class="capitalize"><span class="mobile-recipient-label" aria-hidden="true">{$ui("Role:")} </span>{$ui(r.role)}<span class="text-text-muted normal-case"> · {r.locale}</span></td>
             <td>
-              <span class="mobile-recipient-label" aria-hidden="true">Status: </span>
+              <span class="mobile-recipient-label" aria-hidden="true">{$ui("Status:")} </span>
               <span
                 class="inline-block text-xs px-2 py-0.5 rounded-full border capitalize {pill(r.status)}"
                 title={r.status === 'accepted'
@@ -912,12 +909,12 @@
                       ? `Sent ${ts(r.sent_at)}`
                       : ''}
               >
-                {r.status}
+                {$ui(r.status)}
               </span>
             </td>
             {#if editable}
               <td class="recipient-actions text-right whitespace-nowrap">
-                <span class="mobile-recipient-label" aria-hidden="true">Actions: </span>
+                <span class="mobile-recipient-label" aria-hidden="true">{$ui("Actions:")} </span>
                 <button class="btn btn-secondary text-xs" aria-label={recipientIdentityLocked ? `Email language for ${r.name}` : `Edit ${r.name}`} disabled={otherMutationBusy || documentChanged || saving || !!busy || (recipientIdentityLocked && !intendedParties.some((party) => party.recipient_id === r.id))} onclick={() => openEdit(r)}>
                   <Pencil class="size-3" />
                 </button>
@@ -937,7 +934,7 @@
 	{#if editable}
 		<div class="mb-4 rounded-md border border-border-light bg-bg-elevated p-3 space-y-2">
 			<label class="block text-sm" for="lawful-basis">
-				<span class="text-xs uppercase tracking-widest text-text-muted font-mono">{modeCopy.lawfulBasisLabel}</span>
+				<span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui(modeCopy.lawfulBasisLabel)}</span>
 				<select
 					id="lawful-basis"
 					bind:value={lawfulBasis}
@@ -945,14 +942,14 @@
 					class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg text-sm"
 					required
 				>
-					<option value="" disabled>Select the controller-approved basis…</option>
+					<option value="" disabled>{$ui("Select the controller-approved basis…")}</option>
 					{#each lawfulBasisOptions as option (option.value)}
-						<option value={option.value}>{option.label}</option>
+						<option value={option.value}>{$ui(option.label)}</option>
 					{/each}
 				</select>
 			</label>
 			<p class="text-xs text-text-muted">
-				Your organisation is the controller and must confirm that Art. 6(1)(b) actually applies to this document. Hash currently blocks ceremonies requiring another basis; it does not determine legal effect or choose a basis for you.
+				{$ui("Your organisation is the controller and must confirm that Art. 6(1)(b) actually applies to this document. Hash currently blocks ceremonies requiring another basis; it does not determine legal effect or choose a basis for you.")}
 			</p>
 		</div>
 	{/if}
@@ -964,56 +961,56 @@
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
       {#if preSignMode === 'manual'}<button class="btn btn-primary" onclick={send} disabled={packageUncertain || packageReviewRequired || attachmentsBlocked || crmBlocked || otherMutationBusy || revisionBlocked || reviewRequired || (generatedPlacementRequired && !generatedPlacementReady) || documentChanged || loading || !!recipientRefreshError || partyConflicts.length > 0 || !!busy || saving || savingLocale || !!removingID || recipientDraftChanged() || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
-        <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
+        <Send class="size-4" /> {$ui(busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction)}
       </button>{/if}
       {#if attachmentsBlocked}
         <span class="text-xs text-warning">{attachmentsMessage || "Review and reconcile the saved attachments before sending."}</span>
       {:else if preSignBusy || preSignRecoveryBlocked}
-        <span class="text-xs text-warning">Inspect and resolve the original pre-signing request before another sending action.</span>
+        <span class="text-xs text-warning">{$ui("Inspect and resolve the original pre-signing request before another sending action.")}</span>
       {:else if crmBlocked || crmBusy || externalMutationBusy}
-        <span class="text-xs text-warning">Refresh, review and apply any pending CRM information before sending.</span>
+        <span class="text-xs text-warning">{$ui("Refresh, review and apply any pending CRM information before sending.")}</span>
       {:else if revisionBlocked}
-        <span class="text-xs text-warning">Save or reconcile the document values and wording before sending.</span>
+        <span class="text-xs text-warning">{$ui("Save or reconcile the document values and wording before sending.")}</span>
       {:else if reviewRequired}
-        <span class="text-xs text-warning">Review the generated PDF above before sending.</span>
+        <span class="text-xs text-warning">{$ui("Review the generated PDF above before sending.")}</span>
       {:else if generatedPlacementRequired && !generatedPlacementReady}
-        <span class="text-xs text-warning">Verify the generated signature locations above before sending. Refresh the document if they differ from its intended parties.</span>
+        <span class="text-xs text-warning">{$ui("Verify the generated signature locations above before sending. Refresh the document if they differ from its intended parties.")}</span>
       {:else if partyConflicts.length > 0}
-        <span class="text-xs text-warning">Resolve the declared party conflicts before sending.</span>
+        <span class="text-xs text-warning">{$ui("Resolve the declared party conflicts before sending.")}</span>
       {:else if !hasParticipant}
-        <span class="text-xs text-text-muted">{modeCopy.missingParticipant}</span>
+        <span class="text-xs text-text-muted">{$ui(modeCopy.missingParticipant)}</span>
       {:else if missingRoles.length > 0}
-        <span class="text-xs text-warning">Add a recipient for: {missingRoles.join(', ')}.</span>
+        <span class="text-xs text-warning">{$ui("Add a recipient for:")} {missingRoles.join(', ')}.</span>
       {/if}
     {:else if isLive}
       <button class="btn btn-secondary" onclick={remind} disabled={otherMutationBusy || documentChanged || !!busy}>
-        <Bell class="size-4" /> {busy === 'remind' ? 'Sending...' : 'Send reminder'}
+        <Bell class="size-4" /> {$ui(busy === 'remind' ? 'Sending...' : 'Send reminder')}
       </button>
       <button class="btn btn-secondary" onclick={voidDoc} disabled={otherMutationBusy || documentChanged || !!busy}>
-        <Ban class="size-4" /> {busy === 'void' ? 'Voiding...' : 'Void document'}
+        <Ban class="size-4" /> {$ui(busy === 'void' ? 'Voiding...' : 'Void document')}
       </button>
       {#if remindedFlash !== null}
         <span class="text-xs text-success">
-          Reminder sent to {remindedFlash} pending recipient{remindedFlash === 1 ? '' : 's'}.
+          {$ui("Reminder sent to")} {remindedFlash} {$ui("pending recipient")}{$staffLocale === 'sv' ? '' : remindedFlash === 1 ? '' : 's'}.
         </span>
       {/if}
     {:else if isCompleted}
       <a class="btn btn-primary" href={finalPdfURL(documentID)} download>
-        <Download class="size-4" /> {modeCopy.completedPDF}
+        <Download class="size-4" /> {$ui(modeCopy.completedPDF)}
       </a>
       <a class="btn btn-secondary" href={auditCertURL(documentID)} download>
-        <FileCheck class="size-4" /> {modeCopy.auditCertificate}
+        <FileCheck class="size-4" /> {$ui(modeCopy.auditCertificate)}
       </a>
     {:else if isTerminal}
-      <span class="text-sm text-text-muted capitalize">Document {status}.</span>
+      <span class="text-sm text-text-muted capitalize">{$ui("Document")} {$ui(status)}.</span>
     {/if}
   </div>
 
   {#if links && links.length}
     <div class="card p-4 mt-4 border-l-4 border-warning">
-      <h3 class="font-display font-extralight text-base mb-1">{modeCopy.linksTitle}</h3>
+      <h3 class="font-display font-extralight text-base mb-1">{$ui(modeCopy.linksTitle)}</h3>
       <p class="text-xs text-text-secondary mb-3 leading-relaxed">
-        {modeCopy.linksDescription}
+        {$ui(modeCopy.linksDescription)}
       </p>
       <ul class="divide-y divide-border-light">
         {#each links as l (l.recipient_id)}
@@ -1023,7 +1020,7 @@
               <code class="font-mono text-xs text-text-muted break-all">{l.url}</code>
             </div>
             <button class="btn btn-secondary text-xs" onclick={() => copyLink(l)}>
-              <Copy class="size-3" /> {copiedID === l.recipient_id ? 'Copied' : 'Copy'}
+              <Copy class="size-3" /> {$ui(copiedID === l.recipient_id ? 'Copied' : 'Copy')}
             </button>
           </li>
         {/each}

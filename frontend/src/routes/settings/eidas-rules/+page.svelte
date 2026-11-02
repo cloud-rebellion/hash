@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import {
     listEIDASRules,
@@ -311,39 +312,36 @@
 <div class="px-6 py-10 max-w-5xl mx-auto">
   <div class="mb-8 flex items-baseline justify-between">
     <div class="space-y-2">
-      <p class="page-eyebrow">Settings · Compliance</p>
-      <h1 class="page-title">eIDAS routing rules</h1>
+      <p class="page-eyebrow">{$ui("Settings · Compliance")}</p>
+      <h1 class="page-title">{$ui("eIDAS routing rules")}</h1>
     </div>
     <div class="flex gap-2">
       <button
         class="btn btn-secondary"
         onclick={seed}
         disabled
-        title="Unavailable while AES and QES signing are disabled"
+        title={$ui("Unavailable while AES and QES signing are disabled")}
       >
-        <Sparkles class="size-4" /> Swedish defaults unavailable
+        <Sparkles class="size-4" /> {$ui("Swedish defaults unavailable")}
       </button>
       <button class="btn btn-primary" onclick={openNew}>
-        <Plus class="size-4" /> New rule
+        <Plus class="size-4" /> {$ui("New rule")}
       </button>
     </div>
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Production signing currently supports SES only. AES and QES are not
-    production-capable and cannot be selected or reactivated. Existing higher-tier
-    rules remain visible so you can deactivate or delete them; any document that
-    requires one of those tiers is blocked rather than silently downgraded to SES.
+    {$ui("Production signing currently supports SES only. AES and QES are not production-capable and cannot be selected or reactivated. Existing higher-tier rules remain visible so you can deactivate or delete them; any document that requires one of those tiers is blocked rather than silently downgraded to SES.")}
   </p>
 
   {#if error}
-    <div class="card p-4 mb-4 text-danger text-sm">{error}</div>
+    <div class="card p-4 mb-4 text-danger text-sm">{$ui(error)}</div>
   {/if}
 
   {#if showForm}
     <section class="card p-5 mb-6">
       <h2 class="font-display font-extralight text-lg mb-4">
-        {editingId ? 'Edit rule' : 'New rule'}
+        {$ui(editingId ? 'Edit rule' : 'New rule')}
       </h2>
 
       {#if formError}
@@ -354,27 +352,27 @@
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
         <label class="text-sm sm:col-span-2">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Name</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Name")}</span>
           <input
             type="text"
             bind:value={fName}
-            placeholder="SES routing note"
+            placeholder={$ui("SES routing note")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
         <label class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Required tier</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Required tier")}</span>
           <select
             bind:value={fTier}
             class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
-            <option value="SES">SES (simple)</option>
-            <option value="AES" disabled>AES (unavailable)</option>
-            <option value="QES" disabled>QES (unavailable)</option>
+            <option value="SES">{$ui("SES (simple)")}</option>
+            <option value="AES" disabled>{$ui("AES (unavailable)")}</option>
+            <option value="QES" disabled>{$ui("QES (unavailable)")}</option>
           </select>
         </label>
         <label class="text-sm">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Priority</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Priority")}</span>
           <input
             type="number"
             bind:value={fPriority}
@@ -382,20 +380,20 @@
           />
         </label>
         <label class="text-sm sm:col-span-2">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Reason (shown to the sender when this rule blocks a send)</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Reason (shown to the sender when this rule blocks a send)")}</span>
           <input
             type="text"
             bind:value={fReason}
-            placeholder="Reason shown when this rule matches."
+            placeholder={$ui("Reason shown when this rule matches.")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
       </div>
 
       <div class="flex items-center justify-between mb-2">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Conditions</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Conditions")}</span>
         <button class="btn btn-secondary text-xs" onclick={toggleAdvanced}>
-          {advanced ? 'Visual builder' : 'Edit as JSON'}
+          {$ui(advanced ? 'Visual builder' : 'Edit as JSON')}
         </button>
       </div>
 
@@ -407,22 +405,21 @@
           class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm font-mono"
         ></textarea>
         <p class="text-xs text-text-muted mt-1">
-          Leaf: <code class="font-mono">{'{ "field": "amount", "op": ">=", "value": 100000 }'}</code>.
-          Combine with <code class="font-mono">{'{ "all": [...] }'}</code> or
+          {$ui("Leaf:")} <code class="font-mono">{'{ "field": "amount", "op": ">=", "value": 100000 }'}</code>{$ui(". Combine with")} <code class="font-mono">{'{ "all": [...] }'}</code> {$ui("or")}
           <code class="font-mono">{'{ "any": [...] }'}</code>.
         </p>
       {:else}
         {#if conds.length > 1}
           <div class="flex items-center gap-2 text-sm mb-2">
-            <span class="text-text-muted">Match</span>
+            <span class="text-text-muted">{$ui("Match")}</span>
             <select
               bind:value={combinator}
               class="px-2 py-1 rounded-md border border-border-light bg-bg-elevated text-sm"
             >
-              <option value="all">all</option>
-              <option value="any">any</option>
+              <option value="all">{$ui("all")}</option>
+              <option value="any">{$ui("any")}</option>
             </select>
-            <span class="text-text-muted">of the following</span>
+            <span class="text-text-muted">{$ui("of the following")}</span>
           </div>
         {/if}
         <div class="space-y-2">
@@ -440,7 +437,7 @@
                 <input
                   type="text"
                   bind:value={c.varKey}
-                  placeholder="variable key"
+                  placeholder={$ui("variable key")}
                   class="px-2 py-2 rounded-md border border-border-light bg-bg-elevated text-sm w-36"
                 />
               {/if}
@@ -467,24 +464,24 @@
           {/each}
         </div>
         <button class="btn btn-secondary text-xs mt-2" onclick={addCond}>
-          <Plus class="size-3" /> Add condition
+          <Plus class="size-3" /> {$ui("Add condition")}
         </button>
 
         <div class="mt-3">
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Predicate</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Predicate")}</span>
           <pre class="mt-1 p-3 rounded-md border border-border-light bg-bg-elevated text-xs font-mono overflow-x-auto">{predicatePreview}</pre>
         </div>
       {/if}
 
       <div class="flex items-center gap-4 mt-4">
         <label class="flex items-center gap-2 text-sm">
-          <input type="checkbox" bind:checked={fActive} /> Active
+          <input type="checkbox" bind:checked={fActive} /> {$ui("Active")}
         </label>
         <div class="flex gap-2 ml-auto">
           <button class="btn btn-primary" onclick={save} disabled={saving}>
-            {saving ? 'Saving...' : editingId ? 'Save changes' : 'Create rule'}
+            {$ui(saving ? 'Saving...' : editingId ? 'Save changes' : 'Create rule')}
           </button>
-          <button class="btn btn-secondary" onclick={() => (showForm = false)}>Cancel</button>
+          <button class="btn btn-secondary" onclick={() => (showForm = false)}>{$ui("Cancel")}</button>
         </div>
       </div>
     </section>
@@ -492,23 +489,23 @@
 
   <section class="card p-5 mb-6">
     <h2 class="font-display font-extralight text-lg mb-4 flex items-center gap-2">
-      <Scale class="size-4" /> Active rules
+      <Scale class="size-4" /> {$ui("Active rules")}
     </h2>
     {#if loading}
-      <p class="text-text-muted text-sm">Loading...</p>
+      <p class="text-text-muted text-sm">{$ui("Loading...")}</p>
     {:else if rules.length === 0}
       <p class="text-text-muted text-sm">
-        No rules yet. Click <em>New rule</em> to add an SES routing rule.
+        {$ui("No rules yet. Click")} <em>{$ui("New rule")}</em> {$ui("to add an SES routing rule.")}
       </p>
     {:else}
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-xs uppercase tracking-widest text-text-muted">
-            <th class="py-2">Name</th>
-            <th>Tier</th>
-            <th>Priority</th>
-            <th>Active</th>
-            <th class="text-right">Actions</th>
+            <th class="py-2">{$ui("Name")}</th>
+            <th>{$ui("Tier")}</th>
+            <th>{$ui("Priority")}</th>
+            <th>{$ui("Active")}</th>
+            <th class="text-right">{$ui("Actions")}</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-border-light">
@@ -519,7 +516,7 @@
                 <div class="text-xs text-text-muted">{r.reason}</div>
               </td>
               <td class="font-mono text-xs {tierColor(r.required_tier)}">
-                {r.required_tier}{r.required_tier === 'AES' || r.required_tier === 'QES' ? ' · unavailable' : ''}
+                {r.required_tier}{$ui(r.required_tier === 'AES' || r.required_tier === 'QES' ? ' · unavailable' : '')}
               </td>
               <td class="font-mono text-xs">{r.priority}</td>
               <td>
@@ -527,9 +524,9 @@
                   class="text-xs font-mono underline decoration-dotted"
                   onclick={() => toggleActive(r)}
                   disabled={!r.active && (r.required_tier === 'AES' || r.required_tier === 'QES')}
-                  title="Toggle active"
+                  title={$ui("Toggle active")}
                 >
-                  {r.active ? 'yes' : 'no'}
+                  {$ui(r.active ? 'yes' : 'no')}
                 </button>
               </td>
               <td class="text-right whitespace-nowrap">
@@ -556,15 +553,14 @@
 
   <section class="card p-5">
     <h2 class="font-display font-extralight text-lg mb-1 flex items-center gap-2">
-      <FlaskConical class="size-4" /> Test your rules
+      <FlaskConical class="size-4" /> {$ui("Test your rules")}
     </h2>
     <p class="text-sm text-text-secondary mb-4 leading-relaxed">
-      Run a hypothetical document through the engine to see which tier it would
-      require, without sending anything.
+      {$ui("Run a hypothetical document through the engine to see which tier it would require, without sending anything.")}
     </p>
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Amount</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Amount")}</span>
         <input
           type="number"
           bind:value={pvAmount}
@@ -572,37 +568,37 @@
         />
       </label>
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Country</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Country")}</span>
         <input
           type="text"
           bind:value={pvCountry}
-          placeholder="SE"
+          placeholder={$ui("SE")}
           class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         />
       </label>
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Doc type</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Doc type")}</span>
         <input
           type="text"
           bind:value={pvDocType}
-          placeholder="healthcare"
+          placeholder={$ui("healthcare")}
           class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         />
       </label>
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Current tier</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Current tier")}</span>
         <select
           bind:value={pvCurrentTier}
           class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         >
-          <option value="SES">SES</option>
-          <option value="AES" disabled>AES (unavailable)</option>
-          <option value="QES" disabled>QES (unavailable)</option>
+          <option value="SES">{$ui("SES")}</option>
+          <option value="AES" disabled>{$ui("AES (unavailable)")}</option>
+          <option value="QES" disabled>{$ui("QES (unavailable)")}</option>
         </select>
       </label>
     </div>
     <button class="btn btn-secondary" onclick={runPreview} disabled={pvBusy}>
-      {pvBusy ? 'Evaluating...' : 'Evaluate'}
+      {$ui(pvBusy ? 'Evaluating...' : 'Evaluate')}
     </button>
 
     {#if pvError}
@@ -614,17 +610,17 @@
     {#if pvResult}
       <div class="mt-4 p-4 rounded-md border border-border-light bg-bg-elevated">
         <div class="flex items-baseline gap-2 mb-2">
-          <span class="text-sm text-text-muted">Required tier:</span>
+          <span class="text-sm text-text-muted">{$ui("Required tier:")}</span>
           <span class="font-mono text-base {tierColor(pvResult.required_tier)}">{pvResult.required_tier}</span>
           {#if pvResult.required_tier === 'AES' || pvResult.required_tier === 'QES'}
-            <span class="text-xs text-danger ml-2">unavailable in this release · send blocked</span>
+            <span class="text-xs text-danger ml-2">{$ui("unavailable in this release · send blocked")}</span>
           {:else if pvResult.would_block}
-            <span class="text-xs text-danger ml-2">would block this send</span>
+            <span class="text-xs text-danger ml-2">{$ui("would block this send")}</span>
           {:else}
-            <span class="text-xs text-success ml-2">send allowed at current tier</span>
+            <span class="text-xs text-success ml-2">{$ui("send allowed at current tier")}</span>
           {/if}
         </div>
-        <p class="text-xs text-text-muted mb-2">{pvResult.evaluated_count} rule(s) evaluated</p>
+        <p class="text-xs text-text-muted mb-2">{pvResult.evaluated_count} {$ui("rule(s) evaluated")}</p>
         {#if pvResult.matched_rules.length}
           <ul class="text-sm list-disc pl-5">
             {#each pvResult.matched_rules as m (m.id)}
@@ -636,7 +632,7 @@
             {/each}
           </ul>
         {:else}
-          <p class="text-sm text-text-muted">No rules matched. The document stays at SES (the floor).</p>
+          <p class="text-sm text-text-muted">{$ui("No rules matched. The document stays at SES (the floor).")}</p>
         {/if}
       </div>
     {/if}

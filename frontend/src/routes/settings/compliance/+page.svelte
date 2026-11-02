@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import {
     seedCompliance,
@@ -72,27 +73,25 @@
 
 <div class="px-6 py-10 max-w-5xl mx-auto">
   <div class="mb-8 space-y-2">
-    <p class="page-eyebrow">Settings · Compliance</p>
-    <h1 class="page-title">Compliance kit</h1>
+    <p class="page-eyebrow">{$ui("Settings · Compliance")}</p>
+    <h1 class="page-title">{$ui("Compliance kit")}</h1>
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    The built-in DPA, Records of Processing, and Article 13 kit is an unapproved
-    development draft and cannot be seeded or sent in production. The EDPB feed
-    flagger raises flags here when an advisory touches an existing reviewed baseline.
+    {$ui("The built-in DPA, Records of Processing, and Article 13 kit is an unapproved development draft and cannot be seeded or sent in production. The EDPB feed flagger raises flags here when an advisory touches an existing reviewed baseline.")}
   </p>
 
   {#if error}
-    <div class="card p-4 mb-4 text-danger text-sm">{error}</div>
+    <div class="card p-4 mb-4 text-danger text-sm">{$ui(error)}</div>
   {/if}
 
   <section class="card p-5 mb-6">
     <h2 class="font-display font-extralight text-lg mb-3 flex items-center gap-2">
-      <ShieldCheck class="size-4" /> Development-only draft kit
+      <ShieldCheck class="size-4" /> {$ui("Development-only draft kit")}
     </h2>
     <div class="flex flex-wrap gap-3 items-end">
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Business type</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Business type")}</span>
         <select bind:value={businessType} class="block px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">
           {#each businessTypes as t (t)}
             <option value={t}>{t}</option>
@@ -100,16 +99,16 @@
         </select>
       </label>
       <label class="text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Jurisdiction</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Jurisdiction")}</span>
         <input
           type="text"
           bind:value={jurisdiction}
-          placeholder="SE"
+          placeholder={$ui("SE")}
           class="block px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm w-24"
         />
       </label>
       <button class="btn btn-primary" onclick={seed} disabled={seeding}>
-        {seeding ? 'Seeding...' : 'Seed kit'}
+        {$ui(seeding ? 'Seeding...' : 'Seed kit')}
       </button>
     </div>
     {#if seedMessage}
@@ -120,26 +119,26 @@
   <section class="card p-5">
     <div class="flex items-center justify-between mb-4">
       <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-        <AlertTriangle class="size-4" /> Compliance flags
+        <AlertTriangle class="size-4" /> {$ui("Compliance flags")}
       </h2>
       <div class="flex gap-2 items-center">
         <select bind:value={statusFilter} onchange={refresh} class="text-sm px-3 py-1.5 rounded border border-border-light bg-bg-elevated">
-          <option value="open">Open</option>
-          <option value="acknowledged">Acknowledged</option>
-          <option value="resolved">Resolved</option>
-          <option value="dismissed">Dismissed</option>
-          <option value="">All</option>
+          <option value="open">{$ui("Open")}</option>
+          <option value="acknowledged">{$ui("Acknowledged")}</option>
+          <option value="resolved">{$ui("Resolved")}</option>
+          <option value="dismissed">{$ui("Dismissed")}</option>
+          <option value="">{$ui("All")}</option>
         </select>
         <button class="btn btn-secondary text-xs" onclick={sweep} disabled={sweeping}>
-          <RotateCw class="size-3" /> {sweeping ? 'Running...' : 'Run sweep'}
+          <RotateCw class="size-3" /> {$ui(sweeping ? 'Running...' : 'Run sweep')}
         </button>
       </div>
     </div>
 
     {#if loading}
-      <p class="text-text-muted text-sm">Loading...</p>
+      <p class="text-text-muted text-sm">{$ui("Loading...")}</p>
     {:else if flags.length === 0}
-      <p class="text-text-muted text-sm">No flags in this state.</p>
+      <p class="text-text-muted text-sm">{$ui("No flags in this state.")}</p>
     {:else}
       <ul class="divide-y divide-border-light">
         {#each flags as f (f.id)}
@@ -147,15 +146,14 @@
             <div class="flex-1">
               <div class="text-sm font-medium">{f.update_title}</div>
               <div class="text-xs text-text-muted mt-1">
-                <span class="font-mono">{f.affected_topic}</span> ·
-                severity <span class="font-mono">{f.severity}</span>
+                <span class="font-mono">{f.affected_topic}</span> {$ui("· severity")} <span class="font-mono">{f.severity}</span>
               </div>
               <div class="text-xs text-text-secondary mt-1">{f.suggested_action}</div>
             </div>
             <div class="flex gap-2">
-              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'acknowledged')}>Ack</button>
-              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'resolved')}>Resolve</button>
-              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'dismissed')}>Dismiss</button>
+              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'acknowledged')}>{$ui("Ack")}</button>
+              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'resolved')}>{$ui("Resolve")}</button>
+              <button class="btn btn-secondary text-xs" onclick={() => transition(f.id, 'dismissed')}>{$ui("Dismiss")}</button>
             </div>
           </li>
         {/each}

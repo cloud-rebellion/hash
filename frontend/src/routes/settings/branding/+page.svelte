@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import { getBranding, saveBranding, type OrgBranding } from '$lib/api/client';
   import { Palette, Save } from 'lucide-svelte';
@@ -54,34 +55,31 @@
 <div class="px-6 py-10 max-w-4xl mx-auto">
   <div class="mb-8 flex items-baseline justify-between">
     <div class="space-y-2">
-      <p class="page-eyebrow">Settings · Branding</p>
-      <h1 class="page-title">Brand theme</h1>
+      <p class="page-eyebrow">{$ui("Settings · Branding")}</p>
+      <h1 class="page-title">{$ui("Brand theme")}</h1>
     </div>
     <button class="btn btn-primary" onclick={save} disabled={saving || loading}>
-      <Save class="size-4" /> {saving ? 'Saving...' : 'Save changes'}
+      <Save class="size-4" /> {$ui(saving ? 'Saving...' : 'Save changes')}
     </button>
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Colors below feed every rendered document, signer page, and audit
-    certificate via CSS custom properties. Body-text contrast is
-    enforced server-side to meet WCAG AA against your surface color.
-    Self-hosted fonts only (no third-party CDN).
+    {$ui("Colors below feed every rendered document, signer page, and audit certificate via CSS custom properties. Body-text contrast is enforced server-side to meet WCAG AA against your surface color. Self-hosted fonts only (no third-party CDN).")}
   </p>
 
   {#if error}
-    <div class="card p-4 mb-4 text-danger text-sm">{error}</div>
+    <div class="card p-4 mb-4 text-danger text-sm">{$ui(error)}</div>
   {/if}
   {#if saved}
-    <div class="card p-3 mb-4 text-success text-sm">Branding saved.</div>
+    <div class="card p-3 mb-4 text-success text-sm">{$ui("Branding saved.")}</div>
   {/if}
 
   {#if loading}
-    <p class="text-text-muted">Loading...</p>
+    <p class="text-text-muted">{$ui("Loading...")}</p>
   {:else}
     <section class="card p-5 mb-6">
       <h2 class="font-display font-extralight text-lg mb-4 flex items-center gap-2">
-        <Palette class="size-4" /> Palette
+        <Palette class="size-4" /> {$ui("Palette")}
       </h2>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {#each colorFields as f (f.key)}
@@ -112,58 +110,54 @@
     </section>
 
     <section class="card p-5 mb-6">
-      <h2 class="font-display font-extralight text-lg mb-4">Logo</h2>
+      <h2 class="font-display font-extralight text-lg mb-4">{$ui("Logo")}</h2>
       <label class="block text-sm mb-3">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Logo URL</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Logo URL")}</span>
         <input
           type="url"
           bind:value={branding.logo_url}
-          placeholder="https://your.cdn/logo.png"
+          placeholder={$ui("https://your.cdn/logo.png")}
           class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         />
       </label>
       <label class="block text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Logo alt text</span>
+        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Logo alt text")}</span>
         <input
           type="text"
           bind:value={branding.logo_alt}
-          placeholder="Acme Inc."
+          placeholder={$ui("Acme Inc.")}
           class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         />
       </label>
       <p class="text-xs text-text-muted mt-3">
-        Logo URLs and Hash-hosted logo uploads are disabled in production until
-        each asset is pinned to an exact retained storage version. Palette and
-        font settings remain available and are frozen when a document is sent.
+        {$ui("Logo URLs and Hash-hosted logo uploads are disabled in production until each asset is pinned to an exact retained storage version. Palette and font settings remain available and are frozen when a document is sent.")}
       </p>
     </section>
 
     <section class="card p-5">
-      <h2 class="font-display font-extralight text-lg mb-4">Type</h2>
+      <h2 class="font-display font-extralight text-lg mb-4">{$ui("Type")}</h2>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         <label>
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Heading family</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Heading family")}</span>
           <input
             type="text"
             bind:value={branding.font_heading}
-            placeholder="Geist, Inter, sans-serif"
+            placeholder={$ui("Geist, Inter, sans-serif")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated"
           />
         </label>
         <label>
-          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Body family</span>
+          <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Body family")}</span>
           <input
             type="text"
             bind:value={branding.font_body}
-            placeholder="Inter, system-ui, sans-serif"
+            placeholder={$ui("Inter, system-ui, sans-serif")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated"
           />
         </label>
       </div>
       <p class="text-xs text-text-muted mt-3">
-        Only families embedded in Hash's PDF renderer (Inter, Geist,
-        plus the calligraphy set) resolve consistently; unknown
-        families fall back to <code class="font-mono">system-ui</code>.
+        {$ui("Only families embedded in Hash's PDF renderer (Inter, Geist, plus the calligraphy set) resolve consistently; unknown families fall back to")} <code class="font-mono">system-ui</code>.
       </p>
     </section>
   {/if}

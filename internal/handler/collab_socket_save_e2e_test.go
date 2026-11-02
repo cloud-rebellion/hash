@@ -17,31 +17,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"nhooyr.io/websocket"
 )
 
 func TestCollabTwoSocketCanonicalSaveAndReconnectE2E(t *testing.T) {
-	baseCtx, _, q, s, org, user := setupDSRE2E(t)
+	fixture, doc, cookie := setupNativeCanonicalCollabE2E(t, "socket save")
+	baseCtx, q, s, org := fixture.f.ctx, fixture.f.q, fixture.f.s, fixture.f.org
 	ctx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 	defer cancel()
-	var err error
-	s.Cookies, err = auth.NewSignedCookie(hex.EncodeToString(bytes.Repeat([]byte{28}, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.PublicURL = "https://hash.example.test"
-	s.Collab = collab.NewHub(q)
-	s.Collab.FlushEvery = 0
-	defer s.Collab.Shutdown(context.Background())
-	payload, _ := json.Marshal(auth.SessionPayload{UserID: user})
-	cookie := s.Cookies.Mint(payload, time.Hour)
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org, Name: "socket save", SenderID: user, BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`), VariablesJson: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
 	server := httptest.NewServer(s.Routes())
 	defer server.Close()
 	endpoint := server.URL + "/api/v1/documents/" + doc.ID.String()

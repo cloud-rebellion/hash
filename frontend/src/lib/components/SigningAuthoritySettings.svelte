@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { SigningRegistryController, initialSigningRegistryState, readSigningMarker, saveSigningMarker, signingKey, signingEligibleName,
@@ -64,97 +65,97 @@
 </script>
 
 <div class="px-4 sm:px-6 py-10 max-w-4xl mx-auto space-y-6" data-signing-authority>
-  <div><p class="page-eyebrow">Settings · Signing</p><h1 class="page-title">My signing authority</h1></div>
+  <div><p class="page-eyebrow">{$ui("Settings · Signing")}</p><h1 class="page-title">{$ui("My signing authority")}</h1></div>
   <div class="card p-5 space-y-2 border-l-4 border-warning">
-    <h2 class="font-medium">Named signing authority</h2>
-    <p class="text-sm text-text-secondary">Record or revoke your own named, limited authority. Creating a grant does not sign a document or send an invitation.</p>
-    {#if registryState.context?.execution_available}<p class="text-sm text-text-secondary">Open an eligible agreement to review an exact pre-signing request. A use is recorded only when that request commits.</p>{:else if registryState.context}<p class="text-sm text-text-secondary">Pre-signing is not currently available from this service.</p>{/if}
+    <h2 class="font-medium">{$ui("Named signing authority")}</h2>
+    <p class="text-sm text-text-secondary">{$ui("Record or revoke your own named, limited authority. Creating a grant does not sign a document or send an invitation.")}</p>
+    {#if registryState.context?.execution_available}<p class="text-sm text-text-secondary">{$ui("Open an eligible agreement to review an exact pre-signing request. A use is recorded only when that request commits.")}</p>{:else if registryState.context}<p class="text-sm text-text-secondary">{$ui("Pre-signing is not currently available from this service.")}</p>{/if}
   </div>
   {#if registryState.error}<p role="alert" class="card p-4 text-danger text-sm">{registryState.error}</p>{/if}
   {#if registryState.notice}<p role="status" class="card p-4 text-sm">{registryState.notice}</p>{/if}
-  {#if registryState.markerError}<p role="alert" class="card p-4 text-danger">Pending request metadata could not be verified. New changes remain blocked. Ask your operator to investigate.</p>{/if}
+  {#if registryState.markerError}<p role="alert" class="card p-4 text-danger">{$ui("Pending request metadata could not be verified. New changes remain blocked. Ask your operator to investigate.")}</p>{/if}
   {#if registryState.marker}
-    <section class="card p-5 space-y-3" aria-label="Pending signing authority request">
-      <h2 class="text-lg">Resolve the original request</h2>
-      <p class="text-sm">Another change is blocked until you inspect and acknowledge this exact request. A missing response does not show that the operation failed.</p>
+    <section class="card p-5 space-y-3" aria-label={$ui("Pending signing authority request")}>
+      <h2 class="text-lg">{$ui("Resolve the original request")}</h2>
+      <p class="text-sm">{$ui("Another change is blocked until you inspect and acknowledge this exact request. A missing response does not show that the operation failed.")}</p>
       <p class="text-sm font-mono break-all">{registryState.marker.operation} · {registryState.marker.request_id}</p>
       <div class="flex flex-wrap gap-2">
-        <button class="btn btn-secondary" disabled={!!registryState.busy} onclick={() => controller.inspect()}>Inspect request outcome</button>
-        {#if controller.canRetry}<button class="btn btn-secondary" disabled={!!registryState.busy} onclick={() => controller.retry()}>Retry the exact request</button>{/if}
+        <button class="btn btn-secondary" disabled={!!registryState.busy} onclick={() => controller.inspect()}>{$ui("Inspect request outcome")}</button>
+        {#if controller.canRetry}<button class="btn btn-secondary" disabled={!!registryState.busy} onclick={() => controller.retry()}>{$ui("Retry the exact request")}</button>{/if}
       </div>
       {#if registryState.outcome}
-        <p class="text-sm">Verified outcome: <strong>{registryState.outcome.state}</strong> at {registryState.outcome.occurred_at}. {#if registryState.outcome.state === 'committed'}This records the original operation; current authority may have been revoked or revised afterward.{/if}</p>
-        <button class="btn btn-primary" disabled={!!registryState.busy} onclick={acknowledge}>Acknowledge verified outcome</button>
+        <p class="text-sm">{$ui("Verified outcome:")} <strong>{registryState.outcome.state}</strong> {$ui("at")} {registryState.outcome.occurred_at}. {#if registryState.outcome.state === 'committed'}{$ui("This records the original operation; current authority may have been revoked or revised afterward.")}{/if}</p>
+        <button class="btn btn-primary" disabled={!!registryState.busy} onclick={acknowledge}>{$ui("Acknowledge verified outcome")}</button>
       {:else if !registryState.marker.command_sha256}
-        <label class="flex items-start gap-2 text-sm"><input type="checkbox" bind:checked={stopConfirmed} /><span>I want to stop this exact request if it has not committed.</span></label>
-        <button class="btn btn-secondary" disabled={!stopConfirmed || registryState.busy === 'stop'} onclick={() => controller.stop(stopConfirmed)}>Stop original request</button>
+        <label class="flex items-start gap-2 text-sm"><input type="checkbox" bind:checked={stopConfirmed} /><span>{$ui("I want to stop this exact request if it has not committed.")}</span></label>
+        <button class="btn btn-secondary" disabled={!stopConfirmed || registryState.busy === 'stop'} onclick={() => controller.stop(stopConfirmed)}>{$ui("Stop original request")}</button>
       {/if}
     </section>
   {/if}
-  <button class="btn btn-secondary" disabled={!!registryState.busy} onclick={refresh}>Refresh signing authority</button>
+  <button class="btn btn-secondary" disabled={!!registryState.busy} onclick={refresh}>{$ui("Refresh signing authority")}</button>
   {#if registryState.context}
-    <section class="card p-5 space-y-2" aria-label="Current signing identity">
-      <h2 class="text-lg">Your current Hash identity</h2>
+    <section class="card p-5 space-y-2" aria-label={$ui("Current signing identity")}>
+      <h2 class="text-lg">{$ui("Your current Hash identity")}</h2>
       <p>{registryState.context.self.name || 'No current member name'} · {registryState.context.self.email}</p>
-      <p class="text-sm text-text-secondary">{registryState.context.self.role} · This identity comes from your live membership. Company and representative-authority details below are your declarations, rather than external verification.</p>
-      <p class="text-sm text-text-secondary">Authority is limited to documents you originally authored, the exact approved workflow and template revision, and the selected executor. Role loss, name or email changes, organisation changes or removal permanently revoke an existing authority. Restoring the old identity requires a new self-grant.</p>
+      <p class="text-sm text-text-secondary">{registryState.context.self.role} {$ui("· This identity comes from your live membership. Company and representative-authority details below are your declarations, rather than external verification.")}</p>
+      <p class="text-sm text-text-secondary">{$ui("Authority is limited to documents you originally authored, the exact approved workflow and template revision, and the selected executor. Role loss, name or email changes, organisation changes or removal permanently revoke an existing authority. Restoring the old identity requires a new self-grant.")}</p>
     </section>
-    {#if registryState.context.self.role === 'viewer'}<p class="text-sm text-text-secondary">You can inspect and revoke your own existing authority. A sender or owner role is required to record a new authority.</p>{/if}
-    {#if !signingEligibleName(registryState.context.self.name)}<p class="text-sm text-text-secondary">Your live member name needs updating before a new named authority can be recorded. Existing authority and request outcomes remain available for inspection and revocation.</p>{/if}
+    {#if registryState.context.self.role === 'viewer'}<p class="text-sm text-text-secondary">{$ui("You can inspect and revoke your own existing authority. A sender or owner role is required to record a new authority.")}</p>{/if}
+    {#if !signingEligibleName(registryState.context.self.name)}<p class="text-sm text-text-secondary">{$ui("Your live member name needs updating before a new named authority can be recorded. Existing authority and request outcomes remain available for inspection and revocation.")}</p>{/if}
     <form class="card p-5 space-y-4" onsubmit={review}>
-      <h2 class="text-lg">{expectedRevision ? 'Review a new authority revision' : 'Record your signing authority'}</h2>
-      <label class="block text-sm space-y-1"><span>Approved workflow and policy</span><select aria-label="Approved signing policy" bind:value={policyID} onchange={edited} disabled={!canCreate} class="w-full input"><option value="">Select an exact approved policy</option>{#each availablePolicies as w (w.policy_reference.sha256)}<option value={signingKey(w.policy_reference)}>{w.definition.name} · revision {w.definition.revision} · template version {w.definition.template.version}</option>{/each}</select></label>
+      <h2 class="text-lg">{$ui(expectedRevision ? 'Review a new authority revision' : 'Record your signing authority')}</h2>
+      <label class="block text-sm space-y-1"><span>{$ui("Approved workflow and policy")}</span><select aria-label={$ui("Approved signing policy")} bind:value={policyID} onchange={edited} disabled={!canCreate} class="w-full input"><option value="">{$ui("Select an exact approved policy")}</option>{#each availablePolicies as w (w.policy_reference.sha256)}<option value={signingKey(w.policy_reference)}>{w.definition.name} {$ui("· revision")} {w.definition.revision} {$ui("· template version")} {w.definition.template.version}</option>{/each}</select></label>
       {#if selectedPolicy}
-        <details class="text-sm space-y-2"><summary class="cursor-pointer">Review the exact workflow rules and approval</summary>
-          <p>Executor: {selectedPolicy.definition.executor.kind} · {selectedPolicy.definition.executor.user_id}</p>
-          <p>Template: {selectedPolicy.definition.template.id} · version {selectedPolicy.definition.template.version}</p>
-          <p>Approved by {selectedPolicy.policy.approved_by} at {selectedPolicy.policy.approved_at}. Maximum {selectedPolicy.policy.max_uses} uses over {selectedPolicy.policy.max_grant_duration_seconds} seconds.</p>
+        <details class="text-sm space-y-2"><summary class="cursor-pointer">{$ui("Review the exact workflow rules and approval")}</summary>
+          <p>{$ui("Executor:")} {selectedPolicy.definition.executor.kind} · {selectedPolicy.definition.executor.user_id}</p>
+          <p>{$ui("Template:")} {selectedPolicy.definition.template.id} {$ui("· version")} {selectedPolicy.definition.template.version}</p>
+          <p>{$ui("Approved by")} {selectedPolicy.policy.approved_by} {$ui("at")} {selectedPolicy.policy.approved_at}{$ui(". Maximum")} {selectedPolicy.policy.max_uses} {$ui("uses over")} {selectedPolicy.policy.max_grant_duration_seconds} {$ui("seconds.")}</p>
           <pre class="p-3 bg-bg-elevated rounded text-xs whitespace-pre-wrap break-all">{JSON.stringify(selectedPolicy.definition, null, 2)}</pre>
-          <p class="font-mono break-all">Policy commitment: {selectedPolicy.policy_reference.sha256}</p>
+          <p class="font-mono break-all">{$ui("Policy commitment:")} {selectedPolicy.policy_reference.sha256}</p>
         </details>
       {/if}
       <div class="grid sm:grid-cols-2 gap-3">
-        <label class="text-sm space-y-1">Company name<input class="w-full input" aria-label="Declared company name" bind:value={companyName} oninput={edited} disabled={!canCreate} required maxlength="200" /></label>
-        <label class="text-sm space-y-1">Company ID<input class="w-full input" aria-label="Declared company ID" bind:value={companyID} oninput={edited} disabled={!canCreate} required maxlength="100" /></label>
+        <label class="text-sm space-y-1">{$ui("Company name")}<input class="w-full input" aria-label={$ui("Declared company name")} bind:value={companyName} oninput={edited} disabled={!canCreate} required maxlength="200" /></label>
+        <label class="text-sm space-y-1">{$ui("Company ID")}<input class="w-full input" aria-label={$ui("Declared company ID")} bind:value={companyID} oninput={edited} disabled={!canCreate} required maxlength="100" /></label>
       </div>
-      <label class="block text-sm space-y-1">Representative authority basis<input class="w-full input" aria-label="Declared authority basis" bind:value={authorityBasis} oninput={edited} disabled={!canCreate} required maxlength="500" /></label>
-      <label class="block text-sm space-y-1">Signature font<select class="w-full input" aria-label="Signature font" bind:value={font} onchange={edited} disabled={!canCreate}>{#each registryState.context.fonts as f (f.font)}<option value={f.font}>{f.font}</option>{/each}</select></label>
+      <label class="block text-sm space-y-1">{$ui("Representative authority basis")}<input class="w-full input" aria-label={$ui("Declared authority basis")} bind:value={authorityBasis} oninput={edited} disabled={!canCreate} required maxlength="500" /></label>
+      <label class="block text-sm space-y-1">{$ui("Signature font")}<select class="w-full input" aria-label={$ui("Signature font")} bind:value={font} onchange={edited} disabled={!canCreate}>{#each registryState.context.fonts as f (f.font)}<option value={f.font}>{f.font}</option>{/each}</select></label>
       <div class="grid sm:grid-cols-2 gap-3">
-        <label class="text-sm space-y-1">Not before (optional UTC time)<input class="w-full input font-mono" bind:value={notBefore} oninput={edited} disabled={!canCreate} placeholder="2026-10-10T12:00:00Z" /></label>
-        <label class="text-sm space-y-1">Expires at (UTC time)<input class="w-full input font-mono" bind:value={expiresAt} oninput={edited} disabled={!canCreate} required placeholder="2026-11-10T12:00:00Z" /></label>
+        <label class="text-sm space-y-1">{$ui("Not before (optional UTC time)")}<input class="w-full input font-mono" bind:value={notBefore} oninput={edited} disabled={!canCreate} placeholder={$ui("2026-10-10T12:00:00Z")} /></label>
+        <label class="text-sm space-y-1">{$ui("Expires at (UTC time)")}<input class="w-full input font-mono" bind:value={expiresAt} oninput={edited} disabled={!canCreate} required placeholder={$ui("2026-11-10T12:00:00Z")} /></label>
       </div>
-      <label class="block text-sm space-y-1">Maximum uses<input class="w-full input" type="text" inputmode="numeric" pattern={'[1-9][0-9]{0,5}|1000000'} bind:value={maxUses} oninput={edited} disabled={!canCreate} required /></label>
-      <p class="text-sm text-text-secondary">A revision needs a new explicit review and authorization. Revoked authority cannot be revived.</p>
-      <button class="btn btn-primary" type="submit" disabled={!canCreate || !selectedPolicy}>Preview exact authority</button>
+      <label class="block text-sm space-y-1">{$ui("Maximum uses")}<input class="w-full input" type="text" inputmode="numeric" pattern={'[1-9][0-9]{0,5}|1000000'} bind:value={maxUses} oninput={edited} disabled={!canCreate} required /></label>
+      <p class="text-sm text-text-secondary">{$ui("A revision needs a new explicit review and authorization. Revoked authority cannot be revived.")}</p>
+      <button class="btn btn-primary" type="submit" disabled={!canCreate || !selectedPolicy}>{$ui("Preview exact authority")}</button>
     </form>
     {#if preview && registryState.signatureFont}
-      <section class="card p-5 space-y-4" aria-label="Signing authority preview">
-        <h2 class="text-lg">Review your exact authorization</h2>
+      <section class="card p-5 space-y-4" aria-label={$ui("Signing authority preview")}>
+        <h2 class="text-lg">{$ui("Review your exact authorization")}</h2>
         <p class="text-4xl break-words" style:font-family={registryState.signatureFont}>{preview.grantor.name}</p>
         <p class="text-sm">{preview.grantor.email} · {preview.grantor.company_name} · {preview.grantor.company_id}</p>
-        <p class="text-sm">Declared authority: {preview.grantor.authority_basis}</p>
-        <p class="text-sm">{preview.signature.font} · bundled font verified. No document has been signed.</p>
-        <p class="text-sm font-medium">Disclosure reserved for a future delegated execution:</p><p class="text-sm whitespace-pre-wrap">{registryState.context.disclosure.text}</p>
-        <p class="text-xs text-text-muted">Disclosure version {preview.disclosure.version}. Preview expires {preview.expires_at}. Maximum {preview.intent.max_uses} uses; authority expires {preview.intent.expires_at}.</p>
-        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canCreate} /><span>I authorize this exact named authority, policy, signature style, validity and use limit. Each use must match its approved agreement and recipient rules.</span></label>
-        <button class="btn btn-primary" disabled={!canConfirm} onclick={() => controller.approve()}>Confirm my signing authority</button>
+        <p class="text-sm">{$ui("Declared authority:")} {preview.grantor.authority_basis}</p>
+        <p class="text-sm">{preview.signature.font} {$ui("· bundled font verified. No document has been signed.")}</p>
+        <p class="text-sm font-medium">{$ui("Disclosure reserved for a future delegated execution:")}</p><p class="text-sm whitespace-pre-wrap">{registryState.context.disclosure.text}</p>
+        <p class="text-xs text-text-muted">{$ui("Disclosure version")} {preview.disclosure.version}{$ui(". Preview expires")} {preview.expires_at}{$ui(". Maximum")} {preview.intent.max_uses} {$ui("uses; authority expires")} {preview.intent.expires_at}.</p>
+        <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={registryState.confirmed} onchange={event => controller.confirm(event.currentTarget.checked)} disabled={!canCreate} /><span>{$ui("I authorize this exact named authority, policy, signature style, validity and use limit. Each use must match its approved agreement and recipient rules.")}</span></label>
+        <button class="btn btn-primary" disabled={!canConfirm} onclick={() => controller.approve()}>{$ui("Confirm my signing authority")}</button>
       </section>
     {/if}
-    <section class="space-y-3" aria-label="Recorded personal signing authorities">
-      <h2 class="text-lg">Your recorded authorities</h2>
-      {#if !registryState.grants.length}<p class="text-sm text-text-muted">No recorded authority.</p>{/if}
-      {#if dirty}<label class="flex items-start gap-2 text-sm"><input type="checkbox" bind:checked={replaceDraft} /><span>Replace my unsaved authority inputs when I load or clear a draft.</span></label>{/if}
-      <button class="btn btn-secondary" disabled={!canEdit || (dirty && !replaceDraft)} onclick={newGrant}>Clear inputs for a new authority</button>
+    <section class="space-y-3" aria-label={$ui("Recorded personal signing authorities")}>
+      <h2 class="text-lg">{$ui("Your recorded authorities")}</h2>
+      {#if !registryState.grants.length}<p class="text-sm text-text-muted">{$ui("No recorded authority.")}</p>{/if}
+      {#if dirty}<label class="flex items-start gap-2 text-sm"><input type="checkbox" bind:checked={replaceDraft} /><span>{$ui("Replace my unsaved authority inputs when I load or clear a draft.")}</span></label>{/if}
+      <button class="btn btn-secondary" disabled={!canEdit || (dirty && !replaceDraft)} onclick={newGrant}>{$ui("Clear inputs for a new authority")}</button>
       {#each registryState.grants as g (g.reference.sha256)}
         <article class="card p-5 space-y-3">
-          <p class="font-medium">{g.grant.grantor.name} · revision {g.grant.revision} · {g.revoked ? 'Revoked' : g.expired ? 'Expired' : 'Recorded'}</p>
-          <p class="text-sm">{g.grant.grantor.company_name} · {g.consumed_uses} / {g.grant.max_uses} uses · expires {g.grant.expires_at}</p>
-          {#if g.revocation_reason}<p class="text-sm">Recorded revocation reason: {g.revocation_reason}</p>{/if}
-          <details class="text-sm"><summary class="cursor-pointer">Exact recorded authority</summary><pre class="p-3 text-xs whitespace-pre-wrap break-all">{JSON.stringify(g.grant, null, 2)}</pre><p class="font-mono break-all">{g.reference.sha256}</p></details>
+          <p class="font-medium">{g.grant.grantor.name} {$ui("· revision")} {g.grant.revision} · {$ui(g.revoked ? 'Revoked' : g.expired ? 'Expired' : 'Recorded')}</p>
+          <p class="text-sm">{g.grant.grantor.company_name} · {g.consumed_uses} / {g.grant.max_uses} {$ui("uses · expires")} {g.grant.expires_at}</p>
+          {#if g.revocation_reason}<p class="text-sm">{$ui("Recorded revocation reason:")} {g.revocation_reason}</p>{/if}
+          <details class="text-sm"><summary class="cursor-pointer">{$ui("Exact recorded authority")}</summary><pre class="p-3 text-xs whitespace-pre-wrap break-all">{JSON.stringify(g.grant, null, 2)}</pre><p class="font-mono break-all">{g.reference.sha256}</p></details>
           {#if !g.revoked}
-            <button class="btn btn-secondary" disabled={!canCreate || g.current_revision >= 1000000 || (dirty && !replaceDraft)} onclick={() => loadGrant(g)}>Load this authority for revision</button>
-            <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={revokePin === signingKey(g.reference)} onchange={event => { revokePin = event.currentTarget.checked ? signingKey(g.reference) : ''; }} disabled={!canWrite} /><span>Revoke this exact authority. Earlier evidence is preserved.</span></label>
-            <button class="btn btn-secondary text-danger" disabled={!canWrite || revokePin !== signingKey(g.reference)} onclick={() => revoke(g)}>Revoke my authority</button>
+            <button class="btn btn-secondary" disabled={!canCreate || g.current_revision >= 1000000 || (dirty && !replaceDraft)} onclick={() => loadGrant(g)}>{$ui("Load this authority for revision")}</button>
+            <label class="flex items-start gap-2 text-sm"><input type="checkbox" checked={revokePin === signingKey(g.reference)} onchange={event => { revokePin = event.currentTarget.checked ? signingKey(g.reference) : ''; }} disabled={!canWrite} /><span>{$ui("Revoke this exact authority. Earlier evidence is preserved.")}</span></label>
+            <button class="btn btn-secondary text-danger" disabled={!canWrite || revokePin !== signingKey(g.reference)} onclick={() => revoke(g)}>{$ui("Revoke my authority")}</button>
           {/if}
         </article>
       {/each}

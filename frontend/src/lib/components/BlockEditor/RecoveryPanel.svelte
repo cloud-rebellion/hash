@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount } from 'svelte';
   import {
     APIError, getMe, getCollaborationRecovery, recoverCollaboration,
@@ -209,79 +210,79 @@
 
 <section class="recovery-panel" aria-label={archiveReviewOnly ? 'Collaboration archive review' : 'Collaboration recovery'}>
   {#if archiveReviewOnly}
-    <p>Review retained collaboration archives for the selected document. Download any data needed for the approved rights-response procedure before deleting it.</p>
+    <p>{$ui("Review retained collaboration archives for the selected document. Download any data needed for the approved rights-response procedure before deleting it.")}</p>
   {:else}
-    <p>Keep a copy of your local draft before reviewing the saved document.</p>
+    <p>{$ui("Keep a copy of your local draft before reviewing the saved document.")}</p>
   {/if}
   <div class="actions">
     {#if !archiveReviewOnly}
-      <button type="button" class="btn btn-secondary" disabled={busy} onclick={captureLocalDraft}>Download local draft for recovery</button>
+      <button type="button" class="btn btn-secondary" disabled={busy} onclick={captureLocalDraft}>{$ui("Download local draft for recovery")}</button>
     {/if}
     <button type="button" class="btn btn-secondary" disabled={loading || busy} onclick={loadReview}>
-      {loading ? 'Checking recovery access…' : archiveReviewOnly ? 'Refresh archive review' : 'Refresh recovery review'}
+      {$ui(loading ? 'Checking recovery access…' : archiveReviewOnly ? 'Refresh archive review' : 'Refresh recovery review')}
     </button>
   </div>
 
-  {#if error}<p role="alert" class="recovery-error">{error}</p>{/if}
+  {#if error}<p role="alert" class="recovery-error">{$ui(error)}</p>{/if}
   {#if owner === false}
     {#if archiveReviewOnly}
-      <p>An organization owner must review these collaboration archives.</p>
+      <p>{$ui("An organization owner must review these collaboration archives.")}</p>
     {:else}
-      <p>An organization owner must review and recover shared editing. Your local draft stays in this editor.</p>
+      <p>{$ui("An organization owner must review and recover shared editing. Your local draft stays in this editor.")}</p>
     {/if}
   {:else if owner === true && review}
     {#if archiveReviewOnly || review.document_deleted || review.document.source_kind !== 'blocks' || review.document.status !== 'draft'}
-      <p>Document: {review.document.name}</p>
+      <p>{$ui("Document:")} {review.document.name}</p>
       {#if review.document_deleted}
-        <p>This document was deleted. Retained archives can be reviewed during the cleanup grace period; shared editing cannot be reset here.</p>
+        <p>{$ui("This document was deleted. Retained archives can be reviewed during the cleanup grace period; shared editing cannot be reset here.")}</p>
       {:else}
-        <p>This view provides archive review, download and deletion.</p>
+        <p>{$ui("This view provides archive review, download and deletion.")}</p>
       {/if}
     {:else}
     <details open>
-      <summary>Current saved document: {review.document.name}</summary>
-      <p>Saved {review.document.updated_at}</p>
+      <summary>{$ui("Current saved document:")} {review.document.name}</summary>
+      <p>{$ui("Saved")} {review.document.updated_at}</p>
       <pre>{preview(review)}</pre>
-      <p>The preview shows up to 4,000 characters. Recovery keeps this saved document and archives the older shared editing history; it does not merge the history into the document.</p>
-      <button type="button" class="btn btn-secondary" disabled={busy} onclick={downloadReviewedDocument}>Download full saved document for review</button>
+      <p>{$ui("The preview shows up to 4,000 characters. Recovery keeps this saved document and archives the older shared editing history; it does not merge the history into the document.")}</p>
+      <button type="button" class="btn btn-secondary" disabled={busy} onclick={downloadReviewedDocument}>{$ui("Download full saved document for review")}</button>
     </details>
     {#if successGeneration !== null}
-      <p role="status">Shared editing was reset. Your local draft is still open. Reload the saved document when you are ready to reconnect.</p>
-      <button type="button" class="btn btn-primary" disabled={!canReload} onclick={reloadSavedDocument}>Reload saved document</button>
+      <p role="status">{$ui("Shared editing was reset. Your local draft is still open. Reload the saved document when you are ready to reconnect.")}</p>
+      <button type="button" class="btn btn-primary" disabled={!canReload} onclick={reloadSavedDocument}>{$ui("Reload saved document")}</button>
       {#if successRevision !== editRevision}
-        <p>You edited after the recovery review. Your draft is preserved; download it before leaving this editor.</p>
+        <p>{$ui("You edited after the recovery review. Your draft is preserved; download it before leaving this editor.")}</p>
       {/if}
     {:else}
       {#if reviewedRevision !== editRevision}
-        <p>Your local draft changed during the review. Refresh the review and download the current draft before continuing.</p>
+        <p>{$ui("Your local draft changed during the review. Refresh the review and download the current draft before continuing.")}</p>
       {/if}
       <label class="acknowledgement">
         <input type="checkbox" bind:checked={acknowledged} disabled={busy || reviewedRevision !== editRevision || capturedRevision !== editRevision} />
-        I have downloaded my local draft and reviewed the saved document. Reset shared editing to this saved document and preserve the older server edits in recovery archives.
+        {$ui("I have downloaded my local draft and reviewed the saved document. Reset shared editing to this saved document and preserve the older server edits in recovery archives.")}
       </label>
       <button type="button" class="btn btn-primary" disabled={!canReset} onclick={resetSharedEditing}>
-        {busy ? 'Recovering…' : 'Reset shared editing to saved document'}
+        {$ui(busy ? 'Recovering…' : 'Reset shared editing to saved document')}
       </button>
     {/if}
     {/if}
 
     {#if review.archives.length}
-      <h3>Recovery archives</h3>
-      <p>These files preserve server collaboration history for recovery and are not editable document exports. Download anything you need before its expiry.</p>
+      <h3>{$ui("Recovery archives")}</h3>
+      <p>{$ui("These files preserve server collaboration history for recovery and are not editable document exports. Download anything you need before its expiry.")}</p>
       <ul>
         {#each review.archives as archive (archive.id)}
           <li>
-            <span>{archive.origin === 'active_room' ? 'Active shared editing history' : 'Stored shared editing history'} · {archive.size_bytes.toLocaleString()} bytes</span>
-            <span>Created {archive.created_at}; expires {archive.expires_at}</span>
+            <span>{$ui(archive.origin === 'active_room' ? 'Active shared editing history' : 'Stored shared editing history')} · {archive.size_bytes.toLocaleString()} {$ui("bytes")}</span>
+            <span>{$ui("Created")} {archive.created_at}{$ui("; expires")} {archive.expires_at}</span>
             <div class="actions">
-              <a class="btn btn-secondary" href={collaborationArchiveURL(documentID, archive.id)}>Download archive</a>
-              <button type="button" class="btn btn-secondary" disabled={busy} onclick={() => removeArchive(archive.id)}>Delete archive…</button>
+              <a class="btn btn-secondary" href={collaborationArchiveURL(documentID, archive.id)}>{$ui("Download archive")}</a>
+              <button type="button" class="btn btn-secondary" disabled={busy} onclick={() => removeArchive(archive.id)}>{$ui("Delete archive…")}</button>
             </div>
           </li>
         {/each}
       </ul>
     {:else}
-      <p>No recovery archives are available for this document.</p>
+      <p>{$ui("No recovery archives are available for this document.")}</p>
     {/if}
   {/if}
 </section>

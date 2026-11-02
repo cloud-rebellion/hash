@@ -809,6 +809,12 @@ terms. Preview PDFs and sample text are not retained as contract artifacts.
 Each derived contract still needs review of its own stored rendered PDF and
 signing fields.
 
+`GET /api/v1/templates` also returns the instance capability
+`starter_templates_available`. Built-in legal drafts are unavailable in production;
+clients should enable the starter action only when this value is explicitly `true`.
+A missing or false capability does not disable custom HTML, block or uploaded PDF
+templates. The server independently enforces the existing starter restriction.
+
 For HTML designs, `GET /api/v1/templates/{id}` includes `html_approval` with
 `version` and `content_sha256` for that exact returned master and defaults.
 `approved_by` and `approved_at` are both present after owner approval; both are
@@ -1286,3 +1292,11 @@ routes grant no Send authority. Native package Send requires the exact reviewed
 capture, intent and retained completion guarded by migration110; legacy Send
 cannot bypass that lifecycle. Current browser, configured-service and release
 qualification remains deployment-specific; see [readiness](READINESS.md).
+
+#### Read an exact PDF template preview
+
+`GET /api/v1/templates/{id}/pdf?version=1&sha256=<64-lowercase-hex-characters>`
+
+Staff session authentication is required. The caller must have current read access in the template’s workspace; viewer access is supported. Supply the version and PDF digest observed in the template response. The server selects the persisted immutable storage version, verifies its bytes, and checks current access and the source revision again before returning them. This endpoint reads an existing PDF; it does not render a document.
+
+A successful response is `application/pdf` with `Cache-Control: no-store`, `X-Hash-Template-Id`, `X-Hash-Template-Version`, `X-Hash-PDF-SHA256`, and an ETag containing that digest. `400` means missing or ambiguous pins, `404` means the PDF template is unavailable in the caller’s workspace, and `412` means the observed template version or content changed. Authentication and permission errors use the normal session responses; capacity or provider failures return `503`. Refresh the template after `412`; never substitute a latest object or an unverified body.

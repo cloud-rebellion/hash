@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount } from 'svelte';
   import { getTimeline, timelineCsvURL, type TimelineEntry } from '$lib/api/client';
   import { History, Download, RefreshCw } from 'lucide-svelte';
@@ -45,33 +46,32 @@
 <section class="card p-5 mb-6">
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <History class="size-4" /> Audit timeline
+      <History class="size-4" /> {$ui("Audit timeline")}
     </h2>
     <div class="flex gap-2">
       <button class="btn btn-secondary text-xs" onclick={refresh} disabled={loading}>
-        <RefreshCw class="size-3" /> Refresh
+        <RefreshCw class="size-3" /> {$ui("Refresh")}
       </button>
       <a class="btn btn-secondary text-xs" href={timelineCsvURL(documentID)} download>
-        <Download class="size-3" /> CSV
+        <Download class="size-3" /> {$ui("CSV")}
       </a>
     </div>
   </div>
 
   <p class="text-sm text-text-secondary mb-4 leading-relaxed">
-    Every lifecycle event is hash-chained and tamper-evident. For a successfully completed ceremony,
-    the document-scoped event set is committed into the signed audit certificate.
+    {$ui("Every lifecycle event is hash-chained and tamper-evident. For a successfully completed ceremony, the document-scoped event set is committed into the signed audit certificate.")}
   </p>
 
   {#if error}
     <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
-      {error}
+      {$ui(error)}
     </div>
   {/if}
 
   {#if loading}
-    <p class="text-text-muted text-sm">Loading...</p>
+    <p class="text-text-muted text-sm">{$ui("Loading...")}</p>
   {:else if entries.length === 0}
-    <p class="text-text-muted text-sm">No events recorded yet.</p>
+    <p class="text-text-muted text-sm">{$ui("No events recorded yet.")}</p>
   {:else}
     <ol class="relative border-l border-border-light ml-2">
       {#each entries as e (e.id)}
@@ -81,15 +81,15 @@
           ></span>
           <div class="flex items-baseline justify-between gap-3 flex-wrap">
             <span class="text-sm font-medium">
-              {humanize(e.kind)}
+              {$ui(humanize(e.kind))}
               {#if e.occurrences > 1}
-                <span class="text-xs text-text-muted">x{e.occurrences}</span>
+                <span class="text-xs text-text-muted">{$ui("x")}{e.occurrences}</span>
               {/if}
             </span>
-            <span class="text-xs text-text-muted font-mono">{ts(e.created_at)}</span>
+            <span class="text-xs text-text-muted font-mono">{e.created_at ? new Date(e.created_at).toLocaleString($staffLocale) : ''}</span>
           </div>
           <div class="text-xs text-text-muted">
-            {actor(e)}{#if e.ip}{' · '}{e.ip}{/if}
+            {$ui(actor(e))}{#if e.ip}{' · '}{e.ip}{/if}
           </div>
         </li>
       {/each}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { closeSupersession, createSupersession, getSupersessionContext, inspectSupersession } from '$lib/api/supersession';
@@ -42,31 +43,31 @@
   function acknowledgeClosed() { if (busy || outcome?.state !== 'closed') return; saveSupersessionMarker(sessionStorage, null); marker = null; outcome = null; context = null; confirmed = false; closeConfirmed = false; message = ''; report(); }
 </script>
 
-<section class="card p-4 my-4 space-y-3" aria-label="Create a linked signing draft">
-  <h3 class="font-medium">Create a linked signing draft</h3>
-  <p class="text-sm">Keep this agreement and its evidence intact. A new draft uses the current approved template and new party and signature fields. Review its PDF and choose signing separately. Ordinary amendment notices remain available in Later amendments.</p>
+<section class="card p-4 my-4 space-y-3" aria-label={$ui("Create a linked signing draft")}>
+  <h3 class="font-medium">{$ui("Create a linked signing draft")}</h3>
+  <p class="text-sm">{$ui("Keep this agreement and its evidence intact. A new draft uses the current approved template and new party and signature fields. Review its PDF and choose signing separately. Ordinary amendment notices remain available in Later amendments.")}</p>
   {#if invalid}
-    <p role="alert">The saved original request cannot be verified. Restore the original session and inspect it before creating another draft.</p>
+    <p role="alert">{$ui("The saved original request cannot be verified. Restore the original session and inspect it before creating another draft.")}</p>
   {:else if marker}
-    <p class="text-sm">Original request: {marker.request_id}</p>
-    {#if !owned()}<p role="alert">Return to the original member and <a href={`/documents/${marker.prior_document_id}`}>original agreement</a> to inspect this request.</p>
+    <p class="text-sm">{$ui("Original request:")} {marker.request_id}</p>
+    {#if !owned()}<p role="alert">{$ui("Return to the original member and")} <a href={`/documents/${marker.prior_document_id}`}>{$ui("original agreement")}</a> {$ui("to inspect this request.")}</p>
     {:else}
-      <button class="btn btn-secondary" disabled={busy || blocked} onclick={() => recover()}>Inspect original request</button>
-      {#if outcome?.state === 'closed'}<button class="btn btn-secondary" disabled={busy} onclick={acknowledgeClosed}>Acknowledge closure</button>
-      {:else}<label class="flex gap-2 text-sm"><input type="checkbox" bind:checked={closeConfirmed} disabled={busy || blocked} />Close this exact request if it has not committed.</label><button class="btn btn-secondary" disabled={busy || blocked || !closeConfirmed} onclick={() => recover(true)}>Close original request</button>{/if}
+      <button class="btn btn-secondary" disabled={busy || blocked} onclick={() => recover()}>{$ui("Inspect original request")}</button>
+      {#if outcome?.state === 'closed'}<button class="btn btn-secondary" disabled={busy} onclick={acknowledgeClosed}>{$ui("Acknowledge closure")}</button>
+      {:else}<label class="flex gap-2 text-sm"><input type="checkbox" bind:checked={closeConfirmed} disabled={busy || blocked} />{$ui("Close this exact request if it has not committed.")}</label><button class="btn btn-secondary" disabled={busy || blocked || !closeConfirmed} onclick={() => recover(true)}>{$ui("Close original request")}</button>{/if}
     {/if}
   {:else if context?.state === 'linked'}
-    <a class="btn btn-secondary" href={`/documents/${context.document_id}`}>Open existing linked draft</a>
+    <a class="btn btn-secondary" href={`/documents/${context.document_id}`}>{$ui("Open existing linked draft")}</a>
   {:else if context?.state === 'ready'}
-    {#if !context.creation_available}<p role="note">New supersession is disabled in this service. Existing evidence and request recovery remain available.</p>
+    {#if !context.creation_available}<p role="note">{$ui("New supersession is disabled in this service. Existing evidence and request recovery remain available.")}</p>
     {:else}<fieldset class="space-y-3" disabled={busy || blocked}>
-      <p class="text-sm">Current approved template revision {context.template.version}. These are its defaults, not copied values or signatures from the old agreement.</p>
-      <label class="block text-sm">Draft name<input class="input w-full" bind:value={name} maxlength="200" /></label>
-      {#each context.template.values as field (field.name)}<label class="block text-sm">{field.name.replaceAll('_', ' ')}{field.required ? ' *' : ''}<input class="input w-full" value={values[field.name] ?? ''} maxlength={field.max_chars || 8192} oninput={(event) => { values = { ...values, [field.name]: event.currentTarget.value }; confirmed = false; }} /></label>{/each}
+      <p class="text-sm">{$ui("Current approved template revision")} {context.template.version}{$ui(". These are its defaults, not copied values or signatures from the old agreement.")}</p>
+      <label class="block text-sm">{$ui("Draft name")}<input class="input w-full" bind:value={name} maxlength="200" /></label>
+      {#each context.template.values as field (field.name)}<label class="block text-sm">{field.name.replaceAll('_', ' ')}{$ui(field.required ? ' *' : '')}<input class="input w-full" value={values[field.name] ?? ''} maxlength={field.max_chars || 8192} oninput={(event) => { values = { ...values, [field.name]: event.currentTarget.value }; confirmed = false; }} /></label>{/each}
       {#each context.template.sections as field (field.name)}<label class="block text-sm">{field.name.replaceAll('_', ' ')}<textarea class="input w-full" value={sections[field.name] ?? field.default_text} maxlength={field.max_chars || 32768} oninput={(event) => { sections = { ...sections, [field.name]: event.currentTarget.value }; confirmed = false; }}></textarea></label>{/each}
-      <label class="flex gap-2 text-sm"><input type="checkbox" bind:checked={confirmed} />Create a separate draft for review. This does not sign or send it.</label>
-      <button class="btn btn-primary" disabled={!confirmed} onclick={create}>{busy ? 'Creating…' : 'Create linked draft and review'}</button>
+      <label class="flex gap-2 text-sm"><input type="checkbox" bind:checked={confirmed} />{$ui("Create a separate draft for review. This does not sign or send it.")}</label>
+      <button class="btn btn-primary" disabled={!confirmed} onclick={create}>{$ui(busy ? 'Creating…' : 'Create linked draft and review')}</button>
     </fieldset>{/if}
-  {:else}<button class="btn btn-secondary" disabled={busy || blocked} onclick={prepare}>{busy ? 'Loading…' : 'Prepare linked draft'}</button>{/if}
+  {:else}<button class="btn btn-secondary" disabled={busy || blocked} onclick={prepare}>{$ui(busy ? 'Loading…' : 'Prepare linked draft')}</button>{/if}
   {#if message}<p role="status" class="text-sm">{message}</p>{/if}
 </section>

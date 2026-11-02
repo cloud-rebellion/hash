@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ui, staffLocale } from '$lib/staffPreferences';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import type { PdfDoc } from '$lib/pdf';
   import type { PdfLoad } from '$lib/pdfLoad';
@@ -345,18 +346,16 @@
   }
 </script>
 
-<section class="card p-5 mb-6 min-w-0" aria-label="PDF signature locations" data-generated-signatures={generated} data-placement-ready={rendered && !error && !recipientRefreshError && !refreshingRecipients}>
+<section class="card p-5 mb-6 min-w-0" aria-label={$ui("PDF signature locations")} data-generated-signatures={generated} data-placement-ready={rendered && !error && !recipientRefreshError && !refreshingRecipients}>
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <Signature class="size-4" /> {generated || readonly ? 'Signature locations' : 'Field designer'}
+      <Signature class="size-4" /> {$ui(generated || readonly ? 'Signature locations' : 'Field designer')}
     </h2>
   </div>
-  {#if generated}<p class="text-sm text-text-secondary mb-4 leading-relaxed">Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties. Change document values or wording above to create a new PDF; Hash regenerates its locations for fresh review.</p>
-  {:else if readonly}<p class="text-sm text-text-secondary mb-4 leading-relaxed">The saved field positions are shown for viewing.</p>
+  {#if generated}<p class="text-sm text-text-secondary mb-4 leading-relaxed">{$ui("Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties. Change document values or wording above to create a new PDF; Hash regenerates its locations for fresh review.")}</p>
+  {:else if readonly}<p class="text-sm text-text-secondary mb-4 leading-relaxed">{$ui("The saved field positions are shown for viewing.")}</p>
   {:else}<p class="text-sm text-text-secondary mb-4 leading-relaxed">
-    Pick a field type. On touch screens, tap to place a field and swipe to scroll. With a mouse, click or drag a box. Each
-    signer fills their fields and signs where you drop a signature field; the
-    values stamp onto the final PDF at exactly these positions.
+    {$ui("Pick a field type. On touch screens, tap to place a field and swipe to scroll. With a mouse, click or drag a box. Each signer fills their fields and signs where you drop a signature field; the values stamp onto the final PDF at exactly these positions.")}
   </p>{/if}
 
   <!-- Toolbar -->
@@ -368,20 +367,20 @@
           disabled={placementUnavailable}
           onclick={() => (tool = t.type)}
         >
-          <t.icon class="size-3" /> {t.label}
+          <t.icon class="size-3" /> {$ui(t.label)}
         </button>
       {/each}
     </div>
     <label class="text-sm min-w-0 max-w-full">
-      <span class="block text-xs uppercase tracking-widest text-text-muted font-mono mb-1">Recipient</span>
+      <span class="block text-xs uppercase tracking-widest text-text-muted font-mono mb-1">{$ui("Recipient")}</span>
       <select
-        aria-label="Recipient"
+        aria-label={$ui("Recipient")}
         bind:value={recipientID}
         disabled={placementUnavailable}
         class="max-w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
       >
         {#if tool !== 'signature'}
-          <option value="">Any recipient</option>
+          <option value="">{$ui("Any recipient")}</option>
         {/if}
         {#each recipients as r (r.id)}
           <option value={r.id}>{r.name}</option>
@@ -389,43 +388,43 @@
       </select>
     </label>
     <label class="flex items-center gap-2 text-sm pb-2">
-      <input type="checkbox" bind:checked={required} disabled={placementUnavailable} /> Required
+      <input type="checkbox" bind:checked={required} disabled={placementUnavailable} /> {$ui("Required")}
     </label>
   </div>{/if}
 
   {#if error}
-    <div role="alert" class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">{error}</div>
+    <div role="alert" class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">{$ui(error)}</div>
   {/if}
-  {#if saving}<p role="status" class="text-sm text-text-muted mb-3">Saving field…</p>{/if}
-  {#if refreshingRecipients}<p role="status" class="text-sm text-text-muted mb-3">Refreshing field assignments…</p>{/if}
+  {#if saving}<p role="status" class="text-sm text-text-muted mb-3">{$ui("Saving field…")}</p>{/if}
+  {#if refreshingRecipients}<p role="status" class="text-sm text-text-muted mb-3">{$ui("Refreshing field assignments…")}</p>{/if}
   {#if recipientRefreshError}
     <div role="alert" class="text-danger text-sm mb-3">
-      <p>Field assignments could not be refreshed: {recipientRefreshError}</p>
-      <button type="button" class="btn btn-secondary" disabled={saving || refreshingRecipients} onclick={() => refreshPlacementContext(recipientRevision)}>Retry field assignments</button>
+      <p>{$ui("Field assignments could not be refreshed:")} {recipientRefreshError}</p>
+      <button type="button" class="btn btn-secondary" disabled={saving || refreshingRecipients} onclick={() => refreshPlacementContext(recipientRevision)}>{$ui("Retry field assignments")}</button>
     </div>
   {/if}
 
   {#if recipients.length === 0 && !loading}
     <div class="p-3 rounded-md border border-warning bg-bg-elevated text-sm mb-3">
-      Add recipients first so signature fields can be assigned to a signer.
+      {$ui("Add recipients first so signature fields can be assigned to a signer.")}
     </div>
   {/if}
 
   {#if loading}
-    <p class="text-text-muted text-sm">Loading PDF...</p>
+    <p class="text-text-muted text-sm">{$ui("Loading PDF...")}</p>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus lets users scroll the PDF placement pages.) -->
-    <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label="PDF field placement pages" tabindex="0">
+    <div class="max-w-full overflow-x-auto pt-3 space-y-6" role="region" aria-label={$ui("PDF field placement pages")} tabindex="0">
       {#each pages as p (p.num)}
         <div class="relative mx-auto shadow-sm border border-border-light" style="width:{p.w}px;max-width:100%">
-          <canvas width="0" height="0" bind:this={canvasEls[p.num]} aria-label={`Document page ${p.num}`} class="block w-full h-auto" style="aspect-ratio:{p.w}/{p.h}"></canvas>
-          {#if !residentPages.includes(p.num)}<span class="absolute left-2 top-2 text-sm text-text-muted" role="status">Rendering page {p.num}…</span>{/if}
+          <canvas width="0" height="0" bind:this={canvasEls[p.num]} aria-label={$ui("Document page {number}", { number: p.num })} class="block w-full h-auto" style="aspect-ratio:{p.w}/{p.h}"></canvas>
+          {#if !residentPages.includes(p.num)}<span class="absolute left-2 top-2 text-sm text-text-muted" role="status">{$ui("Rendering page")} {p.num}…</span>{/if}
           <!-- The displayed page and overlay scale together; stored coordinates remain percentages. -->
           <div
             class="absolute inset-0 {generated || readonly ? '' : 'cursor-crosshair'}"
             role="application"
             tabindex="-1"
-            aria-label="Field placement layer for page {p.num}"
+            aria-label={$ui("Field placement layer for page {number}", { number: p.num })}
             style="touch-action:pan-y pinch-zoom"
             onpointerdown={(e) => onPointerDown(e, p.num, e.currentTarget as HTMLElement)}
             onpointermove={(e) => onPointerMove(e, e.currentTarget as HTMLElement)}
@@ -445,7 +444,7 @@
                 {#if !generated && !readonly}<button
                   type="button"
                   class="shrink-0 hover:text-danger"
-                  aria-label="Remove field"
+                  aria-label={$ui("Remove field")}
                   disabled={placementUnavailable || !residentPages.includes(p.num)}
                   onpointerdown={(e) => e.stopPropagation()}
                   onclick={() => remove(f)}
@@ -462,7 +461,7 @@
             {/if}
           </div>
           <span class="absolute -top-3 left-2 text-[10px] font-mono text-text-muted bg-bg-surface px-1">
-            Page {p.num}
+            {$ui("Page")} {p.num}
           </span>
         </div>
       {/each}

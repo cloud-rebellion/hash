@@ -109,6 +109,20 @@ func applyDocumentPurposeV1(ctx context.Context, db generated.DBTX, q *generated
 	if err != nil {
 		return nil, err
 	}
+	row, err := applyDocumentMetadataBytesV1(ctx, db, q, old, metadata, hold)
+	if err != nil {
+		return nil, err
+	}
+	observed, err := documentpurpose.Parse(row.Metadata)
+	if err != nil || observed != p {
+		return nil, ErrBlocksWriterV1
+	}
+	return row, nil
+}
+
+// A genuine source owner supplies the complete old/new body loan. This is
+// post-write producer measurement, never a missing-cache reader repair.
+func applyDocumentMetadataBytesV1(ctx context.Context, db generated.DBTX, q *generated.Queries, old *generated.Document, metadata []byte, hold func(context.Context, int64, int64) error) (*generated.Document, error) {
 	wire, err := sourcejson.PostgreSQLJSONBWireUpperBoundV1(ctx, metadata)
 	if err != nil {
 		return nil, err
@@ -129,10 +143,6 @@ func applyDocumentPurposeV1(ctx context.Context, db generated.DBTX, q *generated
 		return nil, err
 	}
 	if row == nil || !applicationStampV1(row.UpdatedAt) || int64(len(row.Metadata)) > wire {
-		return nil, ErrBlocksWriterV1
-	}
-	observed, err := documentpurpose.Parse(row.Metadata)
-	if err != nil || observed != p {
 		return nil, ErrBlocksWriterV1
 	}
 	expected := *old

@@ -51,6 +51,7 @@ type resultStateV1 struct {
 	blockTemplateSource *pdfadmission.ApplicationBlocksTemplateSourceV1
 	plainDraftWriter    *pdfadmission.ApplicationPlainDraftMutationWriterV1
 	purposeWriter       *pdfadmission.ApplicationDocumentPurposeWriterV1
+	metadataWriter      *pdfadmission.ApplicationDocumentMetadataWriterV1
 	topology            *pdfadmission.ApplicationEnvelopeTopologyV1
 	revisionReader      *pdfadmission.ApplicationHTMLRevisionReaderV1
 	mutationWriter      *pdfadmission.ApplicationBlocksMutationWriterV1
@@ -78,6 +79,9 @@ func (r *ResultV1) CloseConsumerV1() {
 		s.events = nil
 		if s.topology != nil {
 			s.topology.CloseConsumerV1()
+		}
+		if s.metadataWriter != nil {
+			s.metadataWriter.CloseConsumerV1()
 		}
 		if s.purposeWriter != nil {
 			s.purposeWriter.CloseConsumerV1()

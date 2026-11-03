@@ -87,18 +87,33 @@ func holdDocumentMetadataParentE2E(t *testing.T, f lifecycleAuthorizationFixture
 	return tx
 }
 
+// attach_metadata now borrows the original measured document through the native
+// reader. Its successful fixture must originate through the real public creator;
+// set_expiry retains the original details-only legacy path and fixture.
+func setupDocumentMetadataAuthorization756(t *testing.T, role, tool string) lifecycleAuthorizationFixture {
+	t.Helper()
+	if tool == "attach_metadata" {
+		return setupNativeLifecycleAuthorization256(t, role, false, false)
+	}
+	return setupLifecycleAuthorizationE2E(t, role, false, false)
+}
+
 func TestDocumentMetadataMCPOriginalCredentialAfterParentWaitE2E(t *testing.T) {
 	for _, tool := range []string{"set_expiry", "attach_metadata"} {
 		for _, change := range []string{"key-delete", "scope-reduction", "key-expiry", "token-revocation", "member-demotion"} {
 			t.Run(tool+"/"+change, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "owner", false, false)
+				f := setupDocumentMetadataAuthorization756(t, "owner", tool)
 				f.enableMCP()
 				owner := seedSessionOwnerE2E(t, f.ctx, f.q, f.org)
 				mint, keyID := mintDocumentMetadataKeyE2E(t, f, change == "token-revocation")
 				blocked := holdDocumentMetadataParentE2E(t, f)
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- submitDocumentMetadataE2E(f, f.ctx, tool, mint.Plaintext) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: GetDocumentForUpdate", "transactionid")
+				query := "-- name: GetDocumentForUpdate"
+				if tool == "attach_metadata" {
+					query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
+				}
+				awaitAuthoringParentWait624E2E(t, f, blocked, query, tool == "attach_metadata")
 				var err error
 				switch change {
 				case "key-delete":
@@ -142,7 +157,7 @@ func TestDocumentMetadataMCPAuditWaitRollsBackE2E(t *testing.T) {
 	for _, tool := range []string{"set_expiry", "attach_metadata"} {
 		for _, failure := range []string{"expiry", "cancellation"} {
 			t.Run(tool+"/"+failure, func(t *testing.T) {
-				f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+				f := setupDocumentMetadataAuthorization756(t, "sender", tool)
 				f.enableMCP()
 				mint, keyID := mintDocumentMetadataKeyE2E(t, f, false)
 				before := recipientMCPSnapshotE2E(t, f)
@@ -163,7 +178,7 @@ func TestDocumentMetadataMCPAuditWaitRollsBackE2E(t *testing.T) {
 				defer cancel()
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- submitDocumentMetadataE2E(f, ctx, tool, mint.Plaintext) }()
-				awaitSessionOperationLockE2E(t, f.ctx, f.pool, "-- name: AcquireOrgChainLock", "advisory")
+				awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", tool == "attach_metadata")
 				if failure == "expiry" {
 					deadline := time.Now().Add(3 * time.Second)
 					expired := false
@@ -278,9 +293,10 @@ func TestDocumentSoftDeleteCancellationDuringAuditWaitRollsBackE2E(t *testing.T)
 func TestDocumentMetadataMCPOneUseCommitE2E(t *testing.T) {
 	for _, tool := range []string{"set_expiry", "attach_metadata"} {
 		t.Run(tool, func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "sender", false, false)
+			f := setupDocumentMetadataAuthorization756(t, "sender", tool)
 			f.enableMCP()
 			mint, _ := mintDocumentMetadataKeyE2E(t, f, true)
+			originalAudit := authoringAuditBaselineE2E(t, f)
 			fieldMCPTextE2E(t, submitDocumentMetadataE2E(f, f.ctx, tool, mint.Plaintext), false)
 			fresh, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: f.doc.ID, OrgID: f.org})
 			if err != nil {
@@ -297,12 +313,13 @@ func TestDocumentMetadataMCPOneUseCommitE2E(t *testing.T) {
 				}
 			}
 			var total, matching int
-			if err := f.pool.QueryRow(f.ctx, `SELECT count(*),count(*) FILTER (WHERE kind=$2 AND actor_user_id=$3 AND payload_json->>'via'='mcp' AND payload_json->>'tool'=$4) FROM events WHERE document_id=$1`, f.doc.ID, audit.KindDocumentUpdated, f.user.ID, tool).Scan(&total, &matching); err != nil { //nolint:rawsql -- exact authorized audit provenance
+			if err := f.pool.QueryRow(f.ctx, `SELECT count(*),count(*) FILTER (WHERE kind=$2 AND actor_user_id=$3 AND payload_json->>'via'='mcp' AND payload_json->>'tool'=$4) FROM events WHERE document_id=$1 AND NOT (id=ANY($5::uuid[]))`, f.doc.ID, audit.KindDocumentUpdated, f.user.ID, tool, originalAudit.ids()).Scan(&total, &matching); err != nil { //nolint:rawsql -- exact authorized audit provenance
 				t.Fatal(err)
 			}
 			if total != 1 || matching != 1 {
 				t.Fatalf("metadata audit total/matching=%d/%d", total, matching)
 			}
+			originalAudit.assertAdded(t, f, 1)
 			key, err := f.q.GetDocAgentTokenByPrefix(f.ctx, mint.Prefix)
 			if err != nil || key.UsedCount != 1 || !key.LastUsedAt.Valid {
 				t.Fatal("metadata authorization consumed its admitted token more than once")

@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"path"
@@ -241,36 +241,22 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if p.Key == "" {
 				return nil, errors.New("key required")
 			}
-			return mutateDraftDocumentMetadata(r, d, u, id, mcpScopeWriteAuthoring, documentMetadataReplaceV1,
-				map[string]any{"via": "mcp", "tool": "attach_metadata", "key": p.Key, "value": p.Value},
-				func(locked *generated.Document) (generated.UpdateDocumentMetadataParams, error) {
-					meta := map[string]any{}
-					if len(locked.Metadata) > 0 {
-						if err := json.Unmarshal(locked.Metadata, &meta); err != nil {
-							return generated.UpdateDocumentMetadataParams{}, fmt.Errorf("stored metadata invalid: %w", err)
-						}
-					}
-					if meta == nil {
-						return generated.UpdateDocumentMetadataParams{}, errors.New("stored metadata must be an object")
-					}
-					meta[p.Key] = p.Value
-					raw, err := json.Marshal(meta)
-					if err != nil {
-						return generated.UpdateDocumentMetadataParams{}, err
-					}
-					return generated.UpdateDocumentMetadataParams{ID: id, OrgID: u.OrgID, Name: locked.Name, ExpiresAt: locked.ExpiresAt, Metadata: raw}, nil
-				})
+			authorize, err := auth.APIKeyTransactionAuthorization(r.Context(), id, mcpScopeWriteAuthoring)
+			if err != nil {
+				return nil, err
+			}
+			result, err := blockauthoring.AttachDocumentMetadataV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "attach_metadata"}, id, p.Key, p.Value)
+			return &ownedMetadataDocumentResultV1{result}, err
 		},
 	})
 }
 
-// Intent is chosen by the registered tool, never inferred from JSONB equality.
-// Only attach_metadata replaces metadata; set_expiry leaves that column absent.
+// This legacy details helper never replaces metadata. attach_metadata uses
+// the owned metadata producer and its same-transaction response measurement.
 type documentMetadataIntentV1 uint8
 
 const (
 	documentDetailsOnlyV1 documentMetadataIntentV1 = iota + 1
-	documentMetadataReplaceV1
 )
 
 // Both tools retain the original admitted key, the live sender/owner, and
@@ -309,8 +295,6 @@ func mutateDraftDocumentMetadata(r *http.Request, d Deps, u auth.SessionUser, id
 			return nil, errors.New("details-only edit cannot replace metadata")
 		}
 		doc, err = q.UpdateDraftDocumentDetailsV1(ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: params.ID, OrgID: params.OrgID, Name: params.Name, ExpiresAt: params.ExpiresAt})
-	case documentMetadataReplaceV1:
-		doc, err = q.UpdateDocumentMetadata(ctx, params)
 	default:
 		return nil, errors.New("document metadata edit intent unavailable")
 	}
@@ -350,3 +334,19 @@ var (
 	_ = path.Join
 	_ = sha256.Sum256
 )
+
+// Preserve attach_metadata's existing document response while retaining its
+// genuine producer until the central MCP serializer closes the result owner.
+type ownedMetadataDocumentResultV1 struct{ owner *blockauthoring.ResultV1 }
+
+func (r *ownedMetadataDocumentResultV1) MarshalJSON() ([]byte, error) {
+	if r == nil || r.owner == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(r.owner.Document)
+}
+func (r *ownedMetadataDocumentResultV1) CloseConsumerV1() {
+	if r != nil && r.owner != nil {
+		r.owner.CloseConsumerV1()
+	}
+}

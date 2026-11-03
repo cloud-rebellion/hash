@@ -24,6 +24,19 @@ import (
 // Parent/CAS/member/evidence/privacy and final original credential checks keep
 // their original order, and each successful event uses actual ownedaudit hooks.
 func MutateDocumentPurposeV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, via versions.Via, expected string, checkObservation func(*generated.Document, string) error, purpose documentpurpose.Purpose) (result *ResultV1, failure error) {
+	return mutateDocumentMetadataV1(ctx, d, actor, document, expected, checkObservation, &purpose, "", "")
+}
+
+// Metadata merging is serialized under the same original draft/credential gates.
+// It does not claim a caller observation or repair an unreadable old draft.
+func AttachDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, key, value string) (*ResultV1, error) {
+	if key == "" || documentpurpose.IsReservedKey(key) {
+		return nil, errors.New("metadata key is unavailable")
+	}
+	return mutateDocumentMetadataV1(ctx, d, actor, document, "", func(*generated.Document, string) error { return nil }, nil, key, value)
+}
+
+func mutateDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, expected string, checkObservation func(*generated.Document, string) error, purpose *documentpurpose.Purpose, key, value string) (result *ResultV1, failure error) {
 	if d.Sessions == nil || d.Audit == nil || document == uuid.Nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || actor.Authorize == nil || checkObservation == nil {
 		return nil, errors.New("native draft mutation dependencies unavailable")
 	}
@@ -118,17 +131,27 @@ func MutateDocumentPurposeV1(ctx context.Context, d DependenciesV1, actor ActorV
 		if err = checkObservation(old, expected); err != nil {
 			return err
 		}
-		state.purposeWriter, err = session.NewDocumentPurposeWriterV1(call, state.revisionReader)
+		payload := map[string]any{"via": actor.Via, "tool": actor.Tool}
+		auditPurpose := pdfadmission.HTMLAuditDocumentPurposeUpdatedV1
+		if purpose != nil {
+			state.purposeWriter, err = session.NewDocumentPurposeWriterV1(call, state.revisionReader)
+			if err == nil {
+				doc, err = state.purposeWriter.ChangeV1(call, *purpose)
+			}
+			payload["purpose"] = string(*purpose)
+		} else {
+			state.metadataWriter, err = session.NewDocumentMetadataWriterV1(call, state.revisionReader)
+			if err == nil {
+				doc, err = state.metadataWriter.AttachV1(call, key, value)
+			}
+			auditPurpose = pdfadmission.HTMLAuditDocumentMetadataAttachedV1
+			payload["key"], payload["value"] = key, value
+		}
 		if err != nil {
 			return err
 		}
-		doc, err = state.purposeWriter.ChangeV1(call, purpose)
-		if err != nil {
-			return err
-		}
-		payload := map[string]any{"purpose": string(purpose), "via": actor.Via, "tool": actor.Tool}
 		id, uid := doc.ID, actor.UserID
-		pending, eventOwner, err = ownedaudit.LogV1(d.Audit, call, session, pdfadmission.HTMLAuditDocumentPurposeUpdatedV1, audit.Entry{OrgID: actor.OrgID, ActorUserID: &uid, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: payload})
+		pending, eventOwner, err = ownedaudit.LogV1(d.Audit, call, session, auditPurpose, audit.Entry{OrgID: actor.OrgID, ActorUserID: &uid, DocumentID: &id, Kind: audit.KindDocumentUpdated, Payload: payload})
 		if eventOwner != nil {
 			state.events = append(state.events, eventOwner)
 		}

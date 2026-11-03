@@ -637,6 +637,20 @@ type DocumentFinalizationReference struct {
 	OwnerKey             uuid.UUID          `json:"owner_key"`
 }
 
+type DocumentFolder struct {
+	ID        uuid.UUID          `json:"id"`
+	OrgID     uuid.UUID          `json:"org_id"`
+	Name      string             `json:"name"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DocumentFolderMembership struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+	FolderID   uuid.UUID `json:"folder_id"`
+}
+
 type DocumentLawfulBasisConfirmation struct {
 	DocumentID        uuid.UUID          `json:"document_id"`
 	OrgID             uuid.UUID          `json:"org_id"`

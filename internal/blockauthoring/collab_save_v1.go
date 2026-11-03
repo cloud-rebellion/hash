@@ -69,7 +69,8 @@ func SaveCanonicalCollabV1(ctx context.Context, d DependenciesV1, actor ActorV1,
 		}
 	}()
 	var user *generated.User
-	// Acquire the actual parent/member/evidence/privacy/CAS before room mutex.
+	var observedDocument *generated.Document
+	// Acquire the actual parent/member/evidence/privacy before room mutex.
 	// WithTx callbacks expose no raw transaction/commit, and subsequent callbacks
 	// use this retained native session's same still-open physical transaction.
 	err = session.WithTxV1(ctx, func(call context.Context, db generated.DBTX) error {
@@ -129,11 +130,8 @@ func SaveCanonicalCollabV1(ctx context.Context, d DependenciesV1, actor ActorV1,
 		if privacy {
 			return authoring.ErrPendingPrivacyReview
 		}
-		if err = checkObservation(old, expected); err != nil {
-			return err
-		}
-		state.plainDraftWriter, err = session.NewPlainDraftMutationWriterV1(call, state.revisionReader)
-		return err
+		observedDocument = old
+		return nil
 	})
 	if err != nil {
 		return result, err
@@ -144,7 +142,17 @@ func SaveCanonicalCollabV1(ctx context.Context, d DependenciesV1, actor ActorV1,
 	var eventOwner *pdfadmission.ApplicationHTMLAuditEventConsumerV1
 	err = room.CommitSaveCheckpointWithStateAdmissionV1(in.PeerID, in.Checkpoint, func(bytes int) error {
 		return session.WithTxV1(ctx, func(call context.Context, _ generated.DBTX) error {
+			// The consumed checkpoint keeps its original conflict response even
+			// when its document timestamp is also old. A genuine fresh token must
+			// still pass CAS before writer/replay admission or any detached copy.
+			if err := checkObservation(observedDocument, expected); err != nil {
+				return err
+			}
 			var err error
+			state.plainDraftWriter, err = session.NewPlainDraftMutationWriterV1(call, state.revisionReader)
+			if err != nil {
+				return err
+			}
 			replay, err = state.plainDraftWriter.AdmitCanonicalCollabReplayV1(call, bytes)
 			return err
 		})

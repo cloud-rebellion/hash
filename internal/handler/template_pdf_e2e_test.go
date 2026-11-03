@@ -71,7 +71,7 @@ func assertTemplatePDFReadNoWritesE2E(t *testing.T, f lifecycleAuthorizationFixt
 }
 
 func TestTemplatePDFStaffReadBindsTenantVersionAndVerifiedBytesE2E(t *testing.T) {
-	f, base, template, _, cookie := setupPDFTemplateSanitizationE2E(t)
+	f, base, template, _, cookie := setupPDFTemplateSanitizationE2E(t, htmlAuthoringTemplatePDFReadProfileE2E)
 	peer := attachTemplatePDFReadE2E(t, f, base, template, false, false)
 	before := ownedPDFTemplateStateV1(t, &ownedPublicReadFixtureV1{f: f}, template.ID)
 	w := submitSessionOperationE2E(f.s, http.MethodGet, templatePDFPathE2E(template), "", cookie)
@@ -133,7 +133,7 @@ func TestTemplatePDFStaffReadBindsTenantVersionAndVerifiedBytesE2E(t *testing.T)
 func TestTemplatePDFRechecksNativeCredentialAndSourceAfterStorageWaitE2E(t *testing.T) {
 	for _, change := range []string{"logout", "expiry", "native-template-edit", "source-cache-corruption", "pinned-version-unavailable", "provider-byte-corruption"} {
 		t.Run(change, func(t *testing.T) {
-			f, base, template, _, cookie := setupPDFTemplateSanitizationE2E(t)
+			f, base, template, _, cookie := setupPDFTemplateSanitizationE2E(t, htmlAuthoringTemplatePDFReadProfileE2E)
 			blocked := change != "pinned-version-unavailable" && change != "provider-byte-corruption"
 			peer := attachTemplatePDFReadE2E(t, f, base, template, blocked, change == "pinned-version-unavailable")
 			if change == "provider-byte-corruption" {

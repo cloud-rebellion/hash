@@ -106,7 +106,7 @@ func TestNativeCanonicalCollabEmptyThenTypedSaveKeepsSendPreflightMeasurementsE2
 				}
 				blocks := doc.BlocksJson
 				if typed {
-					blocks = json.RawMessage(`{"version":0,"blocks":[{"type":"paragraph","text":"Actual typed canonical clause"}]}`)
+					blocks = json.RawMessage(`{"version":0,"blocks":[{"id":"canonical-terms","type":"paragraph","text":"Actual typed canonical clause"},{"id":"canonical-signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`)
 				}
 				body := collabSaveInput{PeerID: peer.ID(), Checkpoint: hex.EncodeToString(cp.Token[:]), Generation: fmt.Sprint(cp.Generation), ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), BlocksJSON: blocks}
 				w := ownedBlocksTemplateCallV1(t, f, cookie, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/collab/save", body)
@@ -128,13 +128,31 @@ func TestNativeCanonicalCollabEmptyThenTypedSaveKeepsSendPreflightMeasurementsE2
 			}
 			before := nativeCanonicalCollabStateE2E(t, f, doc.ID)
 			w := ownedBlocksTemplateCallV1(t, f, cookie, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/send", map[string]any{"lawful_basis": "contract"})
-			// This deliberately recipient-free draft must reach its specific business
-			// preflight, proving native source/policy admission before renderer or mail.
-			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), send.ErrNoRecipients.Error()) {
-				t.Fatalf("saved native source did not reach exact Send recipient preflight=%d %s", w.Code, w.Body.String())
+			// The real signature block must reach its exact missing-signer policy,
+			// proving native source/policy admission before renderer or mail.
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), send.ErrNoSigners.Error()) {
+				t.Fatalf("saved native source did not reach exact Send signer preflight=%d %s", w.Code, w.Body.String())
 			}
 			if nativeCanonicalCollabStateE2E(t, f, doc.ID) != before {
 				t.Fatal("failed Send preflight changed actual source/history/cache/audit")
+			}
+			recipient := ownedBlocksTemplateCallV1(t, f, cookie, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/recipients", map[string]any{
+				"email": uuid.NewString() + "@canonical-save.example.test", "name": "Synthetic canonical signer", "role": "signer", "order_index": 0, "locale": "en",
+			})
+			if recipient.Code != http.StatusCreated {
+				t.Fatalf("native canonical recipient=%d %s", recipient.Code, recipient.Body.String())
+			}
+			w = ownedBlocksTemplateCallV1(t, f, cookie, http.MethodPost, "/api/v1/documents/"+doc.ID.String()+"/send", map[string]any{"lawful_basis": "contract"})
+			if w.Code != http.StatusOK {
+				t.Fatalf("saved native signature source did not Send=%d %s", w.Code, w.Body.String())
+			}
+			sent, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org})
+			if err != nil || sent.Status != "sent" || !sent.RequiresSignature || !strings.Contains(string(sent.BlocksJson), "Actual typed canonical clause") {
+				t.Fatal("native Send lost the saved signature-required source", err)
+			}
+			recipients, err := f.q.ListRecipientsByDocument(f.ctx, doc.ID)
+			if err != nil || len(recipients) != 1 || recipients[0].Role != "signer" || !recipients[0].SentAt.Valid {
+				t.Fatal("native Send did not invite the real saved-source signer", err)
 			}
 			ownedPlainAssertDrainedV1(t, q)
 		})

@@ -26,11 +26,35 @@ import (
 // Explicit synthetic test capacity, not deployed limits or approval. This
 // unique disposable DB uses the genuine direct factory, original observer,
 // native coordinator and physical cleanup; no caller Tx or READY is supplied.
-// The sole opt-in profile is for metadata's >128KiB source-read fixture.
+// Opt-in profiles cover metadata source reads and a funded template-PDF provider lane.
 // Logical source recipe credit is not measured RSS or installation capacity.
 type htmlAuthoringNativeTestProfileE2E uint8
 
-const htmlAuthoringMetadataReadProfileE2E htmlAuthoringNativeTestProfileE2E = 1
+const (
+	htmlAuthoringMetadataReadProfileE2E    htmlAuthoringNativeTestProfileE2E = 1
+	htmlAuthoringTemplatePDFReadProfileE2E htmlAuthoringNativeTestProfileE2E = 2
+)
+
+// Test profiles fund only explicitly selected work at the original coordinator's
+// birth. Ordinary fixtures retain their zero-provider capacity and original
+// Parent allocation; production configuration is not changed by these tests.
+func htmlAuthoringNativeLimitsE2E(profiles ...htmlAuthoringNativeTestProfileE2E) (workguard.VectorV1, error) {
+	limits := workguard.VectorV1{ParentBytes: 2 << 30, DBStagingBytes: 2 << 30, SQLSessions: 16}
+	if len(profiles) > 1 {
+		return workguard.VectorV1{}, errors.New("unsupported native HTML test profile")
+	}
+	if len(profiles) == 1 {
+		switch profiles[0] {
+		case htmlAuthoringMetadataReadProfileE2E:
+			limits.ParentBytes = 3 << 30
+		case htmlAuthoringTemplatePDFReadProfileE2E:
+			limits.ProviderStreams = 1
+		default:
+			return workguard.VectorV1{}, errors.New("unsupported native HTML test profile")
+		}
+	}
+	return limits, nil
+}
 
 func setupHTMLAuthoringNativeFixtureV1(t *testing.T, f lifecycleAuthorizationFixture, profiles ...htmlAuthoringNativeTestProfileE2E) {
 	t.Helper()
@@ -43,16 +67,10 @@ func setupHTMLAuthoringNativeFixtureV1(t *testing.T, f lifecycleAuthorizationFix
 	cfg.RuntimeParams["statement_timeout"] = "15000"
 	cfg.RuntimeParams["lock_timeout"] = "10000"
 	cfg.RuntimeParams["idle_in_transaction_session_timeout"] = "30000"
-	parentBytes := int64(2 << 30)
-	if len(profiles) > 1 || len(profiles) == 1 && profiles[0] != htmlAuthoringMetadataReadProfileE2E {
-		t.Fatal("unsupported native HTML test profile")
+	limits, err := htmlAuthoringNativeLimitsE2E(profiles...)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(profiles) == 1 {
-		// Explicit finite experiment at factory birth; no live limits change.
-		// Every ordinary caller retains the original2GiB Parent allocation.
-		parentBytes = 3 << 30
-	}
-	limits := workguard.VectorV1{ParentBytes: parentBytes, DBStagingBytes: 2 << 30, SQLSessions: 16}
 	coordinator, err := workguard.NewV1(workguard.LimitsV1{Global: limits, Organisation: limits, MaxGrants: 256, MaxOrganisationGrants: 128})
 	if err != nil {
 		t.Fatal(err)

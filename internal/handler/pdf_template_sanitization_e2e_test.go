@@ -27,12 +27,12 @@ import (
 // is not production storage/Object Lock proof; no renderer or SMTP is used.
 // The existing upload helper supplies a valid metadata-absent PDF, so its
 // recorded absence cannot be confused with observed metadata removal.
-func setupPDFTemplateSanitizationE2E(t *testing.T) (lifecycleAuthorizationFixture, *htmlCreationStorageE2E, *generated.Template, sanitize.Report, string) {
+func setupPDFTemplateSanitizationE2E(t *testing.T, profiles ...htmlAuthoringNativeTestProfileE2E) (lifecycleAuthorizationFixture, *htmlCreationStorageE2E, *generated.Template, sanitize.Report, string) {
 	t.Helper()
 	if os.Getenv("HASH_E2E_PDF_WORKER_PATH") == "" {
 		t.Fatal("PDF template provenance fixture requires the source-built isolated HASH_E2E_PDF_WORKER_PATH")
 	}
-	f, peer := setupHTMLDocumentCreationE2E(t, &htmlCreationRendererE2E{})
+	f, peer := setupHTMLDocumentCreationE2E(t, &htmlCreationRendererE2E{}, profiles...)
 	// The existing operator Pro entitlement is unchanged. Native clone quota
 	// reads need this genuinely measured catalog source, not a repaired template.
 	metadataPrepareNativePlanE2E(t, f)

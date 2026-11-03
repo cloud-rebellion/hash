@@ -43,6 +43,7 @@ func TestCollabSaveAuthenticatedAtomicReceiptE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := collabSaveInput{PeerID: peer.ID(), Checkpoint: hex.EncodeToString(cp.Token[:]), Generation: "1", ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), BlocksJSON: doc.BlocksJson}
+	consumedCheckpoint := input.Checkpoint
 	routes := s.Routes()
 	submit := func(in collabSaveInput, cookieValue string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(in)
@@ -83,8 +84,12 @@ func TestCollabSaveAuthenticatedAtomicReceiptE2E(t *testing.T) {
 	if state.Generation.Int64 != 2 || !bytes.Equal(state.YdocState, []byte{1, 42}) {
 		t.Fatal("content/history receipt not associated")
 	}
+	beforeRefusals := nativeCanonicalCollabStateE2E(t, fixture.f, doc.ID)
 	if res := submit(input, cookie); res.Code != 409 {
 		t.Fatalf("replayed checkpoint: %d", res.Code)
+	}
+	if nativeCanonicalCollabStateE2E(t, fixture.f, doc.ID) != beforeRefusals {
+		t.Fatal("replayed checkpoint changed source/history/generation/measurements/audit")
 	}
 	// The copied cookie remains cryptographically valid after role demotion.
 	cp, err = joined.Room.CaptureSaveCheckpoint(peer.ID())
@@ -96,12 +101,23 @@ func TestCollabSaveAuthenticatedAtomicReceiptE2E(t *testing.T) {
 	if res := submit(input, cookie); res.Code != 412 {
 		t.Fatalf("stale document observation with fresh checkpoint: %d %s", res.Code, res.Body.String())
 	}
+	if nativeCanonicalCollabStateE2E(t, fixture.f, doc.ID) != beforeRefusals {
+		t.Fatal("stale observation changed source/history/generation/measurements/audit")
+	}
 	input.ExpectedUpdatedAt = receipt.Document.UpdatedAt
 	if _, err = q.UpdateUserRole(ctx, generated.UpdateUserRoleParams{ID: user, OrgID: org, Role: "viewer"}); err != nil {
 		t.Fatal(err)
 	}
 	if res := submit(input, cookie); res.Code != 403 {
 		t.Fatalf("demoted save: %d %s", res.Code, res.Body.String())
+	}
+	input.Checkpoint = consumedCheckpoint
+	input.Generation = "1"
+	if res := submit(input, cookie); res.Code != 403 {
+		t.Fatalf("demoted actor refusal must precede replay policy: %d %s", res.Code, res.Body.String())
+	}
+	if nativeCanonicalCollabStateE2E(t, fixture.f, doc.ID) != beforeRefusals {
+		t.Fatal("revoked actor changed source/history/generation/measurements/audit")
 	}
 	state, err = q.GetCollabDocStateWithGeneration(ctx, doc.ID)
 	if err != nil {

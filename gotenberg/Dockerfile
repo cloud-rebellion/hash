@@ -38,6 +38,7 @@ RUN apk add --no-cache \
       'chromium>=152.0.7977.82-r0' \
       'libcrypto3>=3.5.8-r0' \
       'libssl3>=3.5.8-r0' \
+      'libexpat>=2.10.0-r0' \
       ca-certificates \
       font-noto \
       font-noto-cjk \

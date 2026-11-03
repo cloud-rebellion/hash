@@ -64,6 +64,10 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 		return err
 	}
 	w.closes = append(w.closes, closeInputs)
+	selectedTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindNewComment)
+	if err != nil {
+		return err
+	}
 	openURL := ""
 	if signer {
 		openURL = strings.TrimRight(baseURL, "/") + "/documents/" + w.sourceDocument.ID.String()
@@ -73,7 +77,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 		template.SenderName = w.sourceActor.Name
 		template.SenderEmail = w.sourceActor.Email
 	}
-	s, h, t, err := dispatch.CommentNotificationComponentsV1(template)
+	s, h, t, err := applicationServiceEmailComponentsV1(dispatch.KindNewComment, template, selectedTemplate)
 	if err != nil {
 		return err
 	}
@@ -103,7 +107,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	out.messages = make([]dispatch.Message, 0, int(count))
 	out.views = make([]dispatch.Message, 0, int(count))
 	render := func(to string) error {
-		subject, html, text, e := dispatch.Render(dispatch.KindNewComment, template)
+		subject, html, text, e := dispatch.RenderServiceEmailV1(dispatch.KindNewComment, template, selectedTemplate)
 		if e != nil {
 			return e
 		}

@@ -13,7 +13,8 @@ import (
 // Version7 owns M116 pre-sign archives, publication, recovery and V3 evidence.
 // Version8 also owns M117 staff credentials and sealed recovery mail. Older
 // workers do not decode that ciphertext and cannot safely consume its queue.
-// M118 only adds document filing sidecars and retains this writer contract.
+// M118 filing and M119 service-email revision sidecars retain this writer
+// contract: workers consume the same already-rendered durable message bodies.
 const LifecycleContractVersionV1 = 8
 
 func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err error) {
@@ -28,12 +29,12 @@ func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err er
 }
 
 func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
-	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118 migration tree")
-	if len(versions) == 0 || len(versions) > 118 {
+	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119 migration tree")
+	if len(versions) == 0 || len(versions) > 119 {
 		return unsupported
 	}
 	highest := versions[len(versions)-1]
-	if highest != 117 && highest != 118 {
+	if highest != 117 && highest != 118 && highest != 119 {
 		return unsupported
 	}
 	seen := make(map[int64]bool, len(versions))
@@ -44,8 +45,11 @@ func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
 		seen[version] = true
 	}
 	names := []string{"00115_later_amendments.sql", "00116_presign_publication_v1.sql", "00117_staff_password_auth.sql"}
-	if highest == 118 {
+	if highest >= 118 {
 		names = append(names, "00118_document_folders.sql")
+	}
+	if highest == 119 {
+		names = append(names, "00119_service_email_templates.sql")
 	}
 	for index, name := range names {
 		info, err := fs.Stat(migrations, "migrations/"+name)

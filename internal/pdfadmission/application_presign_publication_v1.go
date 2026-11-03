@@ -298,12 +298,16 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 	s.provider = preSignPublicationCloneRecipientV1(provider)
 	var msg dispatch.Message
 	if !s.result.Expired {
+		selectedTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindInvite)
+		if err != nil {
+			return zero, err
+		}
 		probeURL := publicURL + "/sign/" + strings.Repeat("A", 43)
 		probeBeacon := publicURL + "/e/o/" + strings.Repeat("A", 43)
 		context := dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail,
 			RecipientName: customer.Name, OrgName: orgName, Locale: customer.Locale, SignURL: probeURL, BeaconURL: probeBeacon, Acknowledgement: false}
 		stage = "publication_output_size"
-		subjectBytes, htmlBytes, textBytes, err := dispatch.InviteNotificationComponentsV1(context)
+		subjectBytes, htmlBytes, textBytes, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, context, selectedTemplate)
 		if err != nil {
 			return zero, err
 		}
@@ -342,7 +346,7 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 		context.SignURL = publicURL + "/sign/" + token
 		context.BeaconURL = publicURL + "/e/o/" + token
 		stage = "publication_invite_render"
-		subject, html, text, err := dispatch.Render(dispatch.KindInvite, context)
+		subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindInvite, context, selectedTemplate)
 		if err != nil || int64(len(subject)) > subjectBytes || int64(len(html)) > htmlBytes || int64(len(text)) > textBytes {
 			return zero, errors.Join(ErrHTMLSendWorkV1, err)
 		}

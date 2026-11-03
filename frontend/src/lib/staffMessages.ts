@@ -1,3 +1,4 @@
+import { swedishEmailStaffMessages } from './staffEmailMessages';
 import { swedishFolderStaffMessages } from './staffFolderMessages';
 import { swedishDocumentStaffMessages } from './staffDocumentMessages';
 import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
@@ -459,4 +460,5 @@ export const swedishStaffMessages: Record<string, string> = {
   ...swedishDocumentStaffMessages,
   ...swedishAdvancedStaffMessages,
   ...swedishFolderStaffMessages,
+  ...swedishEmailStaffMessages,
 };

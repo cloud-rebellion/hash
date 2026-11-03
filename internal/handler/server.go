@@ -548,6 +548,11 @@ func (s *Server) Routes() http.Handler {
 			})
 		}
 
+		// Revisioned service email content: every read/preview/edit retains the live owner.
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/email-templates", s.handleListEmailTemplates)
+		r.With(auth.RequireRole(auth.RoleOwner)).Put("/email-templates/{kind}", s.handleSaveEmailTemplate)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/email-templates/{kind}/preview", s.handlePreviewEmailTemplate)
+
 		// Phase 8.5: org-level brand theming. Read = any session; edits = owner.
 		r.Get("/branding", s.handleGetOrgBranding)
 		r.With(auth.RequireRole(auth.RoleOwner)).Put("/branding", s.handleUpsertOrgBranding)

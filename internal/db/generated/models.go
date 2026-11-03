@@ -1310,6 +1310,23 @@ type OrgBranding struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type OrgEmailTemplateHeadsV1 struct {
+	OrgID     uuid.UUID          `json:"org_id"`
+	Kind      string             `json:"kind"`
+	Revision  int64              `json:"revision"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OrgEmailTemplateRevisionsV1 struct {
+	OrgID           uuid.UUID          `json:"org_id"`
+	Kind            string             `json:"kind"`
+	Revision        int64              `json:"revision"`
+	SubjectTemplate string             `json:"subject_template"`
+	HtmlTemplate    string             `json:"html_template"`
+	TextTemplate    string             `json:"text_template"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type OrgSubscription struct {
 	ID                     uuid.UUID          `json:"id"`
 	OrgID                  uuid.UUID          `json:"org_id"`

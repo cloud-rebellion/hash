@@ -32,6 +32,7 @@ type HTMLSendModelsV1 struct {
 // Fixed same-session read work. Original actor/credential/source/CRM/evidence
 // checks remain mandatory in Send. This owner supplies no family authority.
 type ApplicationHTMLSendWorkV1 struct {
+	serviceEmailTemplates                                                                             [applicationServiceEmailKindsV1]applicationServiceEmailSlotV1
 	presignAuthorityAttempted, presignEvidenceAttempted                                               bool
 	presignArtifacts                                                                                  *ApplicationPreSignArtifactsV1
 	presignPublication                                                                                *preSignPublicationV1
@@ -437,6 +438,7 @@ func (w *ApplicationHTMLSendWorkV1) retireSourcesLockedV1() ([]func(), *Applicat
 	w.certificateRead = nil
 	w.call = nil
 	w.confirmedBasis = ""
+	w.serviceEmailTemplates = [applicationServiceEmailKindsV1]applicationServiceEmailSlotV1{}
 	w.completionOutputs = nil
 	w.presignPublication = nil
 	w.presignRetained = nil

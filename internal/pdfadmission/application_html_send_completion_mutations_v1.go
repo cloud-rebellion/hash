@@ -79,6 +79,10 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 		return errors.Join(ErrHTMLSendWorkV1, err)
 	}
 	w.closes = append(w.closes, closeInitial)
+	selectedTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindInvite)
+	if err != nil {
+		return err
+	}
 	// Tokens are always43 RawURLEncoding characters. Replacing those safe ASCII
 	// characters with 'A' changes no HTML/text escaping or URL-output length.
 	// This probe is actual fixed renderer input, never source/cost authority.
@@ -86,7 +90,7 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 	beaconURL := publicURL + "/e/o/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	output := int64(0)
 	for _, r := range w.sourceRecipients {
-		subject, html, text, err := dispatch.InviteNotificationComponentsV1(dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature})
+		subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 		if err != nil {
 			return err
 		}
@@ -181,7 +185,11 @@ func (w *ApplicationHTMLSendWorkV1) RenderInviteV1(call context.Context, id uuid
 		return dispatch.Message{}, ErrHTMLSendWorkV1
 	}
 	item.rendered = true
-	subject, html, text, err := dispatch.Render(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: rec.Name, OrgName: p.orgName, Locale: rec.Locale, SignURL: p.publicURL + "/sign/" + item.token, BeaconURL: p.publicURL + "/e/o/" + item.token, Acknowledgement: !w.sourceDocument.RequiresSignature})
+	selectedTemplate, err := w.cachedServiceEmailTemplateV1(dispatch.KindInvite)
+	if err != nil {
+		return dispatch.Message{}, err
+	}
+	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: rec.Name, OrgName: p.orgName, Locale: rec.Locale, SignURL: p.publicURL + "/sign/" + item.token, BeaconURL: p.publicURL + "/e/o/" + item.token, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return dispatch.Message{}, err
 	}

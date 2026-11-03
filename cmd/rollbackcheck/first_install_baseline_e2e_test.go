@@ -51,8 +51,8 @@ func TestFirstInstallFresh117ResourceBaseline(t *testing.T) {
 		t.Fatal("actual embedded migrations failed")
 	}
 	digest, versions, err := hashdb.EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 118 {
-		t.Fatal("qualification requires the actual complete migration118 tree")
+	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 119 {
+		t.Fatal("qualification requires the actual complete migration119 tree")
 	}
 
 	t.Run("untouched migration rows are unused scaffolding", func(t *testing.T) {

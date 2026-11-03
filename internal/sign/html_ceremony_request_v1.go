@@ -180,14 +180,16 @@ func (e *Engine) RequestChanges(ctx context.Context, rc *RecipientContext, in Ch
 			if err != nil {
 				return err
 			}
-			context, to, releaseNotification, err := notification.BorrowContextV1(call)
+			message, releaseNotification, err := notification.BorrowMessageV1(call)
 			if err != nil {
 				return err
 			}
 			finishNotification = releaseNotification
-			messages, err = e.prepareNotificationTx(call, notification, dispatch.KindChangesRequested, to, context)
-			if err != nil {
-				return fmt.Errorf("prepare change-request notification: %w", err)
+			messages = []dispatch.Message{message}
+			if usesDurableEmailQueue(e.Mailer) {
+				if err = enqueueNotificationEmailsTx(call, notification, messages); err != nil {
+					return fmt.Errorf("prepare change-request notification: %w", err)
+				}
 			}
 		}
 		ownedInput, err := work.ParticipantChangeInputV1(call)

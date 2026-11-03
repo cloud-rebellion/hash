@@ -86,9 +86,13 @@ func (w *ApplicationHTMLSendWorkV1) packageSendOutboxShapeV1(outputs *htmlSendCo
 	if r == nil || r.ID == uuid.Nil || r.DocumentID != w.sourceDocument.ID || outputs.recipients[index].id != r.ID {
 		return empty, ErrHTMLSendWorkV1
 	}
+	selectedTemplate, err := w.cachedServiceEmailTemplateV1(dispatch.KindInvite)
+	if err != nil {
+		return empty, err
+	}
 	signURL := outputs.publicURL + "/sign/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	beaconURL := outputs.publicURL + "/e/o/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	subject, html, text, err := dispatch.InviteNotificationComponentsV1(dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: outputs.orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature})
+	subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: outputs.orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return empty, err
 	}

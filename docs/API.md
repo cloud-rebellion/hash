@@ -281,6 +281,30 @@ See [owner settings](API-GUIDE.md#owner-settings-and-organization-credentials).
 See [AI requests](API-GUIDE.md#ai-requests-and-negotiation-metadata) and
 [MCP envelope authoring](API-GUIDE.md#mcp-envelope-authoring).
 
+## MCP email content
+
+Organization owners can use `list_service_email_templates` and
+`preview_service_email_template` with an organization-wide `read` key, and
+`save_service_email_template` with `write:authoring`. Document-scoped tokens
+cannot use these tools. The original key and live owner membership are checked
+again in the same service transaction as the REST email settings.
+
+List takes `{}` and returns the nine email kinds, current revisions, `editable`
+capabilities, allowed variables and byte limits. Preview and Save require exactly
+`kind`, `expected_revision`, `subject_template`, `html_template` and
+`text_template`. Use the observed revision; conflicts require reloading and
+reviewing the draft. All three source strings empty reset an editable kind to
+built-in content on Save. Six kinds are editable; the other three accept only
+built-in synthetic Preview, with revision zero and empty source strings.
+
+These tools edit only the subject and introductory content. Hash retains the
+required action, security and legal section. HTML allows bounded safe formatting,
+without custom links, images, attributes or CSS. Preview uses synthetic data and
+does not save, send email or invoke an AI provider. Save changes future eligible
+email content; it does not send a message or rewrite already frozen messages.
+There is no SMTP, sender identity, tracking, AI generation or full-layout design
+configuration in this tool group.
+
 ## Negotiation and legal lifecycle
 
 Create a draft, configure its recipients/fields and lawful-basis disclosure,

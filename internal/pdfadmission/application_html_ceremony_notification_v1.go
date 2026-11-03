@@ -23,9 +23,12 @@ type ApplicationHTMLChangeNotificationV1 struct {
 	self                               *ApplicationHTMLChangeNotificationV1
 	owner                              *ApplicationHTMLCeremonyWorkflowV1
 	context                            dispatch.TemplateContext
+	selectedTemplate                   *dispatch.ServiceEmailTemplateV1
+	message                            dispatch.Message
 	to                                 string
 	subjectBytes, htmlBytes, textBytes int64
 	attempted                          bool
+	renderAttempted, rendered          bool
 }
 
 func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context.Context, orgName, baseURL, actionSecret string, approveAt, denyAt time.Time) (*ApplicationHTMLChangeNotificationV1, error) {
@@ -80,7 +83,11 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 	context := dispatch.TemplateContext{DocumentName: document.Name, SenderName: sender.Name, SenderEmail: sender.Email, RecipientName: recipient.Name,
 		OrgName: strings.Clone(orgName), DeclineReason: input.Message, ChangeQuote: input.Quote, ChangeContext: input.Context, ChangeProposed: input.Proposed,
 		OpenURL: root + "/documents/" + document.ID.String(), ApproveURL: approveURL, DenyURL: denyURL}
-	s, h, t, err := dispatch.ChangeRequestNotificationComponentsV1(context)
+	selectedTemplate, err := w.changeServiceEmailTemplateV1(call)
+	if err != nil {
+		return nil, err
+	}
+	s, h, t, err := applicationServiceEmailComponentsV1(dispatch.KindChangesRequested, context, selectedTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +104,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 	if err = w.retainV1(call, output, wire); err != nil {
 		return nil, err
 	}
-	n := &ApplicationHTMLChangeNotificationV1{owner: w, context: context, to: sender.Email, subjectBytes: s, htmlBytes: h, textBytes: t}
+	n := &ApplicationHTMLChangeNotificationV1{owner: w, context: context, selectedTemplate: selectedTemplate, to: sender.Email, subjectBytes: s, htmlBytes: h, textBytes: t}
 	n.self = n
 	w.mu.Lock()
 	if w.notification != nil || w.closed {
@@ -134,6 +141,48 @@ func (n *ApplicationHTMLChangeNotificationV1) BorrowContextV1(call context.Conte
 	return context, to, func() { once.Do(owner.doneV1) }, nil
 }
 
+// The original native context and selected revision remain borrowed through
+// render, enqueue, commit and any synchronous local postcommit delivery. The
+// caller supplies no replacement renderer, source, destination or size claim.
+func (n *ApplicationHTMLChangeNotificationV1) BorrowMessageV1(call context.Context) (dispatch.Message, func(), error) {
+	if n == nil || n.self != n {
+		return dispatch.Message{}, nil, ErrHTMLCeremonyWorkflowV1
+	}
+	n.mu.Lock()
+	if n.renderAttempted {
+		n.mu.Unlock()
+		return dispatch.Message{}, nil, ErrHTMLCeremonyWorkflowV1
+	}
+	n.renderAttempted = true
+	n.mu.Unlock()
+	ctx, to, close, err := n.BorrowContextV1(call)
+	if err != nil {
+		return dispatch.Message{}, nil, err
+	}
+	n.mu.Lock()
+	tpl, s, h, t := n.selectedTemplate, n.subjectBytes, n.htmlBytes, n.textBytes
+	n.mu.Unlock()
+	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindChangesRequested, ctx, tpl)
+	if err != nil || int64(len(subject)) > s || int64(len(html)) > h || int64(len(text)) > t {
+		close()
+		if err != nil {
+			return dispatch.Message{}, nil, err
+		}
+		return dispatch.Message{}, nil, ErrHTMLCeremonyWorkflowV1
+	}
+	message := dispatch.Message{To: to, Subject: subject, HTML: html, Text: text, ReplyTo: ctx.SenderEmail, FromName: ctx.OrgName}
+	// Immutable strings alias the already-paid output. A returned message value
+	// may be edited by its caller without altering this private queue binding.
+	n.mu.Lock()
+	n.message, n.rendered = message, true
+	n.mu.Unlock()
+	return message, close, nil
+}
+
+func applicationChangeEmailDeliveryMatchesV1(in generated.EnqueueEmailDeliveryParams, msg dispatch.Message) bool {
+	return len(msg.Headers) == 0 && bytes.Equal(in.HeadersJson, []byte("{}")) && in.ToEmail == msg.To && in.Subject == msg.Subject && in.HtmlBody == msg.HTML && in.TextBody == msg.Text && in.ReplyTo == msg.ReplyTo && in.FromName == msg.FromName
+}
+
 // This is exactly the original outbox interface, with dispatch kept inside the
 // SAME actual native callback and this one concrete notification's paid bounds.
 func (n *ApplicationHTMLChangeNotificationV1) EnqueueEmailDelivery(call context.Context, in generated.EnqueueEmailDeliveryParams) (*generated.EmailDelivery, error) {
@@ -147,7 +196,7 @@ func (n *ApplicationHTMLChangeNotificationV1) EnqueueEmailDelivery(call context.
 		return nil, ErrHTMLCeremonyWorkflowV1
 	}
 	n.mu.Lock()
-	if n.owner != owner || n.attempted {
+	if n.owner != owner || n.attempted || !n.rendered || !applicationChangeEmailDeliveryMatchesV1(in, n.message) {
 		n.mu.Unlock()
 		return nil, ErrHTMLCeremonyWorkflowV1
 	}
@@ -178,6 +227,8 @@ func (n *ApplicationHTMLChangeNotificationV1) clearV1() {
 	}
 	n.mu.Lock()
 	n.context = dispatch.TemplateContext{}
+	n.selectedTemplate = nil
+	n.message = dispatch.Message{}
 	n.to = ""
 	n.owner = nil
 	n.mu.Unlock()

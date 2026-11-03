@@ -82,6 +82,7 @@ func New(d Deps) *Server {
 	registerEngagementTools(s, d)
 	registerAITools(s, d)
 	registerBrandingTools(s, d)
+	registerServiceEmailTools(s, d)
 	registerEnvelopeTools(s, d)
 	registerDocumentPackageToolsV1(s, d)
 	registerTimelineTools(s, d)

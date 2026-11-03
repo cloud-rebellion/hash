@@ -244,6 +244,14 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 		return nil, err
 	}
 	w.closes = append(w.closes, closeInput)
+	signerTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindCompletedSigner)
+	if err != nil {
+		return nil, err
+	}
+	senderTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindCompletedSender)
+	if err != nil {
+		return nil, err
+	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	probe := baseURL + "/sign/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/final-pdf"
 	auditProbe := baseURL + "/sign/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/audit-cert"
@@ -252,7 +260,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 	for _, credential := range out.tokens {
 		r := credential.recipient
 		ctx := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, DownloadURL: probe, AuditCertURL: auditProbe, PackagePortalURL: baseURL + "/completed/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", DownloadExpiresAt: credential.expiry.UTC().Format(time.RFC3339), Acknowledgement: !p.completed.RequiresSignature}
-		a, b, c, e := dispatch.CompletedNotificationComponentsV1(dispatch.KindCompletedSigner, ctx)
+		a, b, c, e := applicationServiceEmailComponentsV1(dispatch.KindCompletedSigner, ctx, signerTemplate)
 		if e != nil {
 			return nil, e
 		}
@@ -263,7 +271,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 		}
 	}
 	senderContext := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: out.sender.Name, OrgName: orgName, DownloadURL: senderURL, AuditCertURL: baseURL + "/api/v1/documents/" + p.completed.ID.String() + "/audit-cert", Acknowledgement: !p.completed.RequiresSignature}
-	a, b, c, err := dispatch.CompletedNotificationComponentsV1(dispatch.KindCompletedSender, senderContext)
+	a, b, c, err := applicationServiceEmailComponentsV1(dispatch.KindCompletedSender, senderContext, senderTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +287,11 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 	w.closes = append(w.closes, closeOutput)
 	out.messages = make([]dispatch.Message, 0, len(out.tokens)+1)
 	render := func(kind, to string, ctx dispatch.TemplateContext) error {
-		subject, html, text, e := dispatch.Render(kind, ctx)
+		selectedTemplate, e := w.cachedServiceEmailTemplateV1(kind)
+		if e != nil {
+			return e
+		}
+		subject, html, text, e := dispatch.RenderServiceEmailV1(kind, ctx, selectedTemplate)
 		if e != nil {
 			return fmt.Errorf("render %s: %w", kind, e)
 		}

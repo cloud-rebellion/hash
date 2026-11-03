@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, Link2, ArrowUpRight } from 'lucide-svelte';
+  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, Link2, ArrowUpRight, Mail } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
   import MCPConnectionGuide from '$lib/components/MCPConnectionGuide.svelte';
 
@@ -7,6 +7,7 @@
     { title: 'Workspace', description: 'People, presentation and your plan.', items: [
       { href: '/settings/members', label: 'Members & roles', desc: 'Manage who can view, prepare and send documents.', icon: Users },
       { href: '/settings/branding', label: 'Branding', desc: 'Choose your workspace logo, colors and fonts.', icon: Palette },
+      { href: '/settings/email', label: 'Email content', desc: 'Edit document email content and preview it with sample data.', icon: Mail },
       { href: '/settings/billing', label: 'Plans & invoices', desc: 'Review subscriptions, quotas and invoices.', icon: Receipt },
     ] },
     { title: 'Documents & signing', description: 'Signing rules and your authority to sign.', items: [

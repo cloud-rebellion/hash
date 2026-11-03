@@ -17,7 +17,7 @@ func TestCompiledLifecycle484BindsActualEmbeddedM118WithoutDatabase(t *testing.T
 		t.Fatal(err)
 	}
 	digest, versions, err := hashdb.EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 118 || got.SchemaVersion != 1 || got.LifecycleContractVersion != 8 || got.MigrationsSHA256 != digest {
+	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 119 || got.SchemaVersion != 1 || got.LifecycleContractVersion != 8 || got.MigrationsSHA256 != digest {
 		t.Fatalf("compiled lifecycle not bound to actual embedded tree: %+v %v", got, err)
 	}
 	raw, err := json.Marshal(got)

@@ -206,10 +206,14 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 	}
 	output := int64(0)
 	if delivery {
+		selectedTemplate, err := w.serviceEmailTemplateV1(call, dispatch.KindReminder)
+		if err != nil {
+			return err
+		}
 		probe := s.publicURL + "/sign/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		for _, item := range s.recipients {
 			ctx := dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: item.recipient.Name, OrgName: s.orgName, Locale: item.recipient.Locale, SignURL: probe, Acknowledgement: !s.document.RequiresSignature}
-			a, b, c, err := dispatch.ReminderNotificationComponentsV1(ctx)
+			a, b, c, err := applicationServiceEmailComponentsV1(dispatch.KindReminder, ctx, selectedTemplate)
 			if err != nil {
 				return err
 			}
@@ -350,7 +354,11 @@ func (r *ApplicationReminderV1) RenderV1(call context.Context, index int) (dispa
 		return dispatch.Message{}, ErrReminderV1
 	}
 	rec := item.recipient
-	subject, html, text, err := dispatch.Render(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: rec.Name, OrgName: s.orgName, Locale: rec.Locale, SignURL: s.publicURL + "/sign/" + item.token, BeaconURL: s.publicURL + "/e/o/" + item.token, Acknowledgement: !s.document.RequiresSignature})
+	selectedTemplate, err := w.cachedServiceEmailTemplateV1(dispatch.KindReminder)
+	if err != nil {
+		return dispatch.Message{}, err
+	}
+	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: rec.Name, OrgName: s.orgName, Locale: rec.Locale, SignURL: s.publicURL + "/sign/" + item.token, BeaconURL: s.publicURL + "/e/o/" + item.token, Acknowledgement: !s.document.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return dispatch.Message{}, err
 	}

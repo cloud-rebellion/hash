@@ -41,6 +41,8 @@ retention schedules for your deployment.
 
 See [the workspace guide](docs/INTERFACE.md) for document and template previews,
 profile settings, Swedish/English, appearance and HTTP MCP setup.
+Workspace owners can edit [service email content](docs/EMAIL-TEMPLATES.md) from
+Settings → Email content and preview it with synthetic example data.
 
 ## Reusable HTML designs
 

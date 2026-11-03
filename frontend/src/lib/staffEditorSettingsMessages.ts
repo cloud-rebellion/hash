@@ -10,6 +10,7 @@ export const swedishEditorSettingsMessages: Record<string, string> = {
   'Choose a document': 'Välj ett dokument',
   'Documents {from}–{to} of {total}': 'Dokument {from}–{to} av {total}',
   'Download PDF': 'Ladda ner PDF',
+  'Download signed PDF': 'Ladda ner signerad PDF',
   'Signed PDF. Signing details are available in the evidence report.': 'Signerad PDF. Signeringsuppgifterna finns i bevisrapporten.',
   'Completed PDF. Completion details are available in the evidence report.': 'Färdig PDF. Uppgifterna om slutförandet finns i bevisrapporten.',
   'Download evidence report': 'Ladda ner bevisrapport',

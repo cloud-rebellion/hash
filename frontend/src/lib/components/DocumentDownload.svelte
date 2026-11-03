@@ -30,7 +30,7 @@
 </script>
 
 <div class="space-y-1">
-  <button type="button" class="btn btn-primary" onclick={() => download()} disabled={blocked || busy} aria-busy={busy} aria-describedby={blocked ? 'document-download-help' : undefined}><Download class="size-4" /> {$ui(busy ? 'Preparing PDF…' : 'Download PDF')}</button>
+  <button type="button" class="btn btn-primary" onclick={() => download()} disabled={blocked || busy} aria-busy={busy} aria-describedby={blocked ? 'document-download-help' : undefined}><Download class="size-4" /> {$ui(busy ? 'Preparing PDF…' : document.status === 'completed' && document.requires_signature === true ? 'Download signed PDF' : 'Download PDF')}</button>
   {#if document.status === 'completed'}
     <p class="max-w-xs text-xs text-text-secondary">{$ui(document.requires_signature === true ? 'Signed PDF. Signing details are available in the evidence report.' : 'Completed PDF. Completion details are available in the evidence report.')}</p>
     <button type="button" class="text-sm text-text-secondary underline underline-offset-4 hover:text-text-primary disabled:opacity-50" onclick={() => download('evidence')} disabled={blocked || busy}>{$ui('Download evidence report')}</button>

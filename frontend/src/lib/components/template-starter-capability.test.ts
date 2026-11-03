@@ -17,7 +17,7 @@ function fixture(response: unknown) {
   const calls: string[] = [];
   const env: any = {
 
-    $ui: (text: string) => text, $staffLocale: 'en', starterTemplatesAvailable: false, loading: true, pendingCreation: false, uploading: false, showUpload: false, seeding: null, error: null, listError: null, templates: [],
+    $ui: (text: string) => text, $staffLocale: 'en', disposed: false, removalBusy: false, starterTemplatesAvailable: false, loading: true, pendingCreation: false, uploading: false, showUpload: false, seeding: null, error: null, listError: null, templates: [],
     listTemplates: async () => response,
     createStarterTemplate: async (key: string) => { calls.push(`starter:${key}`); },
     createBlocksTemplate: async () => { calls.push('blank'); }
@@ -91,7 +91,7 @@ test('the actual starter button is disabled for unavailable or unknown capabilit
     const expression = (Array.isArray(value) ? value[0] : value).expression;
     return new Function('env', `with(env) { return (${source.slice(expression.start, expression.end)}); }`)(env);
   };
-  const env = { loading: false, starterTemplatesAvailable: false, seeding: null, pendingCreation: false };
+  const env = { loading: false, starterTemplatesAvailable: false, seeding: null, pendingCreation: false, removalBusy: false };
   expect(disabled(starter, env)).toBe(true);
   expect(disabled(upload, { ...env, uploading: false })).toBe(false);
   expect(source).toContain('href="/templates/html/new"');

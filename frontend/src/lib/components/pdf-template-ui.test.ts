@@ -1,3 +1,4 @@
+import { requireDocumentPurpose } from '../documentPurpose';
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { pdfTemplateParties } from '../pdfTemplate';
@@ -48,13 +49,14 @@ test('template use collects identities and pins the selected revision; failed cr
   const template = { id: 'template', name: 'Master', source_kind: 'pdf', version: 7,
     fields_json: { version: 1, parties: [{ role: 'provider', label: 'Provider' }, { role: 'client', label: 'Client' }],
       fields: [{ party_role: 'provider', type: 'signature', required: true }, { party_role: 'client', type: 'signature', required: true }] } };
-  const env: any = { creatingId: null, pendingCreation: false, error: null, selectedTemplate: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedParties: [], bindings: [], documentName: '', disposed: false,
+  const env: any = { $staffLocale: 'en', $ui: (text: string) => text, documentPurpose: '', templateCreationUnconfirmed: false, requireDocumentPurpose, creatingId: null, pendingCreation: false, removalBusy: false, error: null, selectedTemplate: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedParties: [], bindings: [], documentName: '', disposed: false,
     pdfTemplateParties, createDocumentFromTemplate: (...args: any[]) => new Promise((resolve, reject) => calls.push({ args, resolve, reject })),
     goto: (url: string) => { navigations.push(url); } };
   const actions = bind('../../routes/templates/+page.svelte', ['useTemplate', 'createBoundDocument'], env);
   await actions.useTemplate(template);
   expect(calls).toHaveLength(0);
   expect(env.bindings.map((party: any) => party.role)).toEqual(['provider', 'client']);
+  env.documentPurpose = 'signing';
   env.bindings[0].name = ' Provider Person '; env.bindings[0].email = ' provider@example.test ';
   env.bindings[1].name = 'Client Person'; env.bindings[1].email = 'client@example.test';
   const failed = actions.createBoundDocument(event);
@@ -67,7 +69,9 @@ test('template use collects identities and pins the selected revision; failed cr
   expect(env.selectedTemplate).toBe(template);
   expect(env.bindings[0].name).toBe(' Provider Person ');
   expect(env.error).toContain('Template changed');
+  await actions.createBoundDocument(event); expect(calls).toHaveLength(1); // Unknown creation is inspected, never replayed by another click.
+  env.templateCreationUnconfirmed = false; // A fresh, externally reconciled form.
   const next = actions.createBoundDocument(event); env.disposed = true;
-  calls[1].resolve({ id: 'new-document' }); await next;
+  calls[1].resolve({ id: 'new-document', purpose: 'signing' }); await next;
   expect(navigations).toEqual([]);
 });

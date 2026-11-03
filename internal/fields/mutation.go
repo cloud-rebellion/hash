@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"math"
 	"math/big"
 	"reflect"
@@ -176,6 +177,9 @@ func (e *MutationEngine) mutate(ctx context.Context, actor Actor, docID uuid.UUI
 		return nil, auth.ErrMutationPermissionRevoked
 	}
 	if err := actor.Authorize(ctx, tx, user); err != nil {
+		return nil, err
+	}
+	if err := documentpurpose.RequireSigning(doc.Metadata); err != nil {
 		return nil, err
 	}
 	if len(doc.HtmlSourceJson) != 0 {

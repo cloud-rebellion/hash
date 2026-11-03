@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"math/big"
 	"net/http"
 	"strings"
@@ -266,6 +267,10 @@ func (s *Server) fieldMutationActor(w http.ResponseWriter, r *http.Request, sess
 }
 
 func (s *Server) writeFieldMutationError(w http.ResponseWriter, operation string, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	var validationErr *fieldmutations.ValidationError
 	switch {
 	case errors.Is(err, auth.ErrMutationCredentialExpired):

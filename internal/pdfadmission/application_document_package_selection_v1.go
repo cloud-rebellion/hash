@@ -249,6 +249,12 @@ func (w *ApplicationDocumentPackageSelectionV1) ValidateSourcesV1(call context.C
 		if err != nil {
 			return err
 		}
+		if i == 0 {
+			if err = r.RequireSigningPurposeV1(call); err != nil {
+				release()
+				return err
+			}
+		}
 		physical := s.session.state
 		p := physical.factory
 		p.mu.Lock()

@@ -54,7 +54,14 @@ test('optional technical tools are collapsed without hiding core editing, requir
       panels.set(node.name, [...(panels.get(node.name) ?? []), ancestors.filter(parent => parent.name === 'details')]);
     }
   });
-  for (const name of ['CRMDocumentPanel', 'RiskPanel', 'EnvelopePanel', 'AgentTokensPanel']) expect(panels.get(name)?.every(ancestors => ancestors.length > 0)).toBe(true);
+  for (const name of ['CRMDocumentPanel', 'RiskPanel', 'EnvelopePanel']) expect(panels.get(name)?.every(ancestors => ancestors.length > 0)).toBe(true);
+  expect(panels.has('AgentTokensPanel')).toBe(false);
+  const settingsPanels: string[] = [];
+  walk(parse(source('routes/settings/api-keys/+page.svelte'), { modern: true }), node => { if (node.type === 'Component') settingsPanels.push(node.name); });
+  expect(settingsPanels.filter(name => name === 'DocumentAIAccessSettings')).toHaveLength(1);
+  const scopedAccess: string[] = [];
+  walk(parse(source('lib/components/DocumentAIAccessSettings.svelte'), { modern: true }), node => { if (node.type === 'Component') scopedAccess.push(node.name); });
+  expect(scopedAccess.filter(name => name === 'AgentTokensPanel')).toHaveLength(1);
   for (const name of ['SenderPanel', 'BlockEditor', 'TimelinePanel', 'DocumentAttachmentsPanel', 'HtmlPDFReview', 'DocumentAmendmentsPanel']) expect(panels.get(name)?.every(ancestors => ancestors.length === 0)).toBe(true);
 });
 

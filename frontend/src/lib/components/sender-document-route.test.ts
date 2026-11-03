@@ -20,6 +20,7 @@ function fixture() {
   const calls: any[] = [];
   const pending = (kind: string) => (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind, args, resolve, reject }));
   const env: any = {
+    savedPurpose: 'signing', signingPurpose: true, changingPurpose: false, purposeUnconfirmed: false, selectedPurpose: '', purposeError: null,
     amendmentLookupBlocked: false, amendmentLinked: false, amendmentNotice: false, amendmentBusy: false, amendmentDirty: false,
     supersessionBusy: false, supersessionPending: false,
     preSignPresentationBlocked: false, doc: document('A'), $page: { params: { id: 'A' } }, routeRevision: 1, documentRevision: 1, disposed: false,

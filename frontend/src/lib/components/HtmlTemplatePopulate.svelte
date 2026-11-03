@@ -7,6 +7,8 @@
   import { crmTemplateTransport } from '$lib/api/crmTemplatePopulation';
   import { CRMTemplatePopulationController, initialCRMTemplateState, readCreationMarker, storeCreationMarker, type CRMTemplateState, type HTMLCreationMarker } from '$lib/crmTemplatePopulation';
   import CRMTemplatePopulationPanel from './CRMTemplatePopulationPanel.svelte';
+  import DocumentPurposeSelect from './DocumentPurposeSelect.svelte';
+  import { requireDocumentPurpose, type DocumentPurpose } from '$lib/documentPurpose';
 
   type DraftNavigation = { cancel: () => void; willUnload: boolean; from: { url: URL } | null; to: { url: URL } | null };
 
@@ -33,6 +35,7 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let needsRefresh = $state(false);
+  let purpose = $state<DocumentPurpose | ''>('');
   let createdDocument = $state<DocumentResponse | null>(null);
   let navigating = $state(false);
   let creationUncertain = $state(false);
@@ -53,17 +56,18 @@
       try { await onCreated(doc); } finally { if (current()) { navigating = false; onBusyChange(false); } } }, untrack(() => pendingMarker));
   const effectiveValues = $derived.by(() => { populationState; clock; values; name; sections; try { return controller.effectiveValues(); } catch { return values; } });
   const profileIssues = $derived(profile ? [...htmlProfileIssues(profile, effectiveValues, sections), ...(design?.html_master_json?.schema_version === 3 ? htmlSigningPageIssues(profile, effectiveValues) : [])] : []);
-  const canCreate = $derived.by(() => { populationState; clock; values; sections; name; return !markerError && controller.canCreate(); });
+  const canCreate = $derived.by(() => { populationState; clock; values; sections; name; purpose; return !markerError && controller.canCreate(); });
   const unusedValues = $derived(Object.entries(values).filter(([name]) => !fields.some((field) => field.name === name)));
   const unusedSections = $derived(Object.entries(sections).filter(([name]) => !sectionDefinitions.some((section) => section.name === name)));
-  const dirty = $derived(name !== initialName || unusedValues.length > 0 || unusedSections.length > 0 || fields.some((field) => values[field.name] !== field.defaultValue)
+  const dirty = $derived(purpose !== '' || name !== initialName || unusedValues.length > 0 || unusedSections.length > 0 || fields.some((field) => values[field.name] !== field.defaultValue)
     || sectionDefinitions.some((section) => sections[section.name] !== section.default_text));
   $effect(() => { onDirtyChange(dirty); });
 
   function candidate() {
     if (!design) throw new Error('Load an approved design first.');
+    if (profile && purpose !== 'signing') throw new Error('This reviewed contract design requires Signing. Choose another design for a document or presentation.');
     const submittedSections = htmlProfileSectionValues(design.html_master_json!, sections, true);
-    return { name: name.trim(), values: htmlValuesForSubmission(fields, values, true), ...(submittedSections === undefined ? {} : { sections: submittedSections }) };
+    return { name: name.trim(), purpose: requireDocumentPurpose(purpose), values: htmlValuesForSubmission(fields, values, true), ...(submittedSections === undefined ? {} : { sections: submittedSections }) };
   }
   function inputChanged() { controller.inputChanged(); error = null; }
   function mappedRequiredFilled(field: HTMLFormField) {
@@ -125,6 +129,7 @@
     if (!current() || !design || !approved || loading || busy || navigating || createdDocument || creationUncertain || markerError || needsRefresh || pendingDesign || !controller.canCreate()) return;
     try {
       if (!name.trim()) throw new Error('Enter a document name.');
+      requireDocumentPurpose(purpose);
       htmlValuesForSubmission(fields, controller.effectiveValues());
       if (profileIssues.length) throw new Error(profileIssues[0]);
       htmlProfileSectionValues(design.html_master_json!, sections);
@@ -177,7 +182,7 @@
     <p class="text-sm text-text-secondary">{$ui("Version")} {design.version} · {$ui(approved ? 'Approved design' : 'Awaiting owner approval')}</p>
     {#if profile}<div class="border border-border-light rounded-md p-4 space-y-2 text-sm" aria-label={$ui("Declared contract checks")}>
       <p class="font-medium">{$ui(profile.kind === 'proposal' ? 'Proposal' : 'Ordinary B2B services')} {$ui("· reviewed profile")} {profile.id.replaceAll('_', ' ')} {$ui("version")} {profile.version}</p>
-      <p>{$ui("Both representatives will sign. Hash creates the provider and customer recipients from the names and email addresses printed below. These declarations do not independently verify identity or authority, or establish legal sufficiency.")}</p>
+      {#if purpose === 'signing'}<p>{$ui("Both representatives will sign. Hash creates the provider and customer recipients from the names and email addresses printed below. These declarations do not independently verify identity or authority, or establish legal sufficiency.")}</p>{:else}<p>{$ui('The design text is preserved. Choose Signing only when you want recipients and a signing workflow.')}</p>{/if}
       {#if populationState.mappings.length}<p>{$ui("This party summary uses the proposed observed CRM values when available. Your manual entries remain in the form below.")}</p>{/if}
       {#if design.html_master_json?.schema_version === 3}<p>{$ui("The approved design appends a signing page with saved branding and fixed signature locations for both representatives. Party details must fit its bounded layout and bundled Latin font. Review the complete generated PDF, including that final page, before sending.")}</p>{/if}
       {#each profile.parties as party (party.slot)}<p class="break-words"><strong>{$ui(party.slot === 'provider' ? 'Our company' : 'Customer')}:</strong> {effectiveValues[party.company_name]?.trim() || 'Company not entered'} · {effectiveValues[party.representative_name]?.trim() || 'Representative not entered'} · {effectiveValues[party.representative_email]?.trim() || 'Email not entered'}</p>{/each}
@@ -193,6 +198,7 @@
     <CRMTemplatePopulationPanel {controller} state={populationState} {values} {clock} />
     <form onsubmit={create} class="space-y-4">
       <fieldset disabled={loading || populationState.busy === 'load' || busy || navigating || creationUncertain || markerError || !!createdDocument} class="space-y-4">
+        <DocumentPurposeSelect value={purpose} signingOnly={!!profile} onChange={value => { purpose = value; inputChanged(); }} disabled={loading || busy || navigating || creationUncertain || markerError || !!createdDocument} />
         <label class="block text-sm">{$ui("Document name")}
           <input bind:value={name} oninput={inputChanged} required maxlength="200" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
         </label>

@@ -81,6 +81,7 @@ const (
 	HTMLAuditPreSignSupersededV1
 	HTMLAuditBlocksRestoredV1
 	HTMLAuditCRMAppliedV1
+	HTMLAuditDocumentPurposeUpdatedV1
 )
 
 func (p HTMLAuditPurposeV1) KindV1() string {
@@ -147,7 +148,7 @@ func (p HTMLAuditPurposeV1) KindV1() string {
 		return "document.created"
 	case HTMLAuditAutomationRecipientCreatedV1:
 		return "recipient.created"
-	case HTMLAuditPlainDraftUpdatedV1:
+	case HTMLAuditPlainDraftUpdatedV1, HTMLAuditDocumentPurposeUpdatedV1:
 		return "document.updated"
 	case HTMLAuditBlockSignedV1, HTMLAuditPackageSignedV1:
 		return "document.signed"
@@ -268,6 +269,8 @@ func htmlAuditRootKeyV1(p HTMLAuditPurposeV1, k string) bool {
 		fields = "|email|name|role|via|automation_request_id|"
 	case HTMLAuditPlainDraftUpdatedV1:
 		fields = "|via|tool|"
+	case HTMLAuditDocumentPurposeUpdatedV1:
+		fields = "|purpose|via|tool|"
 	case HTMLAuditBlockSignedV1:
 		fields = "|font|typed_name|image_sha256|signature_id|notice_schema|notice_digest|notice_snapshot|"
 	case HTMLAuditPlainRecipientCreatedV1, HTMLAuditPlainRecipientUpdatedV1, HTMLAuditPlainRecipientDeletedV1:

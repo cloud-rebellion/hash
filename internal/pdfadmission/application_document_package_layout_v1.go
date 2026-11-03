@@ -37,6 +37,9 @@ func (r *ApplicationHTMLRevisionReaderV1) ApplyDocumentPackageLayoutV1(call cont
 		return out, ErrDocumentPackageSourceChangedV1
 	}
 	r.mu.Unlock()
+	if err := r.RequireSigningPurposeV1(call); err != nil {
+		return out, err
+	}
 	before, e := r.ReadDocumentPackageInventoryV1(call)
 	if e != nil {
 		return out, e

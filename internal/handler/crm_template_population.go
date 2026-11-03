@@ -348,6 +348,9 @@ func crmTemplateCreateInputDigest(actor authoring.Actor, templateID uuid.UUID, i
 	if err != nil {
 		return "", err
 	}
+	if in.Purpose != "" {
+		canonical = append(canonical, []byte("\x00purpose:"+string(in.Purpose))...)
+	}
 	return crmScalarSHA("hash.html-template-document-command.v1\x00" + string(canonical)), nil
 }
 

@@ -16,7 +16,7 @@
       { href: '/settings/eidas-rules', label: 'Signature levels', desc: 'Simple signatures are active; AES and QES are unavailable.', icon: Scale },
     ] },
     { title: 'Connections & automation', description: 'Connect Hash with your applications and AI tools.', items: [
-      { href: '/settings/api-keys', label: 'API keys', desc: 'Workspace owners manage scoped API and MCP access.', icon: KeyRound },
+      { href: '/settings/api-keys', label: 'API & AI access', desc: 'Workspace owners manage scoped API and MCP access.', icon: KeyRound },
       { href: '/settings/webhooks', label: 'Webhooks', desc: 'Deliver signed status updates to another application.', icon: Webhook },
       { href: '/settings/ai', label: 'AI provider', desc: 'Configure the model provider used by AI features.', icon: Bot },
       { href: '/settings/integrations/brightcrm', label: 'BrightCRM connection', desc: 'Manage an optional CRM account connection.', icon: Link2 },

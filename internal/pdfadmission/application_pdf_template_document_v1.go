@@ -11,6 +11,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"github.com/bright-interaction/hash/internal/magictoken"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
@@ -28,6 +29,7 @@ import (
 var ErrPDFTemplateDocumentV1 = errors.New("pdfadmission: owned PDF template document unavailable")
 
 type PDFTemplateDocumentInputV1 struct {
+	Purpose                       documentpurpose.Purpose
 	Name, TemplateText, Via, Tool string
 	Variables                     []byte
 	ExpiresAt                     pgtype.Timestamptz
@@ -210,7 +212,18 @@ func (w *ApplicationPDFTemplateDocumentV1) PrepareSigningV1(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	s.layout, s.values, err = pdflayout.Prepare(s.sourcePin, s.input.ExpectedTemplateVersion, s.input.Parties)
+	if s.input.Purpose != "" && s.input.Purpose != documentpurpose.Signing {
+		if documentpurpose.Validate(s.input.Purpose) != nil || len(s.input.Parties) != 0 {
+			return documentpurpose.ErrInvalid
+		}
+		if s.input.ExpectedTemplateVersion != nil && *s.input.ExpectedTemplateVersion != s.sourcePin.Version {
+			return authoring.ErrCreationInput
+		}
+		s.layout = nil
+		s.values = nil
+	} else {
+		s.layout, s.values, err = pdflayout.Prepare(s.sourcePin, s.input.ExpectedTemplateVersion, s.input.Parties)
+	}
 	if err != nil {
 		return err
 	}
@@ -250,6 +263,10 @@ func (w *ApplicationPDFTemplateDocumentV1) CreateDocumentV1(ctx context.Context)
 		return nil, err
 	}
 	doc, err = s.writer.FreezeVariablesV1(ctx, s.variables)
+	if err != nil {
+		return nil, err
+	}
+	doc, err = s.writer.RecordPurposeV1(ctx, s.input.Purpose)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 // documentResponse is the JSON shape we return.
 type documentResponse struct {
+	Purpose                     documentpurpose.Purpose        `json:"purpose"`
 	PreSign                     *presignexecute.DocumentViewV1 `json:"pre_sign,omitempty"`
 	ID                          uuid.UUID                      `json:"id"`
 	OrgID                       uuid.UUID                      `json:"org_id"`
@@ -66,6 +68,7 @@ type documentResponse struct {
 
 func toDocumentResponse(d *generated.Document) documentResponse {
 	out := documentResponse{
+		Purpose:           documentpurpose.Response(d.Metadata),
 		ID:                d.ID,
 		OrgID:             d.OrgID,
 		Name:              d.Name,
@@ -126,14 +129,15 @@ func uuidFromBytes(b [16]byte) uuid.UUID { return uuid.UUID(b) }
 // variables; pdf path expects template_id pointing to a pdf-source template
 // or a fresh upload (multi-step UX, week 2).
 type createDocumentInput struct {
-	Name                    string              `json:"name"`
-	TemplateID              string              `json:"template_id,omitempty"`
-	SourceKind              string              `json:"source_kind"`
-	BlocksJSON              json.RawMessage     `json:"blocks_json,omitempty"`
-	VariablesJSON           json.RawMessage     `json:"variables_json,omitempty"`
-	ExpiresAt               string              `json:"expires_at,omitempty"`
-	ExpectedTemplateVersion *int32              `json:"expected_template_version,omitempty"`
-	Parties                 []pdflayout.Binding `json:"parties,omitempty"`
+	Purpose                 documentpurpose.Purpose `json:"purpose,omitempty"`
+	Name                    string                  `json:"name"`
+	TemplateID              string                  `json:"template_id,omitempty"`
+	SourceKind              string                  `json:"source_kind"`
+	BlocksJSON              json.RawMessage         `json:"blocks_json,omitempty"`
+	VariablesJSON           json.RawMessage         `json:"variables_json,omitempty"`
+	ExpiresAt               string                  `json:"expires_at,omitempty"`
+	ExpectedTemplateVersion *int32                  `json:"expected_template_version,omitempty"`
+	Parties                 []pdflayout.Binding     `json:"parties,omitempty"`
 }
 
 func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +158,10 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
+		writeError(w, http.StatusBadRequest, "purpose must be document, presentation or signing")
 		return
 	}
 	if in.Name == "" {
@@ -200,7 +208,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.SourceKind == "blocks" {
 		result, err := blockauthoring.CreateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
-			blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, blockauthoring.CreateInputV1{Name: in.Name, TemplateID: templateID, BlocksJSON: in.BlocksJSON, VariablesJSON: in.VariablesJSON, ExpiresAt: expiresAt})
+			blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, blockauthoring.CreateInputV1{Purpose: in.Purpose, Name: in.Name, TemplateID: templateID, BlocksJSON: in.BlocksJSON, VariablesJSON: in.VariablesJSON, ExpiresAt: expiresAt})
 		if result != nil {
 			defer result.CloseConsumerV1()
 		}
@@ -220,7 +228,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := pdftemplateauthoring.CreateV1(r.Context(), pdftemplateauthoring.CreateDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
-		pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, pdftemplateauthoring.CreateInputV1{TemplateID: templateID, Source: pdfadmission.PDFTemplateDocumentInputV1{Name: in.Name, TemplateText: in.TemplateID, Variables: in.VariablesJSON, ExpiresAt: expiresAt, ExpectedTemplateVersion: in.ExpectedTemplateVersion, Parties: in.Parties}})
+		pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, pdftemplateauthoring.CreateInputV1{TemplateID: templateID, Source: pdfadmission.PDFTemplateDocumentInputV1{Purpose: in.Purpose, Name: in.Name, TemplateText: in.TemplateID, Variables: in.VariablesJSON, ExpiresAt: expiresAt, ExpectedTemplateVersion: in.ExpectedTemplateVersion, Parties: in.Parties}})
 	if result != nil {
 		defer result.CloseConsumerV1()
 	}
@@ -240,6 +248,10 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeDocumentCreationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, pdflayout.ErrPrecondition):
 		writeError(w, http.StatusPreconditionFailed, err.Error())
@@ -316,6 +328,16 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get document failed")
 		return
 	}
+	if r.URL.Query().Get("download") == "1" {
+		if err := checkSavedPDFDownload(r, d); err != nil {
+			writeError(w, http.StatusConflict, "document changed; reload before downloading")
+			return
+		}
+		if d.SourceKind == "blocks" {
+			s.downloadSavedBlocksPDF(w, r.WithContext(ctx), d, u.UserID, authorize)
+			return
+		}
+	}
 	if !d.PdfStorageKey.Valid || d.PdfStorageKey.String == "" {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
 		return
@@ -332,10 +354,14 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 	setDocumentPreviewHeaders(w, false)
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", "inline")
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFileName(d.Name)+`.pdf"`)
+	}
 	_, _ = w.Write(body)
 }
 
 type updateDocumentInput struct {
+	Purpose           json.RawMessage `json:"purpose,omitempty"`
 	ExpectedUpdatedAt string          `json:"expected_updated_at"`
 	Name              string          `json:"name,omitempty"`
 	BlocksJSON        json.RawMessage `json:"blocks_json,omitempty"`
@@ -368,6 +394,15 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	if purpose, present, err := documentPurposeEditInputV1(in); present {
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "purpose must be a separate valid document edit")
+			return
+		}
+		s.finishOwnedDocumentPurposeV1(w, r, u.OrgID, u.UserID, id, authorize, in, purpose)
+		return
+	}
+
 	if err := validateDocumentUpdateStorage(in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -424,6 +459,12 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing := guard.Document
+	if in.RequiresSignature != nil {
+		if err := documentpurpose.RequireSigning(existing.Metadata); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	if in.RequiresSignature != nil && !*in.RequiresSignature {
 		parties, err := htmlsource.ContractParties(existing)
 		if err != nil || len(parties) != 0 {

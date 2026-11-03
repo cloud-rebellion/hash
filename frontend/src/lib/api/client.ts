@@ -1,6 +1,7 @@
 import { checkedPackageSendObservation, checkedPackageSendReceipt, checkedPackageSendInspection, type PackageSendObservation, type PackageSendReceipt } from '../packageSend';
 import { commentQuery, latestComments, type CommentPage, type CommentSelection } from '../commentHistory';
 import { checkedPreSignDocumentView, type PreSignDocumentView } from '../presignExecution';
+import { type DocumentPurpose } from '../documentPurpose';
 // Hash frontend API client.
 import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot, HTMLSigningPage } from '../htmlTemplate';
 
@@ -25,6 +26,7 @@ export interface TemplateResponse {
 }
 
 export interface DocumentResponse {
+  purpose?: DocumentPurpose | '';
   folder_id?: string | null;
   id: string;
   org_id: string;
@@ -187,6 +189,7 @@ export async function approveHTMLTemplate(id: string, version: number, contentSH
 }
 
 export interface HTMLDocumentInput {
+  purpose?: DocumentPurpose;
   name: string;
   expected_template_version: number;
   expected_template_content_sha256: string;
@@ -202,6 +205,7 @@ export interface HTMLDocumentInput {
 export async function createHTMLTemplateDocument(templateID: string, input: HTMLDocumentInput): Promise<ImportResult & { review_required: boolean }> {
   return request('POST', `/api/v1/templates/${encodeURIComponent(templateID)}/html/documents`, {
     name: input.name,
+    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
     expected_template_version: input.expected_template_version,
     expected_template_content_sha256: input.expected_template_content_sha256,
     values: input.values,
@@ -431,9 +435,10 @@ export async function moveDocumentFolder(documentId: string, folderId: string | 
   return request('PUT', `/api/v1/documents/${encodeURIComponent(documentId)}/folder`, { folder_id: folderId });
 }
 
-export async function createBlocksDocument(name: string): Promise<DocumentResponse> {
+export async function createBlocksDocument(name: string, purpose?: DocumentPurpose): Promise<DocumentResponse> {
   return request('POST', '/api/v1/documents', {
     name,
+    ...(purpose === undefined ? {} : { purpose }),
     source_kind: 'blocks',
     blocks_json: { version: 1, blocks: [] },
     variables_json: {}
@@ -444,7 +449,8 @@ export async function createDocumentFromTemplate(
   name: string,
   templateID: string,
   sourceKind: 'blocks' | 'pdf',
-  layout?: { expected_template_version: number; parties: PDFPartyBinding[] },
+  layout?: { expected_template_version: number; parties?: PDFPartyBinding[] },
+  purpose?: DocumentPurpose,
 ): Promise<DocumentResponse> {
   // Omit blocks_json/variables_json so the server seeds both from the template
   // (it copies them when the request leaves them empty).
@@ -452,6 +458,7 @@ export async function createDocumentFromTemplate(
     name,
     source_kind: sourceKind,
     template_id: templateID,
+    ...(purpose === undefined ? {} : { purpose }),
     ...layout,
   });
 }
@@ -477,10 +484,11 @@ export interface ImportResult {
 
 // importProposalPDF creates a signable pdf-source document straight from an
 // uploaded PDF (no template detour). Lands the document in the field designer.
-export async function importProposalPDF(name: string, file: File): Promise<ImportResult> {
+export async function importProposalPDF(name: string, file: File, purpose?: DocumentPurpose): Promise<ImportResult> {
   const fd = new FormData();
   fd.append('name', name);
   fd.append('pdf', file);
+  if (purpose !== undefined) fd.append('purpose', purpose);
   const res = await fetch('/api/v1/documents/import', {
     method: 'POST',
     credentials: 'include',
@@ -498,8 +506,9 @@ export async function importProposalHTML(
   name: string,
   html: string,
   landscape = false,
+  purpose?: DocumentPurpose,
 ): Promise<ImportResult> {
-  return request('POST', '/api/v1/documents/import', { name, html, landscape });
+  return request('POST', '/api/v1/documents/import', { name, html, landscape, ...(purpose === undefined ? {} : { purpose }) });
 }
 
 export async function getDocument(id: string, signal?: AbortSignal): Promise<DocumentResponse> {
@@ -590,6 +599,7 @@ export async function updateDocument(
     expires_at?: string;
     default_locale?: string;
     requires_signature?: boolean;
+    purpose?: DocumentPurpose;
   }
 ): Promise<DocumentResponse> {
   return request('PATCH', `/api/v1/documents/${id}`, patch);

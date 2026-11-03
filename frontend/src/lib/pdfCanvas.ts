@@ -4,11 +4,13 @@ export const PDF_CANVAS_PIXELS = 32 * 1024 * 1024;
 export const PDF_CANVAS_LOGICAL_BYTES = PDF_CANVAS_PIXELS * 4;
 const MAX_OWNERS = 32;
 const MAX_STORES_PER_OWNER = 3;
+const MAX_THUMBNAILS_PER_OWNER = 5;
 export const PDF_CANVAS_WAIT_MS = 10_000;
 const unavailable = () => new Error('PDF preview memory is busy. Close another PDF preview and reopen this document.');
 const closed = () => new DOMException('The document view was closed.', 'AbortError');
 export type CanvasStore = Pick<HTMLCanvasElement, 'width' | 'height'>;
 export type PaintOptions = {
+  thumbnail?: true;
   priority?: 'visible' | 'background';
   signal?: AbortSignal;
   evictable?: () => boolean;
@@ -20,10 +22,12 @@ type Generation = {
 };
 type Lease = {
   generation: Generation; canvas: CanvasStore; pixels: number; painting: boolean;
+  thumbnail: boolean;
   options: PaintOptions;
 };
 type Waiter = {
   generation: Generation; canvas: CanvasStore; width: number; height: number; options: PaintOptions;
+  thumbnail: boolean;
   resolve: (lease: PaintLease) => void; reject: (reason: unknown) => void; cleanup: () => void;
 };
 export type CanvasGeneration = Generation;
@@ -81,18 +85,23 @@ export class PdfCanvasBudget {
   }
   acquire(generation: Generation, canvas: CanvasStore, width: number, height: number, options: PaintOptions = {}): Promise<PaintLease> {
     if (!this.owners.has(generation) || generation.state !== 'open' || options.signal?.aborted) return Promise.reject(closed());
+    const thumbnail = options.thumbnail === true;
+    if ((options.thumbnail !== undefined && !thumbnail) || (thumbnail && (width > 112 || height > 160 || options.priority !== 'background'))) return Promise.reject(unavailable());
     if (this.failed || generation.waiting || !Number.isSafeInteger(width) || !Number.isSafeInteger(height)
       || width < 1 || height < 1 || width * height > this.limit) return Promise.reject(unavailable());
+    // Keep this tiny-store contract stable while queued, including the original
+    // abort owner. Ordinary full-page callers retain their existing semantics.
+    const admittedOptions: PaintOptions = thumbnail ? { thumbnail: true, priority: 'background', signal: options.signal, evictable: options.evictable, onEvict: options.onEvict } : options;
     return new Promise((resolve, reject) => {
       const abort = () => this.refuse(waiter, closed());
       const timer = setTimeout(() => this.refuse(waiter, unavailable()), this.waitMilliseconds);
-      const waiter: Waiter = { generation, canvas, width, height, options, resolve, reject, cleanup: () => {
+      const waiter: Waiter = { generation, canvas, width, height, options: admittedOptions, thumbnail, resolve, reject, cleanup: () => {
         clearTimeout(timer); generation.controller.signal.removeEventListener('abort', abort);
-        options.signal?.removeEventListener('abort', abort);
+        admittedOptions.signal?.removeEventListener('abort', abort);
       } };
       generation.waiting = waiter;
       generation.controller.signal.addEventListener('abort', abort, { once: true });
-      options.signal?.addEventListener('abort', abort, { once: true });
+      admittedOptions.signal?.addEventListener('abort', abort, { once: true });
       this.waiters.push(waiter);
       this.pump();
     });
@@ -117,9 +126,9 @@ export class PdfCanvasBudget {
     try { lease.options.onEvict?.(); } catch { this.retirementFailed(lease.generation); }
     this.forget(lease.generation);
   }
-  private ownedStores(generation: Generation): number {
+  private ownedStores(generation: Generation, thumbnail: boolean): number {
     let count = 0;
-    for (const lease of this.stores.values()) if (lease.generation === generation) count++;
+    for (const lease of this.stores.values()) if (lease.generation === generation && lease.thumbnail === thumbnail) count++;
     return count;
   }
   private pump(): void {
@@ -130,21 +139,26 @@ export class PdfCanvasBudget {
     // is at most one waiter per owner and 32 live owners, never one per page.
     const ordered = this.visibleGrants >= 4 ? [...background, ...visible] : [...visible, ...background];
     for (const waiter of ordered) {
+      // The full-page cap remains three. Five strictly tiny thumbnail stores
+      // share the same generation, pixel budget and retirement, never another
+      // PDF worker or an untracked image allocation. Slot class is captured at
+      // admission, independently of a caller changing its options object.
+      const maxStores = waiter.thumbnail ? MAX_THUMBNAILS_PER_OWNER : MAX_STORES_PER_OWNER;
       const old = this.stores.get(waiter.canvas);
       if (old && (old.generation !== waiter.generation || old.painting)) continue;
       if (old) this.release(old);
       if (this.failed) return;
       for (const lease of [...this.stores.values()]) {
-        if (this.pixels + waiter.width * waiter.height <= this.limit && this.ownedStores(waiter.generation) < MAX_STORES_PER_OWNER) break;
-        if ((lease.generation === waiter.generation || this.pixels + waiter.width * waiter.height > this.limit)
+        if (this.pixels + waiter.width * waiter.height <= this.limit && this.ownedStores(waiter.generation, waiter.thumbnail) < maxStores) break;
+        if (((lease.generation === waiter.generation && lease.thumbnail === waiter.thumbnail) || this.pixels + waiter.width * waiter.height > this.limit)
           && !lease.painting && lease.generation.state === 'open' && lease.options.evictable?.() === true) this.release(lease);
       }
       if (this.failed) return;
-      if (this.pixels + waiter.width * waiter.height > this.limit || this.ownedStores(waiter.generation) >= MAX_STORES_PER_OWNER) continue;
+      if (this.pixels + waiter.width * waiter.height > this.limit || this.ownedStores(waiter.generation, waiter.thumbnail) >= maxStores) continue;
       // Synchronous reservation before resolving the waiter prevents two
       // callers from both observing the same free budget.
       const lease: Lease = { generation: waiter.generation, canvas: waiter.canvas,
-        pixels: waiter.width * waiter.height, painting: true, options: waiter.options };
+        pixels: waiter.width * waiter.height, painting: true, options: waiter.options, thumbnail: waiter.thumbnail };
       this.stores.set(waiter.canvas, lease); this.pixels += lease.pixels; this.active = lease;
       this.remove(waiter);
       this.visibleGrants = waiter.options.priority === 'background' ? 0 : this.visibleGrants + 1;

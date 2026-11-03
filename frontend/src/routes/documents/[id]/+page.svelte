@@ -27,7 +27,7 @@
   } from '$lib/api/client';
   import BlockEditor from '$lib/components/BlockEditor/Editor.svelte';
   import RiskPanel from '$lib/components/RiskPanel.svelte';
-  import AgentTokensPanel from '$lib/components/AgentTokensPanel.svelte';
+  import DocumentDownload from '$lib/components/DocumentDownload.svelte';
   import EnvelopePanel from '$lib/components/EnvelopePanel.svelte';
   import SenderPanel from '$lib/components/SenderPanel.svelte';
   import TimelinePanel from '$lib/components/TimelinePanel.svelte';
@@ -42,9 +42,16 @@
   import PreSignSupersession from '$lib/components/PreSignSupersession.svelte';
   import { currentHTMLSource, htmlUUID } from '$lib/htmlRevision';
   import { createCommentHistory, latestComments, type CommentSelection } from '$lib/commentHistory';
-  import { ArrowLeft, Eye, Sparkles, Save } from 'lucide-svelte';
+  import { ArrowLeft, Eye, Save } from 'lucide-svelte';
+  import DocumentPurposeSelect from '$lib/components/DocumentPurposeSelect.svelte';
+  import { documentPurpose, purposeLabel, requireDocumentPurpose, type DocumentPurpose } from '$lib/documentPurpose';
 
   let doc = $state<DocumentResponse | null>(null);
+  let selectedPurpose = $state<DocumentPurpose | ''>('');
+  let changingPurpose = $state(false), purposeUnconfirmed = $state(false);
+  let purposeError = $state<string | null>(null);
+  const savedPurpose = $derived(documentPurpose(doc?.purpose));
+  const signingPurpose = $derived(savedPurpose === 'signing');
   let userName = $state('You');
   let viewerRole = $state('');
   let viewerUserID = $state('');
@@ -52,6 +59,7 @@
   let error = $state<string | null>(null);
   let showPreview = $state(false);
   let recipientRevision = $state(0);
+  let senderPanel = $state.raw<{ openRecipientForm(): Promise<boolean> } | null>(null);
   let savingTemplate = $state(false);
   let savedTemplateFlash = $state(false);
   let showTemplateName = $state(false);
@@ -75,7 +83,7 @@
   let supersessionBusy = $state(false), supersessionPending = $state(false);
   let seenAmendmentScope = '';
   const amendmentScope = $derived(doc ? JSON.stringify([doc.id, doc.org_id, doc.updated_at, viewerUserID, viewerRole]) : '');
-  const amendmentReadOnly = $derived(amendmentLookupBlocked || amendmentLinked || amendmentBusy || supersessionBusy || supersessionPending);
+  const amendmentReadOnly = $derived(!savedPurpose || purposeUnconfirmed || changingPurpose || (signingPurpose && (amendmentLookupBlocked || amendmentLinked || amendmentBusy || supersessionBusy || supersessionPending)));
   $effect.pre(() => { const scope = amendmentScope; untrack(() => { if (seenAmendmentScope !== scope) { seenAmendmentScope = scope; amendmentLookupBlocked = true; amendmentLinked = false; amendmentNotice = false; amendmentBusy = false; amendmentDirty = false; supersessionBusy = false; supersessionPending = false; } }); });
   let crmRefreshRevision = $state(0), crmReviewRevision = $state(0), crmEditorRevision = $state(0);
   let htmlSource = $state.raw<HTMLDocumentSource | null>(null);
@@ -110,15 +118,15 @@
   let disposed = false;
   let templateFlashTimer: ReturnType<typeof setTimeout> | null = null;
   const routeDocumentID = $derived($page.params.id);
-  const crmEditable = $derived(!amendmentReadOnly && !!doc && doc.status === 'draft' && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)));
+  const crmEditable = $derived(savedPurpose !== null && !purposeUnconfirmed && !changingPurpose && !amendmentReadOnly && !!doc && doc.status === 'draft' && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)));
   const crmEditorClean = $derived(doc?.has_html_source ? htmlEditorClean : doc?.source_kind === 'blocks' ? blocksEditorClean : false);
-  const htmlSiblingMutationBusy=$derived(crmBusy || attachmentBusy || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy);
+  const htmlSiblingMutationBusy=$derived(changingPurpose || purposeUnconfirmed || crmBusy || attachmentBusy || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy);
   const attachmentBarrier=$derived(attachmentBusy || attachmentDirty);
-  const attachmentEligible=$derived(!!doc && doc.status==='draft' && (viewerRole==='owner' || (viewerRole==='sender' && viewerUserID===doc.sender_id)) && doc?.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id);
-  const attachmentReconciliationBusy=$derived(crmBusy || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
-  const crmReconciliationBusy=$derived(senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBusy || pdfLayoutBusy || pdfLayoutDirty);
-  const attachmentOtherBusy=$derived(amendmentBusy || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
-  const crmOtherBusy = $derived(senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBarrier);
+  const attachmentEligible=$derived(signingPurpose && !purposeUnconfirmed && !changingPurpose && !!doc && doc.status==='draft' && (viewerRole==='owner' || (viewerRole==='sender' && viewerUserID===doc.sender_id)) && doc?.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id);
+  const attachmentReconciliationBusy=$derived(changingPurpose || purposeUnconfirmed || crmBusy || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
+  const crmReconciliationBusy=$derived(changingPurpose || purposeUnconfirmed || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBusy || pdfLayoutBusy || pdfLayoutDirty);
+  const attachmentOtherBusy=$derived(changingPurpose || purposeUnconfirmed || amendmentBusy || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
+  const crmOtherBusy = $derived(changingPurpose || purposeUnconfirmed || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBarrier);
   let preSignPresentationBlocked = $state(false);
 
   type DocumentScope = { id: string; routeRevision: number; documentRevision: number };
@@ -205,6 +213,12 @@
     try { receiveHTMLDocument(await getDocument(scope.id), scope); }
     catch (e) { if (isCurrentDocument(scope)) error = (e as Error).message; }
   }
+  async function openRecipientsForFields(): Promise<boolean> {
+    const scope = captureDocument(), panel = senderPanel;
+    if (!signingPurpose || changingPurpose || purposeUnconfirmed || !scope || !panel) return false;
+    const opened = await panel.openRecipientForm();
+    return isCurrentDocument(scope) && senderPanel === panel && opened;
+  }
   function receivePlacementProof(proof: { documentID: string; pdfSHA256: string; htmlSourceCommitment: string; ready: boolean }, scope: DocumentScope) {
     if (!doc || !isCurrentDocument(scope) || proof.documentID !== doc.id || proof.pdfSHA256 !== doc.pdf_sha256
         || proof.htmlSourceCommitment !== doc.html_source_commitment || htmlSource?.source_schema_version !== 3 || htmlRevisionBlocked) return;
@@ -252,9 +266,31 @@
     return isCurrentDocument(scope) && doc?.org_id === scope.orgID;
   }
 
+  async function changePurpose(event: Event) {
+    event.preventDefault();
+    const scope = captureDocument();
+    if (!scope || !doc || !savedPurpose || purposeUnconfirmed || changingPurpose || doc.status !== 'draft'
+      || !(viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id))
+      || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || attachmentBusy || attachmentDirty || pdfLayoutBusy || pdfLayoutDirty || savingMode || savingTemplate || revising || resolvingId || savingApprovalMode || amendmentBusy || amendmentDirty || supersessionBusy || supersessionPending
+      || (doc.source_kind === 'blocks' && !blocksEditorClean) || (doc.has_html_source && (!htmlEditorClean || htmlRevisionBlocked))) return;
+    let purpose: DocumentPurpose;
+    try { purpose = requireDocumentPurpose(selectedPurpose); } catch (failure) { purposeError = (failure as Error).message; return; }
+    if (purpose !== 'signing' && htmlSource?.contract_profile) { purposeError = 'This reviewed contract design requires Signing. Choose another design for a document or presentation.'; return; }
+    if (purpose === savedPurpose) return;
+    const before = doc;
+    changingPurpose = true; purposeError = null;
+    try {
+      const updated = await updateDocument(scope.id, { expected_updated_at: before.updated_at, purpose });
+      if (!isCurrentDocument(scope, true)) { if (isCurrentDocument(scope)) purposeUnconfirmed = true; return; }
+      if (updated.purpose !== purpose || !receiveDocument(updated, scope)) throw new Error('The saved document purpose could not be confirmed. Reload this document before making further changes.');
+      selectedPurpose = '';
+    } catch (failure) { if (isCurrentDocument(scope)) { purposeError = (failure as Error).message; purposeUnconfirmed = true; } }
+    finally { if (isCurrentDocument(scope)) changingPurpose = false; }
+  }
+
   async function toggleSignatureMode() {
     const scope = captureDocument();
-    if (!scope || !doc || amendmentReadOnly || crmBusy || attachmentBarrier || crmLocalIntent || doc.status !== 'draft' || savingMode || revising || resolvingId
+    if (!scope || !doc || !signingPurpose || changingPurpose || purposeUnconfirmed || amendmentReadOnly || crmBusy || attachmentBarrier || crmLocalIntent || doc.status !== 'draft' || savingMode || revising || resolvingId
         || (doc.has_html_source && (htmlRevisionBlocked || !htmlSource || htmlSource.contract_profile))) return;
     savingMode = true;
     error = null;
@@ -496,6 +532,7 @@
     loading = true;
     error = null;
     showPreview = false;
+    selectedPurpose = ''; changingPurpose = false; purposeUnconfirmed = false; purposeError = null;
     savingTemplate = false;
     savedTemplateFlash = false;
     showTemplateName = false;
@@ -598,7 +635,8 @@
       <p class="page-eyebrow">{$ui('Document')} · {$ui(doc.status)}</p>
       <div class="flex flex-col items-start gap-4 sm:flex-row sm:items-baseline sm:justify-between">
         <h1 class="page-title min-w-0 w-full break-words sm:flex-1">{doc.name}</h1>
-        <div class="flex max-w-full flex-wrap gap-2">
+        <div class="flex max-w-full flex-wrap items-start gap-2">
+          <DocumentDownload document={doc} blocked={changingPurpose || purposeUnconfirmed || (doc.status === 'draft' && ((savedPurpose !== null && doc.source_kind === 'blocks' && !blocksEditorClean) || (savedPurpose !== null && doc.has_html_source && !htmlEditorClean) || senderMutationBusy || pdfLayoutBusy || pdfLayoutDirty || crmBusy || attachmentBusy || revising || supersessionBusy))} />
           <button class="btn btn-secondary" onclick={() => (showPreview = !showPreview)}>
             <Eye class="size-4" /> {$ui(showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview')}
           </button>
@@ -611,12 +649,24 @@
               <Save class="size-4" /> {$ui(savedTemplateFlash ? 'Saved!' : 'Save as template')}
             </button>
           {/if}
-          <a class="btn btn-secondary" href="/settings/api-keys">
-            <Sparkles class="size-4" /> {$ui("Attach AI")}
-          </a>
         </div>
       </div>
     </div>
+
+    <section class="card p-4 mb-6 space-y-3" aria-label={$ui('Document purpose')}>
+      <p class="text-sm font-medium">{$ui('Document purpose')}: {$ui(purposeLabel(savedPurpose))}</p>
+      {#if doc.status === 'draft' && savedPurpose && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id))}
+        <details><summary class="cursor-pointer text-sm text-text-secondary">{$ui('Change purpose')}</summary>
+          <form onsubmit={changePurpose} class="mt-4 max-w-xl space-y-3" aria-label={$ui('Change document purpose')}>
+            <DocumentPurposeSelect value={selectedPurpose} signingOnly={!!htmlSource?.contract_profile} onChange={value => { selectedPurpose = value; purposeError = null; }} disabled={changingPurpose || purposeUnconfirmed} />
+            <p class="text-xs text-text-secondary">{$ui('Save content first. Existing recipients, signing fields or prepared envelopes must be removed before leaving Signing.')}</p>
+            <button type="submit" class="btn btn-secondary" disabled={changingPurpose || purposeUnconfirmed || !selectedPurpose || selectedPurpose === savedPurpose || htmlSiblingMutationBusy || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || attachmentBarrier || pdfLayoutBusy || pdfLayoutDirty || (doc.source_kind === 'blocks' && !blocksEditorClean) || (doc.has_html_source && (!htmlEditorClean || htmlRevisionBlocked))}>{$ui(changingPurpose ? 'Saving…' : 'Save purpose')}</button>
+          </form>
+        </details>
+      {/if}
+      {#if purposeError}<p role="alert" class="text-sm text-danger">{$ui(purposeError)}</p>{/if}
+      {#if purposeUnconfirmed}<p role="alert" class="text-sm text-warning">{$ui('The purpose change is unconfirmed. Preserve local edits and reload this document before another change.')}</p><a href={`/documents/${doc.id}`} data-sveltekit-reload class="btn btn-secondary">{$ui('Reload document')}</a>{/if}
+    </section>
 
     {#if showTemplateName && doc.source_kind === 'blocks'}
       <section id="document-template-name" class="card p-6 mb-6 space-y-4" aria-labelledby="document-template-name-title">
@@ -649,7 +699,7 @@
       {#key amendmentScope}
        {@const capturedAmendmentScope = amendmentScope}
        <DocumentAmendmentsPanel document={doc} actor={{org_id:doc.org_id,user_id:viewerUserID,role:viewerRole}}
-        externalBusy={crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || attachmentBarrier || pdfLayoutBusy || pdfLayoutDirty || savingMode || revising || !!resolvingId || savingApprovalMode || supersessionBusy || supersessionPending}
+        externalBusy={changingPurpose || purposeUnconfirmed || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || attachmentBarrier || pdfLayoutBusy || pdfLayoutDirty || savingMode || revising || !!resolvingId || savingApprovalMode || supersessionBusy || supersessionPending}
         onStateChange={(state)=>{if(capturedAmendmentScope===amendmentScope && isCurrentDocument(documentScope)){amendmentLookupBlocked=state.blocked;amendmentLinked=state.linked;amendmentNotice=state.notice;amendmentBusy=state.busy;amendmentDirty=state.dirty;}}} />
       {/key}
     {/if}
@@ -689,7 +739,7 @@
     {/if}
     {#if doc.has_html_source}{#key doc.id}<HtmlDocumentHistory document={doc} />{/key}{/if}
 
-    {#if doc.status === 'draft'}
+    {#if signingPurpose && doc.status === 'draft'}
       <div class="card p-4 mb-6 flex items-center justify-between gap-4">
         <div>
           <p class="text-sm font-medium">{$ui("Signing mode")}</p>
@@ -787,9 +837,12 @@
           <iframe title={$ui("Provider-signed agreement")} src={documentPdfURL(doc.id)} class="w-full h-[80vh] card"></iframe>
         {/key}
       {/if}
+    {:else if !savedPurpose}
+      <p role="alert" class="card p-4 text-warning mb-4">{$ui('This document purpose is unavailable. Reload before changing content or signing settings. Saved previews and downloads remain available.')}</p>
+      <iframe title={$ui('Saved document')} src={doc.source_kind === 'pdf' ? documentPdfURL(doc.id) : previewURL(doc.id)} sandbox={doc.source_kind === 'blocks' ? '' : undefined} class="w-full h-[80vh] card"></iframe>
     {:else if doc.status === 'draft' && doc.source_kind === 'blocks'}
       <div hidden={showPreview}>
-        <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} externalBusy={crmBusy}
+        <BlockEditor signingFieldsEnabled={signingPurpose} document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} externalBusy={crmBusy || changingPurpose || purposeUnconfirmed || !savedPurpose}
           onEditorStateChange={(clean) => { if (isCurrentDocument(documentScope)) blocksEditorClean = clean; }} />
       </div>
       {#if showPreview}
@@ -800,9 +853,9 @@
       <div hidden={showPreview}>
         {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Load and reconcile the retained document values before viewing or changing signature locations.")}</p>
         {:else}
-        {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
+        {#key `${doc.id}:${savedPurpose}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
           hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource}
-          readonly={attachmentBarrier || amendmentReadOnly} onStateChange={(state)=>{if(isCurrentDocument(documentScope,true)){pdfLayoutBusy=state.busy;pdfLayoutDirty=state.dirty;}}}
+          fieldsEnabled={signingPurpose} readonly={!signingPurpose || changingPurpose || purposeUnconfirmed || attachmentBarrier || amendmentReadOnly} onAddRecipient={openRecipientsForFields} onStateChange={(state)=>{if(isCurrentDocument(documentScope,true)){pdfLayoutBusy=state.busy;pdfLayoutDirty=state.dirty;}}}
           onPlacementProof={(proof) => receivePlacementProof(proof, documentScope)} onSignatureFieldsChange={(fields) => {
           if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
         }} />{/key}
@@ -819,12 +872,12 @@
         class="w-full h-[80vh] card"
       ></iframe>
     {:else if doc.source_kind === 'blocks'}
-      <BlockEditor document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
+      <BlockEditor signingFieldsEnabled={signingPurpose} document={doc} onChange={(d) => receiveEditorDocument(d, documentScope)} {userName} />
     {:else}
       {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Loading and verifying the saved signature locations…")}</p>
       {:else}
-      {#key `${doc.id}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
-        hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource} readonly={true} onSignatureFieldsChange={(fields) => {
+      {#key `${doc.id}:${savedPurpose}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
+        hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource} fieldsEnabled={signingPurpose} readonly={true} onSignatureFieldsChange={(fields) => {
         if (isCurrentDocument(documentScope)) pdfSignatureFields = fields;
       }} />{/key}
       {/if}
@@ -837,14 +890,15 @@
         onSaved={(updated,expected,reconciliation)=>receiveAttachmentDocument(updated,expected,documentScope,reconciliation)}
         onStateChange={(state)=>{if(isCurrentDocument(documentScope)){attachmentBusy=state.busy;attachmentDirty=state.dirty;attachmentSendBlocked=state.blocked;attachmentMessage=state.message;attachmentPackageSend=state.packageSend;}}} />
       {/if}
-      <SenderPanel
+      {#if signingPurpose}
+      <SenderPanel bind:this={senderPanel}
         documentID={doc.id}
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
         revisionBlocked={amendmentLookupBlocked || amendmentNotice || amendmentBusy || (doc.has_html_source === true && htmlRevisionBlocked) || (crmEditable && doc.source_kind === 'blocks' && !blocksEditorClean)}
         attachmentsBlocked={doc.status==='draft' && doc.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id && (!attachmentEligible || attachmentSendBlocked)} attachmentsMessage={attachmentMessage} packageSend={attachmentPackageSend} packageReviewRevision={attachmentReviewRevision} packageReconciliationBusy={attachmentReconciliationBusy || attachmentBusy} onPackageReviewRequired={(inspect)=>requestPackageReview(inspect,documentScope)}
-        externalMutationBusy={attachmentBarrier || amendmentBusy} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
+        externalMutationBusy={changingPurpose || purposeUnconfirmed || attachmentBarrier || amendmentBusy} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
         crmBlocked={crmEditable && (crmBlocked || crmReviewRequired)} {crmBusy} {crmReviewRevision}
         onCRMReviewRequired={() => { crmDetailsOpen = true; requestCRMReview(documentScope); }}
         onMutationStateChange={(busy) => { if (isCurrentDocument(documentScope)) senderMutationBusy = busy; }}
@@ -860,7 +914,8 @@
         onRecipientsChange={() => { if (isCurrentDocument(documentScope)) recipientRevision++; }}
         onDefaultLocaleChange={(locale) => changeDefaultLocale(locale, documentScope)}
       />
-      {#if doc.status !== 'draft' || doc.has_html_source}
+      {/if}
+      {#if signingPurpose && !changingPurpose && !purposeUnconfirmed && (doc.status !== 'draft' || doc.has_html_source)}
         <section class="card p-5 mb-6">
           <h2 class="font-display font-extralight text-lg mb-1">{$ui("Comments")}</h2>
           <p class="text-sm text-text-secondary mb-4 leading-relaxed">
@@ -908,9 +963,8 @@
         </section>
       {/if}
       <details class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("AI review")}</summary><div class="px-4 pb-4"><RiskPanel documentID={doc.id} /></div></details>
-      <details open={!!doc.is_envelope} class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("Combine documents")}</summary><div class="px-4 pb-4"><EnvelopePanel documentID={doc.id} isEnvelope={!!doc.is_envelope} /></div></details>
+      {#if signingPurpose && !changingPurpose && !purposeUnconfirmed}<details open={!!doc.is_envelope} class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("Multi-document signing")}</summary><div class="px-4 pb-4"><EnvelopePanel documentID={doc.id} isEnvelope={!!doc.is_envelope} /></div></details>{/if}
       <TimelinePanel documentID={doc.id} />
-      <details class="mb-6 rounded-xl border border-border-light bg-bg-surface"><summary class="cursor-pointer px-5 py-4 text-sm font-medium">{$ui("AI access for this document")}</summary><div class="px-4 pb-4"><AgentTokensPanel documentID={doc.id} /></div></details>
     </div>
     {/key}
   {/if}

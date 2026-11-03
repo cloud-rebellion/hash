@@ -1334,3 +1334,65 @@ intact. Folders can be removed only when they contain no active documents.
 
 See [Document folders](DOCUMENT-FOLDERS-API.md) for the staff-session endpoints,
 request examples, role requirements, filtering and error responses.
+
+
+### Document authoring purpose
+
+Document responses expose `purpose`: `document`, `presentation` or `signing`.
+This is independent of `source_kind` (blocks/PDF representation). The existing
+`requires_signature` flag chooses signature versus recipient acknowledgement
+only within a signing workflow; it is not an ordinary-document mode.
+
+Creation accepts optional `purpose` in block/PDF-template JSON, multipart PDF
+imports, designed-HTML imports and approved HTML-template creation. Omission
+retains legacy signing behavior. Templates provide the saved design; they do
+not persist a purpose, so clients choose explicitly when reusing them.
+
+`PATCH /api/v1/documents/{id}` accepts a purpose-only edit with
+`{ "expected_updated_at": "<fresh observation>", "purpose": "document" }`.
+Do not combine it with content or workflow edits. Only editable drafts without
+retained evidence can change purpose; moving away from signing also refuses
+recipients, fields, envelope topology and package preparation. Source bytes and
+variables are unchanged. Stale observations return 412 and incompatible
+workflow state returns 409. Unknown/malformed reserved purpose data is exposed
+as an empty purpose and refuses mutations rather than becoming signing.
+
+MCP `create_document` and `create_pdf_document` accept the same optional enum.
+MCP `set_document_purpose` requires `document_id`, `expected_updated_at` and
+`purpose`, with the real `write:authoring` transaction authorization. Generic
+`attach_metadata` cannot replace the reserved `hash:document-purpose:v1` key.
+Shared native signing/recipient/field/envelope/package mutations enforce the
+stored mode; hiding controls is not the enforcement boundary. Ordinary reads
+and exports retain their existing authorization.
+
+Reviewed HTML contract-profile templates retain their mandatory parties and
+signing artifact. Use signing mode for those templates; document/presentation
+creation refuses before rendering. Ordinary no-profile HTML designs/imports
+remain available. Deploy the purpose-capable server and worker together using
+normal old-writer closure; this metadata-only increment does not fence an
+intentionally surviving old application binary.
+
+### Downloading documents
+
+The editor's **Download PDF** action exports the current saved document. It does
+not add recipients or start a signing/acknowledgement workflow.
+
+Staff sessions use `GET /api/v1/documents/{id}/pdf?download=1` with exactly one
+`expected_updated_at` from the current document response. PDF sources also need
+exactly one `expected_pdf_sha256`. A changed observation returns409: reload and
+review the saved document before downloading. Blocks sources are rendered from
+the saved content and branding; credentials and the saved snapshot are checked
+again after rendering. Unsaved editor changes are not exported.
+
+For completed signing documents, use `GET /api/v1/documents/{id}/final-pdf` to
+retrieve the retained completed PDF with its signature content; the editor
+selects this route automatically. It never falls back to the unsigned source
+while the completed artifact is being prepared. The separate
+`GET /api/v1/documents/{id}/audit-cert` provides the retained evidence report.
+All routes keep their existing session and workspace authorization. Ordinary
+`/pdf` preview requests without the download query retain their original behavior.
+
+The document library exposes **Delete draft** through the existing native draft
+soft-delete route; sent/completed documents and drafts with retained signing
+evidence refuse that action. **Archive template** removes a reusable template
+from the template library while preserving documents already created from it.

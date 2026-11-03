@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ import (
 )
 
 type htmlDocumentInput struct {
+	Purpose                       documentpurpose.Purpose     `json:"purpose,omitempty"`
 	Name                          string                      `json:"name"`
 	ExpectedTemplateVersion       int32                       `json:"expected_template_version"`
 	ExpectedTemplateContentSHA256 string                      `json:"expected_template_content_sha256"`
@@ -103,6 +105,10 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 			return
 		}
 		writeError(w, 400, err.Error())
+		return
+	}
+	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
+		writeError(w, 400, "purpose must be document, presentation or signing")
 		return
 	}
 	if strings.TrimSpace(in.Name) == "" || utf8.RuneCountInString(in.Name) > 200 || strings.ContainsRune(in.Name, '\x00') {
@@ -190,6 +196,10 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) writeHTMLCreationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.Is(err, pdfadmission.ErrHTMLCreationWriterV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) || errors.Is(err, pdfadmission.ErrHTMLAuditEventV1) {
 		writeError(w, 503, "HTML document creation is temporarily unavailable")
 		return
@@ -386,6 +396,9 @@ func (s *Server) prepareHTMLDraft(ctx context.Context, actor authoring.Actor, te
 	}
 	compiled, err := htmlmaster.Compile(master)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateHTMLDocumentPurposeV1(in.Purpose, compiled.ContractProfile() != nil); err != nil {
 		return nil, err
 	}
 	values := map[string]string{}
@@ -600,6 +613,10 @@ func (s *Server) instantiateHTMLDocumentPopulationV1(ctx context.Context, actor 
 			return err
 		}
 		doc, err = q.GetDocument(finalCtx, generated.GetDocumentParams{ID: doc.ID, OrgID: actor.OrgID})
+		if err != nil {
+			return err
+		}
+		doc, err = writer.RecordPurposeV1(finalCtx, in.Purpose)
 		if err != nil {
 			return err
 		}

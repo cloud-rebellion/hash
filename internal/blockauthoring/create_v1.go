@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type ActorV1 struct {
 	Via, Tool, IP, UserAgent string
 }
 type CreateInputV1 struct {
+	Purpose                   documentpurpose.Purpose
 	Name                      string
 	TemplateID                pgtype.UUID
 	BlocksJSON, VariablesJSON json.RawMessage
@@ -48,6 +50,7 @@ type resultStateV1 struct {
 	once                sync.Once
 	blockTemplateSource *pdfadmission.ApplicationBlocksTemplateSourceV1
 	plainDraftWriter    *pdfadmission.ApplicationPlainDraftMutationWriterV1
+	purposeWriter       *pdfadmission.ApplicationDocumentPurposeWriterV1
 	topology            *pdfadmission.ApplicationEnvelopeTopologyV1
 	revisionReader      *pdfadmission.ApplicationHTMLRevisionReaderV1
 	mutationWriter      *pdfadmission.ApplicationBlocksMutationWriterV1
@@ -61,7 +64,7 @@ func (r *ResultV1) MarshalJSON() ([]byte, error) {
 	if r == nil {
 		return []byte("null"), nil
 	}
-	return json.Marshal(r.Document)
+	return json.Marshal(documentpurpose.View(r.Document))
 }
 func (r *ResultV1) CloseConsumerV1() {
 	if r == nil || r.state == nil {
@@ -75,6 +78,9 @@ func (r *ResultV1) CloseConsumerV1() {
 		s.events = nil
 		if s.topology != nil {
 			s.topology.CloseConsumerV1()
+		}
+		if s.purposeWriter != nil {
+			s.purposeWriter.CloseConsumerV1()
 		}
 		if s.plainDraftWriter != nil {
 			s.plainDraftWriter.CloseConsumerV1()
@@ -199,6 +205,10 @@ func CreateV1(ctx context.Context, d DependenciesV1, actor ActorV1, in CreateInp
 			return err
 		}
 		doc, err = state.writer.CreateBlocksDocument(call, generated.CreateBlocksDocumentParams{OrgID: actor.OrgID, TemplateID: in.TemplateID, Name: in.Name, SenderID: actor.UserID, ExpiresAt: in.ExpiresAt})
+		if err != nil {
+			return err
+		}
+		doc, err = state.writer.RecordPurposeV1(call, in.Purpose)
 		if err != nil {
 			return err
 		}

@@ -112,6 +112,13 @@ func (w *ApplicationBlocksMutationWriterV1) EditTreeV1(ctx context.Context, edit
 		}
 		return nil, 0, err
 	}
+	purpose, err := purposeFromMetadataV1(ctx, old.Metadata, work.holdV1)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err = validateBlockTreePurposeV1(ctx, purpose, tree); err != nil {
+		return nil, 0, err
+	}
 	if err = blocks.ValidateForSendV1(tree, admission); err != nil {
 		if work.admissionFailure != nil {
 			return nil, 0, work.admissionFailure

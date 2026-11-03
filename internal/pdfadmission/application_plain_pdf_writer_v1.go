@@ -225,7 +225,7 @@ func (w *ApplicationPlainPDFCreationWriterV1) MeasureFreshPolicyV1(ctx context.C
 	if err != nil {
 		return err
 	}
-	if response == nil || response.DocumentID != document || response.OrgID != org || response.BlocksWireBytes != 0 || response.MetadataWireBytes != 2 || response.MeasurementServerVersionNum != m.MeasurementServerVersionNum {
+	if response == nil || response.DocumentID != document || response.OrgID != org || response.BlocksWireBytes != 0 || response.MetadataWireBytes != int64(len(s.doc.Metadata)) || response.MeasurementServerVersionNum != m.MeasurementServerVersionNum {
 		return ErrPlainPDFWriterV1
 	}
 	report, err := s.queries.MeasureSignerDocumentReportV1(ctx, generated.MeasureSignerDocumentReportV1Params{DocumentID: document, OrgID: org})

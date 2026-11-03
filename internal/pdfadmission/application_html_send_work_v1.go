@@ -230,6 +230,18 @@ func (w *ApplicationHTMLSendWorkV1) ReadModelsV1(ctx context.Context) (*HTMLSend
 	if doc == nil || (doc.SourceKind != "pdf" && doc.SourceKind != "blocks") || (doc.SourceKind == "pdf") != w.state.IsPdfSource || doc.ID != w.logicalDocumentV1() || doc.OrgID != s.org || doc.UpdatedAt != h.UpdatedAt || signerDocumentRawBytesV1(doc) != h.RawTextBytes || int64(len(doc.HtmlSourceJson)) != h.HtmlOriginWireBytes || int64(len(doc.HtmlCurrentSourceJson)) != h.HtmlCurrentWireBytes || int64(len(doc.VariablesJson)) != h.VariablesWireBytes || int64(len(doc.BlocksJson)) != h.BlocksWireBytes || int64(len(doc.Metadata)) != h.MetadataWireBytes || int64(len(doc.MetadataRedactionReport)) != h.ReportWireBytes {
 		return nil, ErrHTMLSendWorkV1
 	}
+	if w.stage.purpose != HTMLStaffCommentMutationV1 {
+		hold := func(call context.Context, raw, wire int64) error {
+			close, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, wire)
+			if err == nil {
+				w.closes = append(w.closes, close)
+			}
+			return err
+		}
+		if err = requireSigningPurposeV1(ctx, doc.Metadata, hold); err != nil {
+			return nil, err
+		}
+	}
 	w.sourceDocument = htmlSendCloneDocumentV1(doc)
 	w.sourceServerVersion = h.ServerVersionNum
 	w.models = &HTMLSendModelsV1{Document: doc}

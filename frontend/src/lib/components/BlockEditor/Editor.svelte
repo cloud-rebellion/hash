@@ -30,13 +30,14 @@
   import { BlockIDExtension, DynamicVariable, OpaqueBlock, PageBreak, SignatureField, TableBlock } from './nodes';
   import RecoveryPanel from './RecoveryPanel.svelte';
 
-  let { document: doc, onChange, userName, userColor, onEditorStateChange, externalBusy = false }: {
+  let { document: doc, onChange, userName, userColor, onEditorStateChange, externalBusy = false, signingFieldsEnabled = true }: {
     document: DocumentResponse;
     onChange?: (d: DocumentResponse) => void;
     userName?: string;
     userColor?: string;
     onEditorStateChange?: (clean: boolean) => void;
     externalBusy?: boolean;
+    signingFieldsEnabled?: boolean;
   } = $props();
 
   let editorEl: HTMLDivElement;
@@ -485,7 +486,7 @@
     editor?.chain().focus().setHorizontalRule().run();
   }
   function insertSignatureField() {
-    if (externalBusy) return;
+    if (externalBusy || !signingFieldsEnabled) return;
     const input = window.prompt(
       'Recipient role (lowercase letters, numbers, "_" or "-"; e.g. client, provider)?',
       'signer'
@@ -654,9 +655,9 @@
     <button type="button" class="tool" onclick={toggleCode} title={$ui("Code")}><CodeIcon class="size-3.5" /></button>
     <button type="button" class="tool" onclick={insertHR} title={$ui("Divider")}><Minus class="size-3.5" /></button>
     <span class="sep"></span>
-    <button type="button" class="tool tool-accent" onclick={insertSignatureField} title={$ui("Signature field")}>
+    {#if signingFieldsEnabled}<button type="button" class="tool tool-accent" onclick={insertSignatureField} title={$ui("Signature field")}>
       <Signature class="size-3.5" /> {$ui("Sig field")}
-    </button>
+    </button>{/if}
     <button type="button" class="tool" onclick={insertPageBreak} title={$ui("Page break")}>{$ui("⤓ Page break")}</button>
     <button type="button" class="tool" onclick={openNewTable} title={$ui("Insert table")}><TableIcon class="size-3.5" /> {$ui("Table")}</button>
     <span class="sep"></span>

@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"github.com/bright-interaction/hash/internal/ownedaudit"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/google/uuid"
@@ -52,7 +53,7 @@ func (r *CreateResultV1) MarshalJSON() ([]byte, error) {
 	if r == nil {
 		return []byte("null"), nil
 	}
-	return json.Marshal(r.Document)
+	return json.Marshal(documentpurpose.View(r.Document))
 }
 func (r *CreateResultV1) CloseConsumerV1() {
 	if r == nil || r.state == nil {

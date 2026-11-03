@@ -6,6 +6,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/hex"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
@@ -54,6 +55,7 @@ func documentMCPScopedReadProjection(row *generated.GetDocumentReadProjectionRow
 }
 
 type htmlDocumentReadResponse struct {
+	Purpose documentpurpose.Purpose `json:"purpose"`
 	*generated.Document
 	HasHTMLSource                bool   `json:"has_html_source"`
 	HTMLReviewRequired           bool   `json:"html_review_required"`
@@ -62,7 +64,7 @@ type htmlDocumentReadResponse struct {
 }
 
 func htmlDocumentReadProjection(doc *generated.Document, commitment string) htmlDocumentReadResponse {
-	return htmlDocumentReadResponse{Document: documentReadProjection(doc), HasHTMLSource: true,
+	return htmlDocumentReadResponse{Purpose: documentpurpose.Response(doc.Metadata), Document: documentReadProjection(doc), HasHTMLSource: true,
 		HTMLReviewRequired: !bytes.Equal(doc.PdfSha256, doc.HtmlReviewedPdfSha256) || !doc.HtmlReviewedBy.Valid || !doc.HtmlReviewedAt.Valid ||
 			(doc.HtmlCurrentMaterializationID.Valid && (!doc.HtmlReviewedMaterializationID.Valid || doc.HtmlCurrentMaterializationID != doc.HtmlReviewedMaterializationID)),
 		ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256), ExpectedHTMLSourceCommitment: commitment}

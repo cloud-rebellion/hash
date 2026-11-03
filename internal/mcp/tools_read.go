@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"strings"
 
@@ -155,7 +156,7 @@ func registerReadTools(s *Server, d Deps) {
 				if err != nil {
 					return map[string]any{"documents": []any{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{documentMCPScopedReadProjection(doc)}, "count": 1}, nil
+				return map[string]any{"documents": documentpurpose.Views([]*generated.Document{documentMCPScopedReadProjection(doc)}), "count": 1}, nil
 			}
 			limit := int32(50)
 			if p.Limit > 0 && p.Limit <= 200 {
@@ -167,7 +168,7 @@ func registerReadTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"documents": documentMCPListQueryProjection(rows), "count": len(rows)}, nil
+			return map[string]any{"documents": documentpurpose.Views(documentMCPListQueryProjection(rows)), "count": len(rows)}, nil
 		},
 	})
 
@@ -211,7 +212,7 @@ func registerReadTools(s *Server, d Deps) {
 				}
 				return htmlDocumentReadProjection(doc, commitment), nil
 			}
-			return doc, nil
+			return documentpurpose.View(doc), nil
 		},
 	})
 
@@ -236,7 +237,7 @@ func registerReadTools(s *Server, d Deps) {
 				if derr != nil || !strings.Contains(strings.ToLower(doc.Name), strings.ToLower(p.Query)) {
 					return map[string]any{"documents": []*generated.Document{}, "count": 0}, nil
 				}
-				return map[string]any{"documents": []*generated.Document{documentMCPScopedReadProjection(doc)}, "count": 1}, nil
+				return map[string]any{"documents": documentpurpose.Views([]*generated.Document{documentMCPScopedReadProjection(doc)}), "count": 1}, nil
 			}
 			rows, err := d.Queries.SearchDocumentsByNameForMCP(r.Context(), generated.SearchDocumentsByNameForMCPParams{
 				OrgID:   u.OrgID,
@@ -246,7 +247,7 @@ func registerReadTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"documents": documentMCPSearchQueryProjection(rows), "count": len(rows)}, nil
+			return map[string]any{"documents": documentpurpose.Views(documentMCPSearchQueryProjection(rows)), "count": len(rows)}, nil
 		},
 	})
 

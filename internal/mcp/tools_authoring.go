@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"net/http"
 	"strings"
@@ -48,12 +49,14 @@ func pgtypeUUID(id uuid.UUID) pgtype.UUID { return pgtype.UUID{Bytes: id, Valid:
 // emits an audit event with `via=mcp` and the tool name so we can tell
 // agent-authored vs human-authored documents apart.
 func registerAuthoringTools(s *Server, d Deps) {
+	registerDocumentPurposeToolV1(s, d)
 	s.RegisterTool(ToolDef{
 		Name:        "create_document",
 		Write:       true,
-		Description: "Create a new draft document. Use source_kind=blocks for the agent authoring path; source_kind=pdf with template_id for stamping flows.",
+		Description: "Create a draft. Explicit purpose document or presentation creates content without a signing workflow; signing enables recipients and Send. Omission preserves historical signing. Templates provide design, not an inherited purpose. source_kind chooses blocks or a PDF template.",
 		InputSchema: schemaObject(map[string]any{
 			"name":                      stringSchema("human-readable document name"),
+			"purpose":                   documentPurposeSchemaV1(),
 			"source_kind":               map[string]any{"type": "string", "enum": []string{"blocks", "pdf"}, "description": "blocks (agent) or pdf (uploaded template)"},
 			"template_id":               stringSchema("optional template uuid to instantiate from"),
 			"expected_template_version": map[string]any{"type": "integer", "minimum": 1, "description": "reviewed current PDF layout template version"},
@@ -69,16 +72,20 @@ func registerAuthoringTools(s *Server, d Deps) {
 			}
 			defer func() { result = newOwnedBlockToolResultV1(result, input) }()
 			var p struct {
-				Name                    string              `json:"name"`
-				SourceKind              string              `json:"source_kind"`
-				TemplateID              string              `json:"template_id"`
-				BlocksJSON              json.RawMessage     `json:"blocks_json"`
-				VariablesJSON           json.RawMessage     `json:"variables_json"`
-				ExpectedTemplateVersion *int32              `json:"expected_template_version"`
-				Parties                 []pdflayout.Binding `json:"parties"`
+				Name                    string                  `json:"name"`
+				Purpose                 documentpurpose.Purpose `json:"purpose"`
+				SourceKind              string                  `json:"source_kind"`
+				TemplateID              string                  `json:"template_id"`
+				BlocksJSON              json.RawMessage         `json:"blocks_json"`
+				VariablesJSON           json.RawMessage         `json:"variables_json"`
+				ExpectedTemplateVersion *int32                  `json:"expected_template_version"`
+				Parties                 []pdflayout.Binding     `json:"parties"`
 			}
 			if err := input.WithArgumentsV1(r.Context(), func(raw []byte) error { return MustParseArgs(raw, &p) }); err != nil {
 				return nil, err
+			}
+			if p.Purpose != "" && documentpurpose.Validate(p.Purpose) != nil {
+				return nil, documentpurpose.ErrInvalid
 			}
 			if p.Name == "" {
 				return nil, errors.New("name required")
@@ -108,10 +115,10 @@ func registerAuthoringTools(s *Server, d Deps) {
 			}
 			if p.SourceKind == "blocks" {
 				return blockauthoring.CreateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit, SnapshotCreation: d.Versions != nil},
-					blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, blockauthoring.CreateInputV1{Name: p.Name, TemplateID: tmplID, BlocksJSON: p.BlocksJSON, VariablesJSON: p.VariablesJSON})
+					blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, blockauthoring.CreateInputV1{Purpose: p.Purpose, Name: p.Name, TemplateID: tmplID, BlocksJSON: p.BlocksJSON, VariablesJSON: p.VariablesJSON})
 			}
 			return pdftemplateauthoring.CreateV1(r.Context(), pdftemplateauthoring.CreateDependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit},
-				pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, pdftemplateauthoring.CreateInputV1{TemplateID: tmplID, Source: pdfadmission.PDFTemplateDocumentInputV1{Name: p.Name, TemplateText: p.TemplateID, Variables: p.VariablesJSON, ExpectedTemplateVersion: p.ExpectedTemplateVersion, Parties: p.Parties}})
+				pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_document"}, pdftemplateauthoring.CreateInputV1{TemplateID: tmplID, Source: pdfadmission.PDFTemplateDocumentInputV1{Purpose: p.Purpose, Name: p.Name, TemplateText: p.TemplateID, Variables: p.VariablesJSON, ExpectedTemplateVersion: p.ExpectedTemplateVersion, Parties: p.Parties}})
 		},
 	})
 
@@ -120,9 +127,10 @@ func registerAuthoringTools(s *Server, d Deps) {
 		Write: true,
 		Description: "Create a signable pdf-source document in ONE step from a designed proposal, skipping the template detour. " +
 			"Supply EITHER pdf_base64 (a base64-encoded PDF) OR html (a designed HTML page rendered to PDF with its own CSS/@page preserved). " +
-			"Returns a draft pdf-source document; then add_recipient + add_document_field (type=signature) + send_document.",
+			"Choose purpose document/presentation for ordinary content, or signing before adding recipients/fields and sending. Omission preserves legacy signing.",
 		InputSchema: schemaObject(map[string]any{
 			"name":               stringSchema("human-readable document name"),
+			"purpose":            documentPurposeSchemaV1(),
 			"pdf_base64":         stringSchema("base64-encoded PDF bytes (mutually exclusive with html)"),
 			"html":               stringSchema("designed HTML to render to PDF (mutually exclusive with pdf_base64)"),
 			"landscape":          map[string]any{"type": "boolean", "default": false, "description": "landscape fallback when the HTML sets no @page size"},
@@ -137,14 +145,18 @@ func registerAuthoringTools(s *Server, d Deps) {
 			defer release()
 
 			var p struct {
-				Name              string `json:"name"`
-				PDFBase64         string `json:"pdf_base64"`
-				HTML              string `json:"html"`
-				Landscape         bool   `json:"landscape"`
-				RequiresSignature *bool  `json:"requires_signature"`
+				Name              string                  `json:"name"`
+				Purpose           documentpurpose.Purpose `json:"purpose"`
+				PDFBase64         string                  `json:"pdf_base64"`
+				HTML              string                  `json:"html"`
+				Landscape         bool                    `json:"landscape"`
+				RequiresSignature *bool                   `json:"requires_signature"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
+			}
+			if p.Purpose != "" && documentpurpose.Validate(p.Purpose) != nil {
+				return nil, documentpurpose.ErrInvalid
 			}
 			if p.Name == "" {
 				return nil, errors.New("name required")
@@ -193,7 +205,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 			ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 			defer cancel()
 			r = r.WithContext(ctx)
-			result, err := docintake.CreateOwnedPDFSourceDocumentV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit, Store: d.Storage}, docintake.OwnedPDFActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_pdf_document"}, p.Name, data, p.RequiresSignature)
+			result, err := docintake.CreateOwnedPDFSourceDocumentWithPurposeV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: d.PDFCreationSessions, Billing: d.Billing, Audit: d.Audit, Store: d.Storage}, docintake.OwnedPDFActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "create_pdf_document"}, p.Name, data, p.RequiresSignature, p.Purpose)
 			// The central MCP transport closes this concrete owner after both
 			// success and error serialization; returning from SQL is not last use.
 			return result, err

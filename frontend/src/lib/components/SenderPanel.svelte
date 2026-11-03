@@ -169,6 +169,7 @@
 
   // Recipient add/edit form.
   let showForm = $state(false);
+  let recipientNameInput = $state.raw<HTMLInputElement>();
   let editingId = $state<string | null>(null);
   let fName = $state('');
   let fEmail = $state('');
@@ -387,6 +388,19 @@
     showForm = true;
     formRevision++;
     formBaseline = currentForm();
+  }
+
+  // A field-placement shortcut opens this existing form; it cannot create a
+  // recipient or bypass the retained document/source/mutation guards.
+  export async function openRecipientForm(): Promise<boolean> {
+    const scope = captureScope();
+    if (!scope || !editable || otherMutationBusy || documentChanged || recipientIdentityLocked || saving || busy) return false;
+    if (!showForm) openAdd();
+    await tick();
+    if (!isCurrent(scope) || !editable || otherMutationBusy || recipientIdentityLocked || saving || busy || !showForm || !recipientNameInput) return false;
+    recipientNameInput.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    recipientNameInput.focus();
+    return true;
   }
 
   function openEdit(r: Recipient) {
@@ -814,6 +828,7 @@
           <input
             type="text"
             disabled={otherMutationBusy || recipientIdentityLocked}
+            bind:this={recipientNameInput}
             bind:value={fName}
             placeholder={$ui("Jane Andersson")}
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"

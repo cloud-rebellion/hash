@@ -92,6 +92,7 @@ var mcpToolRequiredScopes = map[string]string{
 	"bind_variable_to_scanner_finding": mcpScopeWriteAuthoring,
 	"check_bilingual_equivalence":      mcpScopeWriteAuthoring,
 	"clarify_clause":                   mcpScopeWriteAuthoring,
+	"set_document_purpose":             mcpScopeWriteAuthoring,
 	"create_document":                  mcpScopeWriteAuthoring,
 	"create_eidas_rule":                mcpScopeWriteAuthoring,
 	"create_envelope":                  mcpScopeWriteAuthoring,
@@ -227,7 +228,7 @@ var docScopeSafeTools = map[string]bool{
 	"get_document_send_attempt": true,
 	"list_documents":            true, "search_documents": true,
 	// authoring (all EnforceDocScope on the target doc)
-	"set_document_blocks": true, "import_html": true, "import_markdown": true,
+	"set_document_purpose": true, "set_document_blocks": true, "import_html": true, "import_markdown": true,
 	"update_block": true,
 	"append_block": true, "delete_block": true, "reorder_blocks": true,
 	"add_signature_field": true, "set_variables": true, "add_recipient": true,

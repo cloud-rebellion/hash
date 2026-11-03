@@ -5,6 +5,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -138,6 +139,10 @@ func (s *Server) dispatchDocumentSend(w http.ResponseWriter, r *http.Request, do
 // writeSendError maps the engine's typed errors to the REST responses the UI
 // expects: 402 + upgrade_url for quota, 409 + tier detail for an eIDAS block.
 func (s *Server) writeSendError(w http.ResponseWriter, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, pdfadmission.ErrPackageSendSelectionRequiredV1), errors.Is(err, pdfadmission.ErrPackageSendSelectionChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackageSourceChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackagePendingPrivacyV1):
 		writeError(w, http.StatusConflict, "Review and reconcile the exact document and saved attachment selection before sending")

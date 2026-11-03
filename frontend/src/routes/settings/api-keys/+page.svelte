@@ -2,6 +2,7 @@
   import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount, tick } from 'svelte';
   import MCPConnectionGuide from '$lib/components/MCPConnectionGuide.svelte';
+  import DocumentAIAccessSettings from '$lib/components/DocumentAIAccessSettings.svelte';
   import { createAPIKey, deleteAPIKey, listAPIKeys, type APIKeyResponse } from '$lib/api/client';
   import { Copy, Key, Plus, Trash2 } from 'lucide-svelte';
 
@@ -112,7 +113,7 @@
   <div class="mb-8 flex items-baseline justify-between">
     <div class="space-y-2">
       <p class="page-eyebrow">{$ui("Settings · Developer")}</p>
-      <h1 class="page-title">{$ui("API keys")}</h1>
+      <h1 class="page-title">{$ui("API & AI access")}</h1>
     </div>
     {#if !showCreate}<button type="button" bind:this={createTrigger} class="btn btn-primary" onclick={openCreate} aria-controls="hash-api-key-create-form" aria-expanded="false">
       <Plus class="size-4" /> {$ui("Create API key")}
@@ -236,4 +237,5 @@
       </table>
     </div>
   {/if}
+  <DocumentAIAccessSettings />
 </div>

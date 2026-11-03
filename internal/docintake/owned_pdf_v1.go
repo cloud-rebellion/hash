@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"reflect"
 	"sync"
 	"time"
@@ -78,9 +79,9 @@ func (r *OwnedPDFDocumentResultV1) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(struct {
-		Document  *generated.Document `json:"document"`
-		PageCount int                 `json:"page_count"`
-	}{r.Document, r.PageCount})
+		Document  *documentpurpose.DocumentView `json:"document"`
+		PageCount int                           `json:"page_count"`
+	}{documentpurpose.View(r.Document), r.PageCount})
 }
 
 // CreateOwnedPDFSourceDocumentV1 is the shared fixed REST/MCP upload producer.
@@ -89,7 +90,10 @@ func (r *OwnedPDFDocumentResultV1) MarshalJSON() ([]byte, error) {
 // switch remains between quota enforcement and audit, as in the MCP surface.
 // The one-shot preparation owns real sanitized bytes/report/storage identity;
 // native measurement is exclusively for the actual fresh INSERT in this Tx.
-func CreateOwnedPDFSourceDocumentV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool) (result *OwnedPDFDocumentResultV1, failure error) {
+func CreateOwnedPDFSourceDocumentV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool) (*OwnedPDFDocumentResultV1, error) {
+	return CreateOwnedPDFSourceDocumentWithPurposeV1(ctx, d, actor, name, data, requiresSignature, "")
+}
+func CreateOwnedPDFSourceDocumentWithPurposeV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool, purpose documentpurpose.Purpose) (result *OwnedPDFDocumentResultV1, failure error) {
 	if d.Sessions == nil || nilOwnedPDFDependencyV1(d.Audit) || nilOwnedPDFDependencyV1(d.Store) || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || actor.Authorize == nil {
 		return nil, errors.New("owned PDF creation dependencies unavailable")
 	}
@@ -175,6 +179,10 @@ func CreateOwnedPDFSourceDocumentV1(ctx context.Context, d OwnedPDFDependenciesV
 			if err != nil {
 				return err
 			}
+		}
+		doc, err = state.writer.RecordPurposeV1(call, purpose)
+		if err != nil {
+			return err
 		}
 		if err = state.writer.MeasureFreshPolicyV1(call); err != nil {
 			return err

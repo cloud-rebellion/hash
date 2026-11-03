@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/blockauthoring"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/google/uuid"
@@ -33,6 +34,10 @@ func (s *Server) finishOwnedPlainDraftPatchV1(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, toDocumentResponse(result.Document))
 }
 func (s *Server) writeOwnedPlainDraftErrorV1(w http.ResponseWriter, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.Is(err, auth.ErrMutationCredentialExpired) || errors.Is(err, auth.ErrMutationPermissionRevoked) {
 		s.writeDraftAuthoringError(w, "authorize document update", err)
 		return

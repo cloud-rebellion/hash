@@ -5,6 +5,7 @@ package handler
 import (
 	"encoding/hex"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"time"
 )
 
@@ -12,7 +13,7 @@ import (
 // avoiding allocation of an origin/current approved HTML master during replay.
 // No generated.Document with fabricated source or approval facts is constructed.
 func htmlCreationDocumentProjectionV1(d *generated.ReadHTMLCreationResponseV1Row) documentResponse {
-	out := documentResponse{ID: d.ID, OrgID: d.OrgID, Name: d.Name, Status: d.Status, RoutingMode: d.RoutingMode, SourceKind: d.SourceKind,
+	out := documentResponse{Purpose: documentpurpose.Response(d.Metadata), ID: d.ID, OrgID: d.OrgID, Name: d.Name, Status: d.Status, RoutingMode: d.RoutingMode, SourceKind: d.SourceKind,
 		RequiresSignature: d.RequiresSignature, BlocksJSON: d.BlocksJson, VariablesJSON: d.VariablesJson, SenderID: d.SenderID,
 		Metadata: d.Metadata, DefaultLocale: d.DefaultLocale, CreatedAt: d.CreatedAt.Time.Format(time.RFC3339), UpdatedAt: d.UpdatedAt.Time.UTC().Format(time.RFC3339Nano),
 		HasHTMLSource: d.HasHtmlSource, HTMLReviewRequired: d.HtmlReviewRequired}

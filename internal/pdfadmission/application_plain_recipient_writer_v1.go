@@ -104,6 +104,9 @@ func (w *ApplicationPlainRecipientMutationV1) AcceptActualDocumentV1(ctx context
 	if d.ID != s.session.state.document || d.OrgID != s.session.state.org || d.SourceKind != s.sourceKind || d.Status != "draft" || len(d.HtmlSourceJson) != 0 || len(d.HtmlCurrentSourceJson) != 0 || d.HtmlCurrentMaterializationID.Valid {
 		return ErrPlainRecipientWriterV1
 	}
+	if err := requireSigningPurposeV1(ctx, d.Metadata, s.holdV1); err != nil {
+		return err
+	}
 	s.document = d
 	s.created = true
 	return nil

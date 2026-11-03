@@ -342,7 +342,7 @@ func (w *ApplicationBlocksCreationWriterV1) MeasureFreshPolicyV1(ctx context.Con
 	if err != nil {
 		return err
 	}
-	if response == nil || response.DocumentID != document || response.OrgID != org || response.BlocksWireBytes < 1 || response.BlocksWireBytes > s.blocksWire || response.MetadataWireBytes != 2 || response.MeasurementServerVersionNum != m.MeasurementServerVersionNum {
+	if response == nil || response.DocumentID != document || response.OrgID != org || response.BlocksWireBytes < 1 || response.BlocksWireBytes > s.blocksWire || response.MetadataWireBytes != int64(len(s.doc.Metadata)) || response.MeasurementServerVersionNum != m.MeasurementServerVersionNum {
 		return ErrBlocksWriterV1
 	}
 	report, err := s.queries.MeasureSignerDocumentReportV1(ctx, generated.MeasureSignerDocumentReportV1Params{DocumentID: document, OrgID: org})

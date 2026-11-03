@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { PDFPaintLane } from '../pdfPageStrip';
 import { PdfLoad } from '../pdfLoad';
 
 const transpiler = new Bun.Transpiler({ loader: 'ts' });
@@ -88,7 +89,7 @@ function designerFixture(verified: boolean) {
     pdfModule: async () => module, listRecipients: () => recipients.promise, listFields: () => fields.promise,
     documentPdfURL: () => '/synthetic.pdf', fetchVerifiedDocumentPDF: async () => new Uint8Array([1, 2, 3]),
     recipients: [], fields: [], pages: [], residentPages: [], recipientID: '', tick: async () => {}, emitSignatureFields() {},
-    abort: new AbortController(), pdfLoad: null, pageResidency: undefined, rendered: false, error: null, loading: true,
+    paintLane: new PDFPaintLane(() => {}), pdfRenderer: null, loadedPDF: null, abort: new AbortController(), pdfLoad: null, pageResidency: undefined, rendered: false, error: null, loading: true,
     captureFlarePDFViewError: (...args: unknown[]) => reported.push(args),
     onMount(callback: () => Promise<void>) { mount = callback; } };
   new Function('env', 'with(env) { ' + transpiler.transformSync(designerCode) + ' }')(env);

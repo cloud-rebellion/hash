@@ -151,6 +151,11 @@ func (w *ApplicationPlainDraftMutationWriterV1) PatchV1(ctx context.Context, p P
 func (s *applicationBlocksMutationStateV1) patchPlainV1(ctx context.Context, p PlainDraftPatchV1) (*generated.Document, error) {
 	s.attempted = true
 	old := s.snapshot.document
+	if p.RequiresSignature != nil {
+		if err := requireSigningPurposeV1(ctx, old.Metadata, s.sourceWork.holdV1); err != nil {
+			return nil, err
+		}
+	}
 	current := old
 	if old.SourceKind != "blocks" && (len(p.BlocksJSON) > 0 || len(p.VariablesJSON) > 0) {
 		return nil, ErrPlainDraftBlockInputV1
@@ -166,7 +171,15 @@ func (s *applicationBlocksMutationStateV1) patchPlainV1(ctx context.Context, p P
 		if err := (&ApplicationBlocksCreationWriterV1{state: s.sourceWork}).PrepareSourceV1(ctx, raw, variables); err != nil {
 			return nil, err
 		}
-		var err error
+		purpose, err := purposeFromMetadataV1(ctx, old.Metadata, s.sourceWork.holdV1)
+		if err != nil {
+			return nil, err
+		}
+		candidate := *old
+		candidate.BlocksJson = s.sourceWork.blocks
+		if err = validateDocumentBlocksPurposeV1(ctx, &candidate, purpose, s.sourceWork); err != nil {
+			return nil, err
+		}
 		current, err = s.writePlainSourceV1(ctx, old, s.sourceWork.blocks, s.sourceWork.variables, s.sourceWork.blocksWire, s.sourceWork.variablesWire)
 		if err != nil {
 			return nil, err

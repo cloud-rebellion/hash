@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import {
     listTemplates,
+    getMe,
     uploadPDFTemplate,
     createDocumentFromTemplate,
     createStarterTemplate,
@@ -12,10 +13,13 @@
   } from '$lib/api/client';
   import { pdfTemplateParties, type PDFTemplateParty } from '$lib/pdfTemplate';
   import { LOCALES } from '$lib/i18n';
+  import DocumentPurposeSelect from '$lib/components/DocumentPurposeSelect.svelte';
+  import { requireDocumentPurpose, blockTemplateNeedsSigning, type DocumentPurpose } from '$lib/documentPurpose';
   import { ui, staffLocale } from '$lib/staffPreferences';
   import HtmlTemplatePopulate from '$lib/components/HtmlTemplatePopulate.svelte';
   import DocumentThumbnail from '$lib/components/DocumentThumbnail.svelte';
   import TemplateReadPreview from '$lib/components/TemplateReadPreview.svelte';
+  import LibraryRemovalAction from '$lib/components/LibraryRemovalAction.svelte';
   import CRMTemplatePopulationPanel from '$lib/components/CRMTemplatePopulationPanel.svelte';
   import { CRMTemplatePopulationController, initialCRMTemplateState, readCreationMarker, storeCreationMarker, type HTMLCreationMarker, type CRMTemplateState } from '$lib/crmTemplatePopulation';
   import { crmTemplateTransport } from '$lib/api/crmTemplatePopulation';
@@ -23,6 +27,7 @@
 
   let templates = $state<TemplateResponse[]>([]);
   let search = $state('');
+  let canManageTemplates = $state(false), removalBusy = $state(false);
   let listError = $state<string | null>(null);
   const visibleTemplates = $derived(templates.filter(template => template.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
   let loading = $state(true);
@@ -38,11 +43,14 @@
   let selectedParties = $state<PDFTemplateParty[]>([]);
   let bindings = $state<PDFPartyBinding[]>([]);
   let documentName = $state('');
+  let documentPurpose = $state<DocumentPurpose | ''>('');
+  let templateCreationUnconfirmed = $state(false);
   let pendingMarker = $state<HTMLCreationMarker | null>(null), pendingMarkerInvalid = $state(false);
   let pendingChecked = $state(false);
   let recoveryState = $state.raw<CRMTemplateState>(initialCRMTemplateState());
   let recoveryController = $state.raw<CRMTemplatePopulationController | null>(null);
-  const pendingCreation = $derived(!pendingChecked || !!pendingMarker || pendingMarkerInvalid);
+  const pendingCreation = $derived(!pendingChecked || !!pendingMarker || pendingMarkerInvalid || templateCreationUnconfirmed);
+  const selectedBlockSigning = $derived(selectedTemplate?.source_kind === 'blocks' ? blockTemplateNeedsSigning(selectedTemplate.blocks_json) : false);
   let previewTemplate = $state<TemplateResponse | null>(null);
   let previewOwner = $state.raw<{ retire(): Promise<void> } | undefined>(undefined);
   let previewPanel = $state.raw<HTMLDivElement | undefined>(undefined);
@@ -60,7 +68,7 @@
   }
 
   async function seedStarter() {
-    if (pendingCreation || !starterTemplatesAvailable) return;
+    if (pendingCreation || removalBusy || !starterTemplatesAvailable) return;
     seeding = 'starter';
     error = null;
     try {
@@ -74,7 +82,7 @@
   }
 
   async function newBlankTemplate() {
-    if (pendingCreation) return;
+    if (pendingCreation || removalBusy) return;
     seeding = 'blank';
     error = null;
     try {
@@ -88,7 +96,7 @@
   }
 
   async function useTemplate(t: TemplateResponse) {
-    if (creatingId !== null || pendingCreation) return;
+    if (creatingId !== null || pendingCreation || removalBusy || templateCreationUnconfirmed) return;
     if (selectedHTMLTemplate && htmlFormDirty && !window.confirm($ui('Discard the entered values and select another template?'))) return;
     if (selectedTemplate && bindings.some((binding) => binding.name.trim() || binding.email.trim())
         && !window.confirm($ui('Discard the entered signing parties and select another template?'))) return;
@@ -100,31 +108,13 @@
       selectedHTMLTemplate = t;
       return;
     }
-    if (t.source_kind === 'pdf') {
-      try {
-        const parties = pdfTemplateParties(t.fields_json);
-        if (parties.length) {
-          selectedTemplate = t;
-          selectedParties = parties;
-          bindings = parties.map((party) => ({ role: party.role, name: '', email: '', locale: 'en' }));
-          documentName = `${t.name} (${new Date().toLocaleDateString($staffLocale)})`;
-          return;
-        }
-      } catch (e) { error = (e as Error).message; return; }
-    }
-    creatingId = t.id;
-    error = null;
     try {
-      const doc = await createDocumentFromTemplate(
-        `${t.name} (${new Date().toLocaleDateString($staffLocale)})`,
-        t.id,
-        t.source_kind,
-      );
-      if (!disposed) await goto(`/documents/${doc.id}`);
-    } catch (e) {
-      error = (e as Error).message;
-      creatingId = null;
-    }
+      const parties = t.source_kind === 'pdf' ? pdfTemplateParties(t.fields_json) : [];
+      selectedTemplate = t; selectedParties = parties;
+      bindings = parties.map((party) => ({ role: party.role, name: '', email: '', locale: 'en' }));
+      documentName = `${t.name} (${new Date().toLocaleDateString($staffLocale)})`;
+      documentPurpose = '';
+    } catch (e) { error = (e as Error).message; }
   }
 
   async function closePreview(): Promise<boolean> {
@@ -140,7 +130,7 @@
   }
 
   async function openTemplate(t: TemplateResponse) {
-    if (disposed || creatingId !== null || pendingCreation) return;
+    if (disposed || creatingId !== null || pendingCreation || removalBusy) return;
     if (selectedHTMLTemplate && htmlFormDirty && !window.confirm($ui('Discard the entered values and select another template?'))) return;
     if (selectedTemplate && bindings.some((binding) => binding.name.trim() || binding.email.trim())
         && !window.confirm($ui('Discard the entered signing parties and select another template?'))) return;
@@ -153,7 +143,7 @@
   }
 
   async function useFromLibrary(t: TemplateResponse) {
-    if (disposed || creatingId !== null || pendingCreation) return;
+    if (disposed || creatingId !== null || pendingCreation || removalBusy) return;
     if (previewTemplate && !await closePreview()) return;
     await useTemplate(t);
     await tick();
@@ -167,41 +157,55 @@
 
   async function createBoundDocument(event: Event) {
     event.preventDefault();
-    if (!selectedTemplate || creatingId !== null || pendingCreation) return;
+    if (!selectedTemplate || creatingId !== null || pendingCreation || removalBusy || templateCreationUnconfirmed) return;
     const template = selectedTemplate;
-    const parties = bindings.map((party) => ({ ...party, name: party.name.trim(), email: party.email.trim() }));
-    creatingId = template.id;
-    error = null;
+    let purpose: DocumentPurpose;
     try {
-      const doc = await createDocumentFromTemplate(documentName.trim(), template.id, 'pdf', {
-        expected_template_version: template.version, parties,
-      });
-      if (!disposed && selectedTemplate?.id === template.id && selectedTemplate.version === template.version) {
-        await goto(`/documents/${doc.id}`);
-      }
-    } catch (e) { if (!disposed) error = (e as Error).message; }
+      purpose = requireDocumentPurpose(documentPurpose);
+      if (!documentName.trim()) throw new Error('Enter a document name.');
+      const needsSigning = template.source_kind === 'blocks' ? blockTemplateNeedsSigning(template.blocks_json) : false;
+      if (needsSigning === null) throw new Error('The template content could not be checked. Open the template or refresh the library before creating a document.');
+      if (needsSigning && purpose !== 'signing') throw new Error('This template contains recipient-fillable fields and requires Signing. Choose a design without those fields for a document or presentation.');
+    }
+    catch (e) { error = (e as Error).message; return; }
+    const parties = bindings.map((party) => ({ ...party, name: party.name.trim(), email: party.email.trim() }));
+    creatingId = template.id; error = null;
+    try {
+      const doc = await createDocumentFromTemplate(documentName.trim(), template.id, template.source_kind as 'pdf' | 'blocks',
+        template.source_kind === 'pdf' ? { expected_template_version: template.version, ...(purpose === 'signing' && parties.length ? { parties } : {}) } : undefined, purpose);
+      if (doc.purpose !== purpose || doc.org_id !== template.org_id || doc.template_id !== template.id) throw new Error('The saved document purpose could not be confirmed. Reload the document library before creating another document.');
+      if (!disposed && selectedTemplate?.id === template.id && selectedTemplate.version === template.version) await goto(`/documents/${doc.id}`);
+    } catch (e) { if (!disposed) { error = (e as Error).message; templateCreationUnconfirmed = true; } }
     finally { if (!disposed) creatingId = null; }
+  }
+
+  async function prepareTemplateRemoval(id: string): Promise<boolean> {
+    if (disposed || pendingCreation || creatingId !== null || uploading || seeding !== null || selectedTemplate?.id === id || selectedHTMLTemplate?.id === id) return false;
+    return previewTemplate?.id === id ? await closePreview() : true;
   }
 
   let fileInput: HTMLInputElement;
   let nameInput = $state('');
 
   async function refresh() {
+    if (disposed) return;
     loading = true;
     listError = null;
     starterTemplatesAvailable = false;
     try {
       const res = await listTemplates();
+      if (disposed) return;
       templates = res.templates;
       starterTemplatesAvailable = res.starter_templates_available === true;
     } catch (e) {
-      listError = (e as Error).message;
+      if (!disposed) listError = (e as Error).message;
     } finally {
-      loading = false;
+      if (!disposed) loading = false;
     }
   }
 
   onMount(() => {
+    void getMe().then(me => { if (!disposed) canManageTemplates = me.role === 'owner' || me.role === 'sender'; }).catch(() => { if (!disposed) canManageTemplates = false; });
     try { pendingMarker = readCreationMarker(window.sessionStorage); if (pendingMarker) recoverPending(pendingMarker); }
     catch { pendingMarkerInvalid = true; error = $ui('The pending creation marker cannot be verified. Another creation remains blocked; return with the original account for recovery.'); }
     finally { pendingChecked = true; }
@@ -209,14 +213,14 @@
   });
 
   function toggleUpload() {
-    if (uploading || pendingCreation) return;
+    if (uploading || pendingCreation || removalBusy) return;
     showUpload = !showUpload;
   }
 
   async function onUpload(e: Event) {
     e.preventDefault();
     const file = fileInput.files?.[0];
-    if (!file || !nameInput || pendingCreation) return;
+    if (!file || !nameInput || pendingCreation || removalBusy) return;
     uploading = true;
     error = null;
     try {
@@ -243,11 +247,11 @@
   </header>
   <div class="library-command-bar">
     <div class="creation-actions">
-      <a href="/templates/html/new" class="btn btn-primary" aria-disabled={pendingCreation} onclick={(event) => { if (pendingCreation) event.preventDefault(); }}>
+      <a href="/templates/html/new" class="btn btn-primary" aria-disabled={pendingCreation || removalBusy} onclick={(event) => { if (pendingCreation || removalBusy) event.preventDefault(); }}>
         <FilePlus class="size-4" /> {$ui('Create HTML design')}
       </a>
 
-      <button type="button" class="btn btn-secondary" disabled={uploading || pendingCreation} aria-expanded={showUpload} aria-controls="template-pdf-upload-panel" onclick={toggleUpload}>
+      <button type="button" class="btn btn-secondary" disabled={uploading || pendingCreation || removalBusy} aria-expanded={showUpload} aria-controls="template-pdf-upload-panel" onclick={toggleUpload}>
         <Upload class="size-4" /> {$ui('Upload a PDF template')}
       </button>
     </div>
@@ -260,7 +264,7 @@
   {#if error}<p role="alert" class="card p-4 mb-6 text-danger">{error}</p>{/if}
   {#if !selectedHTMLTemplate && recoveryController && pendingMarker}<div class="card p-6 mb-6"><CRMTemplatePopulationPanel controller={recoveryController} state={recoveryState} /></div>{/if}
 
-  {#if previewTemplate}<div bind:this={previewPanel} tabindex="-1" class="preview-panel-focus">{#key previewTemplate.id}<TemplateReadPreview bind:this={previewOwner} template={previewTemplate} onClose={() => { void closePreview(); }} onUse={() => { void usePreview(); }} disabled={creatingId !== null || pendingCreation} />{/key}</div>{/if}
+  {#if previewTemplate}<div bind:this={previewPanel} tabindex="-1" class="preview-panel-focus">{#key previewTemplate.id}<TemplateReadPreview bind:this={previewOwner} template={previewTemplate} onClose={() => { void closePreview(); }} onUse={() => { void usePreview(); }} disabled={creatingId !== null || pendingCreation || removalBusy} />{/key}</div>{/if}
 
   <div bind:this={creationPanel} tabindex="-1" class="preview-panel-focus">
   {#if selectedHTMLTemplate}
@@ -276,14 +280,17 @@
   {/if}
 
   {#if selectedTemplate}
-    <form onsubmit={createBoundDocument} class="card p-6 mb-6 space-y-4" aria-label={$ui('Create document from PDF signing template')}>
-      <h2 class="font-display text-lg">{$ui('New contract from {name}', { name: selectedTemplate.name })}</h2>
-      <p class="text-sm text-text-secondary">{$ui('Version {version} reuses the PDF text and signature positions. Add the people who will sign this contract.', { version: selectedTemplate.version })}</p>
+    <form onsubmit={createBoundDocument} class="card p-6 mb-6 space-y-4" aria-label={$ui('Create document from template')}>
+      <h2 class="font-display text-lg">{$ui('New document from {name}', { name: selectedTemplate.name })}</h2>
+      <p class="text-sm text-text-secondary">{$ui('Version {version} preserves the saved design. Choose how the new document will be used.', { version: selectedTemplate.version })}</p>
       <label class="block text-sm">{$ui('Document name')}
-        <input bind:value={documentName} required maxlength="200" disabled={creatingId !== null} class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
+        <input bind:value={documentName} required maxlength="200" disabled={creatingId !== null || removalBusy || templateCreationUnconfirmed} class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
       </label>
+      <DocumentPurposeSelect value={documentPurpose} signingOnly={selectedBlockSigning === true} signingReason="This template contains recipient-fillable fields and requires Signing. Choose a design without those fields for a document or presentation." onChange={value => { documentPurpose = value; }} disabled={creatingId !== null || removalBusy || templateCreationUnconfirmed || selectedBlockSigning === null} />
+      {#if selectedBlockSigning === null}<p role="alert" class="text-sm text-danger">{$ui('The template content could not be checked. Open the template or refresh the library before creating a document.')}</p>{/if}
+      {#if documentPurpose === 'signing'}
       {#each bindings as binding, index (binding.role)}
-        <fieldset class="border border-border-light rounded-md p-4 space-y-3" disabled={creatingId !== null}>
+        <fieldset class="border border-border-light rounded-md p-4 space-y-3" disabled={creatingId !== null || removalBusy || templateCreationUnconfirmed}>
           <legend class="text-sm px-1">{selectedParties[index].label}</legend>
           <label class="block text-sm">{$ui('Full name')} <input bind:value={binding.name} required maxlength="200" autocomplete="name" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
           <label class="block text-sm">{$ui('Email address')} <input type="email" bind:value={binding.email} required maxlength="254" autocomplete="email" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" /></label>
@@ -294,9 +301,11 @@
           </label>
         </fieldset>
       {/each}
+      {/if}
+      {#if templateCreationUnconfirmed}<p role="alert" class="text-sm text-danger">{$ui('Creation is unconfirmed. Reload the document library and inspect the existing draft before creating another.')}</p>{/if}
       <div class="flex gap-2">
-        <button type="submit" class="btn btn-primary" disabled={creatingId !== null}>{creatingId ? $ui('Creating…') : $ui('Create contract draft')}</button>
-        <button type="button" class="btn btn-secondary" disabled={creatingId !== null} onclick={() => { selectedTemplate = null; bindings = []; selectedParties = []; }}>{$ui('Cancel')}</button>
+        <button type="submit" class="btn btn-primary" disabled={creatingId !== null || removalBusy || templateCreationUnconfirmed || selectedBlockSigning === null}>{creatingId ? $ui('Creating…') : $ui('Create document')}</button>
+        <button type="button" class="btn btn-secondary" disabled={creatingId !== null || removalBusy || templateCreationUnconfirmed} onclick={() => { selectedTemplate = null; bindings = []; selectedParties = []; }}>{$ui('Cancel')}</button>
       </div>
     </form>
   {/if}
@@ -327,7 +336,7 @@
         id="tpl-name"
         type="text"
         bind:value={nameInput}
-        disabled={uploading || pendingCreation}
+        disabled={uploading || pendingCreation || removalBusy}
         required
         placeholder={$ui('Consulting Agreement v1')}
         class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -340,12 +349,12 @@
         type="file"
         accept="application/pdf"
         bind:this={fileInput}
-        disabled={uploading || pendingCreation}
+        disabled={uploading || pendingCreation || removalBusy}
         required
         class="w-full text-sm"
       />
     </div>
-    <button type="submit" class="btn btn-primary" disabled={uploading || pendingCreation}>
+    <button type="submit" class="btn btn-primary" disabled={uploading || pendingCreation || removalBusy}>
       <Upload class="size-4" />
       {uploading ? $ui('Uploading…') : $ui('Upload PDF as template')}
     </button>
@@ -385,11 +394,14 @@
                 <p class="template-updated">{$ui('Updated')} <time datetime={t.updated_at}>{new Date(t.updated_at).toLocaleDateString($staffLocale === 'sv' ? 'sv-SE' : 'en-GB')}</time></p>
               </div>
               <div class="template-card-actions">
-                <button type="button" class="btn btn-secondary template-open" disabled={creatingId !== null || pendingCreation} onclick={() => { void openTemplate(t); }}>{$ui('Open template')}</button>
-                <button type="button" class="btn btn-primary template-use" disabled={creatingId !== null || pendingCreation} onclick={() => { void useFromLibrary(t); }}>
+                <button type="button" class="btn btn-secondary template-open" disabled={creatingId !== null || pendingCreation || removalBusy} onclick={() => { void openTemplate(t); }}>{$ui('Open template')}</button>
+                <button type="button" class="btn btn-primary template-use" disabled={creatingId !== null || pendingCreation || removalBusy} onclick={() => { void useFromLibrary(t); }}>
                   <span>{creatingId === t.id ? $ui('Creating…') : $ui('Use template')}</span><ArrowUpRight class="size-4" />
                 </button>
               </div>
+              <LibraryRemovalAction kind="template" item={t} canWrite={canManageTemplates}
+                disabled={removalBusy || templateCreationUnconfirmed || pendingCreation || creatingId !== null || uploading || seeding !== null || selectedTemplate?.id === t.id || selectedHTMLTemplate?.id === t.id}
+                beforeRemove={() => prepareTemplateRemoval(t.id)} onbusy={value => { removalBusy = value; }} onremoved={refresh} />
             </div>
           </article>
         {/each}

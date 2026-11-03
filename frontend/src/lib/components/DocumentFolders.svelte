@@ -72,6 +72,8 @@
     if (document) void tick().then(() => { if (!disposed && movingDocument?.id === document.id) { movePanel?.focus(); movePanel?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } });
   });
 
+  export async function refreshCounts() { await loadFolders(offset); }
+
   function selectFolder(folder: string) {
     if (locked || (!available && folder !== 'all')) return;
     form = null; deleting = false; actionError = null; notice = null;

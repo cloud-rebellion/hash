@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { compile, parse } from 'svelte/compiler';
+import { requireDocumentPurpose } from '../../lib/documentPurpose';
 
 const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
 const tree: any = parse(source, { modern: true });
@@ -20,12 +21,13 @@ function fixture() {
   const env: any = {
     composer: null, newName: ' Draft ', importName: ' Imported ', importKind: 'pdf',
     pdfFile: { name: 'retained.pdf' }, htmlFile: { text: async () => '<p>retained</p>' }, landscape: true,
-    error: null, creating: false, importing: false, folderBusy: false, tick: async () => {}, $ui: (text: string) => text,
+    error: null, creating: false, importing: false, folderBusy: false, removalBusy: false, creationUnconfirmed: false, disposed: false,
+    blankPurpose: 'document', importPurpose: 'presentation', requireDocumentPurpose, tick: async () => {}, $ui: (text: string) => text,
     blankTrigger: { focus: () => focus.push('blank-trigger') }, importTrigger: { focus: () => focus.push('import-trigger') },
     blankNameInput: { focus: () => focus.push('blank-input') }, importNameInput: { focus: () => focus.push('import-input') },
-    createBlocksDocument: async (...args: any[]) => { calls.push(['blank', ...args]); return { id: 'created' }; },
-    importProposalPDF: async (...args: any[]) => { calls.push(['pdf', ...args]); return { document: { id: 'imported' } }; },
-    importProposalHTML: async (...args: any[]) => { calls.push(['html', ...args]); return { document: { id: 'imported' } }; },
+    createBlocksDocument: async (...args: any[]) => { calls.push(['blank', ...args]); return { id: 'created', purpose: args[1] }; },
+    importProposalPDF: async (...args: any[]) => { calls.push(['pdf', ...args]); return { document: { id: 'imported', purpose: args[2] } }; },
+    importProposalHTML: async (...args: any[]) => { calls.push(['html', ...args]); return { document: { id: 'imported', purpose: args[3] } }; },
     goto: async (path: string) => { calls.push(['goto', path]); },
   };
   Object.defineProperty(env, 'busy', { get: () => evaluateBusy(env) });
@@ -45,28 +47,28 @@ test('actual disclosure handlers open, switch and close with focus while retaini
 
 test('a pending blank creation blocks closing, switching and duplicate import without changing the actual API payload', async () => {
   const f = fixture(); let release!: (value: any) => void;
-  f.env.createBlocksDocument = (name: string) => { f.calls.push(['blank', name]); return new Promise(resolve => { release = resolve; }); };
+  f.env.createBlocksDocument = (name: string, purpose: string) => { f.calls.push(['blank', name, purpose]); return new Promise(resolve => { release = resolve; }); };
   await f.toggleComposer('blank'); const pending = f.createBlank(event);
   expect(f.env.creating).toBe(true);
   await f.toggleComposer('blank'); await f.toggleComposer('import'); f.changeImportKind('html'); await f.importProposal(event);
-  expect(f.env.composer).toBe('blank'); expect(f.env.importKind).toBe('pdf'); expect(f.calls).toEqual([['blank', 'Draft']]);
-  release({ id: 'created' }); await pending;
+  expect(f.env.composer).toBe('blank'); expect(f.env.importKind).toBe('pdf'); expect(f.calls).toEqual([['blank', 'Draft', 'document']]);
+  release({ id: 'created', purpose: 'document' }); await pending;
   expect(f.env.creating).toBe(false); expect(f.calls.at(-1)).toEqual(['goto', '/documents/created']);
 });
 
 test('a pending import keeps its disclosure and selection, then preserves the existing PDF and HTML business inputs', async () => {
   const f = fixture(), pdf = f.env.pdfFile; let release!: (value: any) => void;
-  f.env.importProposalPDF = (name: string, file: unknown) => { f.calls.push(['pdf', name, file]); return new Promise(resolve => { release = resolve; }); };
+  f.env.importProposalPDF = (name: string, file: unknown, purpose: string) => { f.calls.push(['pdf', name, file, purpose]); return new Promise(resolve => { release = resolve; }); };
   await f.toggleComposer('import'); const pending = f.importProposal(event);
   expect(f.env.importing).toBe(true);
   await f.toggleComposer('blank'); await f.toggleComposer('import'); f.changeImportKind('html'); await f.createBlank(event);
-  expect(f.env.composer).toBe('import'); expect(f.env.pdfFile).toBe(pdf); expect(f.calls).toEqual([['pdf', 'Imported', pdf]]);
-  release({ document: { id: 'pdf-import' } }); await pending;
+  expect(f.env.composer).toBe('import'); expect(f.env.pdfFile).toBe(pdf); expect(f.calls).toEqual([['pdf', 'Imported', pdf, 'presentation']]);
+  release({ document: { id: 'pdf-import', purpose: 'presentation' } }); await pending;
   expect(f.env.importing).toBe(false); expect(f.calls.at(-1)).toEqual(['goto', '/documents/pdf-import']);
   f.changeImportKind('html'); expect(f.env.pdfFile).toBeNull();
   f.env.htmlFile = { text: async () => '<h1>Actual HTML</h1>' };
   await f.importProposal(event);
-  expect(f.calls.slice(-2)).toEqual([['html', 'Imported', '<h1>Actual HTML</h1>', true], ['goto', '/documents/imported']]);
+  expect(f.calls.slice(-2)).toEqual([['html', 'Imported', '<h1>Actual HTML</h1>', true, 'presentation'], ['goto', '/documents/imported']]);
 });
 
 test('disclosures compile for client and server, stay mounted outside conditional blocks, and reference their actual form IDs', () => {
@@ -101,5 +103,5 @@ test('a pending folder write blocks composer changes and creation/import until i
   f.env.folderBusy = false; expect(f.env.busy).toBe(false);
   await f.toggleComposer('blank'); expect(f.focus.at(-1)).toBe('blank-input');
   await f.createBlank(event);
-  expect(f.calls).toEqual([['blank', 'Draft'], ['goto', '/documents/created']]);
+  expect(f.calls).toEqual([['blank', 'Draft', 'document'], ['goto', '/documents/created']]);
 });

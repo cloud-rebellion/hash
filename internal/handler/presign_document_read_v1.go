@@ -55,9 +55,19 @@ func (s *Server) tryStaffPreSignDocumentV1(w http.ResponseWriter, r *http.Reques
 			preSignResponseV1(w, out)
 			return nil
 		}
+		if r.URL.Query().Get("download") == "1" {
+			if err := checkSavedPDFDownload(r, d); err != nil {
+				wrote = true
+				writeError(w, http.StatusConflict, "document changed; reload before downloading")
+				return nil
+			}
+		}
 		setDocumentPreviewHeaders(w, false)
 		w.Header().Set("Content-Type", "application/pdf")
 		w.Header().Set("Content-Disposition", "inline")
+		if r.URL.Query().Get("download") == "1" {
+			w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFileName(d.Name)+`.pdf"`)
+		}
 		wrote = true
 		_, err := w.Write(raw)
 		return err

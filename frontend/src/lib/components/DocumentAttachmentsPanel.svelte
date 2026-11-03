@@ -75,7 +75,7 @@
 <section class="card p-6 mb-6 space-y-4 min-w-0" aria-label={$ui("Contract attachments")} data-document-attachments>
  <div class="flex flex-wrap justify-between items-center gap-3"><h2 class="font-display text-lg">{$ui("Attachments")}</h2>
   <button type="button" class="btn btn-secondary" disabled={!!attachmentState.busy || externalBusy} onclick={refresh}>{$ui("Refresh attachments")}</button></div>
- <p class="text-sm text-text-secondary">{$ui("Add supporting agreements, policies, specifications or other business documents. Selected files keep their exact saved versions. Signing or acknowledging the main agreement applies to the complete listed package.")}</p>
+ <p class="text-sm text-text-secondary">{$ui("Add supporting PDFs such as an NDA, DPA, policy or specification alongside the main document. Each attachment keeps the exact saved version selected for the package.")}</p>
  {#if attachmentState.error}<p role="alert" class="text-sm text-danger">{attachmentState.error}</p>{/if}
  {#if attachmentState.notice}<p role="status" class="text-sm">{attachmentState.notice}</p>{/if}
  {#if attachmentState.busy}<p role="status" class="text-sm">{$ui(controller.mutating() ? 'Saving attachments and checking the saved result…' : 'Checking saved documents…')}</p>{/if}

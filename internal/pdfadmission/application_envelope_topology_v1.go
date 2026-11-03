@@ -215,6 +215,9 @@ func (w *ApplicationEnvelopeTopologyV1) PromoteV1(ctx context.Context, id uuid.U
 	if old == nil {
 		return nil, ErrEnvelopeTopologyV1
 	}
+	if err := requireSigningPurposeV1(ctx, old.Metadata, s.holdV1); err != nil {
+		return nil, err
+	}
 	next, err := s.queries.MarkAsEnvelope(ctx, generated.MarkAsEnvelopeParams{ID: id, OrgID: s.session.state.org})
 	if err != nil {
 		return nil, err
@@ -242,6 +245,11 @@ func (w *ApplicationEnvelopeTopologyV1) AttachV1(ctx context.Context, root, chil
 	parent, old := s.docs[root], s.docs[child]
 	if parent == nil || old == nil {
 		return nil, ErrEnvelopeTopologyV1
+	}
+	for _, d := range []*generated.Document{parent, old} {
+		if err := requireSigningPurposeV1(ctx, d.Metadata, s.holdV1); err != nil {
+			return nil, err
+		}
 	}
 	if !parent.IsEnvelope {
 		return nil, errors.New("attach: parent document is not an envelope (call promote first)")
@@ -279,6 +287,9 @@ func (w *ApplicationEnvelopeTopologyV1) DetachV1(ctx context.Context, child uuid
 	if old == nil || !old.ParentEnvelopeID.Valid || uuid.UUID(old.ParentEnvelopeID.Bytes) != s.session.state.document {
 		return nil, pgx.ErrNoRows
 	}
+	if err := requireSigningPurposeV1(ctx, old.Metadata, s.holdV1); err != nil {
+		return nil, err
+	}
 	next, err := s.queries.DetachFromEnvelope(ctx, generated.DetachFromEnvelopeParams{ID: child, OrgID: s.session.state.org})
 	if err != nil {
 		return nil, fmt.Errorf("detach: %w", err)
@@ -307,6 +318,9 @@ func (w *ApplicationEnvelopeTopologyV1) ReorderV1(ctx context.Context, root uuid
 			return ErrEnvelopeTopologyV1
 		}
 		position := pgtype.Int4{Int32: int32(i + 1), Valid: true}
+		if err := requireSigningPurposeV1(ctx, old.Metadata, s.holdV1); err != nil {
+			return err
+		}
 		next, err := s.queries.ReorderEnvelopeTopologyChildV1(ctx, generated.ReorderEnvelopeTopologyChildV1Params{ID: id, ParentEnvelopeID: root, OrgID: s.session.state.org, EnvelopePosition: position})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("reorder child %d (%s): child is not in this draft envelope", i, id)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"github.com/bright-interaction/hash/internal/malwarescan"
 	"io"
 	"net/http"
@@ -29,9 +30,10 @@ const maxProposalHTML = 20 << 20 // 20 MB
 // importProposalInput is the JSON body for POST /documents/import when the
 // caller supplies a designed HTML page to render into a signable PDF.
 type importProposalInput struct {
-	Name      string `json:"name"`
-	HTML      string `json:"html"`
-	Landscape bool   `json:"landscape,omitempty"`
+	Purpose   documentpurpose.Purpose `json:"purpose,omitempty"`
+	Name      string                  `json:"name"`
+	HTML      string                  `json:"html"`
+	Landscape bool                    `json:"landscape,omitempty"`
 }
 
 // handleImportDocument creates a pdf-source document in ONE step, skipping the
@@ -71,6 +73,11 @@ func (s *Server) importDocumentFromPDF(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	name := r.FormValue("name")
+	purpose := documentpurpose.Purpose(r.FormValue("purpose"))
+	if purpose != "" && documentpurpose.Validate(purpose) != nil {
+		writeError(w, http.StatusBadRequest, "purpose must be document, presentation or signing")
+		return
+	}
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
@@ -90,7 +97,7 @@ func (s *Server) importDocumentFromPDF(w http.ResponseWriter, r *http.Request, u
 		writeError(w, http.StatusBadRequest, "uploaded file is not a PDF (magic bytes mismatch)")
 		return
 	}
-	s.finishPDFDocument(w, r, userID, orgID, name, data)
+	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, name, data, purpose)
 }
 
 func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) {
@@ -122,6 +129,10 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
+		writeError(w, 400, "purpose must be document, presentation or signing")
 		return
 	}
 	if in.Name == "" {
@@ -159,12 +170,15 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 		writeInternalErrorMsg(w, "render html to pdf failed", err)
 		return
 	}
-	s.finishPDFDocument(w, r, userID, orgID, in.Name, pdfBytes)
+	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, in.Name, pdfBytes, in.Purpose)
 }
 
 // finishPDFDocument runs the shared clean+store+create intake, then does the
 // HTTP + audit bookkeeping.
 func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte) {
+	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, name, data, "")
+}
+func (s *Server) finishPDFDocumentWithPurposeV1(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte, purpose documentpurpose.Purpose) {
 	authorize, err := s.sessionDraftAuthorization(r, orgID, userID)
 	if err != nil {
 		s.writeDraftAuthoringError(w, "authorize document import", err)
@@ -172,7 +186,7 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 	defer cancel()
-	result, err := docintake.CreateOwnedPDFSourceDocumentV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit, Store: s.Storage}, docintake.OwnedPDFActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest"}, name, data, nil)
+	result, err := docintake.CreateOwnedPDFSourceDocumentWithPurposeV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit, Store: s.Storage}, docintake.OwnedPDFActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest"}, name, data, nil, purpose)
 	if result != nil {
 		defer result.CloseConsumerV1()
 	}

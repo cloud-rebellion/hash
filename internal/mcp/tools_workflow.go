@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"path"
 	"time"
@@ -233,6 +234,9 @@ func registerWorkflowTools(s *Server, d Deps) {
 			}
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
+			}
+			if documentpurpose.IsReservedKey(p.Key) {
+				return nil, errors.New("document purpose requires the guarded purpose edit")
 			}
 			if p.Key == "" {
 				return nil, errors.New("key required")

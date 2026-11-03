@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { PDFPaintLane } from '../pdfPageStrip';
 import { PdfLoad } from '../pdfLoad';
 
 const transpiler = new Bun.Transpiler({ loader: 'ts' });
@@ -36,7 +37,7 @@ test('actual signer save and signing gate preserve confirmed values and actionab
 test('actual designer rejects placement on recycled pages and preserves page-relative saved geometry once a current paint is ready', async () => {
   let ready = false; const writes: any[] = [], failures: unknown[] = [];
   const env: any = {
-    dragStart: null, draft: null, readonly: false, generated: false, placementUnavailable: false,
+    activePage: 2, notice: null, dragStart: null, draft: null, readonly: false, generated: false, placementUnavailable: false,
     current: () => true, documentID: 'document', sourceHTML: true, sourceSHA: 'a'.repeat(64), sourceCommitment: 'b'.repeat(64),
     pageResidency: { pageReady: () => ready }, pages: [{ num: 2, w: 760, h: 1075 }], tool: 'text', recipientID: 'party', required: true,
     error: null, saving: false, fields: [], TOOLS: [{ type: 'text', label: 'Text' }],
@@ -74,7 +75,7 @@ test('actual designer cannot publish completed placement proof from an owner sto
       allPagesRendered() { return false; } stop() {}
     },
     recipients: [], fields: [], recipientID: '', pages: [], residentPages: [],
-    abort: new AbortController(), pdfLoad: null, pageResidency: undefined, rendered: false, error: null, loading: true,
+    paintLane: new PDFPaintLane(() => {}), pdfRenderer: null, loadedPDF: null, abort: new AbortController(), pdfLoad: null, pageResidency: undefined, rendered: false, error: null, loading: true,
     captureFlarePDFViewError() {}, emitSignatureFields() {}, tick: async () => {}, onMount(callback: () => Promise<void>) { mount = callback; },
   };
   const start = designer.indexOf('  onMount(async () => {'), end = designer.indexOf('\n  onDestroy(() => {', start);
@@ -85,4 +86,21 @@ test('actual designer cannot publish completed placement proof from an owner sto
   await mount();
   expect(proofs).not.toContain(true); expect(env.rendered).toBe(false);
   expect(env.error).toContain('stopped before review completed'); expect(destroys).toBe(1);
+});
+
+test('actual placement normalizes identical rectangles at native, fitted and small CSS display sizes', async () => {
+  for (const display of [1, 0.65, 0.3]) {
+    const writes: any[] = [];
+    const env: any = { activePage: 1, notice: null, dragStart: null, draft: null, readonly: false, generated: false, placementUnavailable: false, current: () => true,
+      documentID: 'document', sourceHTML: false, sourceSHA: undefined, sourceCommitment: undefined, pageResidency: { pageReady: () => true },
+      pages: [{ num: 1, w: 760, h: 1074 }], tool: 'text', recipientID: 'party', required: true, error: null, saving: false, fields: [], TOOLS: [{ type: 'text', label: 'Text' }],
+      round: (n: number) => Math.round(n * 1000) / 1000, htmlPlacementPins: () => undefined,
+      addField: async (_id: string, input: any) => { writes.push(input); return { ...input, id: 'created', document_id: 'document' }; }, emitSignatureFields() {} };
+    const action = bind(designer, '  function pctFromEvent(', '  function round(', ['onPointerDown', 'onPointerMove', 'onPointerUp'], env);
+    const layer = { getBoundingClientRect: () => ({ left: 37, top: 91, width: 760 * display, height: 1074 * display }), setPointerCapture() {} };
+    const down = { isPrimary: true, button: 0, pointerId: 1, clientX: 37 + 76 * display, clientY: 91 + 214.8 * display };
+    action.onPointerDown(down, 1, layer); action.onPointerMove({ ...down, clientX: 37 + 228 * display, clientY: 91 + 322.2 * display }, layer); await action.onPointerUp(down);
+    expect(writes).toEqual([{ type: 'text', page: 1, x_pct: 10, y_pct: 20, w_pct: 20, h_pct: 10, required: true, recipient_id: 'party', label: 'Text' }]);
+    expect(env.pages).toEqual([{ num: 1, w: 760, h: 1074 }]);
+  }
 });

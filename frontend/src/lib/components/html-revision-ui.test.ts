@@ -181,7 +181,7 @@ test('history opens only exact read-only source and verified bytes, keeping olde
 test('queued HTML field creation/deletion pins exact PDF and source, ignoring changed-source results', async () => {
   for (const action of ['onPointerUp', 'remove']) {
     const calls: any[] = [], changed: any[] = [];
-    const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64), htmlSourceCommitment: 'a'.repeat(64), disposed: false,
+    const env: any = { activePage: 1, notice: null, documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64), htmlSourceCommitment: 'a'.repeat(64), disposed: false,
       draft: { page: 1, x: 10, y: 10, w: 20, h: 5 }, dragStart: { pointerID: 1 }, readonly: false, generated: false, placementUnavailable: false, tool: 'signature', recipientID: USER, required: true,
       pageResidency: { pageReady: () => true },
       TOOLS: [{ type: 'signature', label: 'Signature' }], fields: [{ id: 'field', document_id: ID }], saving: false, error: null, htmlPlacementPins,
@@ -199,7 +199,7 @@ test('queued HTML field creation/deletion pins exact PDF and source, ignoring ch
 test('canceled or second-pointer navigation cannot place a field and unrelated pointer-up cannot finish the owned gesture', async () => {
   for (const mode of ['cancel', 'second-pointer', 'unrelated-up']) {
     const calls: any[] = [];
-    const env: any = { documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
+    const env: any = { activePage: 1, notice: null, documentID: ID, sourceHTML: true, sourceSHA: 'b'.repeat(64), sourceCommitment: 'a'.repeat(64),
       readonly: false, generated: false, placementUnavailable: false, current: () => true, pages: [{ num: 1, w: 760, h: 1000 }],
       pageResidency: { pageReady: () => true },
       tool: 'signature', recipientID: USER, required: true, TOOLS: [{ type: 'signature', label: 'Signature' }],
@@ -260,7 +260,7 @@ test('CRM external lock blocks actual HTML save, load and adoption callbacks wit
 test('automatic or readonly placement handlers cannot dispatch add/delete even if invoked directly', async () => {
   for (const mode of ['generated', 'readonly']) {
     const calls: unknown[] = [];
-    const env: any = { documentID: ID, readonly: mode === 'readonly', generated: mode === 'generated',
+    const env: any = { activePage: 2, documentID: ID, readonly: mode === 'readonly', generated: mode === 'generated',
       draft: { page: 2, x: 10, y: 42, w: 80, h: 7 }, dragStart: { pointerID: 1 }, placementUnavailable: false, current: () => true,
       addField: () => calls.push('add'), deleteField: () => calls.push('delete') };
     const actions = bind('./PdfFieldDesigner.svelte', ['onPointerUp', 'remove'], env);
@@ -271,7 +271,7 @@ test('automatic or readonly placement handlers cannot dispatch add/delete even i
 test('generated field refresh invalidates readiness before read and only restores it after exact party and rectangle readback', async () => {
   for (const drift of [false, true]) {
     const fixture = generatedAssignmentFixture(), calls: any[] = [], proofs: boolean[] = [];
-    const env: any = { documentID: ID, generated: true, retainedSource: fixture.source, recipientRevision: 1,
+    const env: any = { documentID: ID, fieldsEnabled: true, generated: true, retainedSource: fixture.source, recipientRevision: 1,
       rendered: true, loading: false, saving: false, refreshingRecipients: false, recipientRefreshError: null, appliedRecipientRevision: 0,
       dragStart: null, draft: null, recipients: fixture.recipients, fields: fixture.fields, recipientID: fixture.recipients[0].id,
       current: () => true, verifiedHTMLGeneratedFields, emitProof: (ready: boolean) => proofs.push(ready), emitSignatureFields: () => {} };

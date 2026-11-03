@@ -227,7 +227,14 @@ func (r *ApplicationHTMLRevisionReaderV1) ReadFieldDocumentWithActorV1(ctx conte
 	if gate == nil {
 		return nil, ErrPlainPDFWriterV1
 	}
-	return r.readDocumentBodyModeV1(ctx, user, preflight, gate, false, true)
+	models, err := r.readDocumentBodyModeV1(ctx, user, preflight, gate, false, true)
+	if err != nil {
+		return nil, err
+	}
+	if err = r.RequireSigningPurposeV1(ctx); err != nil {
+		return nil, err
+	}
+	return models, nil
 }
 func (r *ApplicationHTMLRevisionReaderV1) ReadFieldCurrentV1(ctx context.Context) (*htmlmaterialization.CurrentReadProjectionV1, error) {
 	if r == nil || r.self != r {

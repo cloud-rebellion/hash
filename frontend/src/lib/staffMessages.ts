@@ -1,9 +1,13 @@
+import { swedishEditorSettingsMessages } from './staffEditorSettingsMessages';
+import { swedishRemovalStaffMessages } from './staffRemovalMessages';
 import { swedishEmailStaffMessages } from './staffEmailMessages';
+import { swedishEditorStaffMessages } from './staffEditorMessages';
 import { swedishFolderStaffMessages } from './staffFolderMessages';
 import { swedishDocumentStaffMessages } from './staffDocumentMessages';
 import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
 // English literals are stable lookup keys; untranslated staff text remains readable.
 export const swedishStaffMessages: Record<string, string> = {
+  ...swedishEditorStaffMessages,
   'Dashboard': 'Översikt',
   'Documents': 'Dokument',
   'Templates': 'Mallar',
@@ -461,4 +465,6 @@ export const swedishStaffMessages: Record<string, string> = {
   ...swedishAdvancedStaffMessages,
   ...swedishFolderStaffMessages,
   ...swedishEmailStaffMessages,
+  ...swedishRemovalStaffMessages,
+  ...swedishEditorSettingsMessages,
 };

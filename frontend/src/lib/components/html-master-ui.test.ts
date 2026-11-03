@@ -1,3 +1,4 @@
+import { requireDocumentPurpose } from '../documentPurpose';
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { APIError } from '../api/client';
@@ -30,7 +31,7 @@ function design(version = 3) {
 }
 function populateFixture() {
   const calls: any[] = [], template = design();
-  const env: any = { template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
+  const env: any = { templateCreationUnconfirmed: false, purpose: 'signing', profile: null, requireDocumentPurpose, template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
     fields: htmlTemplateFields(template as any), values: { customer: 'Typed <AB> & Co' }, name: 'Typed draft name',
     sections: {}, sectionDefinitions: [], proposed: {}, populationState: { mappings: [], observation: null },
     approved: true, loading: false, busy: false, navigating: false, createdDocument: null, creationUncertain: false, markerError: false, clock: 0,
@@ -115,7 +116,7 @@ test('input changes invalidate confirmation synchronously and canceled navigatio
 
 function reviewFixture() {
   const calls: any[] = [], reviewed: any[] = [];
-  const env: any = { document: { id: 'doc', org_id: 'org', source_kind: 'pdf', has_html_source: true, html_review_required: true,
+  const env: any = { templateCreationUnconfirmed: false, purpose: 'signing', profile: null, requireDocumentPurpose, document: { id: 'doc', org_id: 'org', source_kind: 'pdf', has_html_source: true, html_review_required: true,
       updated_at: 'observed', pdf_sha256: 'a'.repeat(64), status: 'draft' }, sourceID: 'doc', sourceStamp: 'observed', sourceSHA: 'a'.repeat(64), sourceCommitment: '',
     disposed: false, canReview: true, revisionBlocked: false, loading: false, rendering: false, busy: false, error: null, activePDF: {}, allPagesSeen: true, pageCountMatches: true, acknowledged: true,
     current: () => !env.disposed && env.document.id === env.sourceID && env.document.updated_at === env.sourceStamp && env.document.pdf_sha256 === env.sourceSHA,
@@ -149,7 +150,7 @@ test('stale review responses and mismatched PDF confirmations never approve the 
 
 test('library selection sends an HTML design to its form without calling generic document creation', async () => {
   const calls: any[] = [];
-  const env: any = { pendingCreation: false, creatingId: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedTemplate: null, error: null,
+  const env: any = { templateCreationUnconfirmed: false, purpose: 'signing', profile: null, requireDocumentPurpose, pendingCreation: false, removalBusy: false, creatingId: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedTemplate: null, error: null,
     createDocumentFromTemplate: (...args: any[]) => calls.push(args) };
   const actions = bind('../../routes/templates/+page.svelte', ['useTemplate'], env);
   await actions.useTemplate(design()); expect(env.selectedHTMLTemplate.id).toBe('design'); expect(calls).toEqual([]);

@@ -70,6 +70,7 @@ func HTMLCreationResourcesForV1(ctx context.Context, in HTMLCreationInputsV1) (H
 }
 
 type ApplicationHTMLCreationWriterV1 struct {
+	purposeCloses                                   []func()
 	mu                                              sync.Mutex
 	session                                         *ApplicationSessionV1
 	queries                                         *generated.Queries
@@ -330,7 +331,7 @@ func (w *ApplicationHTMLCreationWriterV1) MeasureFreshPolicyV1(ctx context.Conte
 	if err != nil {
 		return err
 	}
-	if responseSize == nil || responseSize.DocumentID != w.document || responseSize.OrgID != w.org || responseSize.BlocksWireBytes != 0 || responseSize.MetadataWireBytes != 2 {
+	if responseSize == nil || responseSize.DocumentID != w.document || responseSize.OrgID != w.org || responseSize.BlocksWireBytes != 0 || responseSize.MetadataWireBytes != int64(len(w.doc.Metadata)) {
 		return ErrHTMLCreationWriterV1
 	}
 	reportSize, err := w.queries.MeasureSignerDocumentReportV1(ctx, generated.MeasureSignerDocumentReportV1Params{DocumentID: w.document, OrgID: w.org})
@@ -350,6 +351,10 @@ func (w *ApplicationHTMLCreationWriterV1) MeasureFreshPolicyV1(ctx context.Conte
 // original-client/backend fence alone reconcile the native loan.
 func (w *ApplicationHTMLCreationWriterV1) CloseConsumerV1() {
 	if w != nil && w.closeConsumer != nil {
+		for _, close := range w.purposeCloses {
+			close()
+		}
+		w.purposeCloses = nil
 		w.closeConsumer()
 	}
 }

@@ -30,6 +30,47 @@ test('tab policy is logical RGBA only and four independent owners share one sync
   expect(budget.snapshot()).toMatchObject({ pixels: 0, stores: 0, owners: 0 });
 });
 
+test('one real owner retains only three full-page stores plus five genuinely tiny background thumbnails', async () => {
+  const budget = new PdfCanvasBudget(), owner = budget.generation();
+  const full = Array.from({ length: 3 }, canvas), thumbs = Array.from({ length: 5 }, canvas);
+  for (const store of full) await painted(budget, owner, store, 100);
+  for (const store of thumbs) { const lease = await budget.acquire(owner, store, 112, 160, { thumbnail: true, priority: 'background' }); lease.assertCurrent(); store.width = 112; store.height = 160; lease.finish(); }
+  expect(budget.snapshot()).toMatchObject({ owners: 1, stores: 8, pixels: 3 * 10000 + 5 * 112 * 160 });
+  for (const thumbnail of [false, true]) {
+    const abort = new AbortController(); const pending = budget.acquire(owner, canvas(), 1, 1, { signal: abort.signal, ...(thumbnail ? { thumbnail: true as const, priority: 'background' as const } : {}) });
+    await flush(); expect(budget.snapshot().waiting).toBe(1); abort.abort(); await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  }
+  budget.retired(owner); expect(budget.snapshot()).toMatchObject({ stores: 0, pixels: 0, owners: 0 });
+});
+
+test('thumbnail class cannot waive real dimensions, priority, global pixels or its captured native slot class', async () => {
+  const budget = new PdfCanvasBudget(1000), owner = budget.generation();
+  for (const [width, height, options] of [[113, 1, { thumbnail: true, priority: 'background' }], [1, 161, { thumbnail: true, priority: 'background' }], [1, 1, { thumbnail: true }], [1, 1, { thumbnail: false }], [112, 160, { thumbnail: true, priority: 'background' }]] as const) {
+    const before = budget.snapshot(); await expect(budget.acquire(owner, canvas(), width, height, options as any)).rejects.toThrow(); expect(budget.snapshot()).toEqual(before);
+  }
+  const other = budget.generation(), holding = await budget.acquire(other, canvas(), 1, 1);
+  const options: any = { thumbnail: true, priority: 'background' }, store = canvas();
+  const queued = budget.acquire(owner, store, 2, 2, options); options.thumbnail = undefined; holding.finish(); const lease = await queued; lease.finish();
+  for (let i = 0; i < 3; i++) await painted(budget, owner, canvas(), 2);
+  expect(budget.snapshot().stores).toBe(5); // Three ordinary slots remain available; the queued native class did not change.
+  budget.retired(owner); budget.retired(other);
+});
+
+test('a queued tiny store retains background scheduling and its original abort owner despite options mutation', async () => {
+  const budget = new PdfCanvasBudget(100), holdingOwner = budget.generation(), thumbnailOwner = budget.generation(), visibleOwner = budget.generation();
+  const holding = await budget.acquire(holdingOwner, canvas(), 1, 1), order: string[] = [];
+  const options: any = { thumbnail: true, priority: 'background' };
+  const thumbnail = budget.acquire(thumbnailOwner, canvas(), 1, 1, options).then(lease => { order.push('thumbnail'); lease.finish(); });
+  options.priority = 'visible';
+  const visible = budget.acquire(visibleOwner, canvas(), 1, 1).then(lease => { order.push('visible'); lease.finish(); });
+  holding.finish(); await Promise.all([thumbnail, visible]); expect(order).toEqual(['visible', 'thumbnail']);
+  const held = await budget.acquire(holdingOwner, canvas(), 1, 1), original = new AbortController();
+  const mutable: any = { thumbnail: true, priority: 'background', signal: original.signal };
+  const canceled = budget.acquire(thumbnailOwner, canvas(), 1, 1, mutable); mutable.signal = new AbortController().signal;
+  original.abort(); await expect(canceled).rejects.toMatchObject({ name: 'AbortError' }); expect(budget.snapshot().waiting).toBe(0); held.finish();
+  for (const owner of [holdingOwner, thumbnailOwner, visibleOwner]) budget.retired(owner);
+});
+
 test('allocation cannot double-grant the final capacity across callers and releases zero before waking a waiter', async () => {
   const budget = new PdfCanvasBudget(32), a = budget.generation(), b = budget.generation(), c = budget.generation();
   const one = canvas(), two = canvas(), three = canvas();
@@ -112,7 +153,7 @@ test('only settled explicitly evictable stores can yield capacity and a failed z
   expect(failing.recycle(owner, bad)).toBe(false); expect(failing.snapshot()).toMatchObject({ pixels: 16, blocked: true });
 });
 
-test('metadata admission caps owners at32 and settled stores at3 per owner even for one-pixel pages', async () => {
+test('metadata admission caps owners at32 and ordinary stores at3 per owner even for one-pixel pages', async () => {
   const budget = new PdfCanvasBudget(128), owners = Array.from({ length: 32 }, () => budget.generation());
   expect(() => budget.generation()).toThrow('Close another');
   for (const owner of owners) for (let i = 0; i < 3; i++) await painted(budget, owner, canvas(), 1);

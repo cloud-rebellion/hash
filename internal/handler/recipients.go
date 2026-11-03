@@ -5,6 +5,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/bright-interaction/hash/internal/documentpurpose"
 	"net/http"
 	"time"
 
@@ -206,6 +207,10 @@ func (s *Server) recipientMutationActor(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) writeRecipientMutationError(w http.ResponseWriter, operation string, err error) {
+	if errors.Is(err, documentpurpose.ErrSigningRequired) || errors.Is(err, documentpurpose.ErrTransition) || errors.Is(err, documentpurpose.ErrInvalid) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	var validationErr *recipients.ValidationError
 	switch {
 	case errors.Is(err, auth.ErrMutationCredentialExpired):

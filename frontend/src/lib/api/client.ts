@@ -25,6 +25,7 @@ export interface TemplateResponse {
 }
 
 export interface DocumentResponse {
+  folder_id?: string | null;
   id: string;
   org_id: string;
   template_id?: string;
@@ -385,8 +386,49 @@ export async function createStarterTemplate(key: string, name?: string): Promise
   return request('POST', '/api/v1/templates/starter', { key, name });
 }
 
-export async function listDocuments(): Promise<{ documents: DocumentResponse[]; total: number }> {
-  return request('GET', '/api/v1/documents');
+export interface DocumentListOptions {
+  folder?: 'all' | 'unfiled' | string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+export interface DocumentFolder {
+  id: string;
+  name: string;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface DocumentFolderPage { folders: DocumentFolder[]; total: number; limit: number; offset: number }
+export interface DocumentListPage { documents: DocumentResponse[]; total: number; limit?: number; offset?: number }
+
+function folderPageQuery(limit: number, offset: number): URLSearchParams {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500 || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid page.');
+  return new URLSearchParams({ limit: String(limit), offset: String(offset) });
+}
+export async function listDocuments(options: DocumentListOptions = {}, signal?: AbortSignal): Promise<DocumentListPage> {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined || options.offset !== undefined) {
+    for (const [key, value] of folderPageQuery(options.limit ?? 50, options.offset ?? 0)) query.set(key, value);
+  }
+  if (options.folder && options.folder !== 'all') query.set('folder_id', options.folder);
+  if (options.status && options.status !== 'all') query.set('status', options.status);
+  return request('GET', '/api/v1/documents' + (query.size ? '?' + query : ''), undefined, signal);
+}
+export async function listDocumentFolders(limit = 100, offset = 0, signal?: AbortSignal): Promise<DocumentFolderPage> {
+  return request('GET', '/api/v1/document-folders?' + folderPageQuery(limit, offset), undefined, signal);
+}
+export async function createDocumentFolder(name: string): Promise<{ folder: DocumentFolder }> {
+  return request('POST', '/api/v1/document-folders', { name: name.trim() });
+}
+export async function renameDocumentFolder(id: string, name: string): Promise<{ folder: DocumentFolder }> {
+  return request('PATCH', `/api/v1/document-folders/${encodeURIComponent(id)}`, { name: name.trim() });
+}
+export async function deleteDocumentFolder(id: string): Promise<void> {
+  return request('DELETE', `/api/v1/document-folders/${encodeURIComponent(id)}`);
+}
+export async function moveDocumentFolder(documentId: string, folderId: string | null): Promise<{ document_id: string; folder_id: string | null }> {
+  return request('PUT', `/api/v1/documents/${encodeURIComponent(documentId)}/folder`, { folder_id: folderId });
 }
 
 export async function createBlocksDocument(name: string): Promise<DocumentResponse> {

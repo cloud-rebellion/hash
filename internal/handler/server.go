@@ -598,6 +598,14 @@ func (s *Server) Routes() http.Handler {
 			r.Delete("/{id}", s.handleArchiveTemplate)
 		})
 
+		r.Route("/document-folders", func(r chi.Router) {
+			r.Use(auth.RequireRoleForWrites(auth.RoleSender))
+			r.Get("/", s.handleListDocumentFolders)
+			r.Post("/", s.handleCreateDocumentFolder)
+			r.Patch("/{folderId}", s.handleRenameDocumentFolder)
+			r.Delete("/{folderId}", s.handleDeleteDocumentFolder)
+		})
+
 		r.Route("/documents", func(r chi.Router) {
 			// RBAC: viewers read; senders+ create/edit/send. Method-aware so
 			// every current + future write route in this group is covered.
@@ -620,6 +628,7 @@ func (s *Server) Routes() http.Handler {
 			r.With(crmDocumentRateLimit(30)).Get("/{id}/send-attempts/{attempt_id}", s.handlePackageSendAttemptInspectionV1)
 			r.With(crmDocumentRateLimit(30)).Get("/{id}/attachments/{member_id}/pdf", s.handleDocumentAttachmentPreviewV1)
 			r.Patch("/{id}", s.handleUpdateDocument)
+			r.Put("/{id}/folder", s.handleMoveDocumentFolder)
 			r.Delete("/{id}", s.handleDeleteDocument)
 			r.Get("/{id}/events", s.handleListEvents)
 			r.Get("/{id}/recipients", s.handleListRecipients)

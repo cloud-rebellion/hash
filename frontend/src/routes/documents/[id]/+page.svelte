@@ -2,7 +2,7 @@
   import { ui, staffLocale } from '$lib/staffPreferences';
  import type { PackageSendObservation } from '$lib/packageSend';
   import { preSignDocumentMatchesResult, type PreSignResult } from '$lib/presignExecution';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { beforeNavigate } from '$app/navigation';
   import {
@@ -54,6 +54,12 @@
   let recipientRevision = $state(0);
   let savingTemplate = $state(false);
   let savedTemplateFlash = $state(false);
+  let showTemplateName = $state(false);
+  let templateName = $state('');
+  let templateNameError = $state<string | null>(null);
+  let templateSource = $state.raw<{ scope: DocumentScope; document: DocumentResponse } | null>(null);
+  let templateNameInput = $state.raw<HTMLInputElement>();
+  let templateNameTrigger = $state.raw<HTMLButtonElement>();
   let showPDFSave = $state(false);
   let pdfSignatureFields = $state<{ role: string; label: string }[]>([]);
   let generatedPlacementReady = $state(false);
@@ -362,31 +368,85 @@
 
   async function saveAsTemplate() {
     const scope = captureDocument();
-    if (!scope || !doc || crmBusy || savingTemplate) return;
-    if (doc.source_kind === 'blocks' && doc.status === 'draft' && !blocksEditorClean) {
+    if (!scope || !doc || doc.source_kind !== 'blocks' || crmBusy || savingTemplate || showTemplateName) return;
+    if (doc.status === 'draft' && !blocksEditorClean) {
       error = 'Wait for the document to finish saving before creating a template.';
       return;
     }
-    const submittedDocument = doc;
-    const name = window.prompt('Template name?', `${doc.name} (mall)`);
-    if (!name || !isCurrentDocument(scope) || doc !== submittedDocument || (doc.status === 'draft' && !blocksEditorClean)) return;
-    savingTemplate = true;
+    const source = { scope, document: doc };
+    templateSource = source;
+    templateName = doc.name;
+    templateNameError = null;
+    showTemplateName = true;
     error = null;
+    await tick();
+    if (templateSource === source && showTemplateName && isCurrentDocument(scope)) {
+      templateNameInput?.focus();
+      templateNameInput?.select();
+    }
+  }
+
+  function templateSourceCurrent(): boolean {
+    return !!templateSource && isCurrentDocument(templateSource.scope, true)
+      && doc === templateSource.document && doc.source_kind === 'blocks'
+      && (doc.status !== 'draft' || blocksEditorClean);
+  }
+
+  async function closeTemplateName() {
+    if (savingTemplate || !showTemplateName) return;
+    const source = templateSource;
+    showTemplateName = false;
+    templateSource = null;
+    templateNameError = null;
+    await tick();
+    if (source && isCurrentDocument(source.scope)) templateNameTrigger?.focus();
+  }
+
+  function templateNameKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    void closeTemplateName();
+  }
+
+  async function submitTemplateName(event: Event) {
+    event.preventDefault();
+    if (!showTemplateName || !templateSource || crmBusy || savingTemplate) return;
+    if (!templateSourceCurrent()) {
+      templateNameError = 'The document changed. Close this form and reopen it to use the current saved content.';
+      return;
+    }
+    const name = templateName.trim();
+    if (!name || name.length > 200) {
+      templateNameError = 'Enter a template name of up to 200 characters.';
+      templateNameInput?.focus();
+      return;
+    }
+    const { scope, document: submittedDocument } = templateSource;
+    savingTemplate = true;
+    templateNameError = null;
+    let saved = false;
     try {
       await createBlocksTemplate(name, {
         blocks_json: submittedDocument.blocks_json,
         variables_json: submittedDocument.variables_json,
       });
       if (!isCurrentDocument(scope)) return;
+      showTemplateName = false;
+      templateSource = null;
       savedTemplateFlash = true;
       if (templateFlashTimer) clearTimeout(templateFlashTimer);
       templateFlashTimer = setTimeout(() => {
         if (isCurrentDocument(scope)) savedTemplateFlash = false;
       }, 3000);
+      saved = true;
     } catch (e) {
-      if (isCurrentDocument(scope)) error = (e as Error).message;
+      if (isCurrentDocument(scope)) templateNameError = (e as Error).message;
     } finally {
       if (isCurrentDocument(scope)) savingTemplate = false;
+    }
+    if (saved) {
+      await tick();
+      if (isCurrentDocument(scope)) templateNameTrigger?.focus();
     }
   }
 
@@ -438,6 +498,10 @@
     showPreview = false;
     savingTemplate = false;
     savedTemplateFlash = false;
+    showTemplateName = false;
+    templateName = '';
+    templateNameError = null;
+    templateSource = null;
     showPDFSave = false;
     pdfSignatureFields = [];
     generatedPlacementReady = false;
@@ -539,7 +603,7 @@
             <Eye class="size-4" /> {$ui(showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview')}
           </button>
           {#if doc.source_kind === 'blocks'}
-            <button class="btn btn-secondary" disabled={savingTemplate || crmBusy || (doc.status === 'draft' && !blocksEditorClean)} onclick={saveAsTemplate}>
+            <button bind:this={templateNameTrigger} type="button" class="btn btn-secondary" aria-expanded={showTemplateName} aria-controls="document-template-name" disabled={savingTemplate || crmBusy || (doc.status === 'draft' && !blocksEditorClean)} onclick={saveAsTemplate}>
               <Save class="size-4" /> {$ui(savedTemplateFlash ? 'Saved!' : savingTemplate ? 'Saving…' : 'Save as template')}
             </button>
           {:else if doc.status === 'draft' && !doc.has_html_source}
@@ -553,6 +617,27 @@
         </div>
       </div>
     </div>
+
+    {#if showTemplateName && doc.source_kind === 'blocks'}
+      <section id="document-template-name" class="card p-6 mb-6 space-y-4" aria-labelledby="document-template-name-title">
+        <div>
+          <h2 id="document-template-name-title" class="font-display text-lg">{$ui('Save as template')}</h2>
+          <p class="mt-1 text-sm text-text-secondary">{$ui('Create a reusable copy of this saved document.')}</p>
+        </div>
+        <form onsubmit={submitTemplateName} aria-label={$ui('Save as template')} aria-busy={savingTemplate} class="space-y-4">
+          <label class="block text-sm" for="document-template-name-input">{$ui('Template name')}</label>
+          <input id="document-template-name-input" bind:this={templateNameInput} bind:value={templateName} onkeydown={templateNameKeydown} required maxlength="200" disabled={savingTemplate}
+            aria-invalid={!!templateNameError} aria-describedby={templateNameError ? 'document-template-name-error' : undefined}
+            class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
+          {#if templateNameError}<p id="document-template-name-error" role="alert" class="text-sm text-danger">{$ui(templateNameError)}</p>{/if}
+          {#if !templateSourceCurrent()}<p role="alert" class="text-sm text-danger">{$ui('The document changed. Close this form and reopen it to use the current saved content.')}</p>{/if}
+          <div class="flex flex-wrap gap-2">
+            <button type="submit" class="btn btn-primary" onkeydown={templateNameKeydown} disabled={savingTemplate || crmBusy || !templateSourceCurrent()}>{$ui(savingTemplate ? 'Saving…' : 'Save template')}</button>
+            <button type="button" class="btn btn-secondary" onkeydown={templateNameKeydown} disabled={savingTemplate} onclick={closeTemplateName}>{$ui('Cancel')}</button>
+          </div>
+        </form>
+      </section>
+    {/if}
 
     {#if showPDFSave && doc.status === 'draft' && doc.source_kind === 'pdf' && !doc.has_html_source}
       <SavePDFTemplate document={doc} onClose={() => (showPDFSave = false)} onSaved={() => {

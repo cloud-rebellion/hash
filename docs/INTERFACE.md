@@ -3,7 +3,11 @@
 Documents holds your drafts and sent or completed documents. Start with a blank
 block document or import a PDF or HTML design, then review the content, recipients
 and signature fields before sending. The status badge shows where each document
-is in its signing journey. Search and status filters narrow the visible library.
+is in its signing journey. Use All documents, Unfiled or a named folder to
+organize the library. Folder and status filters apply before pagination; search
+narrows the current page. Senders and owners can create or rename folders and
+move documents using their filing control. Removing an empty folder preserves
+documents. Filing a completed document leaves its contract and evidence intact.
 
 Templates are reusable starting points. Each customer receives a new document
 created from the template; editing a template does not rewrite an existing

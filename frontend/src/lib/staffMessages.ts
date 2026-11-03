@@ -1,3 +1,4 @@
+import { swedishFolderStaffMessages } from './staffFolderMessages';
 import { swedishDocumentStaffMessages } from './staffDocumentMessages';
 import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
 // English literals are stable lookup keys; untranslated staff text remains readable.
@@ -449,6 +450,13 @@ export const swedishStaffMessages: Record<string, string> = {
   "Copy failed. Select the key and copy it manually.": "Kopieringen misslyckades. Markera nyckeln och kopiera den manuellt.",
   "Language is in the account menu; appearance controls are next to it.": "Språk finns i kontomenyn; utseendekontrollerna finns bredvid den.",
   "Copying…": "Kopierar…",
+  "Create a reusable copy of this saved document.": "Skapa en återanvändbar kopia av det här sparade dokumentet.",
+  "Enter a template name of up to 200 characters.": "Ange ett mallnamn på högst 200 tecken.",
+  "The document changed. Close this form and reopen it to use the current saved content.": "Dokumentet har ändrats. Stäng formuläret och öppna det igen för att använda det aktuella sparade innehållet.",
+  "Document information": "Dokumentuppgifter",
+  "Other document information": "Övriga dokumentuppgifter",
+  "Use Settings to manage your team, branding, integrations and evidence controls. Language is in the account menu; appearance controls are next to it.": "Hantera team, varumärke, integrationer och bevisinställningar under Inställningar. Språk finns i kontomenyn; utseendekontrollerna finns bredvid den.",
   ...swedishDocumentStaffMessages,
   ...swedishAdvancedStaffMessages,
+  ...swedishFolderStaffMessages,
 };

@@ -197,7 +197,7 @@
           <input bind:value={name} oninput={inputChanged} required maxlength="200" class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated" />
         </label>
         {#each groups as group (group.id)}
-          <section class="space-y-3" aria-label={group.label}><h3 class="font-medium">{group.label}</h3>
+          <section class="space-y-3" aria-label={$ui(group.label)}><h3 class="font-medium">{$ui(group.label)}</h3>
             {#each group.fields as field (field.name)}<div class="space-y-1">
               <label class="block text-sm capitalize" for={`html-value-${field.name}`}>{field.label}{$ui(field.required ? ' (required)' : '')}</label>
               <textarea id={`html-value-${field.name}`} bind:value={values[field.name]} oninput={inputChanged} required={field.required && !mappedRequiredFilled(field)} maxlength={field.max_chars * 2} rows={field.max_chars > 200 ? 3 : 1}

@@ -4,7 +4,8 @@
   import { createBlocksDocument, importProposalPDF, importProposalHTML, listDocuments, type DocumentResponse } from '$lib/api/client';
   import { ui, staffLocale } from '$lib/staffPreferences';
   import DocumentThumbnail from '$lib/components/DocumentThumbnail.svelte';
-  import { FileText, Plus, Upload, PenLine, Search, ArrowUpRight, RefreshCw, X } from 'lucide-svelte';
+  import DocumentFolders from '$lib/components/DocumentFolders.svelte';
+  import { FileText, Plus, Upload, PenLine, Search, ArrowUpRight, RefreshCw, X, FolderInput, ChevronLeft, ChevronRight } from 'lucide-svelte';
 
   let docs = $state<DocumentResponse[]>([]);
   let loading = $state(true);
@@ -25,8 +26,20 @@
   let importNameInput: HTMLInputElement;
   let search = $state('');
   let status = $state('all');
-  const busy = $derived(creating || importing);
-  const visibleDocs = $derived(docs.filter(doc => doc.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) && (status === 'all' || doc.status === status)));
+  let folder = $state('all');
+  let total = $state(0);
+  let offset = $state(0);
+  const limit = 24;
+  let foldersAvailable = $state(false);
+  let canManageFolders = $state(false);
+  let folderBusy = $state(false);
+  let movingDocument = $state<DocumentResponse | null>(null);
+  let moveTrigger = $state.raw<HTMLButtonElement>();
+  let disposed = false;
+  let listRevision = 0;
+  let listController: AbortController | null = null;
+  const busy = $derived(creating || importing || folderBusy);
+  const visibleDocs = $derived(docs.filter(doc => doc.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
 
   async function toggleComposer(kind: 'blank' | 'import') {
     if (busy) return;
@@ -37,12 +50,37 @@
   }
 
   async function refresh() {
+    if (disposed) return;
+    const ticket = ++listRevision;
+    listController?.abort(); const controller = new AbortController(); listController = controller;
     loading = true; listError = null;
-    try { docs = (await listDocuments()).documents; }
-    catch (e) { listError = (e as Error).message; }
-    finally { loading = false; }
+    try {
+      const page = await listDocuments({ folder, status, limit, offset }, controller.signal);
+      if (disposed || ticket !== listRevision) return;
+      if (!Array.isArray(page.documents) || !Number.isSafeInteger(page.total) || page.total < 0) throw new Error('Unable to load documents.');
+      if (offset > 0 && page.documents.length === 0 && page.total <= offset) {
+        offset = Math.max(0, Math.floor(Math.max(0, page.total - 1) / limit) * limit);
+        await refresh(); return;
+      }
+      docs = page.documents; total = page.total;
+    } catch (e) { if (!disposed && ticket === listRevision) listError = (e as Error).message; }
+    finally { if (!disposed && ticket === listRevision) loading = false; }
   }
-  onMount(refresh);
+  function selectFolder(next: string) {
+    folder = next; offset = 0; search = ''; movingDocument = null;
+    void refresh();
+  }
+  function changeStatus() { offset = 0; search = ''; void refresh(); }
+  function changePage(next: number) {
+    if (busy || loading || next < 0 || next >= total) return;
+    offset = next; search = ''; movingDocument = null; void refresh();
+  }
+  function openMove(doc: DocumentResponse, trigger: HTMLButtonElement) {
+    if (busy || !foldersAvailable || !canManageFolders) return;
+    moveTrigger = trigger; movingDocument = doc;
+  }
+  function closeMove() { movingDocument = null; moveTrigger?.focus(); }
+  onMount(() => { void refresh(); return () => { disposed = true; listRevision++; listController?.abort(); }; });
 
   async function createBlank(e: Event) {
     e.preventDefault();
@@ -140,25 +178,32 @@
     </form>
   </div>
 
-  <section aria-label={$ui('Document library')} class="space-y-5">
+  <div class="grid lg:grid-cols-[13rem_minmax(0,1fr)] gap-7 lg:gap-9">
+    <DocumentFolders selected={folder} disabled={busy} {movingDocument} onselect={selectFolder} onchange={refresh} oncloseMove={closeMove} onbusy={value => { folderBusy = value; }} oncapability={(available, canWrite) => { foldersAvailable = available; canManageFolders = canWrite; }} />
+  <section aria-label={$ui('Document library')} class="space-y-5 min-w-0">
     <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-      <h2 class="font-medium text-lg">{$ui('Your documents')}</h2>
+      <h2 class="font-medium text-lg">{$ui(folder === 'all' ? 'Your documents' : folder === 'unfiled' ? 'Unfiled documents' : 'Folder documents')}{#if !loading && !listError}<span class="ml-2 text-sm font-normal text-text-muted">{total}</span>{/if}</h2>
       <div class="flex flex-wrap gap-2">
-        <label class="relative flex-1 sm:flex-none"><span class="sr-only">{$ui('Search documents')}</span><Search class="absolute left-3 top-2.5 size-4 text-text-muted" /><input bind:value={search} type="search" placeholder={$ui('Search documents')} class="w-full sm:w-56 pl-9 pr-3 py-2 rounded-lg border border-border bg-bg-surface text-sm" /></label>
-        <select aria-label={$ui('Filter by status')} bind:value={status} class="rounded-lg border border-border bg-bg-surface px-3 py-2 text-sm"><option value="all">{$ui('All statuses')}</option>{#each ['draft', 'sent', 'in_progress', 'completed', 'voided', 'expired'] as value}<option value={value}>{statusLabel(value)}</option>{/each}</select>
+        <label class="relative flex-1 sm:flex-none"><span class="sr-only">{$ui('Search this page')}</span><Search class="absolute left-3 top-2.5 size-4 text-text-muted" /><input bind:value={search} type="search" placeholder={$ui('Search this page')} class="w-full sm:w-56 pl-9 pr-3 py-2 rounded-lg border border-border bg-bg-surface text-sm" /></label>
+        <select aria-label={$ui('Filter by status')} bind:value={status} disabled={busy} onchange={changeStatus} class="rounded-lg border border-border bg-bg-surface px-3 py-2 text-sm"><option value="all">{$ui('All statuses')}</option>{#each ['draft', 'sent', 'in_progress', 'completed', 'voided', 'expired'] as value}<option value={value}>{statusLabel(value)}</option>{/each}</select>
       </div>
     </div>
     {#if loading}<div class="card p-10 text-center text-text-secondary" role="status">{$ui('Loading documents…')}</div>
     {:else if listError}<div class="card p-6 space-y-3" role="alert"><p class="text-danger text-sm">{$ui(listError)}</p><button type="button" class="btn btn-secondary" onclick={refresh}><RefreshCw class="size-4" />{$ui('Try again')}</button></div>
-    {:else if docs.length === 0}<div class="card py-14 px-6 text-center"><div class="w-14 h-14 rounded-2xl bg-bg-hover flex items-center justify-center mx-auto mb-4"><FileText class="size-6 text-text-secondary" /></div><h3 class="font-medium text-lg">{$ui('Your first document starts here')}</h3><p class="text-text-secondary text-sm mt-2">{$ui('Create a draft above or import a document you already designed.')}</p></div>
-    {:else if visibleDocs.length === 0}<div class="card p-10 text-center text-text-secondary text-sm">{$ui('No documents match your search.')}</div>
+    {:else if docs.length === 0 && folder === 'all' && status === 'all'}<div class="card py-14 px-6 text-center"><div class="w-14 h-14 rounded-2xl bg-bg-hover flex items-center justify-center mx-auto mb-4"><FileText class="size-6 text-text-secondary" /></div><h3 class="font-medium text-lg">{$ui('Your first document starts here')}</h3><p class="text-text-secondary text-sm mt-2">{$ui('Create a draft above or import a document you already designed.')}</p></div>
+    {:else if visibleDocs.length === 0}<div class="card p-10 text-center text-text-secondary text-sm">{$ui(search.trim() ? 'No documents on this page match your search.' : 'No documents in this selection.')}</div>
     {:else}<div class="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 sm:gap-6">
       {#each visibleDocs as doc (doc.id)}
-        <a href={`/documents/${doc.id}`} class="card overflow-hidden group transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-text-muted/35 hover:shadow-lg hover:shadow-black/5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4" aria-label={$ui('Open {name}', { name: doc.name })}>
+        <article class="card overflow-hidden group transition-[box-shadow,border-color,transform] duration-200 hover:-translate-y-0.5 hover:border-text-muted/35 hover:shadow-lg hover:shadow-black/5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4">
+          <a href={`/documents/${doc.id}`} aria-label={$ui('Open {name}', { name: doc.name })}>
           {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256 ?? ''}`}<DocumentThumbnail item={doc} kind="document" />{/key}
           <div class="p-4 sm:p-5 space-y-4"><div class="flex gap-2 justify-between items-start min-h-10"><h3 class="font-medium text-sm leading-5 line-clamp-2 [overflow-wrap:anywhere]">{doc.name}</h3><ArrowUpRight class="size-4 text-text-muted shrink-0 group-hover:text-text-primary" /></div><div class="flex gap-2 items-center justify-between"><span class={`rounded-full px-2.5 py-1 text-xs font-medium ${statusTone(doc.status)}`}>{statusLabel(doc.status)}</span><span class="text-xs text-text-secondary">{new Date(doc.updated_at).toLocaleDateString($staffLocale === 'sv' ? 'sv-SE' : 'en-GB')}</span></div></div>
-        </a>
+          </a>
+          {#if foldersAvailable && canManageFolders}<div class="px-4 sm:px-5 pb-4"><button type="button" class="inline-flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary disabled:opacity-40" disabled={busy} aria-label={$ui('Move {name} to a folder', { name: doc.name })} onclick={event => openMove(doc, event.currentTarget)}><FolderInput class="size-3.5" />{$ui('Move to folder')}</button></div>{/if}
+        </article>
       {/each}
     </div>{/if}
+    {#if !loading && !listError && total > 0}<div class="flex flex-wrap items-center justify-between gap-3 pt-2 text-xs text-text-secondary"><p>{$ui('{start}–{end} of {total} documents', { start: offset + 1, end: Math.min(offset + docs.length, total), total })}{#if search.trim()} · {$ui('{count} matches on this page', { count: visibleDocs.length })}{/if}</p><div class="flex gap-2"><button type="button" class="btn btn-secondary !text-xs !px-3 !py-2" disabled={busy || offset === 0} onclick={() => changePage(Math.max(0, offset - limit))}><ChevronLeft class="size-4" />{$ui('Previous')}</button><button type="button" class="btn btn-secondary !text-xs !px-3 !py-2" disabled={busy || offset + docs.length >= total} onclick={() => changePage(offset + limit)}>{$ui('Next')}<ChevronRight class="size-4" /></button></div></div>{/if}
   </section>
+  </div>
 </div>

@@ -257,41 +257,7 @@ func (s *Server) writeDocumentCreationError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
-	u, ok := requireSessionUser(w, r.Context())
-	if !ok {
-		return
-	}
-	limit, offset := paginationFromQuery(r, 50, 500)
-
-	var statusFilter []string
-	if vs, ok := r.URL.Query()["status"]; ok && len(vs) > 0 {
-		statusFilter = vs
-	}
-
-	rows, err := s.Queries.ListDocumentMetadataForREST(r.Context(), generated.ListDocumentMetadataForRESTParams{
-		OrgID:   u.OrgID,
-		Column2: statusFilter,
-		Limit:   limit,
-		Offset:  offset,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list documents failed")
-		return
-	}
-	out := make([]documentResponse, 0, len(rows))
-	for _, d := range rows {
-		out = append(out, toDocumentMetadataResponse(d))
-	}
-	total, _ := s.Queries.CountDocuments(r.Context(), generated.CountDocumentsParams{
-		OrgID:   u.OrgID,
-		Column2: statusFilter,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"documents": out,
-		"total":     total,
-		"limit":     limit,
-		"offset":    offset,
-	})
+	s.handleListDocumentsWithFolders(w, r)
 }
 
 func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {

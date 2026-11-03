@@ -20,7 +20,7 @@ function fixture() {
   const env: any = {
     composer: null, newName: ' Draft ', importName: ' Imported ', importKind: 'pdf',
     pdfFile: { name: 'retained.pdf' }, htmlFile: { text: async () => '<p>retained</p>' }, landscape: true,
-    error: null, creating: false, importing: false, tick: async () => {}, $ui: (text: string) => text,
+    error: null, creating: false, importing: false, folderBusy: false, tick: async () => {}, $ui: (text: string) => text,
     blankTrigger: { focus: () => focus.push('blank-trigger') }, importTrigger: { focus: () => focus.push('import-trigger') },
     blankNameInput: { focus: () => focus.push('blank-input') }, importNameInput: { focus: () => focus.push('import-input') },
     createBlocksDocument: async (...args: any[]) => { calls.push(['blank', ...args]); return { id: 'created' }; },
@@ -86,4 +86,20 @@ test('disclosures compile for client and server, stay mounted outside conditiona
   for (const generate of ['client', 'server'] as const) {
     expect(compile(source, { filename: 'Documents.svelte', generate }).warnings.filter(w => w.code.startsWith('a11y'))).toEqual([]);
   }
+});
+
+test('a pending folder write blocks composer changes and creation/import until its parent busy state settles', async () => {
+  const f = fixture(), pdf = f.env.pdfFile, html = f.env.htmlFile;
+  f.env.composer = 'import'; f.env.folderBusy = true;
+  expect(f.env.busy).toBe(true);
+  await f.toggleComposer('blank'); await f.toggleComposer('import');
+  f.changeImportKind('html'); await f.createBlank(event); await f.importProposal(event);
+  expect(f.env.composer).toBe('import'); expect(f.env.importKind).toBe('pdf');
+  expect(f.env.pdfFile).toBe(pdf); expect(f.env.htmlFile).toBe(html);
+  expect(f.env.newName).toBe(' Draft '); expect(f.env.importName).toBe(' Imported ');
+  expect(f.focus).toEqual([]); expect(f.calls).toEqual([]);
+  f.env.folderBusy = false; expect(f.env.busy).toBe(false);
+  await f.toggleComposer('blank'); expect(f.focus.at(-1)).toBe('blank-input');
+  await f.createBlank(event);
+  expect(f.calls).toEqual([['blank', 'Draft'], ['goto', '/documents/created']]);
 });

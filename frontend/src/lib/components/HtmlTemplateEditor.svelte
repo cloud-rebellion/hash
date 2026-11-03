@@ -484,7 +484,7 @@
       </fieldset>
       <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{$ui(busy === 'preview' ? 'Rendering saved design…' : 'Generate PDF preview')}</button>
       {#if preview}
-        {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} />{/key}
+        {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} translate={(text) => $ui(text)} />{/key}
         {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">{$ui("This preview is no longer current. Generate a new preview before approving.")}</p>{/if}
         {#if canApprove && !approved}
           <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>{$ui("I have reviewed every PDF page, saved source, defaults, wording, local assets")}{$ui(saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : '')}{$ui(saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : '')}{$ui(", and approve this exact design revision. Preview sample values and wording are separate from saved defaults.")}</span></label>

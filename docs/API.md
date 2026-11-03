@@ -1300,3 +1300,13 @@ qualification remains deployment-specific; see [readiness](READINESS.md).
 Staff session authentication is required. The caller must have current read access in the template’s workspace; viewer access is supported. Supply the version and PDF digest observed in the template response. The server selects the persisted immutable storage version, verifies its bytes, and checks current access and the source revision again before returning them. This endpoint reads an existing PDF; it does not render a document.
 
 A successful response is `application/pdf` with `Cache-Control: no-store`, `X-Hash-Template-Id`, `X-Hash-Template-Version`, `X-Hash-PDF-SHA256`, and an ETag containing that digest. `400` means missing or ambiguous pins, `404` means the PDF template is unavailable in the caller’s workspace, and `412` means the observed template version or content changed. Authentication and permission errors use the normal session responses; capacity or provider failures return `503`. Refresh the template after `412`; never substitute a latest object or an unverified body.
+
+## Document folders
+
+Staff can organize documents in one level of workspace folders. Folder and status
+filters are applied before pagination; moving a document changes only its filing
+metadata and leaves contract content, signing evidence and document timestamps
+intact. Folders can be removed only when they contain no active documents.
+
+See [Document folders](DOCUMENT-FOLDERS-API.md) for the staff-session endpoints,
+request examples, role requirements, filtering and error responses.

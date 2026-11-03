@@ -22,22 +22,50 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	statusRows, _ := s.Queries.CountDocumentsByStatus(ctx, u.OrgID)
+	statusRows, err := s.Queries.CountDocumentsByStatus(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	byStatus := make(map[string]int64, len(statusRows))
 	for _, r := range statusRows {
 		byStatus[r.Status] = r.N
 	}
 
 	since24h := pgtype.Timestamptz{Time: time.Now().Add(-24 * time.Hour), Valid: true}
-	sentToday, _ := s.Queries.CountSentSince(ctx, generated.CountSentSinceParams{OrgID: u.OrgID, SentAt: since24h})
-	completed30d, _ := s.Queries.CountCompletedSince(ctx, generated.CountCompletedSinceParams{
+	sentToday, err := s.Queries.CountSentSince(ctx, generated.CountSentSinceParams{OrgID: u.OrgID, SentAt: since24h})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	completed30d, err := s.Queries.CountCompletedSince(ctx, generated.CountCompletedSinceParams{
 		OrgID:       u.OrgID,
 		CompletedAt: pgtype.Timestamptz{Time: time.Now().Add(-30 * 24 * time.Hour), Valid: true},
 	})
-	awaiting, _ := s.Queries.CountAwaitingSig(ctx, u.OrgID)
-	expiring, _ := s.Queries.CountExpiringSoon(ctx, u.OrgID)
-	timeToSign, _ := s.Queries.TimeToSignP50Seconds(ctx, u.OrgID)
-	split, _ := s.Queries.AgentVsHumanDocumentSplit(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	awaiting, err := s.Queries.CountAwaitingSig(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	expiring, err := s.Queries.CountExpiringSoon(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	timeToSign, err := s.Queries.TimeToSignP50Seconds(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	split, err := s.Queries.AgentVsHumanDocumentSplit(ctx, u.OrgID)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
 
 	out := map[string]any{
 		"by_status":            byStatus,

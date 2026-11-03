@@ -10,7 +10,7 @@
   let error = $state<string | null>(null);
 
   function fmtDuration(seconds: number): string {
-    if (!seconds) return ', ';
+    if (!seconds) return '—';
     if (seconds < 60) return `${Math.round(seconds)}s`;
     if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
     if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;

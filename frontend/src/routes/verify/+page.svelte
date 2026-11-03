@@ -88,6 +88,10 @@
     if (bundleLoading) return;
     bundleError = null;
     bundleReport = null;
+    if (!/\.(pdf|zip)$/i.test(file.name)) {
+      bundleError = 'Choose a Hash evidence package (.pdf or .zip).';
+      return;
+    }
     bundleLoading = true;
     try {
       const form = new FormData();
@@ -114,10 +118,6 @@
     if (bundleLoading) return;
     const file = e.dataTransfer?.files?.[0];
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      bundleError = 'expected a Hash evidence bundle PDF';
-      return;
-    }
     verifyBundle(file);
   }
 
@@ -138,17 +138,17 @@
   <div class="mb-7"><p class="page-eyebrow mb-2">{$ui('Trust & evidence')}</p><h1 class="page-title">{$ui('Verify document evidence')}</h1><p class="text-sm text-text-secondary mt-3 max-w-2xl">{$ui('Check that a completed document and its signing evidence match the package issued by Hash.')}</p></div>
   <div class="grid sm:grid-cols-3 gap-4 mb-7">
     <div class="card p-5"><span class="text-xs font-mono text-text-muted">01</span><h2 class="font-medium text-sm mt-2">{$ui('Export the evidence')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Open a completed document and choose Export evidence package.')}</p></div>
-    <div class="card p-5"><span class="text-xs font-mono text-text-muted">02</span><h2 class="font-medium text-sm mt-2">{$ui('Choose the evidence PDF')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Use the exported package, which includes the document and its audit evidence.')}</p></div>
+    <div class="card p-5"><span class="text-xs font-mono text-text-muted">02</span><h2 class="font-medium text-sm mt-2">{$ui('Choose the evidence package')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Use the exported package, which includes the document and its audit evidence.')}</p></div>
     <div class="card p-5"><span class="text-xs font-mono text-text-muted">03</span><h2 class="font-medium text-sm mt-2">{$ui('Review the result')}</h2><p class="text-sm text-text-secondary mt-2">{$ui('Hash checks the file hashes, audit events, cryptographic signatures and issuer keys.')}</p></div>
   </div>
-  <div class="rounded-xl border border-info/20 bg-info/5 p-4 text-sm text-text-secondary mb-7"><p class="font-medium text-text-primary mb-1">{$ui('Checked by this Hash server')}</p><p>{$ui('Selecting a PDF uploads the complete evidence package to this server. Only upload documents you are authorized to share. This page does not verify files offline.')}</p></div>
+  <div class="rounded-xl border border-info/20 bg-info/5 p-4 text-sm text-text-secondary mb-7"><p class="font-medium text-text-primary mb-1">{$ui('Checked by this Hash server')}</p><p>{$ui('Selecting a PDF or ZIP uploads the complete evidence package to this server. Only upload documents you are authorized to share. This page does not verify files offline.')}</p></div>
     <section class="mb-8">
       <h2 class="text-lg font-medium mb-2">{$ui('Verify an evidence package')}</h2>
-      <p class="text-text-secondary text-sm mb-4">{$ui('Choose a Hash evidence bundle PDF. A regular contract PDF on its own does not contain the full verification package.')}</p>
+      <p class="text-text-secondary text-sm mb-4">{$ui('Choose the PDF or ZIP evidence package exported by Hash. A regular contract PDF on its own does not contain the full verification package.')}</p>
       <label for="evidence-bundle" class="block rounded-2xl border-2 border-dashed p-7 sm:p-10 text-center transition-colors" class:border-border={!dragging} class:border-accent={dragging} class:bg-bg-elevated={dragging} ondragover={e => { e.preventDefault(); if (!bundleLoading) dragging = true; }} ondragleave={() => dragging = false} ondrop={onDrop}>
         <Upload class="size-8 mx-auto mb-3 text-text-secondary" />
-        <span class="block text-sm font-medium mb-4">{$ui('Drop your evidence PDF here, or choose a file')}</span>
-        <input id="evidence-bundle" type="file" accept="application/pdf,.pdf" disabled={bundleLoading} aria-label={$ui('Choose evidence PDF')} class="block mx-auto max-w-full text-sm text-text-secondary file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-4 file:py-2.5 file:font-medium file:text-accent-foreground" onchange={onPick} />
+        <span class="block text-sm font-medium mb-4">{$ui('Drop your evidence package here, or choose a PDF or ZIP')}</span>
+        <input id="evidence-bundle" type="file" accept="application/pdf,application/zip,application/x-zip-compressed,.pdf,.zip" disabled={bundleLoading} aria-label={$ui('Choose evidence package (PDF or ZIP)')} class="block mx-auto max-w-full text-sm text-text-secondary file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-4 file:py-2.5 file:font-medium file:text-accent-foreground" onchange={onPick} />
       </label>
 
       {#if bundleLoading}
@@ -260,7 +260,7 @@
 
     <details class="card p-5 sm:p-6 mt-8">
       <summary class="cursor-pointer font-medium flex items-center gap-2"><FileCheck2 class="size-4" />{$ui('Advanced: verify an audit certificate')}</summary>
-      <p class="text-text-secondary text-sm my-4">{$ui('Use this when you already have the certificate body, signature and public key. For a complete exported package, use the PDF check above.')}</p>
+      <p class="text-text-secondary text-sm my-4">{$ui('Use this when you already have the certificate body, signature and public key. For a complete exported package, use the package check above.')}</p>
     {#if serverPubKey}
       <div class="card p-4 mb-6">
         <div class="flex items-center gap-2 text-text-muted text-xs mb-2">

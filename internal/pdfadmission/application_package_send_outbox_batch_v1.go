@@ -59,7 +59,7 @@ func packageSendOutboxBatchResourcesV1(count, raw int64) (ApplicationRequestPayl
 	if count < 1 || raw < 0 {
 		return empty, ErrHTMLSendWorkV1
 	}
-	one, err := htmlAuthoringRetainedBodyResourcesV1(0, 2)
+	one, err := htmlAuthoringRetainedBodyResourcesV1(0, 2+applicationWorkspaceSMTPWireBytesV1)
 	if err != nil {
 		return empty, err
 	}
@@ -92,11 +92,11 @@ func (w *ApplicationHTMLSendWorkV1) packageSendOutboxShapeV1(outputs *htmlSendCo
 	}
 	signURL := outputs.publicURL + "/sign/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	beaconURL := outputs.publicURL + "/e/o/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: outputs.orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
+	subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: outputs.companyName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return empty, err
 	}
-	raw, err := htmlAuthoringSumV1(int64(len(r.Email)), subject, html, text, int64(len(w.sourceIntent.ActorEmail)), int64(len(outputs.orgName)), int64(len("pending")))
+	raw, err := htmlAuthoringSumV1(applicationWorkspaceSMTPPurposeBytesV1, int64(len(r.Email)), subject, html, text, int64(len(w.sourceIntent.ActorEmail)), int64(len(outputs.orgName)), int64(len("pending")))
 	if err != nil {
 		return empty, err
 	}
@@ -227,7 +227,7 @@ func (g *applicationPackageSendOutboxBatchV1) consumeV1(call context.Context, w 
 		}
 		slot := &g.slots[i]
 		r := slot.recipient
-		if slot.self != slot || slot.batch != g || slot.index != i || slot.issued || r == nil || r != w.sourceRecipients[i] || r.ID != item.id || r.DocumentID != g.budget.DocumentID || !item.attempted || !item.rendered || !item.enqueued || item.outboxID != uuid.Nil || len(item.token) != 43 || !slot.shape.coversV1(raw, msg) || len(msg.Headers) != 0 || msg.To != r.Email || msg.ReplyTo != w.sourceIntent.ActorEmail || msg.FromName != g.outputs.orgName {
+		if slot.self != slot || slot.batch != g || slot.index != i || slot.issued || r == nil || r != w.sourceRecipients[i] || r.ID != item.id || r.DocumentID != g.budget.DocumentID || !item.attempted || !item.rendered || !item.enqueued || item.outboxID != uuid.Nil || len(item.token) != 43 || !slot.shape.coversV1(raw, msg) || len(msg.Headers) != 0 || msg.OrgID != g.budget.OrgID || msg.To != r.Email || msg.ReplyTo != w.sourceIntent.ActorEmail || msg.FromName != g.outputs.orgName {
 			return ErrHTMLSendWorkV1
 		}
 		slot.issued = true

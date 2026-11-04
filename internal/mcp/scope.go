@@ -76,6 +76,7 @@ var mcpToolRequiredScopes = map[string]string{
 	"search_documents":               mcpScopeRead,
 
 	// Document/content and configuration authoring.
+	"propose_service_email_design":     mcpScopeWriteAuthoring,
 	"save_service_email_template":      mcpScopeWriteAuthoring,
 	"add_document_field":               mcpScopeWriteAuthoring,
 	"add_recipient":                    mcpScopeWriteAuthoring,

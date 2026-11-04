@@ -38,6 +38,7 @@ import (
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
+	"github.com/bright-interaction/hash/internal/workspacesmtp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -190,9 +191,13 @@ func runWorkerMain() (exitCode int) {
 	// so those events never reached subscribers.
 	dispatch.RegisterWebhookFanout(auditLog, queries)
 
+	var emailMIMEWork dispatch.ServiceEmailMIMEAdmissionV1
+	if workRuntime != nil && workRuntime.MatchesPoolV1(pool) {
+		emailMIMEWork = workRuntime.WorkV1()
+	}
 	mailer, err := dispatch.NewSMTPMailer(dispatch.SMTPConfig{
 		Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser,
-		Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
+		Password: cfg.SMTPPassword, From: cfg.SMTPFrom, MIMEWork: emailMIMEWork,
 	})
 	if err != nil {
 		slog.Error("smtp init", "err", err)
@@ -209,6 +214,8 @@ func runWorkerMain() (exitCode int) {
 		slog.Error("staff authentication mail encryption unavailable")
 		return 1
 	}
+
+	workspaceSMTP := workspacesmtp.Service{Pool: pool, MIMEWork: emailMIMEWork, Audit: auditLog, Box: staffAuthMailBox, AllowPrivate: config.IsLocalDevelopment(cfg.PublicURL)}
 
 	// Endpoint secrets are resolved and authenticated by webhookSecrets. Keep the
 	// dispatcher's legacy instance fallback empty so no future call can silently
@@ -360,6 +367,7 @@ func runWorkerMain() (exitCode int) {
 		audit:             auditLog,
 		mailer:            queueMailer,
 		emailSender:       mailer,
+		workspaceSMTPSend: workspaceSMTP.Deliver,
 		staffAuthMailBox:  staffAuthMailBox,
 		dispatcher:        dispatcher,
 		webhookSecrets:    webhookSecrets,
@@ -523,6 +531,7 @@ type worker struct {
 	audit                     *audit.Logger
 	mailer                    dispatch.Mailer // queue-backed: enqueues into email_deliveries
 	emailSender               dispatch.Mailer // real SMTP, used only by loopEmailDispatch
+	workspaceSMTPSend         func(context.Context, *generated.EmailDelivery, dispatch.Message, dispatch.Mailer) error
 	staffAuthMailBox          *secretbox.Box
 	emailDrainFailed          bool // owned exclusively by the email dispatch loop
 	dispatcher                *dispatch.Dispatcher
@@ -866,13 +875,9 @@ func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDel
 		ReplyTo: d.ReplyTo, FromName: d.FromName, Headers: headers,
 	}
 	var err error
-	if d.StaffAuthCiphertext != nil {
-		message, err = dispatch.OpenStaffAuthEmail(w.staffAuthMailBox, d.ID, d.ToEmail, d.Subject, d.StaffAuthCiphertext)
-	}
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	if err == nil {
-		err = w.emailSender.Send(sctx, message)
-	}
+	err = w.sendEmailTransport(sctx, d, message)
+
 	cancel()
 	if err == nil {
 		if err := w.queries.MarkEmailDeliverySent(ctx, d.ID); err != nil {
@@ -899,6 +904,40 @@ func (w *worker) attemptEmailObserved(ctx context.Context, d *generated.EmailDel
 		return emailCheckpointFailed, fmt.Errorf("email delivery %s retry acknowledgement failed: %w", d.ID, markErr)
 	}
 	return emailRetryAcknowledged, nil
+}
+
+func (w *worker) sendEmailTransport(sctx context.Context, d *generated.EmailDelivery, message dispatch.Message) error {
+	if d == nil {
+		return workspacesmtp.ErrUnavailable
+	}
+	var err error
+	switch d.SmtpPurpose {
+	case "installation_auth", "installation_legacy":
+		if d.SmtpOrgID.Valid || (d.SmtpPurpose == "installation_auth" && d.StaffAuthCiphertext == nil) {
+			err = workspacesmtp.ErrUnavailable
+			break
+		}
+		if d.StaffAuthCiphertext != nil {
+			message, err = dispatch.OpenStaffAuthEmail(w.staffAuthMailBox, d.ID, d.ToEmail, d.Subject, d.StaffAuthCiphertext)
+		}
+		if err == nil {
+			if w.emailSender == nil {
+				err = workspacesmtp.ErrUnavailable
+			} else {
+				err = w.emailSender.Send(sctx, message)
+			}
+		}
+	case "workspace", "workspace_test":
+		if !d.SmtpOrgID.Valid || uuid.UUID(d.SmtpOrgID.Bytes) == uuid.Nil || d.StaffAuthCiphertext != nil || w.workspaceSMTPSend == nil {
+			err = workspacesmtp.ErrUnavailable
+		} else {
+			err = w.workspaceSMTPSend(sctx, d, message, w.emailSender)
+		}
+	default:
+		err = workspacesmtp.ErrUnavailable
+	}
+
+	return err
 }
 
 func truncate(s string, n int) string {

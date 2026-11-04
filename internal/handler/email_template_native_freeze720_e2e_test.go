@@ -25,7 +25,7 @@ func TestServiceEmailNativeSendFreezesSelectedRevisionE2E(t *testing.T) {
 	q := newOwnedAutomationAuthorizationFixtureV1(t)
 	ownedCreationPrepareProPlanV1(t, q)
 	f := q.f
-	legacy, err := f.q.EnqueueEmailDelivery(f.ctx, generated.EnqueueEmailDeliveryParams{ToEmail: "old-queue@synthetic.example.test", Subject: "Original legacy pending", HtmlBody: "<p>Original</p>", TextBody: "Original", HeadersJson: json.RawMessage(`{}`)})
+	legacy, err := f.q.EnqueueEmailDelivery(f.ctx, generated.EnqueueEmailDeliveryParams{OrgID: f.user.OrgID, ToEmail: "old-queue@synthetic.example.test", Subject: "Original legacy pending", HtmlBody: "<p>Original</p>", TextBody: "Original", HeadersJson: json.RawMessage(`{}`)})
 	if err != nil || legacy == nil {
 		t.Fatal("original queue fixture unavailable", err)
 	}
@@ -73,10 +73,13 @@ func TestServiceEmailNativeSendFreezesSelectedRevisionE2E(t *testing.T) {
 		var id uuid.UUID
 		var subject, body, text, replyTo, fromName, headers, status string
 		var attempts int32
-		if err := f.pool.QueryRow(f.ctx, `SELECT id,subject,html_body,text_body,reply_to,from_name,headers_json::text,status,attempts FROM email_deliveries WHERE to_email=$1`, email).Scan(&id, &subject, &body, &text, &replyTo, &fromName, &headers, &status, &attempts); err != nil {
+		var smtpOrg uuid.UUID
+		var smtpPurpose string
+		var nonceAbsent bool
+		if err := f.pool.QueryRow(f.ctx, `SELECT id,subject,html_body,text_body,reply_to,from_name,headers_json::text,status,attempts,smtp_org_id,smtp_purpose,smtp_claim_nonce IS NULL FROM email_deliveries WHERE to_email=$1`, email).Scan(&id, &subject, &body, &text, &replyTo, &fromName, &headers, &status, &attempts, &smtpOrg, &smtpPurpose, &nonceAbsent); err != nil {
 			t.Fatal(err)
 		} //nolint:rawsql -- actual native queue output witness
-		if id == uuid.Nil || !strings.Contains(subject, "edition "+label) || !strings.Contains(body, "Edition "+label) || !strings.Contains(text, "Edition "+label) || !strings.Contains(body, "/sign/") || replyTo != f.user.Email || fromName != f.s.Send.OrgName || headers != "{}" || status != "pending" || attempts != 0 {
+		if smtpOrg != f.user.OrgID || smtpPurpose != "workspace" || !nonceAbsent || id == uuid.Nil || !strings.Contains(subject, "edition "+label) || !strings.Contains(body, "Edition "+label) || !strings.Contains(text, "Edition "+label) || !strings.Contains(body, "/sign/") || replyTo != f.user.Email || fromName != f.s.Send.OrgName || headers != "{}" || status != "pending" || attempts != 0 {
 			t.Fatal("native producer did not retain exact edition/action/address/queue contract")
 		}
 		return id, queueSnapshot(id)

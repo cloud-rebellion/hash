@@ -760,6 +760,7 @@
 </script>
 
 <svelte:head>
+  <title>{ctx?.privacy?.controller ? `${ctx.document_name} · ${ctx.privacy.controller}` : 'Document'}</title>
   <link rel="stylesheet" href="/fonts/fonts.css" />
 </svelte:head>
 
@@ -779,7 +780,7 @@
   <header class="signer-bar">
     <div class="brand">
       <FileSignature class="size-4" />
-      <span>Hash</span>
+      <span>{ctx?.privacy?.controller || 'Document'}</span>
     </div>
     <div class="bar-right">
       {#if ctx}

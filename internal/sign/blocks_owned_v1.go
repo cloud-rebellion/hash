@@ -418,6 +418,12 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		if err != nil {
 			return fmt.Errorf("bind signature notice evidence: %w", err)
 		}
+		stage = "sender_event_prepare"
+		senderNotice, err := w.PrepareSenderEventNoticeV1(call, e.BaseURL)
+		if err != nil {
+			return errors.Join(ErrSigningAdmissionUnavailableV1, err)
+		}
+		defer senderNotice.CloseConsumerV1()
 		stage = "audit_package"
 		packageEvent, err := w.PackageResponseAuditV1(call, payload)
 		if err != nil {
@@ -440,6 +446,10 @@ func (e *Engine) signBlocksOwnedV1(ctx context.Context, rc *RecipientContext, in
 		stage = "report_admit"
 		if err = w.AdmitResponseReportV1(call, auditOwner); err != nil {
 			return responseReportAdmissionErrorV1(err)
+		}
+		stage = "sender_event_notice"
+		if err = senderNotice.EnqueueV1(call, auditOwner); err != nil {
+			return errors.Join(ErrSigningAdmissionUnavailableV1, err)
 		}
 		stage = "recipient_recheck"
 		fresh, err = w.ReadBlockSignatureRecipientV1(call)

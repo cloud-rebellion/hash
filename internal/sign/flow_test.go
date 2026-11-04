@@ -437,7 +437,8 @@ func TestSignRejectsOverlongTypedNameBeforeDependencies(t *testing.T) {
 func TestCommentNotificationUsesTransactionalOutbox(t *testing.T) {
 	store := &completionStoreStub{}
 	engine := &Engine{Mailer: dispatch.QueueingMailer{}, OrgName: "Hash"}
-	messages, err := engine.prepareNotificationTx(context.Background(), store, dispatch.KindNewComment, "sender@example.test", dispatch.TemplateContext{
+	org := uuid.New()
+	messages, err := engine.prepareNotificationTx(context.Background(), store, org, dispatch.KindNewComment, "sender@example.test", dispatch.TemplateContext{
 		DocumentName:  "International agreement",
 		RecipientName: "Åsa Öberg",
 		OrgName:       "Hash",
@@ -449,13 +450,13 @@ func TestCommentNotificationUsesTransactionalOutbox(t *testing.T) {
 	if len(messages) != 1 || len(store.enqueued) != 1 {
 		t.Fatalf("messages=%d outbox rows=%d, want one of each", len(messages), len(store.enqueued))
 	}
-	if store.enqueued[0].ToEmail != "sender@example.test" || store.enqueued[0].HtmlBody == "" || store.enqueued[0].TextBody == "" {
+	if messages[0].OrgID != org || store.enqueued[0].OrgID != org || store.enqueued[0].ToEmail != "sender@example.test" || store.enqueued[0].HtmlBody == "" || store.enqueued[0].TextBody == "" {
 		t.Fatalf("incomplete durable comment delivery: %+v", store.enqueued[0])
 	}
 
 	wantErr := errors.New("forced outbox failure")
 	failingStore := &completionStoreStub{enqueueAt: 1, enqueueErr: wantErr}
-	if _, err := engine.prepareNotificationTx(context.Background(), failingStore, dispatch.KindNewComment, "sender@example.test", dispatch.TemplateContext{
+	if _, err := engine.prepareNotificationTx(context.Background(), failingStore, uuid.New(), dispatch.KindNewComment, "sender@example.test", dispatch.TemplateContext{
 		DocumentName: "Agreement", RecipientName: "Signer", OrgName: "Hash", DeclineReason: "Comment",
 	}); !errors.Is(err, wantErr) {
 		t.Fatalf("enqueue failure = %v, want %v", err, wantErr)

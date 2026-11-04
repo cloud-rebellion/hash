@@ -34,6 +34,7 @@ var ErrServiceEmailTemplateV1 = errors.New("invalid service email template")
 // the actual native producer. A DTO or byte limit is never resource admission.
 type ServiceEmailTemplateV1 struct {
 	Revision        int64  `json:"revision"`
+	DesignJSON      string `json:"design_json,omitempty"`
 	SubjectTemplate string `json:"subject_template"`
 	HTMLTemplate    string `json:"html_template"`
 	TextTemplate    string `json:"text_template"`
@@ -218,6 +219,10 @@ func ValidateServiceEmailTemplateV1(kind string, in ServiceEmailTemplateV1) (Ser
 		return ServiceEmailTemplateV1{}, ErrServiceEmailTemplateV1
 	}
 	var err error
+	in.DesignJSON, err = CanonicalServiceEmailDesignV1(in.DesignJSON)
+	if err != nil {
+		return ServiceEmailTemplateV1{}, err
+	}
 	in.HTMLTemplate, err = serviceEmailSafeHTMLV1(in.HTMLTemplate)
 	if err != nil || len(in.HTMLTemplate) > ServiceEmailHTMLSourceBytesV1 {
 		return ServiceEmailTemplateV1{}, ErrServiceEmailTemplateV1
@@ -307,6 +312,19 @@ func ServiceEmailTemplateComponentsV1(c TemplateContext, tpl *ServiceEmailTempla
 		}
 		t += n + 2
 	}
+	if tpl.DesignJSON != "" {
+		design, e := DecodeServiceEmailDesignV1(tpl.DesignJSON)
+		if e != nil {
+			return 0, 0, 0, e
+		}
+		h, err = ServiceEmailDesignHTMLBytesV1(design, c, h)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if tpl.DesignJSON != "" {
+		t += int64(len(emailDesignBrandV1(c))) + 256
+	}
 	if h < bh || t < bt {
 		return 0, 0, 0, ErrServiceEmailTemplateV1
 	}
@@ -378,5 +396,16 @@ func RenderServiceEmailV1(kind string, c TemplateContext, tpl *ServiceEmailTempl
 		}
 		text = intro + "\n\n" + text
 	}
+	if tpl.DesignJSON != "" {
+		text = themeServiceEmailPlainFooterV1(c, text)
+		body, err = ApplyServiceEmailDesignV1(tpl.DesignJSON, c, body)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
 	return
 }
+
+// ServiceEmailTextSourceV1 applies the unchanged control/UTF-8 policy to a
+// bounded owner design instruction before the configured AI boundary.
+func ServiceEmailTextSourceV1(s string) bool { return serviceEmailTextV1(s, false) }

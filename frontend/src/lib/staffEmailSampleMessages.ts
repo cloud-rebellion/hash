@@ -1,0 +1,17 @@
+export const swedishEmailSampleMessages: Record<string, string> = {
+  'Send a template test': 'Provskicka en e-postmall',
+  'Send the saved design to your own account email using this workspace’s SMTP. Document details are synthetic and signing links are inactive.': 'Skicka den sparade designen till ditt kontos e-postadress via arbetsytans SMTP. Dokumentuppgifterna är fiktiva och signeringslänkarna är inaktiva.',
+  'Save or cancel your edits before sending a test.': 'Spara eller avbryt ändringarna innan du provskickar.',
+  'Configure workspace email delivery first': 'Konfigurera först arbetsytans e-postleverans',
+  'Send saved template test': 'Provskicka sparad mall',
+  'Check test status': 'Kontrollera testets status',
+  'Check delivery settings': 'Kontrollera leveransinställningar',
+  'SMTP accepted the test. Check your inbox; inbox delivery is not confirmed here.': 'SMTP-servern har tagit emot testet. Kontrollera din inkorg; mottagandet i inkorgen bekräftas inte här.',
+  'Test delivery failed. Review workspace SMTP settings before trying again.': 'Testleveransen misslyckades. Kontrollera arbetsytans SMTP-inställningar innan du försöker igen.',
+  'The test is queued. SMTP acceptance and inbox delivery are still pending.': 'Testet ligger i kö. SMTP-serverns mottagande och leveransen till inkorgen återstår.',
+  'Could not confirm whether the test was queued. Check your inbox and reload before another test.': 'Det gick inte att bekräfta om testet lades i kö. Kontrollera inkorgen och ladda om innan du provskickar igen.',
+  'The saved template or delivery settings changed. Reload and review before testing.': 'Den sparade mallen eller leveransinställningarna har ändrats. Ladda om och granska innan du testar.',
+  'A test is pending or was requested recently. Check its status before sending another.': 'Ett test väntar eller begärdes nyligen. Kontrollera dess status innan du skickar ett nytt.',
+  'Owner access is no longer available. Sign in again.': 'Ägarbehörigheten är inte längre tillgänglig. Logga in igen.',
+  'Could not check the email test. Try again.': 'Det gick inte att kontrollera e-posttestet. Försök igen.',
+};

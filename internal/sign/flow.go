@@ -1180,7 +1180,7 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 		if credential.rec == nil || strings.TrimSpace(credential.rawToken) == "" {
 			return nil, errors.New("render completion emails: recipient credential is incomplete")
 		}
-		message, err := renderNotificationEmail(dispatch.KindCompletedSigner, credential.rec.Email, dispatch.TemplateContext{
+		message, err := renderNotificationEmail(doc.OrgID, dispatch.KindCompletedSigner, credential.rec.Email, dispatch.TemplateContext{
 			DocumentName:      doc.Name,
 			SenderName:        sender.Name,
 			SenderEmail:       sender.Email,
@@ -1199,7 +1199,7 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 		messages = append(messages, message)
 	}
 	senderURL := baseURL + "/api/v1/documents/" + doc.ID.String() + "/final-pdf"
-	senderMessage, err := renderNotificationEmail(dispatch.KindCompletedSender, sender.Email, dispatch.TemplateContext{
+	senderMessage, err := renderNotificationEmail(doc.OrgID, dispatch.KindCompletedSender, sender.Email, dispatch.TemplateContext{
 		DocumentName:    doc.Name,
 		SenderName:      sender.Name,
 		SenderEmail:     sender.Email,
@@ -1215,13 +1215,14 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 	return append(messages, senderMessage), nil
 }
 
-func renderNotificationEmail(kind, to string, templateContext dispatch.TemplateContext) (dispatch.Message, error) {
+func renderNotificationEmail(orgID uuid.UUID, kind, to string, templateContext dispatch.TemplateContext) (dispatch.Message, error) {
 	subject, htmlBody, textBody, err := dispatch.Render(kind, templateContext)
 	if err != nil {
 		return dispatch.Message{}, fmt.Errorf("render %s: %w", kind, err)
 	}
 	return dispatch.Message{
-		To: to, Subject: subject, HTML: htmlBody, Text: textBody,
+		OrgID: orgID,
+		To:    to, Subject: subject, HTML: htmlBody, Text: textBody,
 		ReplyTo: templateContext.SenderEmail, FromName: templateContext.OrgName,
 	}, nil
 }
@@ -1230,11 +1231,11 @@ func renderNotificationEmail(kind, to string, templateContext dispatch.TemplateC
 // notifications. Production QueueingMailer messages are persisted through the
 // caller's transaction-scoped query handle; non-queue adapters receive the
 // already-rendered message synchronously after commit via deliverPostCommitEmails.
-func (e *Engine) prepareNotificationTx(ctx context.Context, q emailDeliveryEnqueuer, kind, to string, templateContext dispatch.TemplateContext) ([]dispatch.Message, error) {
+func (e *Engine) prepareNotificationTx(ctx context.Context, q emailDeliveryEnqueuer, orgID uuid.UUID, kind, to string, templateContext dispatch.TemplateContext) ([]dispatch.Message, error) {
 	if e.Mailer == nil {
 		return nil, nil
 	}
-	message, err := renderNotificationEmail(kind, to, templateContext)
+	message, err := renderNotificationEmail(orgID, kind, to, templateContext)
 	if err != nil {
 		return nil, err
 	}
@@ -1261,6 +1262,9 @@ func enqueueNotificationEmailsTx(ctx context.Context, q emailDeliveryEnqueuer, m
 		return errors.New("email outbox is unavailable")
 	}
 	for _, message := range messages {
+		if message.OrgID == uuid.Nil {
+			return errors.New("email workspace scope unavailable")
+		}
 		headers := json.RawMessage("{}")
 		if len(message.Headers) > 0 {
 			encoded, err := json.Marshal(message.Headers)
@@ -1270,7 +1274,7 @@ func enqueueNotificationEmailsTx(ctx context.Context, q emailDeliveryEnqueuer, m
 			headers = encoded
 		}
 		delivery, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{
-			ToEmail: message.To, Subject: message.Subject, HtmlBody: message.HTML, TextBody: message.Text,
+			OrgID: message.OrgID, ToEmail: message.To, Subject: message.Subject, HtmlBody: message.HTML, TextBody: message.Text,
 			ReplyTo: message.ReplyTo, FromName: message.FromName, HeadersJson: headers,
 		})
 		if err != nil {
@@ -1387,7 +1391,7 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 		if err != nil {
 			return fmt.Errorf("load decline notification sender: %w", err)
 		}
-		notificationMessages, err = e.prepareNotificationTx(ctx, q, dispatch.KindDeclined, sender.Email, dispatch.TemplateContext{
+		notificationMessages, err = e.prepareNotificationTx(ctx, q, lockedDoc.OrgID, dispatch.KindDeclined, sender.Email, dispatch.TemplateContext{
 			DocumentName:  lockedDoc.Name,
 			SenderName:    sender.Name,
 			SenderEmail:   sender.Email,
@@ -1545,7 +1549,7 @@ func (e *Engine) requestChangesLegacyV1(ctx context.Context, rc *RecipientContex
 			approveURL = strings.TrimRight(e.BaseURL, "/") + "/a/cr?t=" + actiontoken.Mint(e.ActionSecret, approve, e.now(), 14*24*time.Hour)
 			denyURL = strings.TrimRight(e.BaseURL, "/") + "/a/cr?t=" + actiontoken.Mint(e.ActionSecret, deny, e.now(), 14*24*time.Hour)
 		}
-		notificationMessages, err = e.prepareNotificationTx(ctx, q, dispatch.KindChangesRequested, sender.Email, dispatch.TemplateContext{
+		notificationMessages, err = e.prepareNotificationTx(ctx, q, lockedDoc.OrgID, dispatch.KindChangesRequested, sender.Email, dispatch.TemplateContext{
 			DocumentName:   lockedDoc.Name,
 			SenderName:     sender.Name,
 			SenderEmail:    sender.Email,

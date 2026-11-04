@@ -281,29 +281,74 @@ See [owner settings](API-GUIDE.md#owner-settings-and-organization-credentials).
 See [AI requests](API-GUIDE.md#ai-requests-and-negotiation-metadata) and
 [MCP envelope authoring](API-GUIDE.md#mcp-envelope-authoring).
 
-## MCP email content
+## Email content, design and synthetic previews
 
-Organization owners can use `list_service_email_templates` and
-`preview_service_email_template` with an organization-wide `read` key, and
-`save_service_email_template` with `write:authoring`. Document-scoped tokens
-cannot use these tools. The original key and live owner membership are checked
-again in the same service transaction as the REST email settings.
+Organization owners use `list_service_email_templates` and
+`preview_service_email_template` with an organization-wide `read` key.
+`save_service_email_template` and `propose_service_email_design` require
+`write:authoring`. Document-scoped tokens cannot use these tools. The original
+key and live owner membership are checked in the same service transactions as
+REST settings; a proposal rechecks the current owner and revision after AI IO.
 
-List takes `{}` and returns the nine email kinds, current revisions, `editable`
-capabilities, allowed variables and byte limits. Preview and Save require exactly
-`kind`, `expected_revision`, `subject_template`, `html_template` and
-`text_template`. Use the observed revision; conflicts require reloading and
-reviewing the draft. All three source strings empty reset an editable kind to
-built-in content on Save. Six kinds are editable; the other three accept only
-built-in synthetic Preview, with revision zero and empty source strings.
+List takes `{}` and returns nine kinds, six editable capabilities, revisions,
+allowed variables and source byte limits. Preview and Save require `kind`,
+`expected_revision`, `subject_template`, `html_template` and `text_template`.
+REST uses `GET /api/v1/email-templates`, `PUT /api/v1/email-templates/{kind}`
+and `POST /api/v1/email-templates/{kind}/preview`, with kind in the path.
+The optional `design_json` is a JSON string: omission preserves the saved
+edition, an empty string explicitly clears it, and null is rejected. A missing
+response field means the legacy empty design. Revision conflicts require reload
+and review. Empty content strings select built-in copy; clear design separately
+to restore the entire legacy presentation. Built-in-only kinds permit revision
+zero, empty content and no design in synthetic Preview; they cannot be saved.
 
-These tools edit only the subject and introductory content. Hash retains the
-required action, security and legal section. HTML allows bounded safe formatting,
-without custom links, images, attributes or CSS. Preview uses synthetic data and
-does not save, send email or invoke an AI provider. Save changes future eligible
-email content; it does not send a message or rewrite already frozen messages.
-There is no SMTP, sender identity, tracking, AI generation or full-layout design
-configuration in this tool group.
+A v1 design has `schema_version:1`, `layout_html`, lowercase six-digit hex
+`background`, `surface`, `primary`, `text`, nullable `logo` and `logo_alt`.
+The source limits are subject256B, HTML16384B, text8192B, design131072B,
+layout16384B and logo-alt200B, all UTF-8. A logo is
+`{name:"logo",media_type:"image/png"|"image/jpeg",data_base64,sha256}`;
+its exact decoded bytes must match the lowercase SHA-256 and fit32768B and
+512px per dimension. Hash uses the existing embedded raster validator.
+Exactly one standalone `{{native_content}}` slot is required under visible
+safe div/table containers; a logo needs one standalone `{{logo}}` slot.
+Layout allows bounded formatting/inline colors, spacing and typography.
+Authored links/images, scripts, remote resources, CSS URLs and concealed native
+actions are refused. Surface/text contrast must be at least4.5:1. Introduction
+HTML retains its narrower formatting-only contract with no attributes or CSS.
+Hash preserves actual action URLs, signing mode, deadlines and security/issuer
+content, themes native CTA/readability and uses workspace presentation branding.
+Empty legacy design preserves the existing message bytes. Rendered/frozen logo
+bytes are self-contained; final SMTP MIME embeds the same digest bytes by CID.
+
+Preview is synthetic and never saves, sends or invokes AI. Proposal requires
+all Preview fields plus `prompt` (1..4096 UTF-8 bytes), through the MCP tool or
+owner-session `POST /api/v1/email-templates/{kind}/propose`. It uses the current
+enabled workspace AI provider and its existing accounting/Shield boundaries;
+there is no default-provider fallback or provider/key configuration here. Logo
+bytes stay local. The result contains `input`, synthetic `preview` and
+`saved:false`. Review the candidate, then explicitly Save with the observed
+revision. Save affects future eligible messages and never rewrites frozen mail.
+Email-open tracking remains disabled; no pixel or remote-image tracking is added.
+
+## Workspace SMTP
+
+Live owner sessions configure encrypted, revisioned workspace delivery through
+`GET/PUT/DELETE /api/v1/workspace-smtp`. Synthetic owner-only tests use the real
+outbox through `POST /api/v1/workspace-smtp/test` and the scoped status GET.
+Usernames/passwords are never returned. SMTP acceptance is separate from inbox
+delivery. See [Workspace SMTP](WORKSPACE-SMTP.md) for exact fields, TLS/egress,
+credential-retention protections and migration compatibility.
+
+`POST /api/v1/email-templates/{kind}/test` tests the observed saved or built-in
+edition and requires
+`expected_smtp_revision` and `expected_template_revision`. The authenticated
+owner's current address is the sole destination; both revisions and the actual
+owner are checked in one transaction. The queued subject/body use visibly
+labelled synthetic details and unresolvable example.invalid actions. The receipt
+pins kind/revision and SHA-256 of final subject/HTML/text; a later template edit
+cannot change or authorize those frozen bytes. The existing transport-test
+cooldown/status contract remains in force. A pending receipt or SMTP acceptance
+does not promise inbox delivery or prove signing/customer acceptance.
 
 ## Negotiation and legal lifecycle
 
@@ -503,12 +548,31 @@ before database mutation instead of creating an unusable recipient default.
 
 ### Reminder scheduling and delivery
 
+Sender/owner sessions use `GET/PUT /api/v1/automation-preferences` for their
+own `notify_viewed` and `notify_signed` opt-ins; both default to false. PUT
+requires `expected_revision` and both booleans. These optional emails target
+only the real document sender, from actual committed lifecycle events. Viewed
+means first document view per recipient per send, never an email-open signal.
+
+`GET/PUT /api/v1/templates/{id}/reminder-policy` sets a template default;
+`GET/PUT /api/v1/documents/{id}/reminder-policy` selects a sender-owned draft
+override. PUT requires `expected_revision`, `mode`, `interval_days`, `max_fires`;
+document PUT also requires the observed `expected_updated_at`. Document purpose,
+editability, current source timestamp/evidence/privacy, tenant and live credential
+checks remain authoritative. Policy modes are legacy (0days/max2, offsets3/7),
+disabled (0/0), interval (1..365days with1..floor(365/interval_days) firings).
+A draft may select inherit with0/0. Absent settings retain legacy defaults.
+Send freezes the actual effective policy and source revisions once; replay and
+manual reminders never refill counts or rewrite an in-flight frozen schedule.
+Intervals are fixed24h days, independent of database session DST. Existing
+in-flight documents retain their legacy semantics.
+
 Automatic reminder offsets (`days_after_send`) use the document's send
 timestamp, not the previous reminder's processing time. The default second
 reminder is day7 after send, rather than day10 after a day3 first reminder.
 Overdue schedules remain due. Manual Remind moves an existing schedule's
-`next_fire_at` to three days after the manual transaction's time and records
-`last_fired_at`; it does not replenish `fires_remaining` or recreate a missing
+`next_fire_at` by the frozen policy's manual delay (three days for legacy,
+the selected interval for interval mode) and records `last_fired_at`; it does not replenish `fires_remaining` or recreate a missing
 schedule. Remaining automatic offsets still use the original send timestamp.
 
 REST `POST /api/v1/documents/{id}/remind` returns `{"reminded": count}` for the

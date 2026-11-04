@@ -34,6 +34,7 @@ var PublicEventKinds = map[string]struct{}{
 	"document.completed":       {},
 	"document.declined":        {},
 	audit.KindChangesRequested: {},
+	audit.KindCommentPosted:    {},
 	"document.voided":          {},
 	"document.expired":         {},
 	"recipient.created":        {},
@@ -83,6 +84,15 @@ func LoadEvent(ctx context.Context, q *generated.Queries, eventID uuid.UUID) (We
 	payload := map[string]any{}
 	if len(e.PayloadJson) > 0 {
 		_ = json.Unmarshal(e.PayloadJson, &payload)
+	}
+	if e.Kind == audit.KindCommentPosted {
+		if !e.DocumentID.Valid || uuid.UUID(e.DocumentID.Bytes) == uuid.Nil {
+			return WebhookEvent{}, errors.New("invalid shared comment webhook document")
+		}
+		payload, err = chatWebhookPayloadV1(payload)
+		if err != nil {
+			return WebhookEvent{}, err
+		}
 	}
 	var document map[string]any
 	var automationRequestID string

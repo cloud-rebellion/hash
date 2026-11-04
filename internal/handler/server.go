@@ -549,9 +549,22 @@ func (s *Server) Routes() http.Handler {
 		}
 
 		// Revisioned service email content: every read/preview/edit retains the live owner.
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/workspace-smtp", s.handleGetWorkspaceSMTP)
+		r.With(auth.RequireRole(auth.RoleOwner)).Put("/workspace-smtp", s.handleSaveWorkspaceSMTP)
+		r.With(auth.RequireRole(auth.RoleOwner)).Delete("/workspace-smtp", s.handleDeleteWorkspaceSMTP)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/workspace-smtp/test", s.handleTestWorkspaceSMTP)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/workspace-smtp/test/{id}", s.handleWorkspaceSMTPTestStatus)
+		r.With(auth.RequireRole(auth.RoleSender)).Get("/automation-preferences", s.handleGetAutomationPreferencesV1)
+		r.With(auth.RequireRole(auth.RoleSender)).Put("/automation-preferences", s.handleSaveAutomationPreferencesV1)
+		r.With(auth.RequireRole(auth.RoleSender)).Get("/templates/{id}/reminder-policy", s.handleTemplateReminderPolicyV1)
+		r.With(auth.RequireRole(auth.RoleSender)).Put("/templates/{id}/reminder-policy", s.handleTemplateReminderPolicyV1)
+		r.With(auth.RequireRole(auth.RoleSender)).Get("/documents/{id}/reminder-policy", s.handleDocumentReminderPolicyV1)
+		r.With(auth.RequireRole(auth.RoleSender)).Put("/documents/{id}/reminder-policy", s.handleDocumentReminderPolicyV1)
 		r.With(auth.RequireRole(auth.RoleOwner)).Get("/email-templates", s.handleListEmailTemplates)
 		r.With(auth.RequireRole(auth.RoleOwner)).Put("/email-templates/{kind}", s.handleSaveEmailTemplate)
 		r.With(auth.RequireRole(auth.RoleOwner)).Post("/email-templates/{kind}/preview", s.handlePreviewEmailTemplate)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/email-templates/{kind}/propose", s.handleProposeEmailDesignV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/email-templates/{kind}/test", s.handleTestSavedEmailTemplateV1)
 
 		// Phase 8.5: org-level brand theming. Read = any session; edits = owner.
 		r.Get("/branding", s.handleGetOrgBranding)

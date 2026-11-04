@@ -41,6 +41,7 @@ type ApplicationHTMLSendWorkV1 struct {
 	presignRetained                                                                                   *presignexecute.RetainedAssetsV1
 	presignRetainedAttempted                                                                          bool
 	reminder                                                                                          *applicationReminderStateV1
+	reminderPolicyAttempted                                                                           bool
 	reminderIdentityAttempted                                                                         bool
 	fieldListRead, fieldListCredentialRead                                                            bool
 	mu                                                                                                sync.Mutex
@@ -759,6 +760,11 @@ func (w *ApplicationHTMLSendWorkV1) ReadConfirmationV1(ctx context.Context) (*ge
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.readConfirmationLockedV1(ctx)
+}
+
+// Caller holds the same native Work mutex and its retained SQL/body owner.
+func (w *ApplicationHTMLSendWorkV1) readConfirmationLockedV1(ctx context.Context) (*generated.DocumentLawfulBasisConfirmation, error) {
 	if !w.valid(ctx) || w.state == nil {
 		return nil, ErrHTMLSendWorkV1
 	}

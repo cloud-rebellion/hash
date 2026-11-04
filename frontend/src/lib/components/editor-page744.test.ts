@@ -173,6 +173,8 @@ async function views() {
       builder.onResolve({ filter: /^\$lib\/pdf$/ }, () => ({ path: 'browser-only-pdf', namespace: 'no-ssr-pdf' }));
       builder.onLoad({ filter: /.*/, namespace: 'no-ssr-pdf' }, () => ({ contents: `throw new Error('Server rendering must not load the browser-only PDF renderer');`, loader: 'js' }));
       builder.onResolve({ filter: /^\$lib\// }, args => ({ path: Bun.resolveSync('./' + args.path.slice(5), lib) }));
+      // Use the actual SSR store file; avoid Bun's default-reader EISDIR in combined cohorts.
+      builder.onLoad({ filter: /\/svelte\/src\/store\/index-server\.js$/ }, async args => ({ contents: await Bun.file(args.path).text(), loader: 'js', resolveDir: dirname(args.path) }));
       builder.onLoad({ filter: /\.svelte$/ }, async args => ({ contents: compile(await Bun.file(args.path).text(), { filename: args.path, generate: 'server' }).js.code, loader: 'js', resolveDir: dirname(args.path) }));
     } }] });
     if (!build.success) throw Error(build.logs.map(String).join('\n'));

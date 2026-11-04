@@ -28,6 +28,8 @@
   import BlockEditor from '$lib/components/BlockEditor/Editor.svelte';
   import RiskPanel from '$lib/components/RiskPanel.svelte';
   import DocumentDownload from '$lib/components/DocumentDownload.svelte';
+  import ReminderPolicySettings from '$lib/components/ReminderPolicySettings.svelte';
+  import type { ReminderSnapshot } from '$lib/automationSettings';
   import EnvelopePanel from '$lib/components/EnvelopePanel.svelte';
   import SenderPanel from '$lib/components/SenderPanel.svelte';
   import TimelinePanel from '$lib/components/TimelinePanel.svelte';
@@ -128,6 +130,19 @@
   const attachmentOtherBusy=$derived(changingPurpose || purposeUnconfirmed || amendmentBusy || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy || pdfLayoutDirty);
   const crmOtherBusy = $derived(changingPurpose || purposeUnconfirmed || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || attachmentBarrier);
   let preSignPresentationBlocked = $state(false);
+  let reminderBlocked = $state(true), reminderBusy = $state(false), reminderDirty = $state(false), reminderUnconfirmed = $state(false);
+  const reminderApplies = $derived(!!doc && signingPurpose && viewerUserID === doc.sender_id && ['owner','sender'].includes(viewerRole) && !doc.parent_envelope_id);
+  const reminderScope = $derived(doc ? JSON.stringify([doc.id,doc.org_id,viewerUserID,viewerRole]) : '');
+  let seenReminderScope = '';
+  $effect.pre(() => { const scope = reminderScope; untrack(() => { if (scope !== seenReminderScope) { seenReminderScope = scope; reminderBlocked = true; reminderBusy = false; reminderDirty = false; reminderUnconfirmed = false; } }); });
+  const reminderOtherBusy = $derived(changingPurpose || purposeUnconfirmed || crmBusy || crmLocalIntent || senderMutationBusy || senderDraftDirty || attachmentBarrier || pdfLayoutBusy || pdfLayoutDirty || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || amendmentBusy || amendmentDirty || supersessionBusy || supersessionPending || (doc?.source_kind === 'blocks' && !blocksEditorClean) || (doc?.has_html_source === true && (!htmlEditorClean || htmlRevisionBlocked)));
+  async function receiveReminderPolicy(saved: ReminderSnapshot, scope: DocumentScope) {
+    if (!doc || !isCurrentDocument(scope,true) || saved.scope !== 'document' || saved.id !== doc.id) throw new Error('Reminder source changed');
+    if (saved.updated_at !== doc.updated_at) {
+      await loadDocument(doc.id,scope.routeRevision);
+      if (!doc || !isCurrentRoute(saved.id,scope.routeRevision) || doc.updated_at !== saved.updated_at) throw new Error('Reminder source refresh unconfirmed');
+    }
+  }
 
   type DocumentScope = { id: string; routeRevision: number; documentRevision: number };
   function isCurrentRoute(id: string, revision: number): boolean {
@@ -596,11 +611,13 @@
   });
 
   beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (to?.url.pathname !== from?.url.pathname && (reminderBusy || reminderUnconfirmed)) { cancel(); return; }
+    if (to?.url.pathname !== from?.url.pathname && reminderDirty && !window.confirm($ui('Discard unsaved reminder changes?'))) { cancel(); return; }
     if (!willUnload && to?.url.pathname !== from?.url.pathname && commentBody.trim()
         && !window.confirm('You have an unsent comment. Leave this document and discard the draft?')) cancel();
   });
   function protectCommentDraft(event: BeforeUnloadEvent) {
-    if (!commentBody.trim()) return;
+    if (!commentBody.trim() && !reminderDirty && !reminderBusy && !reminderUnconfirmed) return;
     event.preventDefault();
     event.returnValue = '';
   }
@@ -890,15 +907,22 @@
         onSaved={(updated,expected,reconciliation)=>receiveAttachmentDocument(updated,expected,documentScope,reconciliation)}
         onStateChange={(state)=>{if(isCurrentDocument(documentScope)){attachmentBusy=state.busy;attachmentDirty=state.dirty;attachmentSendBlocked=state.blocked;attachmentMessage=state.message;attachmentPackageSend=state.packageSend;}}} />
       {/if}
+      {#if reminderApplies}
+        {#key reminderScope}{@const capturedReminderScope = reminderScope}
+          <div class="mb-5"><ReminderPolicySettings scope="document" id={doc.id} documentUpdatedAt={doc.updated_at} readonly={amendmentReadOnly || doc.status !== 'draft'} externalBlocked={reminderOtherBusy}
+            onStateChange={(state) => { if(capturedReminderScope === reminderScope && isCurrentDocument(documentScope)){ reminderBlocked = state.blocked; reminderBusy = state.busy; reminderDirty = state.dirty; reminderUnconfirmed = state.unconfirmed; } }}
+            onSaved={(saved) => receiveReminderPolicy(saved,documentScope)} /></div>
+        {/key}
+      {/if}
       {#if signingPurpose}
       <SenderPanel bind:this={senderPanel}
         documentID={doc.id}
         status={doc.status}
         requiresSignature={doc.requires_signature !== false}
         reviewRequired={doc.has_html_source === true && doc.html_review_required === true}
-        revisionBlocked={amendmentLookupBlocked || amendmentNotice || amendmentBusy || (doc.has_html_source === true && htmlRevisionBlocked) || (crmEditable && doc.source_kind === 'blocks' && !blocksEditorClean)}
+        revisionBlocked={(reminderApplies && reminderBlocked) || amendmentLookupBlocked || amendmentNotice || amendmentBusy || (doc.has_html_source === true && htmlRevisionBlocked) || (crmEditable && doc.source_kind === 'blocks' && !blocksEditorClean)}
         attachmentsBlocked={doc.status==='draft' && doc.source_kind==='pdf' && !doc.is_envelope && !doc.parent_envelope_id && (!attachmentEligible || attachmentSendBlocked)} attachmentsMessage={attachmentMessage} packageSend={attachmentPackageSend} packageReviewRevision={attachmentReviewRevision} packageReconciliationBusy={attachmentReconciliationBusy || attachmentBusy} onPackageReviewRequired={(inspect)=>requestPackageReview(inspect,documentScope)}
-        externalMutationBusy={changingPurpose || purposeUnconfirmed || attachmentBarrier || amendmentBusy} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
+        externalMutationBusy={(reminderApplies && (reminderBusy || reminderUnconfirmed)) || changingPurpose || purposeUnconfirmed || attachmentBarrier || amendmentBusy} onDraftStateChange={(dirty)=>{if(isCurrentDocument(documentScope))senderDraftDirty=dirty;}}
         crmBlocked={crmEditable && (crmBlocked || crmReviewRequired)} {crmBusy} {crmReviewRevision}
         onCRMReviewRequired={() => { crmDetailsOpen = true; requestCRMReview(documentScope); }}
         onMutationStateChange={(busy) => { if (isCurrentDocument(documentScope)) senderMutationBusy = busy; }}

@@ -153,7 +153,40 @@ describe('owner email template callbacks', () => {
   test('synthetic preview document puts restrictive CSP before supplied content', () => {
     const html = emailPreviewDocument('<p>Sample</p>');
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<p>Sample'));
-    expect(html).toContain("default-src 'none'"); expect(html).toContain("img-src 'none'");
+    expect(html).toContain("default-src 'none'"); expect(html).toContain("img-src data:");
     expect(html).toContain("form-action 'none'"); expect(html).toContain("base-uri 'none'");
   });
+});
+
+import { defaultEmailDesign } from './emailDesign';
+const branded = () => JSON.stringify(defaultEmailDesign());
+test('editing content preserves loaded design; explicit built-in design clearing uses the same immutable CAS', async () => {
+  const { editor, calls } = setup({ load: async () => ({ ...catalogue(), templates: [{ ...template(undefined, 5), design_json: branded() }] }) });
+  await editor.load(); editor.edit('text_template', 'Updated'); await editor.preview();
+  expect(calls.preview[0].design_json).toBe(branded()); editor.edit('design_json', ''); expect(await editor.save()).toBe(true);
+  expect(calls.save[0].design_json).toBe(''); expect(calls.save[0].expected_revision).toBe(5); editor.dispose();
+});
+test('AI proposal preview needs explicit accept into an unsaved draft and then an explicit CAS save', async () => {
+  const { editor, calls } = setup({ propose: async (kind, input) => ({ schema_version: 1, kind, expected_revision: input.expected_revision, saved: false,
+    input: { ...input, subject_template: 'AI proposed', design_json: branded() }, preview: rendered(input.expected_revision) }) });
+  await editor.load(); editor.edit('text_template', 'My intro'); expect(await editor.propose('Readable branded design')).toBe(true);
+  expect(get(editor).draft.subject_template).toBe(''); expect(get(editor).proposal?.preview.synthetic).toBe(true); expect(calls.save).toHaveLength(0);
+  expect(await editor.save()).toBe(false); expect(editor.acceptProposal()).toBe(true);
+  expect(get(editor).draft.subject_template).toBe('AI proposed'); expect(get(editor).dirty).toBe(true); expect(get(editor).selected?.revision).toBe(0);
+  expect(get(editor).previewOutdated).toBe(false); expect(calls.save).toHaveLength(0); expect(await editor.save()).toBe(true);
+  expect(calls.save[0].expected_revision).toBe(0); expect(calls.save[0].design_json).toBe(branded()); editor.dispose();
+});
+test('AI failed provider, stale revision and timeout retain draft and never invent a proposal or save', async () => {
+  for (const status of [412, 409, 403]) {
+    const { editor, calls } = setup({ propose: async () => { throw { status }; } }); await editor.load(); editor.edit('text_template', 'Keep draft');
+    expect(await editor.propose('Style')).toBe(false); expect(get(editor).draft.text_template).toBe('Keep draft'); expect(get(editor).proposal).toBeNull();
+    expect(calls.save).toHaveLength(0); expect(get(editor).conflict).toBe(status === 409); expect(get(editor).authorized).toBe(status !== 403); editor.dispose();
+  }
+  const late = deferred<any>(); const { editor } = setup({ propose: async () => late.promise }, { requestTimeoutMs: 10 }); await editor.load();
+  expect(await editor.propose('Style')).toBe(false); late.resolve({}); await Promise.resolve(); expect(get(editor).proposal).toBeNull(); expect(get(editor).busy).toBeNull(); editor.dispose();
+});
+test('editing after a proposal invalidates it, and malformed design refuses before a request', async () => {
+  const { editor, calls } = setup({ propose: async (kind, input) => ({ schema_version: 1, kind, expected_revision: input.expected_revision, saved: false, input: { ...input, design_json: branded() }, preview: rendered() }) });
+  await editor.load(); await editor.propose('Style'); editor.edit('text_template', 'Manual edit'); expect(get(editor).proposal).toBeNull(); expect(editor.acceptProposal()).toBe(false);
+  editor.edit('design_json', JSON.stringify({ ...defaultEmailDesign(), layout_html: '<div>Missing slot</div>' })); expect(await editor.preview()).toBe(false); expect(await editor.save()).toBe(false); expect(calls.preview).toHaveLength(0); expect(calls.save).toHaveLength(0); editor.dispose();
 });

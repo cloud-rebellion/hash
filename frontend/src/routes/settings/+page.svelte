@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, ArrowUpRight, Mail } from 'lucide-svelte';
+  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, ArrowUpRight, Mail, Bell } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
   import MCPConnectionGuide from '$lib/components/MCPConnectionGuide.svelte';
 
@@ -7,7 +7,8 @@
     { title: 'Workspace', description: 'People, presentation and your plan.', items: [
       { href: '/settings/members', label: 'Members & roles', desc: 'Manage who can view, prepare and send documents.', icon: Users },
       { href: '/settings/branding', label: 'Branding', desc: 'Choose your workspace logo, colors and fonts.', icon: Palette },
-      { href: '/settings/email', label: 'Email content', desc: 'Edit document email content and preview it with sample data.', icon: Mail },
+      { href: '/settings/delivery', label: 'Email delivery', desc: 'Connect this workspace’s own SMTP server and test delivery.', icon: Mail },
+      { href: '/settings/email', label: 'Email design', desc: 'Design branded emails, review AI proposals and send a saved template test.', icon: Mail },
       { href: '/settings/billing', label: 'Plans & invoices', desc: 'Review subscriptions, quotas and invoices.', icon: Receipt },
     ] },
     { title: 'Documents & signing', description: 'Signing rules and your authority to sign.', items: [
@@ -16,6 +17,7 @@
       { href: '/settings/eidas-rules', label: 'Signature levels', desc: 'Simple signatures are active; AES and QES are unavailable.', icon: Scale },
     ] },
     { title: 'Connections & automation', description: 'Use any CRM or automation with Hash’s API and status webhooks.', items: [
+      { href: '/settings/automations', label: 'Automations', desc: 'Choose your activity notices and reusable reminder defaults.', icon: Bell },
       { href: '/settings/api-keys', label: 'API & AI access', desc: 'Workspace owners manage scoped API and MCP access.', icon: KeyRound },
       { href: '/settings/webhooks', label: 'Webhooks', desc: 'Deliver signed status updates to another application.', icon: Webhook },
       { href: '/settings/ai', label: 'AI provider', desc: 'Configure the model provider used by AI features.', icon: Bot },

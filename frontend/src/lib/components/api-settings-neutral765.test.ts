@@ -32,9 +32,9 @@ async function renderLocales(page: keyof typeof pages, assertion: (html: string,
     expect(requests).toBe(0);
   } finally { m.setStaffLocale('en'); globalThis.fetch = previousFetch; }
 }
-test('actual Settings retains available email/API routes without a CRM-specific connection card in EN/SV', async () => {
+test('actual Settings retains email/automation/API routes without a CRM-specific connection card in EN/SV', async () => {
   await renderLocales('Settings', (html, locale) => {
-    for (const href of ['/settings/email', '/settings/api-keys', '/settings/webhooks', '/settings/branding', '/settings/members']) expect(html).toContain(`href="${href}"`);
+    for (const href of ['/settings/delivery', '/settings/email', '/settings/automations', '/settings/api-keys', '/settings/webhooks', '/settings/branding', '/settings/members']) expect(html).toContain(`href="${href}"`);
     expect(html).not.toContain('/settings/integrations/brightcrm'); expect(html).not.toContain('BrightCRM');
     expect(html).toContain(locale === 'sv' ? 'Anslut valfritt CRM eller automatisering' : 'Use any CRM or automation');
   });
@@ -49,13 +49,16 @@ test('actual API page explains template/prepared requests, outward status flow a
     expect(html).toContain(locale === 'sv' ? 'Integrationer via HTTP-API kräver inte MCP.' : 'HTTP API integrations do not require MCP.');
   });
 });
-test('actual webhook page explains receiving direction and signature completion without promising chat webhooks in EN/SV', async () => {
+test('actual webhook page explains receiving direction, completion and optional shared chat in EN/SV', async () => {
   await renderLocales('Webhooks', (html, locale) => {
     expect(html).toContain('href="/settings/api-keys"'); expect(html).toContain('X-Hash-Signature');
     expect(html).toContain(locale === 'sv' ? 'Från Hash till din applikation' : 'From Hash to your application');
     expect(html).toContain(locale === 'sv' ? 'mottagar-URL i din applikation' : 'receiving URL in your application');
     expect(html).toContain(locale === 'sv' ? 'alla obligatoriska signerare och slutbehandlingen är klara' : 'all required signers and finalization are complete');
-    expect(html).not.toContain('document.comment_posted'); expect(html).not.toContain('Hash stores only a hash'); expect(html).not.toContain('/webhooks/brightcrm');
+    expect(html).toContain('document.comment_posted');
+    expect(html).toContain(locale === 'sv' ? 'Aviseringar om delad dokumentchatt är valfria.' : 'Shared document chat notifications are optional.');
+    expect(html).toContain(locale === 'sv' ? 'meddelandetext och privat aktivitet ingår inte' : 'message text and private activity are not included');
+    expect(html).not.toContain('Hash stores only a hash'); expect(html).not.toContain('/webhooks/brightcrm');
   });
 });
 test('all three actual pages compile for browser/server without accessibility warnings', () => {

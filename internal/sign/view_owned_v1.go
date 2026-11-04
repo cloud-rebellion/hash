@@ -143,9 +143,17 @@ func (e *Engine) markViewedOwnedV1(ctx context.Context, rc *RecipientContext, ev
 		if err != nil {
 			return err
 		}
+		senderNotice, err := w.PrepareSenderEventNoticeV1(actual, e.BaseURL)
+		if err != nil {
+			return errors.Join(ErrSigningAdmissionUnavailableV1, err)
+		}
+		defer senderNotice.CloseConsumerV1()
 		pending, auditOwner, err = ownedaudit.LogV1(e.Audit, actual, session, pdfadmission.HTMLAuditSignerViewedV1, audit.Entry{OrgID: doc.OrgID, DocumentID: &doc.ID, RecipientID: &rec.ID, Kind: audit.KindDocumentViewed, IP: ip, UserAgent: ua, Payload: payload})
 		if err != nil {
 			return fmt.Errorf("audit document view: %w", err)
+		}
+		if err = senderNotice.EnqueueV1(actual, auditOwner); err != nil {
+			return errors.Join(ErrSigningAdmissionUnavailableV1, err)
 		}
 		// The token may expire naturally during an audit-head wait. The native
 		// recipient SHARE lock retains rotation while this final check runs.

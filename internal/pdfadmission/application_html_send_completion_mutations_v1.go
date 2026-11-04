@@ -28,9 +28,9 @@ type htmlSendCompletionRecipientV1 struct {
 	message                       dispatch.Message
 }
 type htmlSendCompletionOutputsV1 struct {
-	publicURL, orgName string
-	recipients         []htmlSendCompletionRecipientV1
-	packageOutbox      *applicationPackageSendOutboxBatchV1
+	publicURL, orgName, companyName string
+	recipients                      []htmlSendCompletionRecipientV1
+	packageOutbox                   *applicationPackageSendOutboxBatchV1
 }
 
 // PrepareCompletionOutputsV1 binds real instance configuration and the SAME
@@ -47,6 +47,10 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 		return ErrHTMLSendWorkV1
 	}
 	w.completionOutputsAttempted = true
+	companyName, err := w.readTenantPresentationNameLockedV1(call, w.sourceDocument)
+	if err != nil {
+		return err
+	}
 	n := int64(0)
 	if w.packageCompletion != nil {
 		if !w.packageCompletionScopeV1(call, w.packageCompletion.plan) {
@@ -59,7 +63,7 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 	if err := htmlSendResolverAddV1(&n, 1, int64(unsafe.Sizeof(htmlSendCompletionOutputsV1{}))); err != nil {
 		return err
 	}
-	for _, x := range [][2]int64{{int64(len(publicURL)), 2}, {int64(len(orgName)), 1}, {int64(len(w.sourceRecipients)), int64(unsafe.Sizeof(htmlSendCompletionRecipientV1{})) + 12*int64(unsafe.Sizeof("")) + 2*int64(unsafe.Sizeof(uuid.UUID{})) + 2*(43+32+32) + 8 + int64(unsafe.Sizeof(audit.Entry{})) + 8*int64(unsafe.Sizeof("")+unsafe.Sizeof(any(nil))+2*unsafe.Sizeof(uintptr(0)))}} {
+	for _, x := range [][2]int64{{int64(len(publicURL)), 2}, {int64(len(orgName)), 1}, {int64(len(companyName)), 1}, {int64(len(w.sourceRecipients)), int64(unsafe.Sizeof(htmlSendCompletionRecipientV1{})) + 12*int64(unsafe.Sizeof("")) + 2*int64(unsafe.Sizeof(uuid.UUID{})) + 2*(43+32+32) + 8 + int64(unsafe.Sizeof(audit.Entry{})) + 8*int64(unsafe.Sizeof("")+unsafe.Sizeof(any(nil))+2*unsafe.Sizeof(uintptr(0)))}} {
 		if err := htmlSendResolverAddV1(&n, x[0], x[1]); err != nil {
 			return err
 		}
@@ -90,7 +94,7 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 	beaconURL := publicURL + "/e/o/" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	output := int64(0)
 	for _, r := range w.sourceRecipients {
-		subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
+		subject, html, text, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: r.Name, OrgName: companyName, Locale: r.Locale, SignURL: signURL, BeaconURL: beaconURL, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 		if err != nil {
 			return err
 		}
@@ -107,7 +111,7 @@ func (w *ApplicationHTMLSendWorkV1) PrepareCompletionOutputsV1(call context.Cont
 		return errors.Join(ErrHTMLSendWorkV1, err)
 	}
 	w.closes = append(w.closes, closeOutput)
-	p := &htmlSendCompletionOutputsV1{publicURL: strings.Clone(publicURL), orgName: strings.Clone(orgName), recipients: make([]htmlSendCompletionRecipientV1, len(w.sourceRecipients))}
+	p := &htmlSendCompletionOutputsV1{publicURL: strings.Clone(publicURL), orgName: strings.Clone(orgName), companyName: strings.Clone(companyName), recipients: make([]htmlSendCompletionRecipientV1, len(w.sourceRecipients))}
 	for i, r := range w.sourceRecipients {
 		p.recipients[i].id = r.ID
 	}
@@ -189,16 +193,16 @@ func (w *ApplicationHTMLSendWorkV1) RenderInviteV1(call context.Context, id uuid
 	if err != nil {
 		return dispatch.Message{}, err
 	}
-	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: rec.Name, OrgName: p.orgName, Locale: rec.Locale, SignURL: p.publicURL + "/sign/" + item.token, BeaconURL: p.publicURL + "/e/o/" + item.token, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
+	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindInvite, dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail, RecipientName: rec.Name, OrgName: p.companyName, Locale: rec.Locale, SignURL: p.publicURL + "/sign/" + item.token, BeaconURL: p.publicURL + "/e/o/" + item.token, Acknowledgement: !w.sourceDocument.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return dispatch.Message{}, err
 	}
-	msg := dispatch.Message{To: rec.Email, Subject: subject, HTML: html, Text: text, ReplyTo: w.sourceIntent.ActorEmail, FromName: p.orgName}
-	item.message = dispatch.Message{To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
+	msg := dispatch.Message{OrgID: w.sourceDocument.OrgID, To: rec.Email, Subject: subject, HTML: html, Text: text, ReplyTo: w.sourceIntent.ActorEmail, FromName: p.orgName}
+	item.message = dispatch.Message{OrgID: msg.OrgID, To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
 	return msg, nil
 }
 func htmlSendInviteMessageEqualV1(a, b dispatch.Message) bool {
-	return len(a.Headers) == 0 && len(b.Headers) == 0 && a.To == b.To && a.Subject == b.Subject && a.HTML == b.HTML && a.Text == b.Text && a.ReplyTo == b.ReplyTo && a.FromName == b.FromName
+	return a.OrgID == b.OrgID && a.OrgID != uuid.Nil && len(a.Headers) == 0 && len(b.Headers) == 0 && a.To == b.To && a.Subject == b.Subject && a.HTML == b.HTML && a.Text == b.Text && a.ReplyTo == b.ReplyTo && a.FromName == b.FromName
 }
 func (w *ApplicationHTMLSendWorkV1) EnqueueEmailDeliveryV1(call context.Context, msg dispatch.Message) error {
 	if w == nil || w.self != w {
@@ -221,7 +225,7 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueEmailDeliveryV1(call context.Context,
 		return ErrHTMLSendWorkV1
 	}
 	item.enqueued = true
-	raw, err := htmlAuthoringSumV1(int64(len(msg.To)), int64(len(msg.Subject)), int64(len(msg.HTML)), int64(len(msg.Text)), int64(len(msg.ReplyTo)), int64(len(msg.FromName)), int64(len("pending")))
+	raw, err := htmlAuthoringSumV1(applicationWorkspaceSMTPPurposeBytesV1, int64(len(msg.To)), int64(len(msg.Subject)), int64(len(msg.HTML)), int64(len(msg.Text)), int64(len(msg.ReplyTo)), int64(len(msg.FromName)), int64(len("pending")))
 	if err != nil {
 		return err
 	}
@@ -236,20 +240,20 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueEmailDeliveryV1(call context.Context,
 			return err
 		}
 	} else {
-		closeBody, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, 2)
+		closeBody, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, 2+applicationWorkspaceSMTPWireBytesV1)
 		if err != nil {
 			return errors.Join(ErrHTMLSendWorkV1, err)
 		}
 		w.closes = append(w.closes, closeBody)
 	}
-	row, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
+	row, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: w.sourceDocument.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
 	if err != nil {
 		return fmt.Errorf("enqueue email to %s: %w", dispatch.MaskEmail(msg.To), err)
 	}
 	if row == nil {
 		return fmt.Errorf("enqueue email to %s returned no delivery", dispatch.MaskEmail(msg.To))
 	}
-	if row.ID == uuid.Nil || row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
+	if !applicationWorkspaceEmailDeliveryMatchesV1(row, w.sourceDocument.OrgID) || row.ID == uuid.Nil || row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
 		return ErrHTMLSendWorkV1
 	}
 	item.outboxID = row.ID

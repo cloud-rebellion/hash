@@ -42,6 +42,10 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	} else if !w.recipientsRead {
 		return ErrCommentRequestV1
 	}
+	companyName, err := w.readTenantPresentationNameLockedV1(call, w.sourceDocument)
+	if err != nil {
+		return err
+	}
 	out := &applicationCommentNotificationsV1{}
 	m.notifications = out
 	count := int64(0)
@@ -56,7 +60,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	}
 	raw := int64(2 * unsafe.Sizeof(applicationCommentNotificationsV1{}))
 	controls := int64(4*unsafe.Sizeof(dispatch.Message{}) + 4*unsafe.Sizeof(dispatch.TemplateContext{}) + 4*unsafe.Sizeof(generated.EmailDelivery{}) + 4*unsafe.Sizeof(generated.EnqueueEmailDeliveryParams{}) + 8*unsafe.Sizeof(uintptr(0)) + 4*unsafe.Sizeof(sync.Once{}))
-	if !htmlInputAddV1(&raw, count, controls) || !htmlInputAddV1(&raw, count, dispatch.CommentNotificationTemplateSourceBytesV1()*64) || !htmlInputAddV1(&raw, int64(len(orgName)), 2*(count+1)) || !htmlInputAddV1(&raw, int64(len(baseURL)), 2) || !htmlInputAddV1(&raw, 1, 2*(int64(len("/documents/"))+36)) {
+	if !htmlInputAddV1(&raw, count, controls) || !htmlInputAddV1(&raw, count, dispatch.CommentNotificationTemplateSourceBytesV1()*64) || !htmlInputAddV1(&raw, int64(len(orgName)), 2*(count+1)) || !htmlInputAddV1(&raw, int64(len(companyName)), 2*(count+1)) || !htmlInputAddV1(&raw, int64(len(baseURL)), 2) || !htmlInputAddV1(&raw, 1, 2*(int64(len("/documents/"))+36)) {
 		return ErrCommentRequestV1
 	}
 	closeInputs, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, 0)
@@ -72,7 +76,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	if signer {
 		openURL = strings.TrimRight(baseURL, "/") + "/documents/" + w.sourceDocument.ID.String()
 	}
-	template := dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, RecipientName: m.row.AuthorName, DeclineReason: m.row.Body, OrgName: orgName, OpenURL: openURL}
+	template := dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, RecipientName: m.row.AuthorName, DeclineReason: m.row.Body, OrgName: companyName, OpenURL: openURL}
 	if signer {
 		template.SenderName = w.sourceActor.Name
 		template.SenderEmail = w.sourceActor.Email
@@ -114,8 +118,8 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 		if int64(len(subject)) > s || int64(len(html)) > h || int64(len(text)) > t {
 			return ErrCommentRequestV1
 		}
-		msg := dispatch.Message{To: to, Subject: subject, HTML: html, Text: text, ReplyTo: template.SenderEmail, FromName: orgName}
-		private := dispatch.Message{To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
+		msg := dispatch.Message{OrgID: w.sourceDocument.OrgID, To: to, Subject: subject, HTML: html, Text: text, ReplyTo: template.SenderEmail, FromName: orgName}
+		private := dispatch.Message{OrgID: msg.OrgID, To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
 		out.messages = append(out.messages, private)
 		out.views = append(out.views, msg)
 		return nil
@@ -153,7 +157,10 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueCommentNotificationsV1(call context.C
 	out.enqueued = true
 	raw, wire := int64(0), int64(0)
 	for _, m := range out.messages {
-		for _, v := range [...]string{m.To, m.Subject, m.HTML, m.Text, m.ReplyTo, m.FromName, "pending", "{}"} {
+		if !htmlInputAddV1(&wire, 1, 16) {
+			return ErrCommentRequestV1
+		}
+		for _, v := range [...]string{m.To, m.Subject, m.HTML, m.Text, m.ReplyTo, m.FromName, "pending", "{}", "workspace"} {
 			if !htmlInputAddV1(&raw, int64(len(v)), 2) || !htmlInputAddV1(&wire, int64(len(v)), 1) {
 				return ErrCommentRequestV1
 			}
@@ -169,11 +176,11 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueCommentNotificationsV1(call context.C
 	w.closes = append(w.closes, closeRows)
 	out.deliveries = make([]*generated.EmailDelivery, 0, len(out.messages))
 	for _, m := range out.messages {
-		row, e := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: m.To, Subject: m.Subject, HtmlBody: m.HTML, TextBody: m.Text, ReplyTo: m.ReplyTo, FromName: m.FromName, HeadersJson: []byte("{}")})
+		row, e := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: w.sourceDocument.OrgID, ToEmail: m.To, Subject: m.Subject, HtmlBody: m.HTML, TextBody: m.Text, ReplyTo: m.ReplyTo, FromName: m.FromName, HeadersJson: []byte("{}")})
 		if e != nil {
 			return e
 		}
-		if row == nil || row.ID == uuid.Nil || row.LastError != "" || row.Attempts != 0 || row.SentAt.Valid || !applicationStampV1(row.CreatedAt) || !applicationStampV1(row.NextAttemptAt) || row.ToEmail != m.To || row.Subject != m.Subject || row.HtmlBody != m.HTML || row.TextBody != m.Text || row.ReplyTo != m.ReplyTo || row.FromName != m.FromName || row.Status != "pending" || !bytes.Equal(row.HeadersJson, []byte("{}")) {
+		if !applicationWorkspaceEmailDeliveryMatchesV1(row, w.sourceDocument.OrgID) || row == nil || row.ID == uuid.Nil || row.LastError != "" || row.Attempts != 0 || row.SentAt.Valid || !applicationStampV1(row.CreatedAt) || !applicationStampV1(row.NextAttemptAt) || row.ToEmail != m.To || row.Subject != m.Subject || row.HtmlBody != m.HTML || row.TextBody != m.Text || row.ReplyTo != m.ReplyTo || row.FromName != m.FromName || row.Status != "pending" || !bytes.Equal(row.HeadersJson, []byte("{}")) {
 			return ErrCommentRequestV1
 		}
 		out.deliveries = append(out.deliveries, row)

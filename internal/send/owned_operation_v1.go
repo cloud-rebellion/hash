@@ -248,6 +248,7 @@ func (o *ownedSendOperationV1) sendEmailV1(kind, toEmail, toName, docName, sende
 		slog.Warn("send: email template render failed", "kind", kind, "err", err)
 		return
 	}
+	msg.OrgID = o.org
 	o.mu.Lock()
 	if o.closed {
 		o.mu.Unlock()

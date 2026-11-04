@@ -50,6 +50,7 @@ import (
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/pdflayout"
 	"github.com/bright-interaction/hash/internal/recipients"
+	"github.com/bright-interaction/hash/internal/remindercadence"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -1326,9 +1327,7 @@ func (e *Engine) completeSealedSend(ctx context.Context, prepared *sealedSendSna
 	}
 
 	if !expiredBeforeInvite {
-		if err := q.UpsertReminderSchedule(ctx, generated.UpsertReminderScheduleParams{
-			DocumentID: doc.ID, Column2: []byte(`[{"days_after_send":3},{"days_after_send":7}]`), FiresRemaining: 2,
-		}); err != nil {
+		if _, err := remindercadence.FreezeAndInstallV1(ctx, q, doc, func(p remindercadence.PolicyV1) error { return p.ValidateV1() }); err != nil {
 			return SendResult{}, fmt.Errorf("complete send sealing: reminder schedule: %w", err)
 		}
 	}
@@ -1340,6 +1339,7 @@ func (e *Engine) completeSealedSend(ctx context.Context, prepared *sealedSendSna
 			if err != nil {
 				return SendResult{}, fmt.Errorf("complete send sealing: render invite: %w", err)
 			}
+			msg.OrgID = doc.OrgID
 			messages = append(messages, msg)
 		}
 		if err := enqueueLifecycleEmails(ctx, q, messages); err != nil {
@@ -1445,7 +1445,7 @@ func (e *Engine) completeSealedSend(ctx context.Context, prepared *sealedSendSna
 	}
 	if !queueBacked && !expiredBeforeInvite {
 		for _, inv := range invites {
-			e.sendEmail(dispatch.KindInvite, inv.email, inv.name, doc.Name, a.Email, inv.signURL, inv.beaconURL, inv.locale, doc.RequiresSignature)
+			e.sendEmail(doc.OrgID, dispatch.KindInvite, inv.email, inv.name, doc.Name, a.Email, inv.signURL, inv.beaconURL, inv.locale, doc.RequiresSignature)
 		}
 	}
 	return out, nil
@@ -2836,7 +2836,7 @@ func (e *Engine) renderEmail(kind, toEmail, toName, docName, senderEmail, signUR
 	}, nil
 }
 
-func (e *Engine) sendEmail(kind, toEmail, toName, docName, senderEmail, signURL, beaconURL, locale string, requiresSignature bool) {
+func (e *Engine) sendEmail(orgID uuid.UUID, kind, toEmail, toName, docName, senderEmail, signURL, beaconURL, locale string, requiresSignature bool) {
 	if e.Mailer == nil {
 		return
 	}
@@ -2845,6 +2845,7 @@ func (e *Engine) sendEmail(kind, toEmail, toName, docName, senderEmail, signURL,
 		slog.Warn("send: email template render failed", "kind", kind, "err", err)
 		return
 	}
+	msg.OrgID = orgID
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -2872,6 +2873,9 @@ func enqueueLifecycleEmails(ctx context.Context, q emailDeliveryEnqueuer, messag
 		return errors.New("email outbox unavailable")
 	}
 	for _, msg := range messages {
+		if msg.OrgID == uuid.Nil {
+			return errors.New("email workspace scope unavailable")
+		}
 		headers := json.RawMessage("{}")
 		if len(msg.Headers) > 0 {
 			encoded, err := json.Marshal(msg.Headers)
@@ -2881,7 +2885,7 @@ func enqueueLifecycleEmails(ctx context.Context, q emailDeliveryEnqueuer, messag
 			headers = encoded
 		}
 		row, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{
-			ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text,
+			OrgID: msg.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text,
 			ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: headers,
 		})
 		if err != nil {

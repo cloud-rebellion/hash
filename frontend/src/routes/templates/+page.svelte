@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, beforeNavigate } from '$app/navigation';
   import {
     listTemplates,
     getMe,
@@ -52,12 +52,13 @@
   const pendingCreation = $derived(!pendingChecked || !!pendingMarker || pendingMarkerInvalid || templateCreationUnconfirmed);
   const selectedBlockSigning = $derived(selectedTemplate?.source_kind === 'blocks' ? blockTemplateNeedsSigning(selectedTemplate.blocks_json) : false);
   let previewTemplate = $state<TemplateResponse | null>(null);
-  let previewOwner = $state.raw<{ retire(): Promise<void> } | undefined>(undefined);
+  let previewOwner = $state.raw<{ retire(): Promise<void>; canLeave(): boolean } | undefined>(undefined);
   let previewPanel = $state.raw<HTMLDivElement | undefined>(undefined);
   let creationPanel = $state.raw<HTMLDivElement | undefined>(undefined);
   let previewRevision = 0;
   let disposed = false;
   onDestroy(() => { disposed = true; recoveryController?.dispose(); });
+  beforeNavigate(({ cancel }) => { if (previewOwner && previewOwner.canLeave?.() !== true) cancel(); });
   function persistPending(marker: HTMLCreationMarker | null) { storeCreationMarker(window.sessionStorage, marker); pendingMarker = marker; }
   function recoverPending(marker: HTMLCreationMarker) {
     recoveryController?.dispose();
@@ -118,6 +119,7 @@
   }
 
   async function closePreview(): Promise<boolean> {
+    if (previewOwner && previewOwner.canLeave?.() !== true) return false;
     const revision = ++previewRevision;
     try { await previewOwner?.retire(); }
     catch { if (!disposed) error = $ui('The preview could not be closed. Refresh this page before opening another template.'); return false; }
@@ -264,7 +266,7 @@
   {#if error}<p role="alert" class="card p-4 mb-6 text-danger">{error}</p>{/if}
   {#if !selectedHTMLTemplate && recoveryController && pendingMarker}<div class="card p-6 mb-6"><CRMTemplatePopulationPanel controller={recoveryController} state={recoveryState} /></div>{/if}
 
-  {#if previewTemplate}<div bind:this={previewPanel} tabindex="-1" class="preview-panel-focus">{#key previewTemplate.id}<TemplateReadPreview bind:this={previewOwner} template={previewTemplate} onClose={() => { void closePreview(); }} onUse={() => { void usePreview(); }} disabled={creatingId !== null || pendingCreation || removalBusy} />{/key}</div>{/if}
+  {#if previewTemplate}<div bind:this={previewPanel} tabindex="-1" class="preview-panel-focus">{#key previewTemplate.id}<TemplateReadPreview bind:this={previewOwner} template={previewTemplate} canManageReminders={canManageTemplates} onClose={() => { void closePreview(); }} onUse={() => { void usePreview(); }} disabled={creatingId !== null || pendingCreation || removalBusy} />{/key}</div>{/if}
 
   <div bind:this={creationPanel} tabindex="-1" class="preview-panel-focus">
   {#if selectedHTMLTemplate}

@@ -1,6 +1,6 @@
 -- name: EnqueueEmailDelivery :one
-INSERT INTO email_deliveries (to_email, subject, html_body, text_body, reply_to, from_name, headers_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO email_deliveries (smtp_org_id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json)
+VALUES (sqlc.arg(org_id)::uuid, sqlc.arg(to_email)::text, sqlc.arg(subject)::text, sqlc.arg(html_body)::text, sqlc.arg(text_body)::text, sqlc.arg(reply_to)::text, sqlc.arg(from_name)::text, sqlc.arg(headers_json)::jsonb)
 RETURNING *;
 
 -- name: ClaimDueEmailDeliveries :many
@@ -19,6 +19,7 @@ WITH due AS (
 )
 UPDATE email_deliveries d
 SET status = 'retrying',
+    smtp_claim_nonce = gen_random_uuid(),
     next_attempt_at = now() + interval '5 minutes'
 FROM due
 WHERE d.id = due.id
@@ -32,6 +33,7 @@ WHERE id = $1;
 -- name: MarkEmailDeliveryRetrying :exec
 UPDATE email_deliveries
 SET status = 'retrying',
+    smtp_claim_nonce = gen_random_uuid(),
     attempts = attempts + 1,
     last_error = $2,
     next_attempt_at = $3

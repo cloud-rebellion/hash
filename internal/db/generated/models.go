@@ -918,6 +918,17 @@ type DocumentReadReportSizesV1 struct {
 	MeasuredAt                  pgtype.Timestamptz `json:"measured_at"`
 }
 
+type DocumentReminderPoliciesV1 struct {
+	DocumentID   uuid.UUID          `json:"document_id"`
+	OrgID        uuid.UUID          `json:"org_id"`
+	SenderUserID uuid.UUID          `json:"sender_user_id"`
+	Revision     int64              `json:"revision"`
+	Mode         string             `json:"mode"`
+	IntervalDays int32              `json:"interval_days"`
+	MaxFires     int32              `json:"max_fires"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
 type DocumentSigningAdmission struct {
 	ID                             uuid.UUID          `json:"id"`
 	OrgID                          uuid.UUID          `json:"org_id"`
@@ -1091,6 +1102,9 @@ type EmailDelivery struct {
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	SentAt              pgtype.Timestamptz `json:"sent_at"`
 	StaffAuthCiphertext []byte             `json:"staff_auth_ciphertext"`
+	SmtpOrgID           pgtype.UUID        `json:"smtp_org_id"`
+	SmtpPurpose         string             `json:"smtp_purpose"`
+	SmtpClaimNonce      pgtype.UUID        `json:"smtp_claim_nonce"`
 }
 
 type Event struct {
@@ -1325,6 +1339,30 @@ type OrgEmailTemplateRevisionsV1 struct {
 	HtmlTemplate    string             `json:"html_template"`
 	TextTemplate    string             `json:"text_template"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	DesignJson      string             `json:"design_json"`
+	DesignSha256    []byte             `json:"design_sha256"`
+}
+
+type OrgSmtpSettingsV1 struct {
+	OrgID            uuid.UUID          `json:"org_id"`
+	Revision         int64              `json:"revision"`
+	Mode             string             `json:"mode"`
+	ConfigCiphertext []byte             `json:"config_ciphertext"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	LastTestAt       pgtype.Timestamptz `json:"last_test_at"`
+}
+
+type OrgSmtpTestRequestsV1 struct {
+	EmailDeliveryID  uuid.UUID          `json:"email_delivery_id"`
+	OrgID            uuid.UUID          `json:"org_id"`
+	OwnerID          uuid.UUID          `json:"owner_id"`
+	SettingsRevision int64              `json:"settings_revision"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	TemplateKind     pgtype.Text        `json:"template_kind"`
+	TemplateRevision pgtype.Int8        `json:"template_revision"`
+	SubjectSha256    []byte             `json:"subject_sha256"`
+	HtmlSha256       []byte             `json:"html_sha256"`
+	TextSha256       []byte             `json:"text_sha256"`
 }
 
 type OrgSubscription struct {
@@ -1665,6 +1703,20 @@ type Reminder struct {
 	FiresRemaining int32              `json:"fires_remaining"`
 }
 
+type ReminderPolicySnapshotsV1 struct {
+	DocumentID             uuid.UUID          `json:"document_id"`
+	OrgID                  uuid.UUID          `json:"org_id"`
+	SenderUserID           uuid.UUID          `json:"sender_user_id"`
+	SentAt                 pgtype.Timestamptz `json:"sent_at"`
+	Source                 string             `json:"source"`
+	TemplatePolicyRevision int64              `json:"template_policy_revision"`
+	DocumentPolicyRevision int64              `json:"document_policy_revision"`
+	Mode                   string             `json:"mode"`
+	IntervalDays           int32              `json:"interval_days"`
+	MaxFires               int32              `json:"max_fires"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+}
+
 type SendSealingIntent struct {
 	DocumentID             uuid.UUID          `json:"document_id"`
 	OrgID                  uuid.UUID          `json:"org_id"`
@@ -1683,6 +1735,28 @@ type SendSealingIntent struct {
 	Article13NoticeEpochAt pgtype.Timestamptz `json:"article13_notice_epoch_at"`
 	PresignExecutionID     pgtype.UUID        `json:"presign_execution_id"`
 	PackageSendAttemptID   pgtype.UUID        `json:"package_send_attempt_id"`
+}
+
+type SenderAutomationPreferencesV1 struct {
+	OrgID        uuid.UUID          `json:"org_id"`
+	SenderUserID uuid.UUID          `json:"sender_user_id"`
+	Revision     int64              `json:"revision"`
+	NotifyViewed bool               `json:"notify_viewed"`
+	NotifySigned bool               `json:"notify_signed"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type SenderEventNoticeReceiptsV1 struct {
+	AuditEventID    uuid.UUID          `json:"audit_event_id"`
+	OrgID           uuid.UUID          `json:"org_id"`
+	DocumentID      uuid.UUID          `json:"document_id"`
+	RecipientID     uuid.UUID          `json:"recipient_id"`
+	SenderUserID    uuid.UUID          `json:"sender_user_id"`
+	SentAt          pgtype.Timestamptz `json:"sent_at"`
+	EventKind       string             `json:"event_kind"`
+	SignatureID     pgtype.UUID        `json:"signature_id"`
+	EmailDeliveryID uuid.UUID          `json:"email_delivery_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
 type Signature struct {
@@ -2030,6 +2104,17 @@ type Template struct {
 	HtmlMasterJson             []byte             `json:"html_master_json"`
 	HtmlContentSha256          []byte             `json:"html_content_sha256"`
 	PdfSanitizationReport      json.RawMessage    `json:"pdf_sanitization_report"`
+}
+
+type TemplateReminderPoliciesV1 struct {
+	TemplateID   uuid.UUID          `json:"template_id"`
+	OrgID        uuid.UUID          `json:"org_id"`
+	Revision     int64              `json:"revision"`
+	Mode         string             `json:"mode"`
+	IntervalDays int32              `json:"interval_days"`
+	MaxFires     int32              `json:"max_fires"`
+	UpdatedBy    uuid.UUID          `json:"updated_by"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type User struct {

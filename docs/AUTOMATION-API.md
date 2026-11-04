@@ -270,10 +270,33 @@ then apply signed callbacks idempotently without Hash storing the producer's raw
 event ID. The public document lifecycle kinds are `document.created`,
 `document.sent`, `document.opened`, `document.viewed`,
 `document.field_filled`, `document.signed`, `document.completed`,
-`document.declined`, `document.changes_requested`, `document.voided`, and
+`document.declined`, `document.changes_requested`, `document.comment_posted`, `document.voided`, and
 `document.expired`; recipient creation, invitation, and bounce events are also
 available. Events for documents created through other Hash surfaces omit
 `automation_request_id`.
+
+`document.comment_posted` is an explicit optional subscription for the shared
+per-document negotiation thread. Both sender and signer comments use it. The
+Settings checkbox starts unchecked; existing endpoint selections stay unchanged.
+Endpoint creation requires named events; wildcard subscriptions are not supported.
+Editor collaboration, internal notes and AI activity do not emit this callback.
+
+The normal event envelope retains `event_id`, `kind`, `occurred_at`, `org_id`,
+`document.id`, the signer `recipient.id` when applicable, and the optional
+`automation_request_id`. Its `payload` contains only:
+
+```json
+{"comment_id":"25c27554-8f39-4b6d-900b-ad3c0389ec78","side":"signer"}
+```
+
+`side` is `sender` or `signer`. Comment text, author names, addresses, body
+hashes, notice snapshots, IPs, HTML and bearer links/tokens are not included.
+Authorized staff can read the shared thread through the ordinary document
+comments API; this callback confers no read or reply permission. Hash retains
+its native comment email notifications and reminder delivery. Document viewing
+and signature events retain their existing meanings; this adds no email-open
+tracking. Deduplicate callbacks by `event_id` and verify `X-Hash-Signature` over
+the exact raw request body before applying an update.
 
 Hash webhook endpoint creation returns a newly generated signing `secret`
 exactly once. A receiver such as Reactor must store that returned value as the

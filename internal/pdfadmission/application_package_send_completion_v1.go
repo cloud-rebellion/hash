@@ -254,7 +254,7 @@ func (p *applicationPackageSendRetentionPlanV1) finalizeSendV1(call context.Cont
 		return err
 	}
 	if !noInvite {
-		if err = w.queries.UpsertReminderSchedule(call, generated.UpsertReminderScheduleParams{DocumentID: doc.ID, Column2: []byte(`[{"days_after_send":3},{"days_after_send":7}]`), FiresRemaining: 2}); err != nil {
+		if err = w.InstallReminderPolicyV1(call); err != nil {
 			return err
 		}
 		// Render every actual locale before the first outbox write, matching the

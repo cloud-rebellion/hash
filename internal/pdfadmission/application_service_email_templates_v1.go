@@ -4,6 +4,7 @@
 package pdfadmission
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"unsafe"
@@ -57,20 +58,23 @@ func applicationServiceEmailHeaderWorkV1() int64 {
 // read. Individual database/source limits are repeated before their sum.
 func applicationServiceEmailSourceWorkV1(h *generated.GetServiceEmailTemplateHeaderV1Row, org uuid.UUID, kind string) (int64, int64, error) {
 	if _, err := applicationServiceEmailKindIndexV1(kind); err != nil || h == nil || org == uuid.Nil || h.OrgID != org || h.Kind != kind || h.Revision <= 0 || !applicationStampV1(h.UpdatedAt) ||
-		h.SubjectBytes < 0 || h.SubjectBytes > 256 || h.HtmlBytes < 0 || h.HtmlBytes > 16384 || h.TextBytes < 0 || h.TextBytes > 8192 {
+		h.SubjectBytes < 0 || h.SubjectBytes > 256 || h.HtmlBytes < 0 || h.HtmlBytes > 16384 || h.TextBytes < 0 || h.TextBytes > 8192 || h.DesignBytes < 0 || h.DesignBytes > dispatch.ServiceEmailDesignSourceBytesV1 || (h.DesignBytes == 0 && len(h.DesignSha256) != 0) || (h.DesignBytes > 0 && len(h.DesignSha256) != 32) {
 		return 0, 0, ErrHTMLSendWorkV1
 	}
-	wire := h.SubjectBytes + h.HtmlBytes + h.TextBytes
+	wire := h.SubjectBytes + h.HtmlBytes + h.TextBytes + h.DesignBytes
 	work := 64*wire + 65536 + 8*int64(unsafe.Sizeof(generated.GetServiceEmailTemplateV1Row{})) + 8*int64(unsafe.Sizeof(dispatch.ServiceEmailTemplateV1{}))
+	if h.DesignBytes > 0 {
+		work += dispatch.ServiceEmailDesignFixedWorkBytesV1
+	}
 	return work, wire, nil
 }
 
 func applicationServiceEmailFromRowsV1(h *generated.GetServiceEmailTemplateHeaderV1Row, r *generated.GetServiceEmailTemplateV1Row, org uuid.UUID, kind string) (*dispatch.ServiceEmailTemplateV1, error) {
 	if _, _, err := applicationServiceEmailSourceWorkV1(h, org, kind); err != nil || r == nil || r.OrgID != org || r.Kind != kind || r.Revision != h.Revision || r.UpdatedAt != h.UpdatedAt ||
-		int64(len(r.SubjectTemplate)) != h.SubjectBytes || int64(len(r.HtmlTemplate)) != h.HtmlBytes || int64(len(r.TextTemplate)) != h.TextBytes {
+		int64(len(r.SubjectTemplate)) != h.SubjectBytes || int64(len(r.HtmlTemplate)) != h.HtmlBytes || int64(len(r.TextTemplate)) != h.TextBytes || int64(len(r.DesignJson)) != h.DesignBytes || !bytes.Equal(r.DesignSha256, h.DesignSha256) || !bytes.Equal(r.DesignSha256, dispatch.ServiceEmailDesignDigestV1(r.DesignJson)) {
 		return nil, ErrHTMLSendWorkV1
 	}
-	in := dispatch.ServiceEmailTemplateV1{Revision: r.Revision, SubjectTemplate: r.SubjectTemplate, HTMLTemplate: r.HtmlTemplate, TextTemplate: r.TextTemplate}
+	in := dispatch.ServiceEmailTemplateV1{Revision: r.Revision, SubjectTemplate: r.SubjectTemplate, HTMLTemplate: r.HtmlTemplate, TextTemplate: r.TextTemplate, DesignJSON: r.DesignJson}
 	checked, err := dispatch.ValidateServiceEmailTemplateV1(kind, in)
 	if err != nil || checked != in {
 		return nil, errors.Join(ErrHTMLSendWorkV1, err)

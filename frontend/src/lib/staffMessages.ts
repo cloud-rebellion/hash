@@ -1,3 +1,7 @@
+import { swedishAutomationMessages } from './staffAutomationMessages';
+import { swedishEmailDesignMessages } from './staffEmailDesignMessages';
+import { swedishEmailSampleMessages } from './staffEmailSampleMessages';
+import { swedishDeliveryStaffMessages } from './staffDeliveryMessages';
 import { swedishEditorSettingsMessages } from './staffEditorSettingsMessages';
 import { swedishRemovalStaffMessages } from './staffRemovalMessages';
 import { swedishEmailStaffMessages } from './staffEmailMessages';
@@ -8,6 +12,7 @@ import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
 // English literals are stable lookup keys; untranslated staff text remains readable.
 export const swedishStaffMessages: Record<string, string> = {
   ...swedishEditorStaffMessages,
+  'Shared document chat notifications are optional. Select document.comment_posted to receive comment IDs and the sender or signer side; message text and private activity are not included.': 'Aviseringar om delad dokumentchatt är valfria. Välj document.comment_posted för att få kommentarens ID och avsändarsidan eller signerarsidan; meddelandetext och privat aktivitet ingår inte.',
   'Dashboard': 'Översikt',
   'Documents': 'Dokument',
   'Templates': 'Mallar',
@@ -482,4 +487,8 @@ export const swedishStaffMessages: Record<string, string> = {
   "No connection to a specific CRM is required. The receiving application verifies each event and chooses how to update its own records.": "Ingen anslutning till ett specifikt CRM krävs. Den mottagande applikationen verifierar varje händelse och väljer hur dess egna poster ska uppdateras.",
   "Manage API access": "Hantera API-åtkomst",
   "This signing secret is shown only once. Copy it into your receiving application and keep it private. To replace it, delete and recreate this endpoint. Each endpoint has its own secret.": "Signeringshemligheten visas bara en gång. Kopiera den till din mottagande applikation och håll den privat. Ta bort och skapa om denna slutpunkt för att byta hemlighet. Varje slutpunkt har en egen hemlighet.",
+  ...swedishDeliveryStaffMessages,
+  ...swedishAutomationMessages,
+  ...swedishEmailDesignMessages,
+  ...swedishEmailSampleMessages,
 };

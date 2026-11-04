@@ -5,7 +5,7 @@ import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate } from './e
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 const item = (kind: EmailTemplateKind = emailTemplateKinds[0], revision = 0) => ({ kind, revision, editable: editableEmailTemplateKinds.includes(kind), subject_template: '', html_template: '', text_template: '', variables: ['document_name'], mandatory_content: 'appended_by_hash' });
-const catalog = () => ({ schema_version: 1, templates: emailTemplateKinds.map(kind => item(kind)), limits: { subject_bytes: 256, html_bytes: 16384, text_bytes: 8192 }, preview_synthetic: true });
+const catalog = () => ({ schema_version: 1, templates: emailTemplateKinds.map(kind => item(kind)), limits: { subject_bytes: 256, html_bytes: 16384, text_bytes: 8192, design_bytes: 131072 }, preview_synthetic: true });
 const input = { expected_revision: 2, subject_template: 'Hello {{recipient_name}}', html_template: '<p>Hello</p>', text_template: 'Hello' };
 function respond(value: unknown, status = 200) {
   const calls: { path: string; options: RequestInit }[] = [];
@@ -70,4 +70,56 @@ describe('email template HTTP contract', () => {
     try { await saveEmailTemplate('email.invite', input, new AbortController().signal); throw new Error('accepted'); }
     catch (error) { expect(error).toMatchObject({ status: 409 }); expect(String(error)).not.toContain('database'); }
   });
+});
+
+import { defaultEmailDesign } from '../emailDesign';
+import { proposeEmailDesign } from './emailTemplates';
+const designSource = () => JSON.stringify(defaultEmailDesign());
+const proposal = () => ({ schema_version: 1, saved: false, kind: 'email.invite', expected_revision: 2,
+  input: { ...input, design_json: designSource() },
+  preview: { schema_version: 1, synthetic: true, revision: 2, subject: 'Proposal', html: '<p>Native</p>', text: 'Native', mandatory_content_preserved: true } });
+test('design omission is preserved and explicit empty design is forwarded for CAS clearing', async () => {
+  for (const draft of [input, { ...input, design_json: '' }, { ...input, design_json: designSource() }]) {
+    const calls = respond({ ...item(undefined, 3), ...draft, revision: 3 });
+    await saveEmailTemplate('email.invite', draft, new AbortController().signal);
+    expect(JSON.parse(String(calls[0].options.body))).toEqual(draft);
+  }
+});
+test('source byte limits and returned malformed design reject rather than silently dropping design', async () => {
+  const calls = respond(item(undefined, 3));
+  for (const patch of [{ design_json: null }, { design_json: '{"schema_version":1}' }, { design_json: ' '.repeat(131073) }, { subject_template: 'å'.repeat(129) }]) {
+    await expect(saveEmailTemplate('email.invite', { ...input, ...patch } as any, new AbortController().signal)).rejects.toThrow();
+  }
+  expect(calls).toHaveLength(0);
+  const data = catalog(); (data.templates[0] as any).design_json = '{"schema_version":1}'; respond(data);
+  await expect(listEmailTemplates(new AbortController().signal)).rejects.toThrow();
+});
+test('the complete nine-design catalogue can exceed the old512KiB bound while every row is validated', async () => {
+  const bytes = new Uint8Array(32768); const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  const large = JSON.stringify({ ...defaultEmailDesign(), layout_html: '<div>' + 'a'.repeat(16200) + '{{logo}}{{native_content}}</div>', logo: { name: 'logo', media_type: 'image/png', data_base64: btoa(String.fromCharCode(...bytes)), sha256 } });
+  const data = catalog(); for (const row of data.templates) { if (row.editable) Object.assign(row, { design_json: large, revision: 1 }); }
+  // Escape legal JSON whitespace to exercise the actual wire bound beyond512KiB.
+  const wire = JSON.stringify(data).replaceAll('a'.repeat(16200), '\\u0061'.repeat(16200)); expect(JSON.parse(wire)).toEqual(data); expect(wire.length).toBeGreaterThan(512 * 1024);
+  globalThis.fetch = (async () => new Response(wire, { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+  expect((await listEmailTemplates(new AbortController().signal)).templates).toHaveLength(9);
+  const invalid = catalog(); (invalid.templates[0] as any).design_json = large.replace(sha256, '0'.repeat(64)); respond(invalid);
+  await expect(listEmailTemplates(new AbortController().signal)).rejects.toThrow('commitment');
+});
+test('configured-workspace AI proposal is one explicit POST and rejects saved, foreign or unbound candidates', async () => {
+  const calls = respond(proposal()); const candidate = await proposeEmailDesign('email.invite', input, 'A calm, readable layout', new AbortController().signal);
+  expect(candidate.saved).toBe(false); expect(calls).toHaveLength(1); expect(calls[0].path).toBe('/api/v1/email-templates/email.invite/propose');
+  expect(JSON.parse(String(calls[0].options.body))).toEqual({ ...input, prompt: 'A calm, readable layout' });
+  for (const patch of [{ saved: true }, { kind: 'email.reminder' }, { expected_revision: 3 }, { input: { ...input, design_json: null } }]) {
+    respond({ ...proposal(), ...patch }); await expect(proposeEmailDesign('email.invite', input, 'Style', new AbortController().signal)).rejects.toThrow();
+  }
+});
+test('preview supports bounded complete branded HTML and rejects an oversized stream', async () => {
+  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(200000), text: '', mandatory_content_preserved: true });
+  expect((await previewEmailTemplate('email.invite', input, new AbortController().signal)).html.length).toBe(200000);
+  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(262145), text: '', mandatory_content_preserved: true });
+  await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
+  let cancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(4 * 1024 * 1024)); }, cancel() { cancelled = true; } }))) as typeof fetch;
+  await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow('bound'); expect(cancelled).toBe(true);
 });

@@ -15,7 +15,7 @@
   let newURL = $state('');
   let evt = $state({
     sent: true, viewed: false, signed: true, completed: true,
-    declined: true, changesRequested: true, voided: false, expired: false, bounced: false
+    declined: true, changesRequested: true, commentPosted: false, voided: false, expired: false, bounced: false
   });
   let creating = $state(false);
 
@@ -54,6 +54,7 @@
       if (evt.completed) events.push('document.completed');
       if (evt.declined) events.push('document.declined');
       if (evt.changesRequested) events.push('document.changes_requested');
+      if (evt.commentPosted) events.push('document.comment_posted');
       if (evt.voided) events.push('document.voided');
       if (evt.expired) events.push('document.expired');
       if (evt.bounced) events.push('recipient.bounced');
@@ -113,6 +114,7 @@
     <p class="text-sm leading-relaxed text-text-secondary">{$ui('Your CRM or automation calls Hash’s HTTP API to start a signature request. Enter a receiving URL in your application here; Hash posts the selected events to it.')}</p>
     <p class="text-sm leading-relaxed text-text-secondary">{$ui('For signature requests, document.signed reports each signer’s progress. document.completed means all required signers and finalization are complete.')}</p>
     <p class="text-sm leading-relaxed text-text-secondary">{$ui('No connection to a specific CRM is required. The receiving application verifies each event and chooses how to update its own records.')}</p>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('Shared document chat notifications are optional. Select document.comment_posted to receive comment IDs and the sender or signer side; message text and private activity are not included.')}</p>
     <a href="/settings/api-keys" class="btn btn-secondary">{$ui('Manage API access')}</a>
   </section>
 
@@ -181,6 +183,7 @@
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.completed} /> {$ui("document.completed")}</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.declined} /> {$ui("document.declined")}</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.changesRequested} /> {$ui("document.changes_requested")}</label>
+        <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.commentPosted} /> {$ui("document.comment_posted")}</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.voided} /> {$ui("document.voided")}</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.expired} /> {$ui("document.expired")}</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.bounced} /> {$ui("recipient.bounced")}</label>

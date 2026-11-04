@@ -268,7 +268,7 @@ func (e *EngineV1) PrepareV1(ctx context.Context, in InputV1) (out *PreparedV1, 
 			}
 		}
 	}
-	cost := int64(1<<20) + 4*int64(len(in.FileSetBytes)) + int64(len(in.RecipientEmails))*(12*int64(len(in.Subject)+len(in.Text)+len(in.ReplyTo)+len(in.FromName))+16384)
+	cost := int64(1<<20) + 4*int64(len(in.FileSetBytes)) + int64(len(in.RecipientEmails))*(12*int64(len(in.Subject)+len(in.Text)+len(in.ReplyTo)+len(in.FromName))+16384+2*16)
 	grant, err := e.work.TryAcquireV1(ctx, in.OrgID, workguard.VectorV1{ParentBytes: cost})
 	if err != nil {
 		return nil, ErrUnavailableV1
@@ -339,7 +339,7 @@ func (e *EngineV1) PrepareV1(ctx context.Context, in InputV1) (out *PreparedV1, 
 		link := e.publicURL + "/notice/" + in.NoticeID.String() + "#access=" + token
 		text := in.Text + "\n\nRead the exact files declared in this notice:\n" + link + "\n\nThis link permits reading only. It does not request a signature or acknowledgement. Link expires " + in.IssuedAt.Add(AccessTTL).Format(time.RFC3339) + ".\n"
 		htmlBody := "<p>" + strings.ReplaceAll(html.EscapeString(in.Text), "\n", "<br>") + "</p><p><a href=\"" + html.EscapeString(link) + "\">Read the exact notice files</a></p><p>Reading is not a signature, acknowledgement or verified delivery receipt. Link expires " + in.IssuedAt.Add(AccessTTL).Format(time.RFC3339) + ".</p>"
-		message := dispatch.Message{To: recipient, Subject: in.Subject, HTML: htmlBody, Text: text, ReplyTo: in.ReplyTo, FromName: in.FromName}
+		message := dispatch.Message{OrgID: in.OrgID, To: recipient, Subject: in.Subject, HTML: htmlBody, Text: text, ReplyTo: in.ReplyTo, FromName: in.FromName}
 		messageSHA, err := QueueMessageSHA256V1(message)
 		if err != nil {
 			return out, err

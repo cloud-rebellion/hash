@@ -33,3 +33,18 @@ test('new email controls and errors are Swedish through the real staff preferenc
   expect(translateStaffText('sv', 'Only workspace owners can manage email templates.')).toContain('ägare');
   expect(translateStaffText('en', 'Email templates')).toBe('Email templates');
 });
+
+test('sample-send uses current saved identity and every original-owner dirty/conflict/busy barrier', () => {
+  const tree: any = parse(source, { modern: true }); let guard: any;
+  function walk(node: any) {
+    if (!node || typeof node !== 'object') return;
+    if (node.name === 'EmailTemplateSampleSend') { const value = node.attributes.find((a: any) => a.name === 'disabled').value; guard = (Array.isArray(value) ? value[0] : value).expression; }
+    for (const value of Object.values(node)) { if (Array.isArray(value)) value.forEach(walk); else if (value && typeof value === 'object') walk(value); }
+  }
+  walk(tree.fragment); expect(guard).toBeDefined();
+  const disabled = new Function('env', `with(env) { return ${source.slice(guard.start, guard.end)}; }`);
+  const env = { busy: false, $editor: { dirty: false, authorized: true, conflict: false } }; expect(disabled(env)).toBe(false);
+  for (const flag of ['dirty', 'conflict']) { (env.$editor as any)[flag] = true; expect(disabled(env)).toBe(true); (env.$editor as any)[flag] = false; }
+  env.$editor.authorized = false; expect(disabled(env)).toBe(true); env.$editor.authorized = true; env.busy = true; expect(disabled(env)).toBe(true);
+  expect(source).toContain("{#key $editor.selected.kind + ':' + $editor.selected.revision}");
+});

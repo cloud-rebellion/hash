@@ -1,11 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { ArrowLeft, Check, ChevronRight, Code2, Eye, FileText, Mail, RotateCcw, Save, ShieldCheck } from 'lucide-svelte';
+  import { onMount, untrack } from 'svelte';
+  import { ArrowLeft, Check, ChevronRight, Code2, Eye, FileText, Mail, RotateCcw, Save, ShieldCheck, Sparkles, Palette, Upload, X } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
   import { createEmailTemplateEditor, canEditEmailTemplate, emailDraftProblems, emailFieldBytes, emailPreviewDocument, type EmailTemplateKind, type EmailField } from '$lib/emailTemplateEditor';
-  import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate } from '$lib/api/emailTemplates';
+  import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate, proposeEmailDesign } from '$lib/api/emailTemplates';
 
-  const editor = createEmailTemplateEditor({ load: listEmailTemplates, preview: previewEmailTemplate, save: saveEmailTemplate });
+  import { emailDesignDraft, localEmailLogo, type EmailDesign } from '$lib/emailDesign';
+  import EmailTemplateSampleSend from './EmailTemplateSampleSend.svelte';
+
+  let { controller }: { controller?: ReturnType<typeof createEmailTemplateEditor> } = $props();
+  const editor = untrack(() => controller) ?? createEmailTemplateEditor({ load: listEmailTemplates, preview: previewEmailTemplate, save: saveEmailTemplate, propose: proposeEmailDesign });
   let format = $state<'html' | 'text'>('html');
   const info: Record<EmailTemplateKind, { name: string; description: string }> = {
     'email.invite': { name: 'Signature invitation', description: 'When a recipient is invited to review and sign.' },
@@ -21,16 +25,40 @@
   const selectedInfo = $derived($editor.selected ? info[$editor.selected.kind] : null);
   const problems: Partial<Record<EmailField, string>> = $derived($editor.catalog ? emailDraftProblems($editor.draft, $editor.catalog.limits) : {});
   const invalid = $derived(Object.keys(problems).length > 0);
-  const busy = $derived($editor.busy !== null);
+  let prompt = $state('');
+  let logoBusy = $state(false);
+  let logoError = $state<string | null>(null);
+  let alive = true;
+  const design = $derived(emailDesignDraft($editor.draft.design_json));
+  const activePreview = $derived($editor.proposal?.preview ?? $editor.preview);
+  const busy = $derived($editor.busy !== null || logoBusy);
   const locked = $derived(busy || !$editor.authorized);
   const editable = $derived(canEditEmailTemplate($editor.selected));
   const editorLocked = $derived(locked || !editable);
-  const previewHTML = $derived($editor.preview ? emailPreviewDocument($editor.preview.html) : '');
-  onMount(() => { void editor.load(); return editor.dispose; });
+  const previewHTML = $derived(activePreview ? emailPreviewDocument(activePreview.html) : '');
+  onMount(() => { void editor.load(); return () => { alive = false; editor.dispose(); }; });
 
   function resetToBuiltIn() {
     if (editorLocked) return;
     editor.edit('subject_template', ''); editor.edit('html_template', ''); editor.edit('text_template', '');
+  }
+
+  function updateDesign(field: keyof EmailDesign, value: EmailDesign[keyof EmailDesign]) {
+    if (editorLocked) return;
+    editor.edit('design_json', JSON.stringify({ ...design, [field]: value }));
+  }
+  async function selectLogo(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0]; input.value = '';
+    if (!file || editorLocked) return;
+    const source = $editor.draft.design_json, kind = $editor.selected?.kind, revision = $editor.selected?.revision;
+    logoBusy = true; logoError = null;
+    try {
+      const logo = await localEmailLogo(file);
+      if (!alive || $editor.selected?.kind !== kind || $editor.selected?.revision !== revision || $editor.draft.design_json !== source) return;
+      editor.edit('design_json', JSON.stringify({ ...design, logo, layout_html: design.layout_html.includes('{{logo}}') ? design.layout_html : '<div>{{logo}}</div>' + design.layout_html }));
+    } catch { if (alive) logoError = 'Use a local PNG or JPEG logo up to 32 KiB and 512 pixels.'; }
+    finally { if (alive) logoBusy = false; }
   }
 </script>
 
@@ -40,8 +68,8 @@
     <div class="flex flex-wrap items-end justify-between gap-4">
       <div class="space-y-2">
         <p class="page-eyebrow">{$ui('Workspace · Email')}</p>
-        <h1 class="page-title">{$ui('Email content')}</h1>
-        <p class="max-w-2xl text-sm text-text-secondary">{$ui('Edit subjects and introductory content. Hash keeps the required signing and security section.')}</p>
+        <h1 class="page-title">{$ui('Email design')}</h1>
+        <p class="max-w-2xl text-sm text-text-secondary">{$ui('Design your workspace emails. Hash keeps the required signing and security section.')}</p>
       </div>
       <div class="flex items-center gap-2 rounded-full border border-border px-3 py-1.5 text-xs text-text-secondary"><ShieldCheck class="size-3.5" /> {$ui('Owners only')}</div>
     </div>
@@ -49,7 +77,7 @@
 
   <div class="flex items-start gap-3 rounded-xl border border-border bg-bg-elevated px-4 py-3 text-xs leading-relaxed text-text-secondary">
     <Mail class="mt-0.5 size-4 shrink-0" />
-    <p>{$ui('Delivery uses this installation’s SMTP settings. This page edits content and creates sample previews; it does not change the sender or send a test email.')}</p>
+    <p>{$ui('Design, preview and test your emails. Configure this workspace’s own sender and SMTP server in Delivery settings.')} <a href="/settings/delivery" class="underline underline-offset-4">{$ui('Email delivery')}</a></p>
   </div>
 
   {#if $editor.error}
@@ -93,6 +121,48 @@
               <span id="email-subject-help" class="mt-1.5 block text-xs text-text-secondary">{problems.subject_template ? $ui(problems.subject_template) : $ui('Optional. Keep the subject on one line.')}</span>
             </label>
 
+            {#if editable}
+              <section class="space-y-4 rounded-xl border border-border p-4" aria-label={$ui('Brand and layout')}>
+                <div class="flex items-center gap-2"><Palette class="size-4 text-text-secondary" /><h3 class="text-xs font-medium text-text-primary">{$ui('Brand and layout')}</h3></div>
+                <p class="text-xs leading-relaxed text-text-secondary">{$ui('Choose colours, upload your logo and edit the layout around the required message. Changes belong to this email template.')}</p>
+                <div class="grid grid-cols-2 gap-3">
+                  {#each [{ key: 'background', label: 'Background' }, { key: 'surface', label: 'Message surface' }, { key: 'primary', label: 'Action colour' }, { key: 'text', label: 'Text colour' }] as colour}
+                    <label class="block text-xs text-text-secondary" for={'email-colour-' + colour.key}>{$ui(colour.label)}
+                      <span class="mt-1.5 flex items-center gap-2 rounded-lg border border-border bg-bg-elevated px-2 py-1.5"><input id={'email-colour-' + colour.key} type="color" class="h-7 w-8 shrink-0 cursor-pointer border-0 bg-transparent p-0" disabled={editorLocked} value={design[colour.key as 'background' | 'surface' | 'primary' | 'text']} oninput={(event) => updateDesign(colour.key as keyof EmailDesign, event.currentTarget.value)} /><span class="font-mono text-[10px] text-text-primary">{design[colour.key as 'background' | 'surface' | 'primary' | 'text']}</span></span>
+                    </label>
+                  {/each}
+                </div>
+                <div class="space-y-2">
+                  <label for="email-logo" class="flex items-center gap-2 text-xs font-medium text-text-primary"><Upload class="size-3.5" /> {$ui('Local logo')}</label>
+                  <input id="email-logo" type="file" accept="image/png,image/jpeg" disabled={editorLocked} class="block w-full text-xs text-text-secondary file:mr-3 file:rounded-lg file:border file:border-border file:bg-bg-elevated file:px-3 file:py-2 file:text-text-primary" onchange={selectLogo} />
+                  <p class="text-[10px] leading-relaxed text-text-muted">{$ui('PNG or JPEG · maximum 32 KiB · 512 × 512 pixels. Embedded in the email; no external image requests or tracking pixels.')}</p>
+                  {#if logoBusy}<p class="text-xs text-text-secondary" role="status">{$ui('Checking logo…')}</p>{/if}
+                  {#if logoError}<p class="text-xs text-danger" role="alert">{$ui(logoError)}</p>{/if}
+                  {#if design.logo}<div class="flex items-center gap-3"><span class="text-xs text-text-secondary">{$ui('Local logo attached')}</span><button type="button" class="inline-flex items-center gap-1 text-xs text-text-secondary underline underline-offset-4" disabled={editorLocked} onclick={() => updateDesign('logo', null)}><X class="size-3" /> {$ui('Remove logo')}</button></div>{/if}
+                  <label for="email-logo-alt" class="block text-xs text-text-secondary">{$ui('Logo description')}</label>
+                  <input id="email-logo-alt" class="w-full rounded-lg border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary" value={design.logo_alt} disabled={editorLocked} oninput={(event) => updateDesign('logo_alt', event.currentTarget.value)} />
+                </div>
+                <details>
+                  <summary class="cursor-pointer text-xs font-medium text-text-primary">{$ui('Layout HTML')}</summary>
+                  <label for="email-layout-html" class="sr-only">{$ui('Layout HTML')}</label>
+                  <textarea id="email-layout-html" rows="8" class="mt-3 w-full resize-y rounded-lg border border-border bg-bg-elevated p-3 font-mono text-xs leading-relaxed text-text-primary" value={design.layout_html} disabled={editorLocked} spellcheck="false" aria-invalid={!!problems.design_json} oninput={(event) => updateDesign('layout_html', event.currentTarget.value)}></textarea>
+                  <p class="mt-2 text-[10px] leading-relaxed text-text-secondary">{$ui('Keep exactly one {{native_content}} slot and use {{logo}} for the attached logo. Safe tables, text and inline styles only. Links, remote images and hidden content are rejected.')}</p>
+                </details>
+                {#if problems.design_json}<p class="text-xs text-danger" role="alert">{$ui(problems.design_json)}</p>{/if}
+                <button type="button" class="text-xs text-text-secondary underline underline-offset-4" disabled={editorLocked || !$editor.draft.design_json} onclick={() => editor.edit('design_json', '')}>{$ui('Use built-in design')}</button>
+              </section>
+              <section class="space-y-3 rounded-xl border border-border bg-bg-elevated p-4" aria-label={$ui('Design with AI')}>
+                <h3 class="flex items-center gap-2 text-xs font-medium text-text-primary"><Sparkles class="size-4" /> {$ui('Design with AI')}</h3>
+                <p class="text-xs leading-relaxed text-text-secondary">{$ui('Uses your enabled workspace AI provider. Describe the style and content; review the proposal before adding it to your draft. Nothing is saved or sent automatically.')}</p>
+                <label for="email-design-prompt" class="sr-only">{$ui('Describe your email design')}</label>
+                <textarea id="email-design-prompt" rows="3" class="w-full rounded-lg border border-border bg-bg-surface p-3 text-xs leading-relaxed text-text-primary" placeholder={$ui('Describe your email design')} value={prompt} disabled={editorLocked} oninput={(event) => prompt = event.currentTarget.value}></textarea>
+                <div class="flex flex-wrap items-center justify-between gap-2"><a href="/settings/ai" class="text-xs text-text-secondary underline underline-offset-4">{$ui('Workspace AI settings')}</a><button type="button" class="btn btn-secondary" disabled={editorLocked || invalid || $editor.conflict || !prompt.trim() || emailFieldBytes(prompt) > 4096} aria-busy={$editor.busy === 'proposing'} onclick={() => editor.propose(prompt)}><Sparkles class="size-3.5" /> {$ui($editor.busy === 'proposing' ? 'Creating proposal…' : 'Create design proposal')}</button></div>
+                {#if $editor.proposal}
+                  <div class="space-y-3 border-t border-border pt-3" role="status"><p class="text-xs font-medium text-text-primary">{$ui('Review AI proposal')}</p><p class="text-xs leading-relaxed text-text-secondary">{$ui('The preview shows the proposed email. Accepting replaces this unsaved subject, introduction and design. Save changes separately after review.')}</p><dl class="space-y-2 text-xs"><dt class="text-text-muted">{$ui('Subject')}</dt><dd class="break-words text-text-primary">{$editor.proposal.input.subject_template || $ui('Built-in subject')}</dd><dt class="text-text-muted">{$ui('HTML introduction')}</dt><dd><pre class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-text-secondary">{$editor.proposal.input.html_template}</pre></dd><dt class="text-text-muted">{$ui('Plain text introduction')}</dt><dd><pre class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-text-secondary">{$editor.proposal.input.text_template}</pre></dd></dl><div class="flex flex-wrap gap-2"><button type="button" class="btn btn-primary" disabled={editorLocked || $editor.conflict} onclick={() => editor.acceptProposal()}>{$ui('Use proposal in draft')}</button><button type="button" class="btn btn-secondary" disabled={busy} onclick={() => editor.discardProposal()}>{$ui('Discard proposal')}</button></div></div>
+                {/if}
+              </section>
+            {/if}
+
             <div>
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <h3 class="text-xs font-medium text-text-primary">{$ui('Introductory content')}</h3>
@@ -116,29 +186,30 @@
             </div>
             <div class="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
               <button type="button" class="text-xs text-text-secondary underline decoration-border underline-offset-4 hover:text-text-primary disabled:no-underline" disabled={editorLocked || (!$editor.draft.subject_template && !$editor.draft.html_template && !$editor.draft.text_template)} onclick={resetToBuiltIn}>{$ui('Use built-in content')}</button>
-              <button type="button" class="btn btn-secondary" disabled={locked || invalid || $editor.conflict} onclick={() => editor.preview()} aria-busy={$editor.busy === 'previewing'}><Eye class="size-3.5" /> {$ui($editor.busy === 'previewing' ? 'Generating preview…' : 'Generate preview')}</button>
+              <button type="button" class="btn btn-secondary" disabled={locked || invalid || $editor.conflict || !!$editor.proposal} onclick={() => editor.preview()} aria-busy={$editor.busy === 'previewing'}><Eye class="size-3.5" /> {$ui($editor.busy === 'previewing' ? 'Generating preview…' : 'Generate preview')}</button>
             </div>
           </div>
 
           <aside class="min-w-0 border-t border-border bg-bg-elevated p-5 xl:border-l xl:border-t-0" aria-label={$ui('Email preview')}>
-            <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-xs font-medium text-text-primary">{$ui('Preview')}</h3><span class="rounded-full border border-border px-2 py-1 text-[9px] uppercase tracking-wider text-text-muted">{$ui('Sample data')}</span></div>
+            <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-xs font-medium text-text-primary">{$ui('Preview')}</h3><span class="rounded-full border border-border px-2 py-1 text-[9px] uppercase tracking-wider text-text-muted">{$ui($editor.proposal ? 'AI proposal · not saved' : 'Sample data')}</span></div>
             <p class="mb-4 text-xs leading-relaxed text-text-secondary">{$ui('No email is sent. Action links in this preview cannot be used.')}</p>
-            {#if $editor.preview}
-              {#if $editor.previewOutdated}<p class="mb-3 text-xs text-warning" role="status">{$ui('This preview is out of date. Generate it again after editing.')}</p>{/if}
-              <div class="overflow-hidden rounded-lg border border-border bg-white text-neutral-900" class:preview-outdated={$editor.previewOutdated}>
-                <div class="border-b border-neutral-200 px-4 py-3"><p class="text-[9px] uppercase tracking-widest text-neutral-500">{$ui('Subject')}</p><p class="mt-1 break-words text-sm font-medium">{$editor.preview.subject}</p></div>
+            {#if activePreview}
+              {#if !$editor.proposal && $editor.previewOutdated}<p class="mb-3 text-xs text-warning" role="status">{$ui('This preview is out of date. Generate it again after editing.')}</p>{/if}
+              <div class="overflow-hidden rounded-lg border border-border bg-white text-neutral-900" class:preview-outdated={!$editor.proposal && $editor.previewOutdated}>
+                <div class="border-b border-neutral-200 px-4 py-3"><p class="text-[9px] uppercase tracking-widest text-neutral-500">{$ui('Subject')}</p><p class="mt-1 break-words text-sm font-medium">{activePreview.subject}</p></div>
                 {#if format === 'html'}<div inert><iframe title={$ui('Synthetic HTML email preview')} srcdoc={previewHTML} sandbox="" referrerpolicy="no-referrer" tabindex="-1" class="h-[430px] w-full border-0 pointer-events-none" aria-hidden="true"></iframe></div>
-                {:else}<pre class="max-h-[430px] overflow-auto whitespace-pre-wrap break-words p-4 font-sans text-xs leading-relaxed">{$editor.preview.text}</pre>{/if}
+                {:else}<pre class="max-h-[430px] overflow-auto whitespace-pre-wrap break-words p-4 font-sans text-xs leading-relaxed">{activePreview.text}</pre>{/if}
               </div>
-              <p class="mt-3 flex items-center gap-1.5 text-[10px] text-text-muted"><ShieldCheck class="size-3" /> {$ui('Required content preserved · revision {revision}', { revision: $editor.preview.revision })}</p>
+              <p class="mt-3 flex items-center gap-1.5 text-[10px] text-text-muted"><ShieldCheck class="size-3" /> {$ui('Required content preserved · revision {revision}', { revision: activePreview.revision })}</p>
             {:else}
-              <div class="flex min-h-[330px] flex-col items-center justify-center rounded-lg border border-dashed border-border px-6 text-center"><Mail class="mb-3 size-7 stroke-1 text-text-muted" /><p class="text-sm font-medium text-text-primary">{$ui('Review before saving')}</p><p class="mt-2 max-w-xs text-xs leading-relaxed text-text-secondary">{$ui('Generate a sample to see your introduction together with Hash’s required content.')}</p></div>
+              <div class="flex min-h-[330px] flex-col items-center justify-center rounded-lg border border-dashed border-border px-6 text-center"><Mail class="mb-3 size-7 stroke-1 text-text-muted" /><p class="text-sm font-medium text-text-primary">{$ui('Review before saving')}</p><p class="mt-2 max-w-xs text-xs leading-relaxed text-text-secondary">{$ui('Generate a sample to see your design and introduction together with Hash’s required content.')}</p></div>
             {/if}
+            <div class="mt-5">{#key $editor.selected.kind + ':' + $editor.selected.revision}<EmailTemplateSampleSend kind={$editor.selected.kind} revision={$editor.selected.revision} disabled={busy || $editor.dirty || !$editor.authorized || $editor.conflict} />{/key}</div>
           </aside>
         </div>
         <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-bg-elevated px-5 py-4">
           <p class="max-w-sm text-xs text-text-secondary">{$ui(!editable ? 'Built-in content is unchanged.' : $editor.dirty ? 'Save or cancel before choosing another template.' : 'Changes apply to new emails. Already queued messages keep their saved content.')}</p>
-          {#if editable}<div class="flex items-center gap-2"><button type="button" class="btn btn-secondary" disabled={busy || !$editor.dirty} onclick={() => editor.cancel()}>{$ui('Cancel')}</button><button type="button" class="btn btn-primary" disabled={locked || !$editor.dirty || invalid || $editor.conflict} aria-busy={$editor.busy === 'saving'} onclick={() => editor.save()}><Save class="size-3.5" /> {$ui($editor.busy === 'saving' ? 'Saving…' : 'Save changes')}</button></div>{:else}<span class="text-xs text-text-muted">{$ui('Read only')}</span>{/if}
+          {#if editable}<div class="flex items-center gap-2"><button type="button" class="btn btn-secondary" disabled={busy || !$editor.dirty} onclick={() => editor.cancel()}>{$ui('Cancel')}</button><button type="button" class="btn btn-primary" disabled={locked || !$editor.dirty || invalid || $editor.conflict || !!$editor.proposal} aria-busy={$editor.busy === 'saving'} onclick={() => editor.save()}><Save class="size-3.5" /> {$ui($editor.busy === 'saving' ? 'Saving…' : 'Save changes')}</button></div>{:else}<span class="text-xs text-text-muted">{$ui('Read only')}</span>{/if}
         </footer>
       </section>
     </div>

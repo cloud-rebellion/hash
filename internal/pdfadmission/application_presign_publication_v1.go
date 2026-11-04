@@ -280,8 +280,15 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 	}
 	// Full actual input, row copies, token/URL containers and fixed reminder SQL
 	// are paid before cloning, minting, rendering or a full RETURNING row.
+	companyName := ""
+	if !s.result.Expired {
+		companyName, err = w.readTenantPresentationNameLockedV1(call, w.sourceDocument)
+		if err != nil {
+			return zero, err
+		}
+	}
 	stage = "publication_input_size"
-	raw, err := htmlAuthoringSumV1(4*int64(len(publicURL)), int64(len(orgName)), 2*int64(len(w.sourceIntent.ActorEmail)),
+	raw, err := htmlAuthoringSumV1(4*int64(len(publicURL)), int64(len(orgName)), int64(len(companyName)), 2*int64(len(w.sourceIntent.ActorEmail)),
 		4*preSignPublicationRecipientBytesV1(customer), 4*preSignPublicationRecipientBytesV1(provider),
 		8*int64(unsafe.Sizeof(generated.Recipient{})), int64(len(w.sourceIntent.ActorIp)+len(w.sourceIntent.Via)+len(w.sourceIntent.Tool)+len(w.sourceIntent.LastError.String)),
 		8*int64(unsafe.Sizeof(dispatch.Message{}))+2*(43+32)+512)
@@ -305,13 +312,13 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 		probeURL := publicURL + "/sign/" + strings.Repeat("A", 43)
 		probeBeacon := publicURL + "/e/o/" + strings.Repeat("A", 43)
 		context := dispatch.TemplateContext{DocumentName: w.sourceDocument.Name, SenderName: w.sourceIntent.ActorEmail, SenderEmail: w.sourceIntent.ActorEmail,
-			RecipientName: customer.Name, OrgName: orgName, Locale: customer.Locale, SignURL: probeURL, BeaconURL: probeBeacon, Acknowledgement: false}
+			RecipientName: customer.Name, OrgName: companyName, Locale: customer.Locale, SignURL: probeURL, BeaconURL: probeBeacon, Acknowledgement: false}
 		stage = "publication_output_size"
 		subjectBytes, htmlBytes, textBytes, err := applicationServiceEmailComponentsV1(dispatch.KindInvite, context, selectedTemplate)
 		if err != nil {
 			return zero, err
 		}
-		output, err := htmlAuthoringSumV1(subjectBytes, htmlBytes, textBytes, int64(len(customer.Email)+len(w.sourceIntent.ActorEmail)+len(orgName)+len("pending")))
+		output, err := htmlAuthoringSumV1(applicationWorkspaceSMTPPurposeBytesV1, subjectBytes, htmlBytes, textBytes, int64(len(customer.Email)+len(w.sourceIntent.ActorEmail)+len(orgName)+len("pending")))
 		if err != nil {
 			return zero, err
 		}
@@ -320,7 +327,7 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 			return zero, err
 		}
 		stage = "publication_output_loan"
-		closeOutput, err := w.actor.acquireOwnedRetainedBodyV1(call, outputCopies, 2)
+		closeOutput, err := w.actor.acquireOwnedRetainedBodyV1(call, outputCopies, 2+applicationWorkspaceSMTPWireBytesV1)
 		if err != nil {
 			return zero, errors.Join(ErrHTMLSendWorkV1, err)
 		}
@@ -350,7 +357,7 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 		if err != nil || int64(len(subject)) > subjectBytes || int64(len(html)) > htmlBytes || int64(len(text)) > textBytes {
 			return zero, errors.Join(ErrHTMLSendWorkV1, err)
 		}
-		msg = dispatch.Message{To: customer.Email, Subject: subject, HTML: html, Text: text, ReplyTo: w.sourceIntent.ActorEmail, FromName: orgName}
+		msg = dispatch.Message{OrgID: e.OrgID, To: customer.Email, Subject: subject, HTML: html, Text: text, ReplyTo: w.sourceIntent.ActorEmail, FromName: orgName}
 		s.customer.MagicTokenHash = bytes.Clone(hash)
 		s.customer.MagicTokenExpiresAt = expiry
 		s.customer.Status = "sent"
@@ -445,18 +452,17 @@ func (w *ApplicationHTMLSendWorkV1) PublishPreSignCustomerV1(call context.Contex
 		}
 	} else {
 		stage = "publication_reminder_upsert"
-		if err = w.queries.UpsertReminderSchedule(call, generated.UpsertReminderScheduleParams{DocumentID: e.Document.ID,
-			Column2: []byte(`[{"days_after_send":3},{"days_after_send":7}]`), FiresRemaining: 2}); err != nil {
+		if err = w.installReminderPolicyLockedV1(call); err != nil {
 			return zero, err
 		}
 		stage = "publication_outbox"
-		outbox, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
-		if err != nil || outbox == nil || outbox.ID == uuid.Nil || outbox.ToEmail != msg.To || outbox.Subject != msg.Subject || outbox.HtmlBody != msg.HTML ||
+		outbox, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: e.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
+		if err != nil || !applicationWorkspaceEmailDeliveryMatchesV1(outbox, e.OrgID) || outbox == nil || outbox.ID == uuid.Nil || outbox.ToEmail != msg.To || outbox.Subject != msg.Subject || outbox.HtmlBody != msg.HTML ||
 			outbox.TextBody != msg.Text || outbox.ReplyTo != msg.ReplyTo || outbox.FromName != msg.FromName || string(outbox.HeadersJson) != "{}" || outbox.Status != "pending" || outbox.LastError != "" {
 			return zero, errors.Join(ErrHTMLSendWorkV1, err)
 		}
 		s.outboxID = outbox.ID
-		s.message = dispatch.Message{To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
+		s.message = dispatch.Message{OrgID: msg.OrgID, To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
 	}
 	s.document = htmlSendCloneDocumentV1(w.sourceDocument)
 	stage = "publication_current"

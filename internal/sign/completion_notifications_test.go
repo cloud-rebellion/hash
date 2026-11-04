@@ -21,7 +21,7 @@ import (
 func TestPrepareCompletionNotificationsTxQueuesRecipientCredentialsAndSenderURL(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	doc := &generated.Document{
-		ID: uuid.New(), SenderID: uuid.New(), Name: "Partner Agreement",
+		ID: uuid.New(), OrgID: uuid.New(), SenderID: uuid.New(), Name: "Partner Agreement",
 		Status: "completed", RequiresSignature: true,
 	}
 	signer := &generated.Recipient{ID: uuid.New(), DocumentID: doc.ID, Role: "signer", Status: "signed", Email: "signer@example.test", Name: "Signer", Locale: "en"}
@@ -33,7 +33,7 @@ func TestPrepareCompletionNotificationsTxQueuesRecipientCredentialsAndSenderURL(
 			{ID: uuid.New(), DocumentID: doc.ID, Role: "cc", Status: "signed", Email: "cc@example.test"},
 			{ID: uuid.New(), DocumentID: doc.ID, Role: "signer", Status: "viewed", Email: "waiting@example.test"},
 		},
-		sender: &generated.User{ID: doc.SenderID, Email: "sender@example.test", Name: "Sender"},
+		sender: &generated.User{ID: doc.SenderID, OrgID: doc.OrgID, Email: "sender@example.test", Name: "Sender"},
 	}
 	engine := &Engine{
 		Mailer: dispatch.QueueingMailer{}, BaseURL: "https://hash.example.test/", OrgName: "Hash Test",
@@ -93,7 +93,7 @@ func TestPrepareCompletionNotificationsTxQueuesRecipientCredentialsAndSenderURL(
 
 func TestPrepareCompletionNotificationsTxAcknowledgementIncludesAcceptedNonCC(t *testing.T) {
 	doc := &generated.Document{
-		ID: uuid.New(), SenderID: uuid.New(), Name: "Policy Acknowledgement",
+		ID: uuid.New(), OrgID: uuid.New(), SenderID: uuid.New(), Name: "Policy Acknowledgement",
 		Status: "completed", RequiresSignature: false,
 	}
 	accepted := &generated.Recipient{ID: uuid.New(), DocumentID: doc.ID, Role: "approver", Status: "accepted", Email: "accepted@example.test", Name: "Accepted"}
@@ -104,7 +104,7 @@ func TestPrepareCompletionNotificationsTxAcknowledgementIncludesAcceptedNonCC(t 
 			{ID: uuid.New(), DocumentID: doc.ID, Role: "approver", Status: "declined", Email: "declined@example.test"},
 			{ID: uuid.New(), DocumentID: doc.ID, Role: "approver", Status: "signed", Email: "signed@example.test"},
 		},
-		sender: &generated.User{ID: doc.SenderID, Email: "sender@example.test", Name: "Sender"},
+		sender: &generated.User{ID: doc.SenderID, OrgID: doc.OrgID, Email: "sender@example.test", Name: "Sender"},
 	}
 	engine := &Engine{Mailer: dispatch.QueueingMailer{}, BaseURL: "https://hash.example.test", OrgName: "Hash Test"}
 
@@ -135,10 +135,10 @@ func TestPrepareCompletionNotificationsTxAcknowledgementIncludesAcceptedNonCC(t 
 
 func TestPrepareCompletionNotificationsTxQueueFailureIsReturned(t *testing.T) {
 	wantErr := errors.New("email outbox unavailable")
-	doc := &generated.Document{ID: uuid.New(), SenderID: uuid.New(), Name: "Agreement", Status: "completed", RequiresSignature: true}
+	doc := &generated.Document{ID: uuid.New(), OrgID: uuid.New(), SenderID: uuid.New(), Name: "Agreement", Status: "completed", RequiresSignature: true}
 	store := &completionStoreStub{
 		recipients: []*generated.Recipient{{ID: uuid.New(), DocumentID: doc.ID, Role: "signer", Status: "signed", Email: "signer@example.test", Name: "Signer"}},
-		sender:     &generated.User{ID: doc.SenderID, Email: "sender@example.test", Name: "Sender"},
+		sender:     &generated.User{ID: doc.SenderID, OrgID: doc.OrgID, Email: "sender@example.test", Name: "Sender"},
 		enqueueErr: wantErr,
 		enqueueAt:  2,
 	}

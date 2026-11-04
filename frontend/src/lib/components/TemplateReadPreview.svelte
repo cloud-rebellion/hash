@@ -5,7 +5,10 @@
  import { ui, staffLocale } from '$lib/staffPreferences';
  import { blockTemplatePreview, sameTemplatePreviewSource } from '$lib/templateLibraryPreview';
  import VerifiedPDFPages from './VerifiedPDFPages.svelte';
- let { template, onClose, onUse, disabled=false }: { template:TemplateResponse;onClose:()=>void;onUse:()=>void;disabled?:boolean }=$props();
+ import ReminderPolicySettings from './ReminderPolicySettings.svelte';
+ let { template, onClose, onUse, disabled=false, canManageReminders=false }: { template:TemplateResponse;onClose:()=>void;onUse:()=>void;disabled?:boolean;canManageReminders?:boolean }=$props();
+ let reminderBlocked=$state(true), reminderBusy=$state(false), reminderDirty=$state(false), reminderUnconfirmed=$state(false);
+ export function canLeave():boolean { if (reminderBusy || reminderUnconfirmed) return false; return !reminderDirty || window.confirm($ui('Discard unsaved reminder changes?')); }
  let loading=$state(true), error=$state<string|null>(null), current=$state.raw<TemplateResponse|null>(null), bytes=$state.raw<Uint8Array|null>(null);
  const expected=untrack(()=>template), controller=new AbortController();let disposed=false;
  let pagesOwner:{retire():Promise<void>}|null=null, retirement:Promise<void>|null=null;
@@ -38,7 +41,9 @@
  {:else if error}<p class="p-6 text-sm text-danger" role="alert">{$ui(error)}</p>
  {:else if bytes && current?.source_kind==='pdf'}<div class="pdf-pages"><VerifiedPDFPages {bytes} proofKey={`${current.id}:${current.version}:${current.pdf_sha256}`} expectedPages={current.page_count!} onProof={()=>{}} ariaLabel={$ui('Template PDF')} translate={(text)=>$ui(text)} onOwner={(owner)=>{pagesOwner=owner;}} /></div>
  {:else if current?.source_kind==='blocks'}<div class="block-content"><div class="paper-content">{#if contents.lines.length}{#each contents.lines as line,index}<p class:content-heading={index===0}>{line}</p>{/each}{:else}<div class="blank-content"><FileText class="size-8" /><p>{$ui('This block template is empty.')}</p><p>{$ui('Create content in a document, then save it as a template. For a new editable design, choose Create HTML design.')}</p></div>{/if}</div>{#if contents.truncated}<p class="mt-4 text-sm text-text-secondary">{$ui('This source preview is shortened. Create a document to review all of its content.')}</p>{/if}</div>{/if}
- <footer><button type="button" class="btn btn-secondary" onclick={onClose}>{$ui('Close')}</button><button type="button" class="btn btn-primary" disabled={disabled||loading||!!error} onclick={onUse}>{$ui('Use template')}<ArrowUpRight class="size-4" /></button></footer>
+ {#if canManageReminders}<div class="p-5"><ReminderPolicySettings scope="template" id={template.id} externalBlocked={disabled}
+  onStateChange={(state)=>{reminderBlocked=state.blocked;reminderBusy=state.busy;reminderDirty=state.dirty;reminderUnconfirmed=state.unconfirmed;}} /></div>{/if}
+ <footer><button type="button" class="btn btn-secondary" onclick={onClose}>{$ui('Close')}</button><button type="button" class="btn btn-primary" disabled={disabled||loading||!!error||(canManageReminders&&reminderBlocked)} onclick={onUse}>{$ui('Use template')}<ArrowUpRight class="size-4" /></button></footer>
 </section>
 <style>
  .read-preview{margin:0 0 28px;border:1px solid var(--t-border);border-radius:16px;overflow:hidden;background:var(--t-bg-surface);}

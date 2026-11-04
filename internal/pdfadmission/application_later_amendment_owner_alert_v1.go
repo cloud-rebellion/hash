@@ -31,7 +31,7 @@ func laterAmendmentOwnerAlertForV1(call context.Context, s *applicationDocumentP
 		return out, amendments.ErrUnavailableV1
 	}
 	original := s.readers[0].snapshot.document
-	close, e := s.actor.acquireOwnedRetainedBodyV1(call, 128<<10, 32<<10)
+	close, e := s.actor.acquireOwnedRetainedBodyV1(call, (128<<10)+2*applicationWorkspaceSMTPPurposeBytesV1, (32<<10)+applicationWorkspaceSMTPWireBytesV1)
 	if e != nil {
 		return out, e
 	}
@@ -58,16 +58,17 @@ func laterAmendmentOwnerAlertForV1(call context.Context, s *applicationDocumentP
 	if e != nil {
 		return out, e
 	}
+	message.OrgID = original.OrgID
 	sum, e := dispatch.AmendmentOwnerAlertMessageSHA256V1(message)
 	if e != nil {
 		return out, e
 	}
 	q := generated.New(db)
-	row, e := q.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: message.To, Subject: message.Subject, HtmlBody: message.HTML, TextBody: message.Text, FromName: message.FromName, ReplyTo: "", HeadersJson: []byte(dispatch.AmendmentOwnerAlertHeadersJSONV1)})
+	row, e := q.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: original.OrgID, ToEmail: message.To, Subject: message.Subject, HtmlBody: message.HTML, TextBody: message.Text, FromName: message.FromName, ReplyTo: "", HeadersJson: []byte(dispatch.AmendmentOwnerAlertHeadersJSONV1)})
 	if e != nil {
 		return out, e
 	}
-	if row == nil || row.ID == uuid.Nil || row.ToEmail != email || row.Subject != message.Subject || row.HtmlBody != message.HTML || row.TextBody != message.Text || row.FromName != "Hash" || row.ReplyTo != "" || row.Status != "pending" || row.LastError != "" {
+	if !applicationWorkspaceEmailDeliveryMatchesV1(row, original.OrgID) || row == nil || row.ID == uuid.Nil || row.ToEmail != email || row.Subject != message.Subject || row.HtmlBody != message.HTML || row.TextBody != message.Text || row.FromName != "Hash" || row.ReplyTo != "" || row.Status != "pending" || row.LastError != "" {
 		return out, amendments.ErrUnavailableV1
 	}
 	var observed []byte

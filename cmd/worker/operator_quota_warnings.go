@@ -96,7 +96,7 @@ func (w *worker) queueOperatorQuotaWarning(ctx context.Context, orgID uuid.UUID)
 		return err
 	}
 	for _, u := range users {
-		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`)}); err != nil {
+		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: orgID, ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`)}); err != nil {
 			return err
 		}
 	}

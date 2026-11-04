@@ -16,6 +16,7 @@ import (
 )
 
 func TestAcknowledgementEmailModeReachesDurableOutbox(t *testing.T) {
+	orgID := uuid.New()
 	engine := &Engine{OrgName: "Partner Org"}
 	for _, kind := range []string{dispatch.KindInvite, dispatch.KindReminder} {
 		t.Run(kind, func(t *testing.T) {
@@ -33,12 +34,16 @@ func TestAcknowledgementEmailModeReachesDurableOutbox(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			message.OrgID = orgID // native callers stamp the retained document organization
 			queue := &modeEmailQueue{}
 			if err := enqueueLifecycleEmails(context.Background(), queue, []dispatch.Message{message}); err != nil {
 				t.Fatal(err)
 			}
 			if len(queue.rows) != 1 {
 				t.Fatalf("outbox rows = %d, want 1", len(queue.rows))
+			}
+			if queue.rows[0].OrgID != orgID {
+				t.Fatal("outbox lost the native organization")
 			}
 			assertAcknowledgementLifecycleCopy(t, queue.rows[0].Subject+"\n"+queue.rows[0].HtmlBody+"\n"+queue.rows[0].TextBody)
 		})
@@ -47,9 +52,11 @@ func TestAcknowledgementEmailModeReachesDurableOutbox(t *testing.T) {
 
 func TestAcknowledgementEmailModeReachesLocalMailer(t *testing.T) {
 	mailer := modeChannelMailer(make(chan dispatch.Message, 2))
+	orgID := uuid.New()
 	engine := &Engine{OrgName: "Partner Org", Mailer: mailer}
 	for _, kind := range []string{dispatch.KindInvite, dispatch.KindReminder} {
 		engine.sendEmail(
+			orgID,
 			kind,
 			"recipient@example.test",
 			"Recipient",
@@ -62,6 +69,9 @@ func TestAcknowledgementEmailModeReachesLocalMailer(t *testing.T) {
 		)
 		select {
 		case message := <-mailer:
+			if message.OrgID != orgID {
+				t.Fatal("local mailer lost the native organization")
+			}
 			assertAcknowledgementLifecycleCopy(t, message.Subject+"\n"+message.HTML+"\n"+message.Text)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s was not delivered to the local mailer", kind)

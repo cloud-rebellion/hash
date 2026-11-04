@@ -57,12 +57,13 @@ func dialControl(allowPrivate func() bool) func(network, address string, c sysca
 // Transport returns an *http.Transport whose dialer enforces the blocked-IP
 // guard at dial time. allowPrivate is read at dial time so a caller may flip a
 // flag after construction.
+// Dialer shares the exact resolved-IP guard with non-HTTP tenant transports.
+func Dialer(allowPrivate func() bool) *net.Dialer {
+	return &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: dialControl(allowPrivate)}
+}
+
 func Transport(allowPrivate func() bool) *http.Transport {
-	d := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   dialControl(allowPrivate),
-	}
+	d := Dialer(allowPrivate)
 	return &http.Transport{
 		DialContext:           d.DialContext,
 		ForceAttemptHTTP2:     true,

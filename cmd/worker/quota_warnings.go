@@ -139,7 +139,7 @@ func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.Li
 
 	q := w.queries.WithTx(tx)
 	for _, u := range users {
-		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{
+		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: row.OrgID,
 			ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`),
 		}); err != nil {
 			slog.Warn("quota_warnings: enqueue", "to", dispatch.MaskEmail(u.Email), "err", dispatch.ScrubEmails(err.Error()))

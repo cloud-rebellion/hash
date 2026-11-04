@@ -54,11 +54,11 @@ test('Open is a real separate read/navigation action for every source and honors
  for(const barrier of ['pending','busy','dirty']){const f=actions();if(barrier==='pending')f.env.pendingCreation=true;if(barrier==='busy')f.env.creatingId='other';if(barrier==='dirty'){f.env.selectedHTMLTemplate=template;f.env.htmlFormDirty=true;}await f.openTemplate(template);expect(f.env.previewTemplate).toBeNull();expect(f.calls).toEqual([]);}
 });
 test('a failed native preview retirement blocks both replacement and Use without invoking creation',async()=>{
- const f=actions();f.env.previewTemplate=template;f.env.previewOwner={retire:async()=>{throw new Error('unjoined')}};await f.openTemplate({...template,id:'next'});await f.useFromLibrary(template);expect(f.calls).toEqual([]);expect(f.env.previewTemplate).toBe(template);expect(f.env.error).toBeTruthy();
+ const f=actions();f.env.previewTemplate=template;f.env.previewOwner={canLeave:()=>true,retire:async()=>{throw new Error('unjoined')}};await f.openTemplate({...template,id:'next'});await f.useFromLibrary(template);expect(f.calls).toEqual([]);expect(f.env.previewTemplate).toBe(template);expect(f.env.error).toBeTruthy();
 });
 
 test('same-card reopen flushes the retired component before mounting the next instance',async()=>{
- const f=actions();f.env.previewTemplate=template;let retired=0;f.env.previewOwner={retire:async()=>{retired++;}};
+ const f=actions();f.env.previewTemplate=template;let retired=0;f.env.previewOwner={canLeave:()=>true,retire:async()=>{retired++;}};
  const flushes:Array<()=>void>=[];f.env.tick=()=>new Promise<void>(resolve=>flushes.push(resolve));
  const pending=f.openTemplate(template);
  for(let i=0;i<6;i++)await Promise.resolve();
@@ -72,4 +72,18 @@ test('source preview reports shortened tables and enforces shared line and Unico
  const rows=Array.from({length:1001},()=>['cell']);const table=blockTemplatePreview({rows});expect(table.truncated).toBe(true);expect(table.lines).toHaveLength(1000);
  const many=blockTemplatePreview({blocks:[...Array.from({length:1990},()=>({text:'paragraph'})),{rows:Array.from({length:100},()=>['cell'])}]});expect(many.truncated).toBe(true);expect(many.lines).toHaveLength(2000);
  const astral=blockTemplatePreview({text:'x'.repeat(199999)+'😀more'});expect(astral.truncated).toBe(true);expect(astral.lines[0]).toBe('x'.repeat(199999));expect(/[\uD800-\uDBFF]$/.test(astral.lines[0])).toBe(false);
+});
+
+
+test('unsaved or unknown template policy blocks the actual library replacement and Use callbacks', async()=>{
+ const f=actions();let retired=0;f.env.previewTemplate=template;f.env.previewOwner={canLeave:()=>false,retire:async()=>{retired++;}};
+ await f.openTemplate({...template,id:'next'});await f.useFromLibrary(template);
+ expect(retired).toBe(0);expect(f.calls).toEqual([]);expect(f.env.previewTemplate).toBe(template);
+});
+test('actual preview leave guard preserves busy/unknown and explicit dirty confirmation',()=>{
+ const node=ast.instance.content.body.find((n:any)=>n.type==='ExportNamedDeclaration'&&n.declaration?.id?.name==='canLeave').declaration;
+ const bind=new Function('env',`with(env){${ts.transformSync(source.slice(node.start,node.end))};return canLeave;}`);
+ for(const key of ['reminderBusy','reminderUnconfirmed']){const env:any={reminderBusy:false,reminderUnconfirmed:false,reminderDirty:false,$ui:(s:string)=>s,window:{confirm:()=>true}};env[key]=true;expect(bind(env)()).toBe(false);}
+ const env={reminderBusy:false,reminderUnconfirmed:false,reminderDirty:true,$ui:(s:string)=>s,window:{confirm:()=>false}};
+ expect(bind(env)()).toBe(false);env.window.confirm=()=>true;expect(bind(env)()).toBe(true);env.reminderDirty=false;env.window.confirm=()=>false;expect(bind(env)()).toBe(true);
 });

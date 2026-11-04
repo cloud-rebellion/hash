@@ -18,6 +18,8 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/emailtemplates"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -135,7 +137,9 @@ func serviceEmailFixture(t *testing.T) (*Server, *serviceEmailCredentialFixture,
 func serviceEmailCall(t *testing.T, s *Server, v *serviceEmailCredentialFixture, name string, args string) *response {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`
-	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body)).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer "+v.key.Plaintext)
 	w := httptest.NewRecorder()
 	auth.RequireAPIKey(v)(s.Handler()).ServeHTTP(w, r)
@@ -254,7 +258,9 @@ func TestServiceEmailMCPCannotForgeTransactionReceiptWithSessionContext(t *testi
 			args = "{}"
 		}
 		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`
-		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body)).WithContext(ctx)
 		r = withSessionContext(r, v.org, v.user, "owner", "owner@example.invalid")
 		r = withTokenScopes(r, "admin")
 		w := httptest.NewRecorder()
@@ -335,7 +341,15 @@ func TestServiceEmailMCPStrictArgumentsBeforeDelegation(t *testing.T) {
 func TestServiceEmailMCPNativeServiceRulesRemainAuthoritative(t *testing.T) {
 	s, v, _ := serviceEmailFixture(t)
 	s = NewServer()
-	registerServiceEmailToolsWithService(s, emailtemplates.Service{})
+	coordinator, err := workguard.NewV1(workguard.LimitsV1{Global: workguard.VectorV1{ParentBytes: 128 << 20, DBStagingBytes: 64 << 20}, Organisation: workguard.VectorV1{ParentBytes: 64 << 20, DBStagingBytes: 32 << 20}, MaxGrants: 64, MaxOrganisationGrants: 32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err := pdfadmission.NewWorkAdmissionV1(coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerServiceEmailToolsWithService(s, emailtemplates.Service{Work: work})
 	for name, args := range map[string]string{
 		"builtin-save": `{"kind":"email.declined","expected_revision":0,"subject_template":"","html_template":"","text_template":""}`,
 		"unknown":      strings.Replace(serviceEmailValidArgs, "email.invite", "email.unknown", 1), "negative": strings.Replace(serviceEmailValidArgs, `"expected_revision":7`, `"expected_revision":-1`, 1), "unsafe-html": strings.Replace(serviceEmailValidArgs, "<p>Intro</p>", "<a href='https://example.invalid'>x</a>", 1), "unknown-variable": strings.Replace(serviceEmailValidArgs, "recipient_name", "private_token", 1),

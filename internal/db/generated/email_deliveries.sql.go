@@ -28,10 +28,11 @@ WITH due AS (
 )
 UPDATE email_deliveries d
 SET status = 'retrying',
+    smtp_claim_nonce = gen_random_uuid(),
     next_attempt_at = now() + interval '5 minutes'
 FROM due
 WHERE d.id = due.id
-RETURNING d.id, d.to_email, d.subject, d.html_body, d.text_body, d.reply_to, d.from_name, d.headers_json, d.status, d.attempts, d.last_error, d.next_attempt_at, d.created_at, d.sent_at, d.staff_auth_ciphertext
+RETURNING d.id, d.to_email, d.subject, d.html_body, d.text_body, d.reply_to, d.from_name, d.headers_json, d.status, d.attempts, d.last_error, d.next_attempt_at, d.created_at, d.sent_at, d.staff_auth_ciphertext, d.smtp_org_id, d.smtp_purpose, d.smtp_claim_nonce
 `
 
 // Atomically lease a batch before SMTP I/O. Multiple workers use SKIP LOCKED,
@@ -63,6 +64,9 @@ func (q *Queries) ClaimDueEmailDeliveries(ctx context.Context, limit int32) ([]*
 			&i.CreatedAt,
 			&i.SentAt,
 			&i.StaffAuthCiphertext,
+			&i.SmtpOrgID,
+			&i.SmtpPurpose,
+			&i.SmtpClaimNonce,
 		); err != nil {
 			return nil, err
 		}
@@ -75,12 +79,13 @@ func (q *Queries) ClaimDueEmailDeliveries(ctx context.Context, limit int32) ([]*
 }
 
 const enqueueEmailDelivery = `-- name: EnqueueEmailDelivery :one
-INSERT INTO email_deliveries (to_email, subject, html_body, text_body, reply_to, from_name, headers_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at, staff_auth_ciphertext
+INSERT INTO email_deliveries (smtp_org_id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json)
+VALUES ($1::uuid, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::jsonb)
+RETURNING id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at, staff_auth_ciphertext, smtp_org_id, smtp_purpose, smtp_claim_nonce
 `
 
 type EnqueueEmailDeliveryParams struct {
+	OrgID       uuid.UUID       `json:"org_id"`
 	ToEmail     string          `json:"to_email"`
 	Subject     string          `json:"subject"`
 	HtmlBody    string          `json:"html_body"`
@@ -92,6 +97,7 @@ type EnqueueEmailDeliveryParams struct {
 
 func (q *Queries) EnqueueEmailDelivery(ctx context.Context, arg EnqueueEmailDeliveryParams) (*EmailDelivery, error) {
 	row := q.db.QueryRow(ctx, enqueueEmailDelivery,
+		arg.OrgID,
 		arg.ToEmail,
 		arg.Subject,
 		arg.HtmlBody,
@@ -117,6 +123,9 @@ func (q *Queries) EnqueueEmailDelivery(ctx context.Context, arg EnqueueEmailDeli
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.StaffAuthCiphertext,
+		&i.SmtpOrgID,
+		&i.SmtpPurpose,
+		&i.SmtpClaimNonce,
 	)
 	return &i, err
 }
@@ -142,6 +151,7 @@ func (q *Queries) MarkEmailDeliveryFailed(ctx context.Context, arg MarkEmailDeli
 const markEmailDeliveryRetrying = `-- name: MarkEmailDeliveryRetrying :exec
 UPDATE email_deliveries
 SET status = 'retrying',
+    smtp_claim_nonce = gen_random_uuid(),
     attempts = attempts + 1,
     last_error = $2,
     next_attempt_at = $3

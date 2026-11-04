@@ -181,7 +181,7 @@ func (e *Engine) completeOwnedSealedSendV1(ctx context.Context, o *ownedSendOper
 			}
 		}
 		if !expiredBeforeInvite {
-			if err = q.UpsertReminderSchedule(call, generated.UpsertReminderScheduleParams{DocumentID: doc.ID, Column2: []byte("[{\"days_after_send\":3},{\"days_after_send\":7}]"), FiresRemaining: 2}); err != nil {
+			if err = p.work.InstallReminderPolicyV1(call); err != nil {
 				return fmt.Errorf("complete send sealing: reminder schedule: %w", err)
 			}
 		}

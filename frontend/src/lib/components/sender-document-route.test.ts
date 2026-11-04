@@ -271,10 +271,13 @@ test('CRM Apply lock cannot adopt a late block autosave or change document metad
 test('the actual Send prop blocks dirty or unsynced editable blocks and retains clean manual sending', () => {
   const prop = source.slice(source.indexOf('<SenderPanel')).match(/revisionBlocked=\{([^\n]+)\}/)?.[1]; expect(prop).toBeDefined();
   const evaluate = new Function('env', `with(env){return ${prop};}`);
-  const blocked = (doc: unknown, htmlRevisionBlocked: boolean, crmEditable: boolean, blocksEditorClean: boolean, amendment: Record<string, boolean> = {}) => evaluate({ doc, htmlRevisionBlocked, crmEditable, blocksEditorClean, amendmentLookupBlocked: false, amendmentNotice: false, amendmentBusy: false, ...amendment });
+  const blocked = (doc: unknown, htmlRevisionBlocked: boolean, crmEditable: boolean, blocksEditorClean: boolean, amendment: Record<string, boolean> = {}) => evaluate({ doc, htmlRevisionBlocked, crmEditable, blocksEditorClean, amendmentLookupBlocked: false, amendmentNotice: false, amendmentBusy: false, reminderApplies: false, reminderBlocked: false, ...amendment });
   const blocks = { source_kind: 'blocks', has_html_source: false };
   expect(blocked(blocks, false, true, false)).toBe(true);
   expect(blocked(blocks, false, true, true)).toBe(false);
+  expect(blocked(blocks, false, true, true, { reminderApplies: true, reminderBlocked: false })).toBe(false);
+  expect(blocked(blocks, false, true, true, { reminderApplies: true, reminderBlocked: true })).toBe(true);
+  expect(blocked(blocks, false, true, true, { reminderApplies: false, reminderBlocked: true })).toBe(false);
   expect(blocked(blocks, false, false, false)).toBe(false);
   expect(blocked({ source_kind: 'pdf', has_html_source: true }, true, true, true)).toBe(true);
   for (const flag of ['amendmentLookupBlocked', 'amendmentNotice', 'amendmentBusy']) expect(blocked(blocks, false, true, true, { [flag]: true })).toBe(true);

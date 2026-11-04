@@ -70,8 +70,8 @@ func (q *Queries) DeleteStaffAuthRequestsByEmail(ctx context.Context, email stri
 }
 
 const enqueueStaffAuthEmail = `-- name: EnqueueStaffAuthEmail :exec
-INSERT INTO email_deliveries (id, to_email, subject, html_body, text_body, staff_auth_ciphertext)
-VALUES ($1, $2, $3, '', '', $4)
+INSERT INTO email_deliveries (id, to_email, subject, html_body, text_body, staff_auth_ciphertext, smtp_purpose)
+VALUES ($1, $2, $3, '', '', $4, 'installation_auth')
 `
 
 type EnqueueStaffAuthEmailParams struct {
@@ -92,7 +92,7 @@ func (q *Queries) EnqueueStaffAuthEmail(ctx context.Context, arg EnqueueStaffAut
 }
 
 const getLatestStaffAuthEmail = `-- name: GetLatestStaffAuthEmail :one
-SELECT id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at, staff_auth_ciphertext FROM email_deliveries
+SELECT id, to_email, subject, html_body, text_body, reply_to, from_name, headers_json, status, attempts, last_error, next_attempt_at, created_at, sent_at, staff_auth_ciphertext, smtp_org_id, smtp_purpose, smtp_claim_nonce FROM email_deliveries
 WHERE to_email = $1 AND staff_auth_ciphertext IS NOT NULL
 ORDER BY created_at DESC, id DESC LIMIT 1
 `
@@ -116,6 +116,9 @@ func (q *Queries) GetLatestStaffAuthEmail(ctx context.Context, toEmail string) (
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.StaffAuthCiphertext,
+		&i.SmtpOrgID,
+		&i.SmtpPurpose,
+		&i.SmtpClaimNonce,
 	)
 	return &i, err
 }

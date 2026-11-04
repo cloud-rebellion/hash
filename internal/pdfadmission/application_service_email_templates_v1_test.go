@@ -216,19 +216,21 @@ func TestServiceEmailRetirementKeepsSourceUntilLastBorrowerV1(t *testing.T) {
 }
 
 func TestServiceEmailChangeQueueRejectsWithinBoundsReplacementV1(t *testing.T) {
-	msg := dispatch.Message{To: "owner@example.test", Subject: "Selected subject", HTML: "<p>Selected revision and original action</p>", Text: "Selected revision and original action", ReplyTo: "sender@example.test", FromName: "Workspace"}
-	in := generated.EnqueueEmailDeliveryParams{ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")}
+	msg := dispatch.Message{OrgID: uuid.New(), To: "owner@example.test", Subject: "Selected subject", HTML: "<p>Selected revision and original action</p>", Text: "Selected revision and original action", ReplyTo: "sender@example.test", FromName: "Workspace"}
+	in := generated.EnqueueEmailDeliveryParams{OrgID: msg.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")}
 	if !applicationChangeEmailDeliveryMatchesV1(in, msg) {
 		t.Fatal("actual rendered message lost its private binding")
 	}
 	for name, change := range map[string]func(*generated.EnqueueEmailDeliveryParams){
-		"subject":      func(v *generated.EnqueueEmailDeliveryParams) { v.Subject = "short" },
-		"html":         func(v *generated.EnqueueEmailDeliveryParams) { v.HtmlBody = "<p>Other</p>" },
-		"text":         func(v *generated.EnqueueEmailDeliveryParams) { v.TextBody = "Other" },
-		"recipient":    func(v *generated.EnqueueEmailDeliveryParams) { v.ToEmail = "other@example.test" },
-		"reply-to":     func(v *generated.EnqueueEmailDeliveryParams) { v.ReplyTo = "other@example.test" },
-		"display-name": func(v *generated.EnqueueEmailDeliveryParams) { v.FromName = "Other" },
-		"headers":      func(v *generated.EnqueueEmailDeliveryParams) { v.HeadersJson = []byte(`{"x":"other"}`) },
+		"other-workspace":   func(v *generated.EnqueueEmailDeliveryParams) { v.OrgID = uuid.New() },
+		"missing-workspace": func(v *generated.EnqueueEmailDeliveryParams) { v.OrgID = uuid.Nil },
+		"subject":           func(v *generated.EnqueueEmailDeliveryParams) { v.Subject = "short" },
+		"html":              func(v *generated.EnqueueEmailDeliveryParams) { v.HtmlBody = "<p>Other</p>" },
+		"text":              func(v *generated.EnqueueEmailDeliveryParams) { v.TextBody = "Other" },
+		"recipient":         func(v *generated.EnqueueEmailDeliveryParams) { v.ToEmail = "other@example.test" },
+		"reply-to":          func(v *generated.EnqueueEmailDeliveryParams) { v.ReplyTo = "other@example.test" },
+		"display-name":      func(v *generated.EnqueueEmailDeliveryParams) { v.FromName = "Other" },
+		"headers":           func(v *generated.EnqueueEmailDeliveryParams) { v.HeadersJson = []byte(`{"x":"other"}`) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			copy := in

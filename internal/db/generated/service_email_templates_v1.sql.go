@@ -16,8 +16,8 @@ import (
 )
 
 const createServiceEmailTemplateRevisionV1 = `-- name: CreateServiceEmailTemplateRevisionV1 :exec
-INSERT INTO org_email_template_revisions_v1(org_id,kind,revision,subject_template,html_template,text_template)
-VALUES($1,$2,$3,$4,$5,$6)
+INSERT INTO org_email_template_revisions_v1(org_id,kind,revision,subject_template,html_template,text_template,design_json,design_sha256)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 `
 
 type CreateServiceEmailTemplateRevisionV1Params struct {
@@ -27,6 +27,8 @@ type CreateServiceEmailTemplateRevisionV1Params struct {
 	SubjectTemplate string    `json:"subject_template"`
 	HtmlTemplate    string    `json:"html_template"`
 	TextTemplate    string    `json:"text_template"`
+	DesignJson      string    `json:"design_json"`
+	DesignSha256    []byte    `json:"design_sha256"`
 }
 
 func (q *Queries) CreateServiceEmailTemplateRevisionV1(ctx context.Context, arg CreateServiceEmailTemplateRevisionV1Params) error {
@@ -37,6 +39,8 @@ func (q *Queries) CreateServiceEmailTemplateRevisionV1(ctx context.Context, arg 
 		arg.SubjectTemplate,
 		arg.HtmlTemplate,
 		arg.TextTemplate,
+		arg.DesignJson,
+		arg.DesignSha256,
 	)
 	return err
 }
@@ -45,7 +49,8 @@ const getServiceEmailTemplateHeaderV1 = `-- name: GetServiceEmailTemplateHeaderV
 SELECT h.org_id,h.kind,h.revision,
        octet_length(r.subject_template)::bigint AS subject_bytes,
        octet_length(r.html_template)::bigint AS html_bytes,
-       octet_length(r.text_template)::bigint AS text_bytes,h.updated_at
+       octet_length(r.text_template)::bigint AS text_bytes,
+       octet_length(r.design_json)::bigint AS design_bytes,r.design_sha256,h.updated_at
 FROM org_email_template_heads_v1 h
 JOIN org_email_template_revisions_v1 r USING(org_id,kind,revision)
 WHERE h.org_id=$1 AND h.kind=$2
@@ -64,6 +69,8 @@ type GetServiceEmailTemplateHeaderV1Row struct {
 	SubjectBytes int64              `json:"subject_bytes"`
 	HtmlBytes    int64              `json:"html_bytes"`
 	TextBytes    int64              `json:"text_bytes"`
+	DesignBytes  int64              `json:"design_bytes"`
+	DesignSha256 []byte             `json:"design_sha256"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
@@ -77,13 +84,15 @@ func (q *Queries) GetServiceEmailTemplateHeaderV1(ctx context.Context, arg GetSe
 		&i.SubjectBytes,
 		&i.HtmlBytes,
 		&i.TextBytes,
+		&i.DesignBytes,
+		&i.DesignSha256,
 		&i.UpdatedAt,
 	)
 	return &i, err
 }
 
 const getServiceEmailTemplateV1 = `-- name: GetServiceEmailTemplateV1 :one
-SELECT h.org_id,h.kind,h.revision,r.subject_template,r.html_template,r.text_template,h.updated_at
+SELECT h.org_id,h.kind,h.revision,r.subject_template,r.html_template,r.text_template,r.design_json,r.design_sha256,h.updated_at
 FROM org_email_template_heads_v1 h
 JOIN org_email_template_revisions_v1 r USING(org_id,kind,revision)
 WHERE h.org_id=$1 AND h.kind=$2
@@ -102,6 +111,8 @@ type GetServiceEmailTemplateV1Row struct {
 	SubjectTemplate string             `json:"subject_template"`
 	HtmlTemplate    string             `json:"html_template"`
 	TextTemplate    string             `json:"text_template"`
+	DesignJson      string             `json:"design_json"`
+	DesignSha256    []byte             `json:"design_sha256"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
@@ -117,6 +128,8 @@ func (q *Queries) GetServiceEmailTemplateV1(ctx context.Context, arg GetServiceE
 		&i.SubjectTemplate,
 		&i.HtmlTemplate,
 		&i.TextTemplate,
+		&i.DesignJson,
+		&i.DesignSha256,
 		&i.UpdatedAt,
 	)
 	return &i, err

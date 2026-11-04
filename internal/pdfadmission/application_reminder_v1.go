@@ -34,21 +34,21 @@ type applicationReminderRecipientV1 struct {
 	rotated, rendered, enqueued bool
 }
 type applicationReminderStateV1 struct {
-	mu                                                         sync.Mutex
-	self                                                       *applicationReminderStateV1
-	work                                                       *ApplicationHTMLSendWorkV1
-	document                                                   *generated.Document
-	schedule                                                   *generated.Reminder
-	closes                                                     []func()
-	recipients                                                 []applicationReminderRecipientV1
-	audits                                                     *applicationReminderAuditBatchV1
-	auditHeld, auditOpening                                    bool
-	actor                                                      pgtype.UUID
-	senderEmail, publicURL, orgName, ip, via, tool             string
-	expiry                                                     pgtype.Timestamptz
-	automatic, due, prepared, reset, queue, delivery, finished bool
-	auditNext                                                  int
-	consumerClosed, released                                   bool
+	mu                                                          sync.Mutex
+	self                                                        *applicationReminderStateV1
+	work                                                        *ApplicationHTMLSendWorkV1
+	document                                                    *generated.Document
+	schedule                                                    *generated.Reminder
+	closes                                                      []func()
+	recipients                                                  []applicationReminderRecipientV1
+	audits                                                      *applicationReminderAuditBatchV1
+	auditHeld, auditOpening                                     bool
+	actor                                                       pgtype.UUID
+	senderEmail, publicURL, orgName, companyName, ip, via, tool string
+	expiry                                                      pgtype.Timestamptz
+	automatic, due, prepared, reset, queue, delivery, finished  bool
+	auditNext                                                   int
+	consumerClosed, released                                    bool
 }
 
 func reminderEligibleV1(r *generated.Recipient) bool {
@@ -122,6 +122,42 @@ func (w *ApplicationHTMLSendWorkV1) StartReminderV1(call context.Context, policy
 	if row == nil || row.DocumentID != h.DocumentID || row.NextFireAt != h.NextFireAt || row.LastFiredAt != h.LastFiredAt || row.FiresRemaining != h.FiresRemaining || int64(len(row.ScheduleJson)) != h.ScheduleWireBytes {
 		return result, false, ErrReminderV1
 	}
+	// New snapshots bind the entire finite policy. Old in-flight rows without
+	// a snapshot retain the original cadence. Admission precedes the scalar
+	// snapshot query and a second canonical schedule allocation.
+	closeFrozen, err := w.actor.acquireOwnedRetainedBodyV1(call, 32<<10, 8<<10)
+	if err != nil {
+		return result, false, err
+	}
+	s.closes = append(s.closes, closeFrozen)
+	frozen, err := w.queries.GetReminderPolicySnapshotV1(call, generated.GetReminderPolicySnapshotV1Params{DocumentID: s.document.ID, OrgID: s.document.OrgID, SentAt: s.document.SentAt})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return result, false, err
+	}
+	if err == nil {
+		if frozen == nil || frozen.SenderUserID != s.document.SenderID || !applicationStampV1(frozen.CreatedAt) {
+			return result, false, ErrReminderV1
+		}
+		policy := remindercadence.PolicyV1{Mode: frozen.Mode, IntervalDays: int(frozen.IntervalDays), MaxFires: int(frozen.MaxFires)}
+		if policy.ValidateV1() != nil {
+			return result, false, ErrReminderV1
+		}
+		size := int64(512 + policy.MaxFires*32)
+		closeCanonical, err := w.actor.acquireOwnedRetainedBodyV1(call, size*64, size*16)
+		if err != nil {
+			return result, false, err
+		}
+		s.closes = append(s.closes, closeCanonical)
+		if !policy.ScheduleMatchesV1(row.ScheduleJson, int(row.FiresRemaining)) {
+			return result, false, ErrReminderV1
+		}
+		if !row.LastFiredAt.Valid {
+			first, ok, err := policy.FirstFireV1(s.document.SentAt.Time)
+			if err != nil || !ok || !applicationStampV1(row.NextFireAt) || !row.NextFireAt.Time.Equal(first) {
+				return result, false, ErrReminderV1
+			}
+		}
+	}
 	next, err := remindercadence.NextV1(row.ScheduleJson, int(row.FiresRemaining), s.document.SentAt.Time)
 	if err != nil {
 		return result, false, err
@@ -156,6 +192,14 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 	if !s.validLockedV1(call) || !s.due || s.prepared || !w.recipientsRead || w.sourceActor == nil || w.sourceActor.OrgID != s.document.OrgID || (s.automatic && w.sourceActor.ID != s.document.SenderID) || queue && !delivery || policyTime.IsZero() {
 		return ErrReminderV1
 	}
+	companyName := ""
+	if delivery {
+		var err error
+		companyName, err = w.readTenantPresentationNameLockedV1(call, s.document)
+		if err != nil {
+			return err
+		}
+	}
 	count := int64(0)
 	for _, row := range w.sourceRecipients {
 		if row == nil || row.DocumentID != s.document.ID {
@@ -169,7 +213,7 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 	if !htmlInputAddV1(&raw, count, 8192+8*int64(unsafe.Sizeof(applicationReminderRecipientV1{}))+8*int64(unsafe.Sizeof(applicationReminderAuditSlotV1{}))) {
 		return ErrReminderV1
 	}
-	for _, v := range []string{publicURL, orgName, ip, via, tool, w.sourceActor.Email} {
+	for _, v := range []string{publicURL, orgName, companyName, ip, via, tool, w.sourceActor.Email} {
 		if !htmlInputAddV1(&raw, int64(len(v)), 16) {
 			return ErrReminderV1
 		}
@@ -191,7 +235,7 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 		return err
 	}
 	s.closes = append(s.closes, closeInputs)
-	s.publicURL, s.orgName, s.ip, s.via, s.tool, s.senderEmail = strings.Clone(publicURL), strings.Clone(orgName), strings.Clone(ip), strings.Clone(via), strings.Clone(tool), strings.Clone(w.sourceActor.Email)
+	s.publicURL, s.orgName, s.companyName, s.ip, s.via, s.tool, s.senderEmail = strings.Clone(publicURL), strings.Clone(orgName), strings.Clone(companyName), strings.Clone(ip), strings.Clone(via), strings.Clone(tool), strings.Clone(w.sourceActor.Email)
 	s.queue, s.delivery = queue, delivery
 	s.expiry = magictoken.Expiry(s.document.ExpiresAt, policyTime)
 	s.expiry.Time = s.expiry.Time.UTC().Truncate(time.Microsecond)
@@ -212,7 +256,10 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 		}
 		probe := s.publicURL + "/sign/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		for _, item := range s.recipients {
-			ctx := dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: item.recipient.Name, OrgName: s.orgName, Locale: item.recipient.Locale, SignURL: probe, Acknowledgement: !s.document.RequiresSignature}
+			if !htmlInputAddV1(&output, applicationWorkspaceSMTPPurposeBytesV1, 4) {
+				return ErrReminderV1
+			}
+			ctx := dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: item.recipient.Name, OrgName: s.companyName, Locale: item.recipient.Locale, SignURL: probe, Acknowledgement: !s.document.RequiresSignature}
 			a, b, c, err := applicationServiceEmailComponentsV1(dispatch.KindReminder, ctx, selectedTemplate)
 			if err != nil {
 				return err
@@ -227,6 +274,9 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 	outputWire := int64(0)
 	if queue {
 		outputWire = output
+		if !htmlInputAddV1(&outputWire, count, applicationWorkspaceSMTPWireBytesV1) {
+			return ErrReminderV1
+		}
 	}
 	closeOutputs, err := w.actor.acquireOwnedRetainedBodyV1(call, output, outputWire)
 	if err != nil {
@@ -327,7 +377,7 @@ func (r *ApplicationReminderV1) ResetManualScheduleV1(call context.Context) erro
 			return ErrReminderV1
 		}
 	}
-	if err := w.queries.ResetReminderAfterManualRemind(call, s.document.ID); err != nil {
+	if err := w.queries.ResetFrozenReminderAfterManualV1(call, generated.ResetFrozenReminderAfterManualV1Params{DocumentID: s.document.ID, OrgID: s.document.OrgID}); err != nil {
 		return err
 	}
 	s.reset = true
@@ -358,12 +408,12 @@ func (r *ApplicationReminderV1) RenderV1(call context.Context, index int) (dispa
 	if err != nil {
 		return dispatch.Message{}, err
 	}
-	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: rec.Name, OrgName: s.orgName, Locale: rec.Locale, SignURL: s.publicURL + "/sign/" + item.token, BeaconURL: s.publicURL + "/e/o/" + item.token, Acknowledgement: !s.document.RequiresSignature}, selectedTemplate)
+	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: s.document.Name, SenderName: s.senderEmail, SenderEmail: s.senderEmail, RecipientName: rec.Name, OrgName: s.companyName, Locale: rec.Locale, SignURL: s.publicURL + "/sign/" + item.token, BeaconURL: s.publicURL + "/e/o/" + item.token, Acknowledgement: !s.document.RequiresSignature}, selectedTemplate)
 	if err != nil {
 		return dispatch.Message{}, err
 	}
-	msg := dispatch.Message{To: rec.Email, Subject: subject, HTML: html, Text: text, ReplyTo: s.senderEmail, FromName: s.orgName}
-	item.message = dispatch.Message{To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
+	msg := dispatch.Message{OrgID: s.document.OrgID, To: rec.Email, Subject: subject, HTML: html, Text: text, ReplyTo: s.senderEmail, FromName: s.orgName}
+	item.message = dispatch.Message{OrgID: msg.OrgID, To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
 	item.rendered = true
 	return msg, nil
 }
@@ -394,11 +444,11 @@ func (r *ApplicationReminderV1) EnqueueV1(call context.Context, index int) error
 		return ErrReminderV1
 	}
 	msg := item.message
-	row, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
+	row, err := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: s.document.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
 	if err != nil {
 		return err
 	}
-	if row == nil || row.ID == uuid.Nil || row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
+	if !applicationWorkspaceEmailDeliveryMatchesV1(row, s.document.OrgID) || row == nil || row.ID == uuid.Nil || row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
 		return ErrReminderV1
 	}
 	item.outbox = row.ID
@@ -466,6 +516,7 @@ func (s *applicationReminderStateV1) retireLockedV1() ([]func(), *ApplicationHTM
 	s.senderEmail = ""
 	s.publicURL = ""
 	s.orgName = ""
+	s.companyName = ""
 	s.ip = ""
 	s.via = ""
 	s.tool = ""

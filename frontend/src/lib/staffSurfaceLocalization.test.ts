@@ -14,7 +14,7 @@ const paths = [
 const unchanged = new Set(['AES', 'QES', 'SES', 'P', 'H1', 'H2', 'HTML', 'Markdown', 'Anthropic', 'Mistral (EU)', 'URL', 'Status', 'Version', 'Index', 'Model', 'Code', 'API', 'SE',
   'Inter, system-ui, sans-serif', 'Geist, Inter, sans-serif', 'Acme Inc.', 'subject@example.com', 'https://your.cdn/logo.png', 'https://yoursaas.com/webhooks/hash',
   '2026-10-10T12:00:00Z', '2026-11-10T12:00:00Z', 'var.name', 'KiB', 'SHA-256', 'PDF SHA-256:',
-  'Policy:', 'Status:', 'Webhooks', '· version', 'document.changes_requested', 'document.completed', 'document.declined', 'document.expired', 'document.sent', 'document.signed', 'document.viewed', 'document.voided', 'recipient.bounced', 'absent', 'active_room', 'approved_default', 'crm_scalar', 'grantor_field', 'literal', 'reviewed_value']);
+  'Policy:', 'Status:', 'Webhooks', '· version', 'document.changes_requested', 'document.comment_posted', 'document.completed', 'document.declined', 'document.expired', 'document.sent', 'document.signed', 'document.viewed', 'document.voided', 'recipient.bounced', 'absent', 'active_room', 'approved_default', 'crm_scalar', 'grantor_field', 'literal', 'reviewed_value']);
 function strings(node: any): string[] {
   if (node?.type === 'Literal' && typeof node.value === 'string') return [node.value];
   if (node?.type === 'ConditionalExpression') return [...strings(node.consequent), ...strings(node.alternate)];

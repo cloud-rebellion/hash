@@ -318,7 +318,11 @@ func (w *ApplicationDocumentPackageSelectionV1) CommitLaterAmendmentNoticeV1(cal
 	if candidate == nil || candidate.Status != "draft" || !candidate.UpdatedAt.Valid || !candidate.UpdatedAt.Time.Equal(h.request.ExpectedDocumentUpdatedAt) {
 		return out, amendments.ErrChangedV1
 	}
-	close, e := s.actor.acquireOwnedRetainedBodyV1(call, 32<<20, 8<<20)
+	routeRaw, routeWire := int64(32<<20), int64(8<<20)
+	if !htmlInputAddV1(&routeRaw, int64(len(h.input.RecipientEmails)), 2*applicationWorkspaceSMTPPurposeBytesV1) || !htmlInputAddV1(&routeWire, int64(len(h.input.RecipientEmails)), applicationWorkspaceSMTPWireBytesV1) {
+		return out, amendments.ErrUnavailableV1
+	}
+	close, e := s.actor.acquireOwnedRetainedBodyV1(call, routeRaw, routeWire)
 	if e != nil {
 		return out, e
 	}
@@ -410,10 +414,10 @@ func (w *ApplicationDocumentPackageSelectionV1) CommitLaterAmendmentNoticeV1(cal
 			if len(d.Message.Headers) != 0 {
 				return amendments.ErrChangedV1
 			}
-			if d.Message.To != d.RecipientEmail || d.Message.Subject != h.input.Subject || d.Message.ReplyTo != h.input.ReplyTo || d.Message.FromName != h.input.FromName {
+			if d.Message.OrgID != d.OrgID || d.Message.To != d.RecipientEmail || d.Message.Subject != h.input.Subject || d.Message.ReplyTo != h.input.ReplyTo || d.Message.FromName != h.input.FromName {
 				return amendments.ErrChangedV1
 			}
-			_, e = db.Exec(call, `INSERT INTO email_deliveries(id,to_email,subject,html_body,text_body,reply_to,from_name,headers_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, d.EmailDeliveryID, d.Message.To, d.Message.Subject, d.Message.HTML, d.Message.Text, d.Message.ReplyTo, d.Message.FromName, headers)
+			_, e = db.Exec(call, `INSERT INTO email_deliveries(id,to_email,subject,html_body,text_body,reply_to,from_name,headers_json,smtp_org_id,smtp_purpose) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'workspace')`, d.EmailDeliveryID, d.Message.To, d.Message.Subject, d.Message.HTML, d.Message.Text, d.Message.ReplyTo, d.Message.FromName, headers, d.OrgID)
 			if e != nil {
 				return e
 			}

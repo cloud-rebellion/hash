@@ -21,10 +21,20 @@ import (
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/bright-interaction/hash/internal/nethard"
+	"github.com/google/uuid"
 )
 
 // SMTPConfig is the slice of hash config the dispatcher needs.
 type SMTPConfig struct {
+	MIMEWork ServiceEmailMIMEAdmissionV1
+	// Tenant SMTP explicitly selects verified TLS and hardened public egress.
+	// Empty TLSMode preserves the existing installation/dev transport contract.
+	TLSMode      string
+	PublicOnly   bool
+	AllowPrivate bool // operator-selected local-development predicate only
+
 	Host     string
 	Port     int
 	User     string
@@ -40,6 +50,9 @@ type Mailer interface {
 
 // Message carries everything we need to ship an email.
 type Message struct {
+	// Native organization authority for workspace mail, never inferred from
+	// recipient, display name or caller-controlled headers.
+	OrgID   uuid.UUID
 	To      string
 	Subject string
 	HTML    string
@@ -58,7 +71,9 @@ type Message struct {
 // each Send opens a fresh connection, authenticates, ships, closes. Reuse
 // arrives in week 5 once we measure the call rate.
 type SMTPMailer struct {
-	cfg SMTPConfig
+	cfg         SMTPConfig
+	dialContext func(context.Context, string, string) (net.Conn, error)
+	tlsConfig   *tls.Config // private test seam; production always uses system roots
 }
 
 const smtpOperationTimeout = 30 * time.Second
@@ -86,6 +101,12 @@ func NewSMTPMailer(cfg SMTPConfig) (*SMTPMailer, error) {
 	if err != nil || from.Address == "" {
 		return nil, errors.New("smtp from must be a valid RFC-5322 address")
 	}
+	if cfg.TLSMode != "" && !((cfg.TLSMode == "starttls" && cfg.Port == 587) || (cfg.TLSMode == "tls" && cfg.Port == 465)) {
+		return nil, errors.New("smtp TLS mode/port must be STARTTLS587 or TLS465")
+	}
+	if cfg.PublicOnly && cfg.TLSMode == "" {
+		return nil, errors.New("workspace SMTP requires explicit TLS")
+	}
 	return &SMTPMailer{cfg: cfg}, nil
 }
 
@@ -103,6 +124,19 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 			return errors.New("smtp: reply-to must be a single valid address")
 		}
 	}
+	if serviceEmailHasInlineLogoV1(msg.HTML) {
+		if m.cfg.MIMEWork == nil || msg.OrgID == uuid.Nil {
+			return ErrServiceEmailMIMEV1
+		}
+		closeWork, err := m.cfg.MIMEWork.ServiceEmailMIMEV1(ctx, msg)
+		if err != nil {
+			return err
+		}
+		if closeWork == nil {
+			return ErrServiceEmailMIMEV1
+		}
+		defer closeWork()
+	}
 	body, err := buildMIME(m.cfg.From, msg)
 	if err != nil {
 		return err
@@ -110,7 +144,14 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	addr := net.JoinHostPort(m.cfg.Host, fmt.Sprintf("%d", m.cfg.Port))
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if m.cfg.PublicOnly {
+		dialer = nethard.Dialer(func() bool { return m.cfg.AllowPrivate })
+	}
+	dial := dialer.DialContext
+	if m.dialContext != nil {
+		dial = m.dialContext
+	}
+	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return smtpOperationError(ctx, "smtp dial", err)
 	}
@@ -127,8 +168,21 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 		_ = conn.Close()
 		return smtpOperationError(ctx, "smtp set connection deadline", err)
 	}
-	stopContextClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	rawConn := conn
+	stopContextClose := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
 	defer stopContextClose()
+	tlsConfig := &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}
+	if m.tlsConfig != nil {
+		tlsConfig = m.tlsConfig.Clone()
+	}
+	if m.cfg.TLSMode == "tls" {
+		secure := tls.Client(conn, tlsConfig)
+		if e := secure.HandshakeContext(ctx); e != nil {
+			_ = conn.Close()
+			return smtpOperationError(ctx, "smtp TLS handshake", e)
+		}
+		conn = secure
+	}
 	c, err := smtp.NewClient(conn, m.cfg.Host)
 	if err != nil {
 		_ = conn.Close()
@@ -140,14 +194,14 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	// attempting it when advertised permits a stripping attacker to remove the
 	// capability and receive both the message and AUTH PLAIN credentials.
 	// Production config rejects port 1025; that exception is dev/e2e only.
-	if m.cfg.Port != 1025 {
+	if m.cfg.TLSMode != "tls" && m.cfg.Port != 1025 {
 		if ok, _ := c.Extension("STARTTLS"); !ok {
 			if ctxErr := smtpContextError(ctx); ctxErr != nil {
 				return fmt.Errorf("smtp hello: %w", ctxErr)
 			}
 			return errors.New("smtp: STARTTLS is required but the server did not advertise it")
 		}
-		if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+		if err := c.StartTLS(tlsConfig); err != nil {
 			return smtpOperationError(ctx, "smtp starttls", err)
 		}
 	}
@@ -260,6 +314,9 @@ func validateExtraHeader(name string) error {
 // buildMIME assembles a multipart/alternative message with both HTML and
 // plaintext parts, plus any extra headers the caller specified.
 func buildMIME(from string, msg Message) (string, error) {
+	if serviceEmailHasInlineLogoV1(msg.HTML) {
+		return buildServiceEmailInlineMIMEV1(from, msg)
+	}
 	if msg.Subject == "" {
 		return "", errors.New("smtp: subject required")
 	}

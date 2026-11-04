@@ -65,10 +65,10 @@
  onMount(() => { void load(true); return () => { disposed = true; entryCapability = null; generation++; metaAbort?.abort(); void closePDF(); }; });
 </script>
 
-<svelte:head><title>Email notice · Hash</title><meta name="robots" content="noindex,nofollow" /><meta name="referrer" content="no-referrer" /></svelte:head>
+<svelte:head><title>Email notice</title><meta name="robots" content="noindex,nofollow" /><meta name="referrer" content="no-referrer" /></svelte:head>
 <main class="min-h-screen bg-bg px-4 py-8 sm:px-6">
  <div class="max-w-4xl mx-auto space-y-5">
-  <p class="font-display text-xl">Hash</p>
+  <p class="font-display text-xl">Document notice</p>
   <header class="space-y-2"><p class="text-sm text-text-secondary">Shared email notice</p><h1 class="font-display text-2xl">{notice?.subject ?? 'Email notice'}</h1>
    <p class="text-sm text-text-secondary">Read the notice and its exact accompanying files. This page does not submit a signature or acknowledgement.</p></header>
   {#if loading}<p role="status">Opening the shared notice…</p>{/if}

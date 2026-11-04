@@ -1,6 +1,6 @@
 -- name: EnqueueStaffAuthEmail :exec
-INSERT INTO email_deliveries (id, to_email, subject, html_body, text_body, staff_auth_ciphertext)
-VALUES ($1, $2, $3, '', '', $4);
+INSERT INTO email_deliveries (id, to_email, subject, html_body, text_body, staff_auth_ciphertext, smtp_purpose)
+VALUES ($1, $2, $3, '', '', $4, 'installation_auth');
 
 -- name: GetLatestStaffAuthEmail :one
 SELECT * FROM email_deliveries

@@ -226,9 +226,13 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 		return nil, ErrHTMLSendWorkV1
 	}
 	out.rendered = true
+	companyName, err := w.readTenantPresentationNameLockedV1(call, p.completed)
+	if err != nil {
+		return nil, err
+	}
 	count := int64(len(out.tokens) + 1)
 	raw := int64(0)
-	if !htmlInputAddV1(&raw, int64(len(baseURL)), 2) || !htmlInputAddV1(&raw, int64(len(orgName)), 2) || !htmlInputAddV1(&raw, dispatch.CompletedSenderTemplateSourceBytesV1(), 64) || !htmlInputAddV1(&raw, count, 4*int64(unsafe.Sizeof(dispatch.Message{}))+4*int64(unsafe.Sizeof(dispatch.TemplateContext{}))+4*int64(unsafe.Sizeof(generated.EmailDelivery{}))+4*int64(unsafe.Sizeof(generated.EnqueueEmailDeliveryParams{}))+4*int64(unsafe.Sizeof((*generated.EmailDelivery)(nil)))+4*int64(unsafe.Sizeof(map[string]string{}))+8*int64(unsafe.Sizeof(""))+4*int64(unsafe.Sizeof(time.Time{}))) {
+	if !htmlInputAddV1(&raw, int64(len(baseURL)), 2) || !htmlInputAddV1(&raw, int64(len(orgName)), 2) || !htmlInputAddV1(&raw, int64(len(companyName)), 2) || !htmlInputAddV1(&raw, dispatch.CompletedSenderTemplateSourceBytesV1(), 64) || !htmlInputAddV1(&raw, count, 4*int64(unsafe.Sizeof(dispatch.Message{}))+4*int64(unsafe.Sizeof(dispatch.TemplateContext{}))+4*int64(unsafe.Sizeof(generated.EmailDelivery{}))+4*int64(unsafe.Sizeof(generated.EnqueueEmailDeliveryParams{}))+4*int64(unsafe.Sizeof((*generated.EmailDelivery)(nil)))+4*int64(unsafe.Sizeof(map[string]string{}))+8*int64(unsafe.Sizeof(""))+4*int64(unsafe.Sizeof(time.Time{}))) {
 		return nil, ErrHTMLSendWorkV1
 	}
 	for range out.tokens {
@@ -259,7 +263,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 	output := int64(0)
 	for _, credential := range out.tokens {
 		r := credential.recipient
-		ctx := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, DownloadURL: probe, AuditCertURL: auditProbe, PackagePortalURL: baseURL + "/completed/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", DownloadExpiresAt: credential.expiry.UTC().Format(time.RFC3339), Acknowledgement: !p.completed.RequiresSignature}
+		ctx := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: r.Name, OrgName: companyName, Locale: r.Locale, DownloadURL: probe, AuditCertURL: auditProbe, PackagePortalURL: baseURL + "/completed/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", DownloadExpiresAt: credential.expiry.UTC().Format(time.RFC3339), Acknowledgement: !p.completed.RequiresSignature}
 		a, b, c, e := applicationServiceEmailComponentsV1(dispatch.KindCompletedSigner, ctx, signerTemplate)
 		if e != nil {
 			return nil, e
@@ -270,7 +274,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 			}
 		}
 	}
-	senderContext := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: out.sender.Name, OrgName: orgName, DownloadURL: senderURL, AuditCertURL: baseURL + "/api/v1/documents/" + p.completed.ID.String() + "/audit-cert", Acknowledgement: !p.completed.RequiresSignature}
+	senderContext := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: out.sender.Name, OrgName: companyName, DownloadURL: senderURL, AuditCertURL: baseURL + "/api/v1/documents/" + p.completed.ID.String() + "/audit-cert", Acknowledgement: !p.completed.RequiresSignature}
 	a, b, c, err := applicationServiceEmailComponentsV1(dispatch.KindCompletedSender, senderContext, senderTemplate)
 	if err != nil {
 		return nil, err
@@ -295,12 +299,12 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 		if e != nil {
 			return fmt.Errorf("render %s: %w", kind, e)
 		}
-		out.messages = append(out.messages, dispatch.Message{To: to, Subject: subject, HTML: html, Text: text, ReplyTo: ctx.SenderEmail, FromName: ctx.OrgName})
+		out.messages = append(out.messages, dispatch.Message{OrgID: p.completed.OrgID, To: to, Subject: subject, HTML: html, Text: text, ReplyTo: ctx.SenderEmail, FromName: orgName})
 		return nil
 	}
 	for _, credential := range out.tokens {
 		r := credential.recipient
-		ctx := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: r.Name, OrgName: orgName, Locale: r.Locale, DownloadURL: baseURL + "/sign/" + credential.token + "/final-pdf", AuditCertURL: baseURL + "/sign/" + credential.token + "/audit-cert", PackagePortalURL: baseURL + "/completed/" + credential.token, DownloadExpiresAt: credential.expiry.UTC().Format(time.RFC3339), Acknowledgement: !p.completed.RequiresSignature}
+		ctx := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: r.Name, OrgName: companyName, Locale: r.Locale, DownloadURL: baseURL + "/sign/" + credential.token + "/final-pdf", AuditCertURL: baseURL + "/sign/" + credential.token + "/audit-cert", PackagePortalURL: baseURL + "/completed/" + credential.token, DownloadExpiresAt: credential.expiry.UTC().Format(time.RFC3339), Acknowledgement: !p.completed.RequiresSignature}
 		if err = render(dispatch.KindCompletedSigner, r.Email, ctx); err != nil {
 			return nil, err
 		}
@@ -310,7 +314,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 	}
 	out.views = make([]dispatch.Message, len(out.messages))
 	for i, msg := range out.messages {
-		out.messages[i] = dispatch.Message{To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
+		out.messages[i] = dispatch.Message{OrgID: msg.OrgID, To: strings.Clone(msg.To), Subject: strings.Clone(msg.Subject), HTML: strings.Clone(msg.HTML), Text: strings.Clone(msg.Text), ReplyTo: strings.Clone(msg.ReplyTo), FromName: strings.Clone(msg.FromName)}
 		out.views[i] = msg
 	}
 	return out.views, nil
@@ -335,8 +339,8 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueHistoricalCompletionMessagesV1(call c
 		return ErrHTMLSendWorkV1
 	}
 	for _, msg := range out.messages {
-		n, e := htmlAuthoringSumV1(int64(len(msg.To)), int64(len(msg.Subject)), int64(len(msg.HTML)), int64(len(msg.Text)), int64(len(msg.ReplyTo)), int64(len(msg.FromName)), int64(len("pending")))
-		if e != nil || !htmlInputAddV1(&raw, n, 2) || !htmlInputAddV1(&wire, 1, 2) {
+		n, e := htmlAuthoringSumV1(applicationWorkspaceSMTPPurposeBytesV1, int64(len(msg.To)), int64(len(msg.Subject)), int64(len(msg.HTML)), int64(len(msg.Text)), int64(len(msg.ReplyTo)), int64(len(msg.FromName)), int64(len("pending")))
+		if e != nil || !htmlInputAddV1(&raw, n, 2) || !htmlInputAddV1(&wire, 1, 2+applicationWorkspaceSMTPWireBytesV1) {
 			return ErrHTMLSendWorkV1
 		}
 	}
@@ -347,14 +351,14 @@ func (w *ApplicationHTMLSendWorkV1) EnqueueHistoricalCompletionMessagesV1(call c
 	w.closes = append(w.closes, closeRows)
 	out.deliveries = make([]*generated.EmailDelivery, 0, len(out.messages))
 	for index, msg := range out.messages {
-		row, e := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
+		row, e := w.queries.EnqueueEmailDelivery(call, generated.EnqueueEmailDeliveryParams{OrgID: p.completed.OrgID, ToEmail: msg.To, Subject: msg.Subject, HtmlBody: msg.HTML, TextBody: msg.Text, ReplyTo: msg.ReplyTo, FromName: msg.FromName, HeadersJson: []byte("{}")})
 		if e != nil {
 			return fmt.Errorf("enqueue notification email to %s: %w", dispatch.MaskEmail(msg.To), e)
 		}
 		if row == nil {
 			return fmt.Errorf("enqueue notification email to %s returned no delivery", dispatch.MaskEmail(msg.To))
 		}
-		if row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
+		if !applicationWorkspaceEmailDeliveryMatchesV1(row, p.completed.OrgID) || row.ToEmail != msg.To || row.Subject != msg.Subject || row.HtmlBody != msg.HTML || row.TextBody != msg.Text || row.ReplyTo != msg.ReplyTo || row.FromName != msg.FromName || row.Status != "pending" || row.LastError != "" || string(row.HeadersJson) != "{}" {
 			return ErrHTMLSendWorkV1
 		}
 		audience, recipient := "sender", uuid.Nil

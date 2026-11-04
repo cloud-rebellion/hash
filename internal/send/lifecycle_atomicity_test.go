@@ -45,10 +45,11 @@ func TestAppendAuditEntriesTxPropagatesFailureForCallerRollback(t *testing.T) {
 func TestEnqueueLifecycleEmailsPropagatesOutboxFailureForCallerRollback(t *testing.T) {
 	wantErr := errors.New("outbox insert failed")
 	store := &fakeEmailEnqueuer{failAt: 2, err: wantErr}
+	org := uuid.New()
 	messages := []dispatch.Message{
-		{To: "first@example.test", Subject: "One", HTML: "<p>one</p>", Text: "one"},
-		{To: "second@example.test", Subject: "Two", HTML: "<p>two</p>", Text: "two"},
-		{To: "third@example.test", Subject: "Three", HTML: "<p>three</p>", Text: "three"},
+		{OrgID: org, To: "first@example.test", Subject: "One", HTML: "<p>one</p>", Text: "one"},
+		{OrgID: org, To: "second@example.test", Subject: "Two", HTML: "<p>two</p>", Text: "two"},
+		{OrgID: org, To: "third@example.test", Subject: "Three", HTML: "<p>three</p>", Text: "three"},
 	}
 
 	err := enqueueLifecycleEmails(context.Background(), store, messages)
@@ -58,7 +59,7 @@ func TestEnqueueLifecycleEmailsPropagatesOutboxFailureForCallerRollback(t *testi
 	if len(store.calls) != 2 {
 		t.Fatalf("outbox calls = %d, want stop at failed insert", len(store.calls))
 	}
-	if store.calls[0].ToEmail != messages[0].To || store.calls[0].Subject != messages[0].Subject {
+	if store.calls[0].OrgID != org || store.calls[0].ToEmail != messages[0].To || store.calls[0].Subject != messages[0].Subject {
 		t.Fatalf("first outbox row = %#v, want rendered first message", store.calls[0])
 	}
 }

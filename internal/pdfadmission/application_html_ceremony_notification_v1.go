@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/bright-interaction/hash/internal/actiontoken"
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -22,10 +23,11 @@ type ApplicationHTMLChangeNotificationV1 struct {
 	mu                                 sync.Mutex
 	self                               *ApplicationHTMLChangeNotificationV1
 	owner                              *ApplicationHTMLCeremonyWorkflowV1
+	org                                uuid.UUID
 	context                            dispatch.TemplateContext
 	selectedTemplate                   *dispatch.ServiceEmailTemplateV1
 	message                            dispatch.Message
-	to                                 string
+	to, fromName                       string
 	subjectBytes, htmlBytes, textBytes int64
 	attempted                          bool
 	renderAttempted, rendered          bool
@@ -42,6 +44,10 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 	}
 	document, recipient, sender, change, input := w.snapshot.document, w.participant, w.sender, w.change, w.changeInput
 	w.mu.Unlock()
+	companyName, err := w.readTenantPresentationNameV1(call)
+	if err != nil {
+		return nil, err
+	}
 	// Actual actiontoken payload is six joined strings/five separators. UUIDs are
 	//36ASCII bytes each, kind cr2, longest action approve7 and signed int64 <=20.
 	// RawURL base64 upper is4*ceil(n/3); HMAC-SHA256 adds43bytes plus one dot.
@@ -58,7 +64,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 			return nil, err
 		}
 	}
-	inputs, err := htmlAuthoringSumV1(int64(len(orgName)), base, int64(len(actionSecret)), urls, 2*payloadUpper,
+	inputs, err := htmlAuthoringSumV1(int64(unsafe.Sizeof("")), int64(len(orgName)), int64(len(companyName)), base, int64(len(actionSecret)), urls, 2*payloadUpper,
 		int64(len(document.Name)), int64(len(recipient.Name)), int64(len(sender.Name)), int64(len(sender.Email)),
 		int64(len(input.Message)), int64(len(input.Quote)), int64(len(input.Context)), int64(len(input.Proposed)))
 	if err != nil {
@@ -81,7 +87,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 		denyURL = root + "/a/cr?t=" + actiontoken.Mint(actionSecret, deny, denyAt, 14*24*time.Hour)
 	}
 	context := dispatch.TemplateContext{DocumentName: document.Name, SenderName: sender.Name, SenderEmail: sender.Email, RecipientName: recipient.Name,
-		OrgName: strings.Clone(orgName), DeclineReason: input.Message, ChangeQuote: input.Quote, ChangeContext: input.Context, ChangeProposed: input.Proposed,
+		OrgName: strings.Clone(companyName), DeclineReason: input.Message, ChangeQuote: input.Quote, ChangeContext: input.Context, ChangeProposed: input.Proposed,
 		OpenURL: root + "/documents/" + document.ID.String(), ApproveURL: approveURL, DenyURL: denyURL}
 	selectedTemplate, err := w.changeServiceEmailTemplateV1(call)
 	if err != nil {
@@ -91,20 +97,20 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 	if err != nil {
 		return nil, err
 	}
-	output, err := htmlAuthoringSumV1(s, h, t, 2*int64(len(sender.Email)), int64(len(orgName)), int64(len("pending")))
+	output, err := htmlAuthoringSumV1(applicationWorkspaceSMTPPurposeBytesV1, s, h, t, 2*int64(len(sender.Email)), int64(len(orgName)), int64(len("pending")))
 	if err != nil {
 		return nil, err
 	}
 	// Complete logical TEXT output plus the actual two-byte headers JSON is
 	// separately charged for DB staging as well as retained client/result copies.
-	wire, err := htmlAuthoringSumV1(output, 2)
+	wire, err := htmlAuthoringSumV1(output, 2+applicationWorkspaceSMTPWireBytesV1)
 	if err != nil {
 		return nil, err
 	}
 	if err = w.retainV1(call, output, wire); err != nil {
 		return nil, err
 	}
-	n := &ApplicationHTMLChangeNotificationV1{owner: w, context: context, selectedTemplate: selectedTemplate, to: sender.Email, subjectBytes: s, htmlBytes: h, textBytes: t}
+	n := &ApplicationHTMLChangeNotificationV1{owner: w, org: document.OrgID, context: context, selectedTemplate: selectedTemplate, to: sender.Email, fromName: strings.Clone(orgName), subjectBytes: s, htmlBytes: h, textBytes: t}
 	n.self = n
 	w.mu.Lock()
 	if w.notification != nil || w.closed {
@@ -160,7 +166,7 @@ func (n *ApplicationHTMLChangeNotificationV1) BorrowMessageV1(call context.Conte
 		return dispatch.Message{}, nil, err
 	}
 	n.mu.Lock()
-	tpl, s, h, t := n.selectedTemplate, n.subjectBytes, n.htmlBytes, n.textBytes
+	tpl, fromName, s, h, t := n.selectedTemplate, n.fromName, n.subjectBytes, n.htmlBytes, n.textBytes
 	n.mu.Unlock()
 	subject, html, text, err := dispatch.RenderServiceEmailV1(dispatch.KindChangesRequested, ctx, tpl)
 	if err != nil || int64(len(subject)) > s || int64(len(html)) > h || int64(len(text)) > t {
@@ -170,7 +176,7 @@ func (n *ApplicationHTMLChangeNotificationV1) BorrowMessageV1(call context.Conte
 		}
 		return dispatch.Message{}, nil, ErrHTMLCeremonyWorkflowV1
 	}
-	message := dispatch.Message{To: to, Subject: subject, HTML: html, Text: text, ReplyTo: ctx.SenderEmail, FromName: ctx.OrgName}
+	message := dispatch.Message{OrgID: n.org, To: to, Subject: subject, HTML: html, Text: text, ReplyTo: ctx.SenderEmail, FromName: fromName}
 	// Immutable strings alias the already-paid output. A returned message value
 	// may be edited by its caller without altering this private queue binding.
 	n.mu.Lock()
@@ -180,7 +186,7 @@ func (n *ApplicationHTMLChangeNotificationV1) BorrowMessageV1(call context.Conte
 }
 
 func applicationChangeEmailDeliveryMatchesV1(in generated.EnqueueEmailDeliveryParams, msg dispatch.Message) bool {
-	return len(msg.Headers) == 0 && bytes.Equal(in.HeadersJson, []byte("{}")) && in.ToEmail == msg.To && in.Subject == msg.Subject && in.HtmlBody == msg.HTML && in.TextBody == msg.Text && in.ReplyTo == msg.ReplyTo && in.FromName == msg.FromName
+	return msg.OrgID != uuid.Nil && in.OrgID == msg.OrgID && len(msg.Headers) == 0 && bytes.Equal(in.HeadersJson, []byte("{}")) && in.ToEmail == msg.To && in.Subject == msg.Subject && in.HtmlBody == msg.HTML && in.TextBody == msg.Text && in.ReplyTo == msg.ReplyTo && in.FromName == msg.FromName
 }
 
 // This is exactly the original outbox interface, with dispatch kept inside the
@@ -201,9 +207,9 @@ func (n *ApplicationHTMLChangeNotificationV1) EnqueueEmailDelivery(call context.
 		return nil, ErrHTMLCeremonyWorkflowV1
 	}
 	n.attempted = true
-	expected, to, s, h, t := n.context, n.to, n.subjectBytes, n.htmlBytes, n.textBytes
+	expected, to, fromName, s, h, t := n.context, n.to, n.fromName, n.subjectBytes, n.htmlBytes, n.textBytes
 	n.mu.Unlock()
-	if in.ToEmail != to || in.ReplyTo != expected.SenderEmail || in.FromName != expected.OrgName || !bytes.Equal(in.HeadersJson, []byte("{}")) ||
+	if in.ToEmail != to || in.ReplyTo != expected.SenderEmail || in.FromName != fromName || !bytes.Equal(in.HeadersJson, []byte("{}")) ||
 		int64(len(in.Subject)) > s || int64(len(in.HtmlBody)) > h || int64(len(in.TextBody)) > t {
 		return nil, ErrHTMLCeremonyWorkflowV1
 	}
@@ -215,7 +221,7 @@ func (n *ApplicationHTMLChangeNotificationV1) EnqueueEmailDelivery(call context.
 	if err != nil {
 		return nil, err
 	}
-	if row == nil || row.ID == uuid.Nil || row.ToEmail != in.ToEmail || row.Subject != in.Subject || row.HtmlBody != in.HtmlBody || row.TextBody != in.TextBody ||
+	if !applicationWorkspaceEmailDeliveryMatchesV1(row, n.org) || row == nil || row.ID == uuid.Nil || row.ToEmail != in.ToEmail || row.Subject != in.Subject || row.HtmlBody != in.HtmlBody || row.TextBody != in.TextBody ||
 		row.ReplyTo != in.ReplyTo || row.FromName != in.FromName || !bytes.Equal(row.HeadersJson, in.HeadersJson) || row.Status != "pending" || row.LastError != "" {
 		return nil, ErrHTMLCeremonyWorkflowV1
 	}
@@ -229,7 +235,7 @@ func (n *ApplicationHTMLChangeNotificationV1) clearV1() {
 	n.context = dispatch.TemplateContext{}
 	n.selectedTemplate = nil
 	n.message = dispatch.Message{}
-	n.to = ""
+	n.to, n.fromName = "", ""
 	n.owner = nil
 	n.mu.Unlock()
 }

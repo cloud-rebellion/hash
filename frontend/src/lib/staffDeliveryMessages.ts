@@ -10,7 +10,7 @@ export const swedishDeliveryStaffMessages: Record<string, string> = {
   'Delivery disabled': 'Leverans avstängd',
   'Configuration is saved. This does not prove that the server accepts mail or that a message reaches an inbox.': 'Konfigurationen är sparad. Det bevisar inte att servern tar emot e-post eller att ett meddelande når inkorgen.',
   'This existing workspace still uses its legacy installation transport. Saving your own server replaces that route; disabling delivery does not fall back to it.': 'Den här befintliga arbetsytan använder fortfarande installationens äldre leverans. När du sparar en egen server ersätts den vägen. Avstängd leverans återgår inte till den.',
-  'Document email requires this workspace’s own SMTP configuration. No shared transport is selected automatically.': 'Dokumentmeddelanden kräver arbetsytans egen SMTP-konfiguration. Ingen delad leverans väljs automatiskt.',
+  'Document email requires this workspace’s own SMTP configuration; no shared transport is selected automatically. Messages can still queue, retry and then fail. Saving SMTP later does not automatically resend failed mail.': 'Dokumentmeddelanden kräver arbetsytans egen SMTP-konfiguration. Ingen delad leverans väljs automatiskt. Meddelanden kan ändå köas, få nya leveransförsök och sedan misslyckas. Att spara SMTP senare skickar inte automatiskt om misslyckade meddelanden.',
   'Revision {revision}': 'Revision {revision}',
   'Workspace SMTP configuration': 'Arbetsytans SMTP-konfiguration',
   'Sender identity': 'Avsändare',

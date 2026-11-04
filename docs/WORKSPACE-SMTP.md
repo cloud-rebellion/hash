@@ -62,6 +62,12 @@ The worker uses that immutable route and never infers tenant identity from an
 address, display name or header. Sealed account-recovery messages have a separate
 explicit installation-authentication purpose.
 
+Existing installation-compatible workspaces continue using installation SMTP.
+An unconfigured workspace can still queue attributed document mail, but delivery
+retries and eventually fails if SMTP remains unavailable. Saving SMTP later lets
+pending or retrying mail use the configuration; it does not automatically revive
+failed deliveries.
+
 A database claim nonce prevents a surviving older worker from leasing workspace
 mail and sending it through its installation sender. New native claim/retry SQL
 advances that nonce every attempt; older statements fail atomically before the

@@ -17,6 +17,7 @@ interface StackFrame {
 	filename: string;
 	lineno: number;
 	colno?: number;
+	module?: string;
 	in_app: true;
 }
 type FailureCategory = 'javascript_error' | 'unhandled_rejection' | 'resource_error' | 'render_error' | 'pdf_view_error';
@@ -32,7 +33,7 @@ const duplicateWindowMs = 10_000;
 const defaultMaxEventsPerMinute = 20;
 const captureMarker = '__flareBrowserCaptureInstalled';
 const renderStartupMarker = '__hashFlareRenderStartupAttempted';
-let renderReporter: { owner: Window; send: (category: HandledFailureCategory) => void } | undefined;
+let renderReporter: { owner: Window; send: (category: HandledFailureCategory, frames?: StackFrame[]) => void } | undefined;
 const environmentNames = new Set(['development', 'test', 'staging', 'production', 'unknown']);
 const failureDetails: Record<FailureCategory, { type: string; message: string; operation: string }> = {
 	javascript_error: { type: 'BrowserError', message: 'Browser JavaScript error', operation: 'browser.javascript' },
@@ -100,14 +101,19 @@ function pageCategory(): string {
 
 // Reading own data properties avoids invoking getters/toJSON on rejected values.
 // In particular no Error.message/name or arbitrary rejected object is read.
-function ownString(value: unknown, key: string): string | undefined {
+function ownValue(value: unknown, key: string): unknown {
 	if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
 	try {
 		const descriptor = Object.getOwnPropertyDescriptor(value, key);
-		return descriptor && typeof descriptor.value === 'string' ? descriptor.value : undefined;
+		return descriptor && 'value' in descriptor ? descriptor.value : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+function ownString(value: unknown, key: string): string | undefined {
+	const property = ownValue(value, key);
+	return typeof property === 'string' ? property : undefined;
 }
 
 function errorStack(value: unknown): string | undefined {
@@ -149,6 +155,28 @@ function parseStack(stack: string | undefined): StackFrame[] {
 	return frames;
 }
 
+// A handled error can be constructed from arbitrary application input. Its
+// stack alone is not evidence that an immutable-looking path is compiled code.
+// Look up only the already-sanitized candidate, never enumerate resource URLs.
+// If browser timing evidence is unavailable, keep the fixed generic signal.
+function handledRenderFrames(input: unknown): StackFrame[] {
+	const frames = parseStack(errorStack(ownValue(input, 'error')));
+	return frames.filter(frame => {
+		try {
+			if (typeof performance === 'undefined' || typeof performance.getEntriesByName !== 'function' || typeof PerformanceResourceTiming === 'undefined') return false;
+			return performance.getEntriesByName(frame.filename, 'resource').slice(0, maxFrames).some(entry =>
+				entry instanceof PerformanceResourceTiming && entry.name === frame.filename && entry.entryType === 'resource' &&
+				['script', 'link'].includes(entry.initiatorType));
+		} catch { return false; }
+	}).map(frame => ({
+		...frame,
+		// Flare groups by module/function, not filename. This bounded site ID
+		// uses only the proven compiled path and numeric position, never a stack
+		// function name, page URL, query, fragment or customer identifier.
+		module: 'hash-browser' + frame.filename.slice(location.origin.length) + ':' + frame.lineno + ':' + (frame.colno ?? 0)
+	}));
+}
+
 function installSender(dsn: ParsedDsn, options: FlareBrowserCaptureOptions) {
 	const configuredMax = options.maxEventsPerMinute;
 	const maxEvents = typeof configuredMax === 'number' && Number.isFinite(configuredMax)
@@ -159,14 +187,14 @@ function installSender(dsn: ParsedDsn, options: FlareBrowserCaptureOptions) {
 	const recent = new Map<string, number>();
 	return {
 		close() { closed = true; recent.clear(); },
-		send(category: FailureCategory, stack?: string, resource?: ResourceCategory) {
+		send(category: FailureCategory, stack?: string, resource?: ResourceCategory, handledFrames?: StackFrame[]) {
 			if (closed || noticeCapabilityPage()) return;
 			try {
 				const now = Date.now();
 				if (now - windowStarted >= 60_000) { windowStarted = now; sentInWindow = 0; recent.clear(); }
 				if (sentInWindow >= maxEvents) return;
 				const details = failureDetails[category];
-				const frames = parseStack(stack);
+				const frames = handledFrames ?? parseStack(stack);
 				const route = pageCategory();
 				const signature = category + ':' + route + ':' + (resource ?? '') + ':' + JSON.stringify(frames);
 				const previous = recent.get(signature);
@@ -198,7 +226,7 @@ export function installFlareBrowserCapture(options: FlareBrowserCaptureOptions):
 	if (marked[captureMarker]) return () => {};
 	marked[captureMarker] = true;
 	const sender = installSender(dsn, options);
-	const reporter = { owner: window, send: (category: HandledFailureCategory) => sender.send(category) };
+	const reporter = { owner: window, send: (category: HandledFailureCategory, frames?: StackFrame[]) => sender.send(category, undefined, undefined, frames) };
 	renderReporter = reporter;
 	const onError = (event: ErrorEvent) => {
 		if (noticeCapabilityPage()) return;
@@ -245,18 +273,21 @@ export function installFlareBrowserCapture(options: FlareBrowserCaptureOptions):
 	};
 }
 
-// Only closed categories cross handled-error boundaries. Neither producer
-// accepts an error, response, event, URL, observation or document payload.
-export function captureFlareRenderError(): void { captureHandledFlareFailure('render_error'); }
+// Only sanitized loaded-code frames cross the handled-error boundary. Read no
+// navigation/status/message fields, and do not retain the input or raw stack.
+export function captureFlareRenderError(input?: unknown): void {
+	if (typeof window === 'undefined' || noticeCapabilityPage()) return;
+	captureHandledFlareFailure('render_error', handledRenderFrames(input));
+}
 export function captureFlarePDFViewError(): void { captureHandledFlareFailure('pdf_view_error'); }
 
 // Both producers share the installed sender and the same single early attempt.
-function captureHandledFlareFailure(category: HandledFailureCategory): void {
+function captureHandledFlareFailure(category: HandledFailureCategory, frames?: StackFrame[]): void {
 	let releaseStartup = () => {};
 	try {
 		if (typeof window === 'undefined' || noticeCapabilityPage()) return;
 		const owner = window;
-		if (renderReporter?.owner === owner) { renderReporter.send(category); return; }
+		if (renderReporter?.owner === owner) { renderReporter.send(category, frames); return; }
 		// Before onMount there is no normal sender. At most one bounded attempt
 		// per page covers that failure; no raw error or pending-event queue is kept.
 		const marked = owner as Window & { [renderStartupMarker]?: boolean };
@@ -279,11 +310,11 @@ function captureHandledFlareFailure(category: HandledFailureCategory): void {
 				if (!config || controller.signal.aborted || window !== owner) return;
 				// Mount may have installed capture while the bounded config was read.
 				// Use that owner's existing rate/dedup budget whenever it is present.
-				if (renderReporter?.owner === owner) { renderReporter.send(category); return; }
+				if (renderReporter?.owner === owner) { renderReporter.send(category, frames); return; }
 				const dsn = parseDsn(config.dsn!, config.environment!);
 				if (!dsn) return;
 				const sender = installSender(dsn, config);
-				try { sender.send(category); } finally { sender.close(); }
+				try { sender.send(category, undefined, undefined, frames); } finally { sender.close(); }
 			} catch { /* Reporting must never replace SvelteKit's fallback error. */ }
 			finally { releaseStartup(); }
 		})();

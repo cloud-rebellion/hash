@@ -121,8 +121,18 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    {$ui("Connect another application through the REST API, or use MCP for AI document authoring. New keys can read and author documents. Enable sending access only for integrations that need it.")}
+    {$ui("Connect any CRM, business application or automation through Hash’s HTTP API. Create and send a signature request from an approved blocks template with customer details and recipients, or send an already prepared document.")}
   </p>
+
+  <section class="card p-5 mb-7 space-y-3" aria-labelledby="application-flow-heading">
+    <h2 id="application-flow-heading" class="font-display text-lg text-text-primary">{$ui('Your application → Hash → your application')}</h2>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('Your application supplies the template, document data and recipients. Hash sends the invitation and handles document access, signing and evidence.')}</p>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('Hash sends the status events you select to a webhook URL in your application. Your integration decides how those events update its own records.')}</p>
+    <a href="/settings/webhooks" class="btn btn-secondary">{$ui('Set up status webhooks')}</a>
+    <p class="text-xs leading-relaxed text-text-secondary">{$ui('New keys start with read and authoring access. Enable workflow access only for integrations that need to send documents.')}</p>
+  </section>
+
+  <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">{$ui('MCP is for AI document authoring and supported workspace settings. HTTP API integrations do not require MCP.')}</p>
 
   <div class="mb-7"><MCPConnectionGuide /></div>
 

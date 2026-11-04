@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, Link2, ArrowUpRight, Mail } from 'lucide-svelte';
+  import { KeyRound, Webhook, Receipt, Palette, ShieldCheck, Scale, UserSearch, Bot, Users, ArrowUpRight, Mail } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
   import MCPConnectionGuide from '$lib/components/MCPConnectionGuide.svelte';
 
@@ -15,11 +15,10 @@
       { href: '/settings/signing-authority', label: 'My signing authority', desc: 'Review your named authority, limits and revocation.', icon: KeyRound },
       { href: '/settings/eidas-rules', label: 'Signature levels', desc: 'Simple signatures are active; AES and QES are unavailable.', icon: Scale },
     ] },
-    { title: 'Connections & automation', description: 'Connect Hash with your applications and AI tools.', items: [
+    { title: 'Connections & automation', description: 'Use any CRM or automation with Hash’s API and status webhooks.', items: [
       { href: '/settings/api-keys', label: 'API & AI access', desc: 'Workspace owners manage scoped API and MCP access.', icon: KeyRound },
       { href: '/settings/webhooks', label: 'Webhooks', desc: 'Deliver signed status updates to another application.', icon: Webhook },
       { href: '/settings/ai', label: 'AI provider', desc: 'Configure the model provider used by AI features.', icon: Bot },
-      { href: '/settings/integrations/brightcrm', label: 'BrightCRM connection', desc: 'Manage an optional CRM account connection.', icon: Link2 },
     ] },
     { title: 'Privacy & evidence', description: 'Privacy requests, compliance records and audit checks.', items: [
       { href: '/settings/compliance', label: 'Compliance kit', desc: 'Review compliance records and configured advisory flags.', icon: ShieldCheck },

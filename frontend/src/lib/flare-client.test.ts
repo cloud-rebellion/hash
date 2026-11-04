@@ -12,6 +12,11 @@ class ResourceElement {
   getAttribute(name: string) { throw new Error('Capture must not read resource URLs: ' + name + JSON.stringify(this.attributes)); }
 }
 
+class LoadedCodeTiming {
+  readonly entryType = 'resource';
+  constructor(readonly name: string, readonly initiatorType: string) {}
+}
+
 type FetchFixture = (input: RequestInfo | URL, options?: RequestInit) => Promise<Response>;
 
 // The actual exported module serializes every asserted envelope. This fixture
@@ -21,6 +26,8 @@ function browserFixture() {
   const events: { endpoint: string; body: Blob }[] = [];
   let beaconCalls = 0;
   const requests: { endpoint: string; options: RequestInit }[] = [];
+  const loadedCode = new Map<string, string>();
+  let codeLookups = 0;
   const original = new Map<string, PropertyDescriptor | undefined>();
   const stops: (() => void)[] = [];
   const page = { origin: 'https://hash.test', pathname: '/completed/' + completedToken, href: 'https://hash.test/completed/' + completedToken };
@@ -38,6 +45,14 @@ function browserFixture() {
   });
   install('location', page);
   install('Element', ResourceElement);
+  install('PerformanceResourceTiming', LoadedCodeTiming);
+  install('performance', {
+    getEntriesByName(name: string, type: string) {
+      codeLookups++;
+      return type === 'resource' && loadedCode.has(name)
+        ? [new LoadedCodeTiming(name, loadedCode.get(name)!)] : [];
+    }
+  });
   install('navigator', { sendBeacon() {
     beaconCalls++;
     throw new Error('Beacon is forbidden: its credential mode includes cookies');
@@ -50,6 +65,8 @@ function browserFixture() {
   return {
     events, requests,
     beaconCalls() { return beaconCalls; },
+    loadCode(url: string, initiator = 'script') { loadedCode.set(url, initiator); },
+    codeLookups() { return codeLookups; },
     setFetch(value: FetchFixture) { fetchFixture = value; },
     setPath(path: string) { page.pathname = path; page.href = page.origin + path; },
     listenerCount() { return [...listeners.values()].reduce((sum, set) => sum + set.size, 0); },
@@ -251,7 +268,8 @@ test('Flare unmount aborts pending configuration and refuses late listener insta
   const browser = browserFixture();
   let resolveConfig!: (response: Response) => void;
   try {
-    browser.setFetch(() => new Promise(resolve => { resolveConfig = resolve; }));
+    browser.setFetch(input => String(input) === '/api/telemetry/config'
+      ? new Promise(resolve => { resolveConfig = resolve; }) : Promise.resolve(new Response(null, { status: 202 })));
     const stop = browser.runtime();
     expect(browser.listenerCount()).toBe(0); expect(browser.requests).toHaveLength(1);
     const signal = browser.requests[0].options.signal!;
@@ -367,6 +385,136 @@ test('SvelteKit handled render errors use the installed private-safe sender and 
     expect(payload.message).toBe('Browser render boundary failed');
     expect(payload.exception.values[0].stacktrace.frames).toEqual([]);
     expect(browser.requests[0].options).toMatchObject({ credentials: 'omit', mode: 'no-cors', keepalive: true });
+  } finally { browser.close(); }
+});
+
+test('SvelteKit handled errors retain only proven loaded-code sites without diagnostic getters', async () => {
+  const browser = browserFixture();
+  const filename = 'https://hash.test/_app/immutable/chunks/portal.ABC123.js';
+  let privateReads = 0;
+  try {
+    browser.loadCode(filename);
+    browser.capture();
+    const error = diagnosticError();
+    for (const key of ['message', 'name']) Object.defineProperty(error, key, { get() { privateReads++; throw new Error(privateText); } });
+    const input = { error };
+    for (const key of ['event', 'status', 'message']) Object.defineProperty(input, key, { get() { privateReads++; throw new Error(privateText); } });
+    expect(handleError(input as unknown as Parameters<typeof handleError>[0])).toBeUndefined();
+    expect(privateReads).toBe(0);
+    const raw = await browser.events[0].body.text(); assertPrivateAbsent(raw);
+    const payload = JSON.parse(raw);
+    expect(payload.message).toBe('Browser render boundary failed');
+    expect(payload.exception.values[0].stacktrace.frames).toEqual([{
+      filename, lineno: 17, colno: 9, in_app: true,
+      module: 'hash-browser/_app/immutable/chunks/portal.ABC123.js:17:9'
+    }]);
+    expect(payload.request).toBeUndefined();
+    expect(browser.requests[0].options).toMatchObject({ credentials: 'omit', mode: 'no-cors', keepalive: true });
+  } finally { browser.close(); }
+});
+
+test('SvelteKit handled-code sites distinguish separate locations under the same fixed error category', async () => {
+  const browser = browserFixture();
+  try {
+    browser.loadCode('https://hash.test/_app/immutable/chunks/portal.ABC123.js', 'link');
+    browser.capture();
+    for (const line of [17, 23]) handleError({ error: diagnosticError(line) } as Parameters<typeof handleError>[0]);
+    expect(browser.events).toHaveLength(2);
+    const modules: string[] = [];
+    for (const entry of browser.events) {
+      const raw = await entry.body.text(); assertPrivateAbsent(raw);
+      const payload = JSON.parse(raw);
+      expect(payload.exception.values[0].type).toBe('RenderError');
+      modules.push(payload.exception.values[0].stacktrace.frames[0].module);
+    }
+    expect(modules).toEqual([
+      'hash-browser/_app/immutable/chunks/portal.ABC123.js:17:9',
+      'hash-browser/_app/immutable/chunks/portal.ABC123.js:23:9'
+    ]);
+  } finally { browser.close(); }
+});
+
+test('SvelteKit handled errors refuse unproven resources and accessor or inherited diagnostics', async () => {
+  for (const kind of ['unloaded', 'image', 'plain-object', 'stack-getter', 'input-getter', 'inherited-error', 'input-proxy', 'error-proxy', 'broken-timing', 'missing-timing', 'plain-timing', 'wrong-origin', 'query-resource', 'private-path']) {
+    const browser = browserFixture();
+    let privateReads = 0;
+    try {
+      browser.capture();
+      const filename = 'https://hash.test/_app/immutable/chunks/portal.ABC123.js';
+      if (kind !== 'unloaded') browser.loadCode(filename, kind === 'image' ? 'img' : 'script');
+      const error = diagnosticError();
+      let input: unknown = { error };
+      if (kind === 'plain-object') input = { error: { stack: error.stack, toJSON() { privateReads++; throw new Error(privateText); } } };
+      if (kind === 'stack-getter') Object.defineProperty(error, 'stack', { get() { privateReads++; throw new Error(privateText); } });
+      if (kind === 'input-getter') Object.defineProperty(input, 'error', { get() { privateReads++; throw new Error(privateText); } });
+      if (kind === 'inherited-error') input = Object.create({ error });
+      if (kind === 'input-proxy') input = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error(privateText); } });
+      if (kind === 'error-proxy') input = { error: new Proxy(error, { getPrototypeOf() { throw new Error(privateText); } }) };
+      if (kind === 'broken-timing') performance.getEntriesByName = () => { throw new Error(privateText); };
+      if (kind === 'missing-timing') Reflect.deleteProperty(globalThis, 'performance');
+      if (kind === 'plain-timing') performance.getEntriesByName = () => [{ name: filename, entryType: 'resource', initiatorType: 'script' } as unknown as PerformanceEntry];
+      if (kind === 'wrong-origin') error.stack = 'Error: ' + privateText + '\n    at private (https://other.test/_app/immutable/chunks/foreign.js:1:2)';
+      if (kind === 'query-resource') {
+        performance.getEntriesByName = name => name === filename + '?token=SECRET' ? [new LoadedCodeTiming(name, 'script') as unknown as PerformanceEntry] : [];
+      }
+      if (kind === 'private-path') {
+        error.stack = 'Error: ' + privateText + '\n    at private (https://hash.test/sign/' + activeToken + ':1:2)';
+      }
+      expect(handleError(input as Parameters<typeof handleError>[0])).toBeUndefined();
+      expect(privateReads).toBe(0);
+      const raw = await browser.events[0].body.text(); assertPrivateAbsent(raw);
+      expect(JSON.parse(raw).exception.values[0].stacktrace.frames).toEqual([]);
+    } finally { browser.close(); }
+  }
+});
+
+test('SvelteKit early handled diagnostics freeze only sanitized frames before async config', async () => {
+  const browser = browserFixture();
+  let resolveConfig!: (response: Response) => void;
+  try {
+    browser.loadCode('https://hash.test/_app/immutable/chunks/portal.ABC123.js');
+    browser.setFetch(() => new Promise(resolve => { resolveConfig = resolve; }));
+    const error = diagnosticError();
+    handleError({ error } as Parameters<typeof handleError>[0]);
+    error.stack = privateText;
+    resolveConfig(configResponse());
+    await waitFor(() => browser.events.length === 1);
+    const raw = await browser.events[0].body.text(); assertPrivateAbsent(raw);
+    expect(JSON.parse(raw).exception.values[0].stacktrace.frames[0].module).toBe('hash-browser/_app/immutable/chunks/portal.ABC123.js:17:9');
+    expect(browser.listenerCount()).toBe(0);
+  } finally { browser.close(); }
+});
+
+test('SvelteKit handled diagnostics read no error or loaded-code evidence on excluded entry pages', () => {
+  const browser = browserFixture();
+  let reads = 0;
+  try {
+    browser.capture();
+    const input = new Proxy({}, { getOwnPropertyDescriptor() { reads++; throw new Error(privateText); } });
+    for (const path of ['/notice/opaque', '/login', '/register', '/verify-email', '/forgot-password', '/reset-password']) {
+      browser.setPath(path);
+      expect(handleError(input as Parameters<typeof handleError>[0])).toBeUndefined();
+    }
+    expect(reads).toBe(0); expect(browser.codeLookups()).toBe(0);
+    expect(browser.events).toHaveLength(0); expect(browser.requests).toHaveLength(0);
+  } finally { browser.close(); }
+});
+
+test('SvelteKit handled-code frames preserve the bounded stack scan and existing sender quota', async () => {
+  const browser = browserFixture();
+  try {
+    browser.loadCode('https://hash.test/_app/immutable/chunks/portal.ABC123.js');
+    browser.capture({ maxEventsPerMinute: 2 });
+    const oversized = diagnosticError();
+    oversized.stack = privateText.repeat(1000) + '\n    at private (https://hash.test/_app/immutable/chunks/portal.ABC123.js:17:9)';
+    for (const error of [oversized, diagnosticError(), diagnosticError(23)]) handleError({ error } as Parameters<typeof handleError>[0]);
+    expect(browser.events).toHaveLength(2);
+    const payloads = [];
+    for (const event of browser.events) {
+      const raw = await event.body.text(); assertPrivateAbsent(raw); payloads.push(JSON.parse(raw));
+    }
+    expect(payloads[0].exception.values[0].stacktrace.frames).toEqual([]);
+    expect(payloads[1].exception.values[0].stacktrace.frames[0].module).toBe('hash-browser/_app/immutable/chunks/portal.ABC123.js:17:9');
   } finally { browser.close(); }
 });
 

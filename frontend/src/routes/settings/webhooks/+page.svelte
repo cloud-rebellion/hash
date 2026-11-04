@@ -108,6 +108,14 @@
     </button>
   </div>
 
+  <section class="card p-5 mb-6 space-y-3" aria-labelledby="outbound-webhook-heading">
+    <h2 id="outbound-webhook-heading" class="font-display text-lg text-text-primary">{$ui('From Hash to your application')}</h2>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('Your CRM or automation calls Hash’s HTTP API to start a signature request. Enter a receiving URL in your application here; Hash posts the selected events to it.')}</p>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('For signature requests, document.signed reports each signer’s progress. document.completed means all required signers and finalization are complete.')}</p>
+    <p class="text-sm leading-relaxed text-text-secondary">{$ui('No connection to a specific CRM is required. The receiving application verifies each event and chooses how to update its own records.')}</p>
+    <a href="/settings/api-keys" class="btn btn-secondary">{$ui('Manage API access')}</a>
+  </section>
+
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
     {$ui("Hash posts events to subscribed endpoints. Every payload carries")}
     <code class="font-mono text-xs">X-Hash-Signature: t=…,v1=…</code> {$ui("with HMAC-SHA256 over")} <code class="font-mono text-xs">${'{ts}'}.${'{rawJSONBody}'}</code>{$ui(". Failed deliveries retry on 1m / 5m / 25m / 2h / 12h / 24h, then mark failed.")}
@@ -121,7 +129,7 @@
     <div class="card p-5 mb-6 border-l-4 border-warning">
       <h3 class="font-display font-extralight text-lg mb-2">{$ui("Copy this signing secret now")}</h3>
       <p class="text-xs text-text-secondary mb-3 leading-relaxed">
-        {$ui("This is the only time we will show this secret. Hash stores only a hash; if you lose it you must rotate by deleting and recreating the endpoint. The secret is per-endpoint so rotating one does not affect any other webhook.")}
+        {$ui("This signing secret is shown only once. Copy it into your receiving application and keep it private. To replace it, delete and recreate this endpoint. Each endpoint has its own secret.")}
       </p>
       <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-1">{$ui("Endpoint")}</p>
       <p class="font-mono text-xs mb-3 break-all">{lastSecret.url}</p>

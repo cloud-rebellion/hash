@@ -68,10 +68,10 @@ func TestCountedAuthoringAdaptersDelegateToQuotaOwners(t *testing.T) {
 	}{
 		{"internal/handler/documents.go", "blockauthoring.CreateV1(", 1},
 		{"internal/handler/documents.go", "pdftemplateauthoring.CreateV1(", 1},
-		{"internal/handler/documents_import.go", "docintake.CreateOwnedPDFSourceDocumentV1(", 1},
+		{"internal/handler/documents_import.go", "docintake.CreateOwnedPDFSourceDocumentWithPurposeV1(", 1},
 		{"internal/mcp/tools_authoring.go", "blockauthoring.CreateV1(", 1},
 		{"internal/mcp/tools_authoring.go", "pdftemplateauthoring.CreateV1(", 1},
-		{"internal/mcp/tools_authoring.go", "docintake.CreateOwnedPDFSourceDocumentV1(", 1},
+		{"internal/mcp/tools_authoring.go", "docintake.CreateOwnedPDFSourceDocumentWithPurposeV1(", 1},
 		{"internal/mcp/tools_envelopes.go", "commitOwnedEnvelopeV1(", 5},
 		{"internal/mcp/envelope_topology_owned_v1.go", "blockauthoring.EnvelopeV1(", 1},
 	}

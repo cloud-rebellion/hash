@@ -65,32 +65,40 @@ func TestEmailDesign760CanonicalFullLayoutAndNativeContent(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			expectedPlain := text
+			if recipientLocalized(kind) {
+				expectedPlain = strings.TrimSuffix(text, "Document service\n") + "Workspace\n"
+			}
 
 			tpl := &ServiceEmailTemplateV1{Revision: 1, DesignJSON: raw}
 			got, body, plain, e := RenderServiceEmailV1(kind, c, tpl)
 			if e != nil {
 				t.Fatal(e)
 			}
-			if got != subject || plain != themeServiceEmailPlainFooterV1(c, text) || !strings.Contains(body, "Our footer") || !strings.Contains(body, "data-hash-logo=\"") {
+			if got != subject || plain != expectedPlain || !strings.Contains(body, "Our footer") || !strings.Contains(body, "data-hash-logo=\"") {
 				t.Fatal("native subject/body/actions/plaintext or full authored layout lost")
 			}
 			if strings.Contains(body, serviceEmailNativeSlotV1) || strings.Contains(body, serviceEmailLogoSlotV1) || !strings.Contains(body, "data:image/png;base64,"+d.Logo.DataBase64) {
 				t.Fatal("logo/native slot not materialized")
 			}
-			s, h, pt, e := ServiceEmailTemplateComponentsV1(c, tpl, int64(len(subject)), int64(len(base)), int64(len(text)))
+			s, h, pt, e := ServiceEmailTemplateComponentsV1(kind, c, tpl, int64(len(subject)), int64(len(base)), int64(len(text)))
 			if e != nil || s < int64(len(got)) || h < int64(len(body)) || pt < int64(len(plain)) {
 				t.Fatal("design output was not priced before expansion", s, h, pt, e)
 			}
 		})
 	}
 }
-func TestEmailDesign760EmptyEditionRetainsExactLegacyBytes(t *testing.T) {
+func TestEmailDesign760EmptyEditionRetainsNativeContentAndCompanyFooter(t *testing.T) {
 	for _, kind := range ServiceEmailKindsV1() {
 		t.Run(kind, func(t *testing.T) {
 			c := designContext760()
 			s, h, txt, e := Render(kind, c)
 			if e != nil {
 				t.Fatal(e)
+			}
+			if recipientLocalized(kind) {
+				h = strings.Replace(h, ">Document service</p>", ">Workspace</p>", 1)
+				txt = strings.TrimSuffix(txt, "Document service\n") + "Workspace\n"
 			}
 			actual, b, plain, e := RenderServiceEmailV1(kind, c, &ServiceEmailTemplateV1{})
 			if e != nil || actual != s || b != h || plain != txt {
@@ -181,8 +189,8 @@ func TestEmailDesign760LightDarkNativeReadabilityCTAAndWhiteLabel(t *testing.T) 
 						t.Fatal("custom design still displays vendor presentation footer")
 					}
 				}
-				if !strings.Contains(body, c.OrgName) || !strings.Contains(plain, c.OrgName) || !strings.Contains(legacy, "Hash") {
-					t.Fatal("branding/legacy boundary lost")
+				if !strings.Contains(body, c.OrgName) || !strings.Contains(plain, c.OrgName) || !strings.Contains(legacy, ">Document service</p>") {
+					t.Fatal("company/neutral legacy presentation boundary lost")
 				}
 			})
 		}

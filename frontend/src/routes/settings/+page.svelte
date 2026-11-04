@@ -6,7 +6,7 @@
   const groups = [
     { title: 'Workspace', description: 'People, presentation and your plan.', items: [
       { href: '/settings/members', label: 'Members & roles', desc: 'Manage who can view, prepare and send documents.', icon: Users },
-      { href: '/settings/branding', label: 'Branding', desc: 'Choose your workspace logo, colors and fonts.', icon: Palette },
+      { href: '/settings/branding', label: 'Branding', desc: 'Set document theme colors, fonts and signature ink.', icon: Palette },
       { href: '/settings/delivery', label: 'Email delivery', desc: 'Connect this workspace’s own SMTP server and test delivery.', icon: Mail },
       { href: '/settings/email', label: 'Email design', desc: 'Design branded emails, review AI proposals and send a saved template test.', icon: Mail },
       { href: '/settings/billing', label: 'Plans & invoices', desc: 'Review subscriptions, quotas and invoices.', icon: Receipt },

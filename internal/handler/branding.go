@@ -33,16 +33,18 @@ import (
 // brandingInput is the wire shape for upsert. All fields optional; any
 // missing field preserves the current value, or the system default for a new row.
 type brandingInput struct {
-	PrimaryHex     string `json:"primary_hex"`
-	AccentHex      string `json:"accent_hex"`
-	SurfaceHex     string `json:"surface_hex"`
-	TextHex        string `json:"text_hex"`
-	MutedHex       string `json:"muted_hex"`
-	LogoURL        string `json:"logo_url"`
-	LogoAlt        string `json:"logo_alt"`
-	FontHeading    string `json:"font_heading"`
-	FontBody       string `json:"font_body"`
-	SignatureColor string `json:"signature_color"`
+	PrimaryHex string `json:"primary_hex"`
+	AccentHex  string `json:"accent_hex"`
+	SurfaceHex string `json:"surface_hex"`
+	TextHex    string `json:"text_hex"`
+	MutedHex   string `json:"muted_hex"`
+	// Preserve omitted values while allowing an explicit empty value to clear a
+	// legacy logo. An empty URL remains valid in production; a new one does not.
+	LogoURL        *string `json:"logo_url"`
+	LogoAlt        *string `json:"logo_alt"`
+	FontHeading    string  `json:"font_heading"`
+	FontBody       string  `json:"font_body"`
+	SignatureColor string  `json:"signature_color"`
 }
 
 // validateHexFields normalises every supplied hex field; on error
@@ -83,7 +85,10 @@ func (s *Server) handleGetOrgBranding(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, b)
+	writeJSON(w, http.StatusOK, struct {
+		branding.Branding
+		LogoURLSupported bool `json:"logo_url_supported"`
+	}{b, !strings.EqualFold(strings.TrimSpace(s.Environment), "production")})
 }
 
 // PUT /api/v1/branding
@@ -121,10 +126,12 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 			*font.value = normalized
 		}
 	}
-	in.LogoURL = strings.TrimSpace(in.LogoURL)
-	if err := branding.ValidateLogoURLForEnvironment(s.Environment, in.LogoURL); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	if in.LogoURL != nil {
+		*in.LogoURL = strings.TrimSpace(*in.LogoURL)
+		if err := branding.ValidateLogoURLForEnvironment(s.Environment, *in.LogoURL); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	actor, err := s.sessionOwnerActor(r, sess)
 	if err != nil {
@@ -422,8 +429,8 @@ func (s *Server) resolveBrandingForDoc(ctx context.Context, doc *generated.Docum
 	return s.BrandingResolver.Resolve(ctx, doc.OrgID, doc.ID)
 }
 
-// mergeBrandingInput overlays caller-supplied non-empty fields onto the
-// default, so missing fields don't blank out the existing palette.
+// mergeBrandingInput keeps the existing palette when fields are absent. Logo
+// fields additionally distinguish omission from an explicit empty clear.
 func mergeBrandingInput(b branding.Branding, in brandingInput) branding.Branding {
 	if in.PrimaryHex != "" {
 		b.PrimaryHex = in.PrimaryHex
@@ -440,11 +447,11 @@ func mergeBrandingInput(b branding.Branding, in brandingInput) branding.Branding
 	if in.MutedHex != "" {
 		b.MutedHex = in.MutedHex
 	}
-	if in.LogoURL != "" {
-		b.LogoURL = in.LogoURL
+	if in.LogoURL != nil {
+		b.LogoURL = *in.LogoURL
 	}
-	if in.LogoAlt != "" {
-		b.LogoAlt = in.LogoAlt
+	if in.LogoAlt != nil {
+		b.LogoAlt = *in.LogoAlt
 	}
 	if in.FontHeading != "" {
 		b.FontHeading = in.FontHeading

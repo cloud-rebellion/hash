@@ -1080,12 +1080,22 @@ export interface OrgBranding {
   signature_color: string;
 }
 
-export async function getBranding(): Promise<OrgBranding> {
+export interface OrgBrandingConfiguration extends OrgBranding {
+  /** Read-only server capability; never part of the branding write payload. */
+  logo_url_supported?: boolean;
+}
+
+export async function getBranding(): Promise<OrgBrandingConfiguration> {
   return request('GET', '/api/v1/branding');
 }
 
 export async function saveBranding(b: Partial<OrgBranding>): Promise<OrgBranding> {
-  return request('PUT', '/api/v1/branding', b);
+  const input: Partial<OrgBranding> = {};
+  for (const key of ['primary_hex', 'accent_hex', 'surface_hex', 'text_hex', 'muted_hex',
+    'logo_url', 'logo_alt', 'font_heading', 'font_body', 'signature_color'] as const) {
+    if (b[key] !== undefined) input[key] = b[key];
+  }
+  return request('PUT', '/api/v1/branding', input);
 }
 
 // --- Compliance -------------------------------------------------------

@@ -65,10 +65,8 @@ func ReminderNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlBy
 			}
 		}
 	}
-	footer, e := translated(footerKey(KindReminder, ctx))
-	if e != nil {
-		return 0, 0, 0, e
-	}
+	footer := int64(len(nativeEmailFooterFallbackV1))
+	var e error
 	htmlBytes, e = inviteAddBytesV1(htmlBytes, footer, 6)
 	if e != nil {
 		return 0, 0, 0, e

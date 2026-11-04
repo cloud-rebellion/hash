@@ -77,14 +77,19 @@ func TestServiceEmail720BuiltinAndMandatoryContent(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
+				baseHTML, baseText := bh, bt
+				if recipientLocalized(kind) {
+					bh = strings.Replace(bh, ">Document service</p>", ">Example workspace</p>", 1)
+					bt = strings.TrimSuffix(bt, "Document service\n") + "Example workspace\n"
+				}
 				s, h, p, e := RenderServiceEmailV1(kind, ctx, nil)
 				if e != nil || s != bs || h != bh || p != bt {
-					t.Fatal("nil override changed builtin", e)
+					t.Fatal("nil edition changed content beyond the native company footer", e)
 				}
 				empty := ServiceEmailTemplateV1{Revision: 3}
 				s, h, p, e = RenderServiceEmailV1(kind, ctx, &empty)
 				if e != nil || s != bs || h != bh || p != bt {
-					t.Fatal("reset changed builtin", e)
+					t.Fatal("reset changed content beyond the native company footer", e)
 				}
 				v, e := ValidateServiceEmailTemplateV1(kind, ServiceEmailTemplateV1{Revision: 4, SubjectTemplate: "For {{recipient_name}}", HTMLTemplate: "<h2>{{document_name}}</h2><p>Hello {{recipient_name}}</p>", TextTemplate: "Hello {{recipient_name}}"})
 				if e != nil {
@@ -98,7 +103,7 @@ func TestServiceEmail720BuiltinAndMandatoryContent(t *testing.T) {
 				if strings.Replace(h, intro, "", 1) != bh || strings.TrimPrefix(p, "Hello Example recipient\n\n") != bt || s != "For Example recipient" {
 					t.Fatal("mandatory native content/action/notice changed")
 				}
-				ms, mh, mt, e := ServiceEmailTemplateComponentsV1(ctx, &v, int64(len(bs)), int64(len(bh)), int64(len(bt)))
+				ms, mh, mt, e := ServiceEmailTemplateComponentsV1(kind, ctx, &v, int64(len(bs)), int64(len(baseHTML)), int64(len(baseText)))
 				if e != nil || ms != int64(len(s)) || mh != int64(len(h)) || mt != int64(len(p)) {
 					t.Fatal("actual expanded output measurement differs", e)
 				}
@@ -159,7 +164,7 @@ func TestServiceEmail720VariablesAreEscapedMissingAndNonrecursive(t *testing.T) 
 		t.Fatal("subject variable newline accepted")
 	}
 	ctx.DocumentName = strings.Repeat("z", 4097)
-	if _, _, _, e = ServiceEmailTemplateComponentsV1(ctx, &v, 10, 10, 10); e == nil {
+	if _, _, _, e = ServiceEmailTemplateComponentsV1(KindInvite, ctx, &v, 10, 10, 10); e == nil {
 		t.Fatal("expanded subject cap ignored")
 	}
 }

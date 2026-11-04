@@ -11,6 +11,14 @@ import { swedishDocumentStaffMessages } from './staffDocumentMessages';
 import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
 // English literals are stable lookup keys; untranslated staff text remains readable.
 export const swedishStaffMessages: Record<string, string> = {
+  'Document theme': 'Dokumenttema',
+  'Document logo': 'Dokumentlogotyp',
+  'Set document theme colors, fonts and signature ink.': 'Välj dokumenttemats färger, typsnitt och signaturfärg.',
+  'Set workspace defaults for document designs that use this theme. Custom designs can have their own styling, and sent documents keep their saved theme. Recipient pages use a separate interface. Design email colors and logos in Email design.': 'Välj organisationens standardtema för dokumentdesigner som använder temat. Egna designer kan ha egen formgivning, och skickade dokument behåller sitt sparade tema. Mottagarsidorna har ett separat gränssnitt. Utforma e-postens färger och logotyper under E-postdesign.',
+  'Logo URL editing is unavailable here. Add a local logo to your emails in Email design.': 'Redigering av logotypens URL är inte tillgänglig här. Lägg till en lokal logotyp i dina e-postmeddelanden under E-postdesign.',
+  'Clear the saved logo URL, then save changes to keep editing document colors and fonts.': 'Rensa den sparade logotypens URL och spara ändringarna för att fortsätta redigera dokumentets färger och typsnitt.',
+  'Clear logo URL': 'Rensa logotypens URL',
+  'Open email design': 'Öppna e-postdesign',
   ...swedishEditorStaffMessages,
   'Shared document chat notifications are optional. Select document.comment_posted to receive comment IDs and the sender or signer side; message text and private activity are not included.': 'Aviseringar om delad dokumentchatt är valfria. Välj document.comment_posted för att få kommentarens ID och avsändarsidan eller signerarsidan; meddelandetext och privat aktivitet ingår inte.',
   'Dashboard': 'Översikt',

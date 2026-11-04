@@ -213,5 +213,5 @@ func applicationServiceEmailComponentsV1(kind string, ctx dispatch.TemplateConte
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	return dispatch.ServiceEmailTemplateComponentsV1(ctx, tpl, s, h, t)
+	return dispatch.ServiceEmailTemplateComponentsV1(kind, ctx, tpl, s, h, t)
 }

@@ -9,6 +9,7 @@ const lib = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const signer = readFileSync(resolve(lib, '../routes/sign/[token]/+page.svelte'), 'utf8');
 const completed = readFileSync(resolve(lib, '../routes/completed/[token]/+page.svelte'), 'utf8');
 const notice = readFileSync(join(lib, 'components/NoticeReader.svelte'), 'utf8');
+const layout = readFileSync(resolve(lib, '../routes/+layout.svelte'), 'utf8');
 
 function between(source: string, start: string, end: string) {
   const first = source.indexOf(start), last = source.indexOf(end, first);
@@ -17,6 +18,7 @@ function between(source: string, start: string, end: string) {
 }
 const head = (source: string) => between(source, '<svelte:head>', '</svelte:head>');
 const shells = {
+  layout: `<script lang="ts">import { isStaffAuthPath } from ${JSON.stringify(join(lib, 'staffAuth.ts'))}; let { showChrome = false, path = '/sign/example' } = $props();</script>${head(layout)}`,
   signer: `<script lang="ts">import { FileSignature } from 'lucide-svelte'; import { t } from ${JSON.stringify(join(lib, 'i18n.ts'))}; let { ctx = null } = $props();</script>${head(signer)}${between(signer, '<header class="signer-bar">', '</header>')}`,
   completed: head(completed),
   notice: `${head(notice)}${between(notice, '<p class="font-display text-xl">', '</p>')}`
@@ -27,7 +29,7 @@ function renderer() {
     const result = await Bun.build({ entrypoints: ['tenant767-entry'], target: 'bun', plugins: [{ name: 'actual-public-presentation-fragments', setup(build) {
       build.onResolve({ filter: /^tenant767-/ }, args => ({ path: args.path.slice('tenant767-'.length), namespace: 'tenant767' }));
       build.onLoad({ filter: /.*/, namespace: 'tenant767' }, args => {
-        if (args.path === 'entry') return { contents: `import Signer from 'tenant767-signer'; import Completed from 'tenant767-completed'; import Notice from 'tenant767-notice'; import { render } from 'svelte/server'; export { Signer, Completed, Notice, render };`, loader: 'ts', resolveDir: process.cwd() };
+        if (args.path === 'entry') return { contents: `import Layout from 'tenant767-layout'; import Signer from 'tenant767-signer'; import Completed from 'tenant767-completed'; import Notice from 'tenant767-notice'; import { render } from 'svelte/server'; export { Layout, Signer, Completed, Notice, render };`, loader: 'ts', resolveDir: process.cwd() };
         const fragment = shells[args.path as keyof typeof shells];
         if (!fragment) throw new Error('undeclared public presentation fragment');
         return { contents: compile(fragment, { filename: `tenant767-${args.path}.svelte`, generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() };
@@ -45,6 +47,21 @@ function renderer() {
 // Scope: real production head/header markup and Svelte escaping. These fixtures
 // do not replace the signer protocol, legal notice, business-state machine or
 // any component, and do not claim a full-page/browser/recipient journey.
+test('the app shell has a neutral public fallback and retains the staff application title', async () => {
+  const m = await renderer();
+  for (const path of ['/sign/example', '/completed/example', '/notice/comment/example', '/legal/privacy']) {
+    expect(m.render(m.Layout, { props: { path } }).head).toContain('<title>Document</title>');
+  }
+  for (const path of ['/', '/login', '/reset-password', '/auth/callback']) {
+    expect(m.render(m.Layout, { props: { path } }).head).toContain('<title>Hash</title>');
+  }
+  expect(m.render(m.Layout, { props: { path: '/documents', showChrome: true } }).head).toContain('<title>Hash</title>');
+  // The static SPA boot document must leave route titles to SvelteKit.
+  const boot = readFileSync(resolve(lib, '../app.html'), 'utf8');
+  expect(boot).not.toContain('<title>');
+  expect(boot).toContain('type="image/svg+xml"');
+});
+
 test('actual shared signer header and title use only trusted controller text across response statuses', async () => {
   const m = await renderer(); const previousFetch = globalThis.fetch; let requests = 0;
   globalThis.fetch = (() => { requests++; throw new Error('presentation SSR must not send requests'); }) as typeof fetch;
@@ -86,7 +103,7 @@ test('actual separate completion and notice shells use neutral document labels w
 });
 
 test('actual modified pages compile for client/server without presentation warnings', () => {
-  for (const [filename, source] of [['signer.svelte', signer], ['completed.svelte', completed], ['notice.svelte', notice]]) {
+  for (const [filename, source] of [['layout.svelte', layout], ['signer.svelte', signer], ['completed.svelte', completed], ['notice.svelte', notice]]) {
     for (const generate of ['client', 'server'] as const) expect(compile(source, { filename, generate }).warnings).toEqual([]);
   }
 });

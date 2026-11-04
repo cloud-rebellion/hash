@@ -3,17 +3,22 @@
   import { onMount } from 'svelte';
   import { getBranding, saveBranding, type OrgBranding } from '$lib/api/client';
   import { Palette, Save } from 'lucide-svelte';
+  import BrandingLogoFields from '$lib/components/BrandingLogoFields.svelte';
 
   let branding = $state<Partial<OrgBranding>>({});
   let loading = $state(true);
   let saving = $state(false);
   let error = $state<string | null>(null);
   let saved = $state(false);
+  let logoURLSupported = $state(false);
 
   async function load() {
     loading = true;
+    logoURLSupported = false;
     try {
-      branding = await getBranding();
+      const { logo_url_supported, ...theme } = await getBranding();
+      logoURLSupported = logo_url_supported === true;
+      branding = theme;
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -56,7 +61,7 @@
   <div class="mb-8 flex items-baseline justify-between">
     <div class="space-y-2">
       <p class="page-eyebrow">{$ui("Settings · Branding")}</p>
-      <h1 class="page-title">{$ui("Brand theme")}</h1>
+      <h1 class="page-title">{$ui("Document theme")}</h1>
     </div>
     <button class="btn btn-primary" onclick={save} disabled={saving || loading}>
       <Save class="size-4" /> {$ui(saving ? 'Saving...' : 'Save changes')}
@@ -64,7 +69,7 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    {$ui("Colors below feed every rendered document, signer page, and audit certificate via CSS custom properties. Body-text contrast is enforced server-side to meet WCAG AA against your surface color. Self-hosted fonts only (no third-party CDN).")}
+    {$ui("Set workspace defaults for document designs that use this theme. Custom designs can have their own styling, and sent documents keep their saved theme. Recipient pages use a separate interface. Design email colors and logos in Email design.")}
   </p>
 
   {#if error}
@@ -109,30 +114,9 @@
       </div>
     </section>
 
-    <section class="card p-5 mb-6">
-      <h2 class="font-display font-extralight text-lg mb-4">{$ui("Logo")}</h2>
-      <label class="block text-sm mb-3">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Logo URL")}</span>
-        <input
-          type="url"
-          bind:value={branding.logo_url}
-          placeholder={$ui("https://your.cdn/logo.png")}
-          class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
-        />
-      </label>
-      <label class="block text-sm">
-        <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Logo alt text")}</span>
-        <input
-          type="text"
-          bind:value={branding.logo_alt}
-          placeholder={$ui("Acme Inc.")}
-          class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
-        />
-      </label>
-      <p class="text-xs text-text-muted mt-3">
-        {$ui("Logo URLs and Hash-hosted logo uploads are disabled in production until each asset is pinned to an exact retained storage version. Palette and font settings remain available and are frozen when a document is sent.")}
-      </p>
-    </section>
+    <BrandingLogoFields supported={logoURLSupported} disabled={saving}
+      logoURL={branding.logo_url ?? ''} logoAlt={branding.logo_alt ?? ''}
+      onChange={(patch) => { branding = { ...branding, ...patch }; saved = false; }} />
 
     <section class="card p-5">
       <h2 class="font-display font-extralight text-lg mb-4">{$ui("Type")}</h2>

@@ -106,7 +106,7 @@ func TestParticipantReportCapacityRefusesOversizeResponseBeforeCommitV1E2E(t *te
 			var rejected struct {
 				Error string `json:"error"`
 			}
-			const expectedCopy = "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing"
+			const expectedCopy = "this negotiation's evidence report has reached its size limit; contact the sender before continuing"
 			if response.Code != http.StatusConflict || json.Unmarshal(response.Body.Bytes(), &rejected) != nil || rejected.Error != expectedCopy {
 				t.Fatal("public capacity refusal did not return the fixed409 copy", response.Code)
 			}

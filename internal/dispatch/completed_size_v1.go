@@ -71,7 +71,7 @@ func CompletedNotificationComponentsV1(kind string, ctx TemplateContext) (subjec
 	textBytes = int64(len(completedSignerText))
 	// Localized shared skeleton is below the complete original fallback. Every
 	// fixed catalog insertion and optional CTA is then added independently.
-	for _, suffix := range [...]string{"eyebrow", "heading", "body", "cta", "auditCta", "footer"} {
+	for _, suffix := range [...]string{"eyebrow", "heading", "body", "cta", "auditCta"} {
 		n, e := translated(prefix + "." + suffix)
 		if e != nil {
 			return 0, 0, 0, e
@@ -86,6 +86,14 @@ func CompletedNotificationComponentsV1(kind string, ctx TemplateContext) (subjec
 				return 0, 0, 0, e
 			}
 		}
+	}
+	htmlBytes, err = inviteAddBytesV1(htmlBytes, int64(len(nativeEmailFooterFallbackV1)), 6)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	textBytes, err = inviteAddBytesV1(textBytes, int64(len(nativeEmailFooterFallbackV1)), 1)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	htmlBytes, err = inviteAddBytesV1(htmlBytes, int64(len(ctx.DownloadURL)+len(ctx.AuditCertURL)+len(ctx.PackagePortalURL)), 6)
 	if err != nil {

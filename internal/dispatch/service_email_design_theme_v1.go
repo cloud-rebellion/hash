@@ -13,6 +13,16 @@ import (
 
 var trustedEmailStyleAttributeV1 = regexp.MustCompile(`\bstyle="([^"]*)"`)
 
+// The native service-email boundary receives the producer's already measured
+// send-frozen controller name. Missing context stays neutral; person names,
+// addresses and installation branding never become its replacement identity.
+func serviceEmailPresentationNameV1(c TemplateContext) string {
+	if name := strings.TrimSpace(c.OrgName); name != "" {
+		return name
+	}
+	return nativeEmailFooterFallbackV1
+}
+
 func emailDesignBrandV1(c TemplateContext) string {
 	if c.OrgName != "" {
 		return c.OrgName

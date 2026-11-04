@@ -64,6 +64,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>{showChrome || path === '/' || isStaffAuthPath(path) || path.startsWith('/auth') ? 'Hash' : 'Document'}</title>
+</svelte:head>
+
 {#if showChrome}
   <div lang={$staffLocale} class="min-h-screen flex flex-col">
     <header class="border-b border-border-light bg-bg-surface">

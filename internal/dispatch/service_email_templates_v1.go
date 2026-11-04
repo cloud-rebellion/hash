@@ -282,14 +282,27 @@ func serviceEmailMeasureV1(s string, c TemplateContext, escaped, header bool) (i
 // Prices only bounded, already-admitted actual source/context before any
 // expanded output is allocated. Existing native builtin calculators still own
 // mandatory message bounds. The producer must pay source, parsing and outputs.
-func ServiceEmailTemplateComponentsV1(c TemplateContext, tpl *ServiceEmailTemplateV1, bs, bh, bt int64) (s, h, t int64, err error) {
+func ServiceEmailTemplateComponentsV1(kind string, c TemplateContext, tpl *ServiceEmailTemplateV1, bs, bh, bt int64) (s, h, t int64, err error) {
 	if bs < 0 || bh < 0 || bt < 0 {
 		return 0, 0, 0, ErrServiceEmailTemplateV1
 	}
-	if tpl == nil {
-		return bs, bh, bt, nil
-	}
 	s, h, t = bs, bh, bt
+	if recipientLocalized(kind) {
+		// Native builtin quotes include the neutral footer. The frozen company
+		// may need more bytes, including HTML escaping, even without an edition.
+		footer := serviceEmailPresentationNameV1(c)
+		h, err = inviteAddBytesV1(h, max(0, serviceEmailEscapedBytesV1(footer)-int64(len(nativeEmailFooterFallbackV1))), 1)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		t, err = inviteAddBytesV1(t, max(0, int64(len(footer))-int64(len(nativeEmailFooterFallbackV1))), 1)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if tpl == nil {
+		return s, h, t, nil
+	}
 	if tpl.SubjectTemplate != "" {
 		s, err = serviceEmailMeasureV1(tpl.SubjectTemplate, c, false, true)
 		if err != nil || s > ServiceEmailRenderedSubjectBytesV1 {
@@ -351,17 +364,17 @@ func serviceEmailExpandV1(s string, c TemplateContext, escaped bool) (string, er
 }
 func RenderServiceEmailV1(kind string, c TemplateContext, tpl *ServiceEmailTemplateV1) (subject, body, text string, err error) {
 	if tpl == nil {
-		return Render(kind, c)
+		return renderNativeEmailV1(kind, c, serviceEmailPresentationNameV1(c))
 	}
 	canonical, e := ValidateServiceEmailTemplateV1(kind, *tpl)
 	if e != nil || canonical != *tpl {
 		return "", "", "", ErrServiceEmailTemplateV1
 	}
 	// Refuse expansion errors before allocating either custom or builtin output.
-	if _, _, _, e = ServiceEmailTemplateComponentsV1(c, tpl, 0, 0, 0); e != nil {
+	if _, _, _, e = ServiceEmailTemplateComponentsV1(kind, c, tpl, 0, 0, 0); e != nil {
 		return "", "", "", e
 	}
-	subject, body, text, err = Render(kind, c)
+	subject, body, text, err = renderNativeEmailV1(kind, c, serviceEmailPresentationNameV1(c))
 	if err != nil {
 		return
 	}

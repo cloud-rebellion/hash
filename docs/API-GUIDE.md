@@ -342,6 +342,15 @@ exact uploaded version/digest rather than replacing or deleting an older logo.
 Custom logo uploads remain restricted to development; production support needs
 its separate implementation and acceptance work.
 
+`GET /api/v1/branding` includes the read-only `logo_url_supported` capability.
+Do not send that metadata back in a branding update. Production accepts an
+explicit empty `logo_url` to clear a legacy value, while an omitted or null logo
+field preserves its current value. An explicit empty `logo_alt` clears the alt
+text. New production logo URLs remain refused. Document theme settings apply to
+designs using those defaults; they do not theme the recipient interface or
+rewrite sent documents. Embedded email logos are configured separately in
+[Email design](EMAIL-TEMPLATES.md).
+
 REST reports HTTP 401 for expired credentials and HTTP 403 for revoked membership,
 session or role. Input validation retains HTTP 400; genuine missing key/webhook
 targets return HTTP 404. MCP failures retain its normal tool-error envelope.

@@ -376,7 +376,7 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 			}
 			writeError(w, http.StatusServiceUnavailable, "signing is temporarily unavailable")
 		case errors.Is(err, sign.ErrParticipantReportCapacityV1):
-			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing")
+			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached its size limit; contact the sender before continuing")
 		case errors.Is(err, sign.ErrSignatureTierUnavailable):
 			writeError(w, http.StatusConflict, "AES and QES signing are temporarily unavailable; this document cannot be completed through the SES endpoint")
 		case errors.Is(err, sign.ErrAlreadySigned):
@@ -441,7 +441,7 @@ func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, sign.ErrSigningAdmissionUnavailableV1):
 			writeError(w, http.StatusServiceUnavailable, "acknowledgement is temporarily unavailable")
 		case errors.Is(err, sign.ErrParticipantReportCapacityV1):
-			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing")
+			writeError(w, http.StatusConflict, "this negotiation's evidence report has reached its size limit; contact the sender before continuing")
 		case errors.Is(err, sign.ErrSignatureTierUnavailable):
 			writeError(w, http.StatusConflict, "AES and QES response flows are temporarily unavailable")
 		case errors.Is(err, sign.ErrAlreadyAccepted):

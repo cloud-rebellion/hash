@@ -116,6 +116,14 @@ func TestServiceEmailNativeBoundsCoverCustomEscapingAndQueueReturnsV1(t *testing
 					if err != nil {
 						t.Fatal(err)
 					}
+					// Raw legacy rendering has no frozen tenant identity. The owned
+					// service boundary changes only its exact recipient footer.
+					if kind == dispatch.KindInvite || kind == dispatch.KindReminder || kind == dispatch.KindCompletedSigner {
+						if !strings.HasSuffix(baseText, "Document service\n") {
+							t.Fatal("raw recipient footer is not the neutral native slot")
+						}
+						baseText = strings.TrimSuffix(baseText, "Document service\n") + ctx.OrgName + "\n"
+					}
 					if !strings.HasSuffix(actualText, baseText) || !strings.Contains(actualHTML, "&lt;") || strings.Contains(actualHTML, ctx.BeaconURL) {
 						t.Fatal("mandatory text/escaping/no-tracking contract changed")
 					}

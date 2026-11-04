@@ -73,9 +73,18 @@ type TemplateContext struct {
 	InternalOperator bool // internal quota warning: contact operator, no purchases
 }
 
+const nativeEmailFooterFallbackV1 = "Document service"
+
 // Render returns (subject, html, text) for the given kind + ctx. Errors only
 // when the kind is unknown or templates fail to compile.
 func Render(kind string, ctx TemplateContext) (subject, html, text string, err error) {
+	// Raw legacy callers do not carry the native producer's frozen controller
+	// identity. Only their application-owned recipient footer is neutralized;
+	// document, sender, action, notice and evidence content remain unchanged.
+	return renderNativeEmailV1(kind, ctx, nativeEmailFooterFallbackV1)
+}
+
+func renderNativeEmailV1(kind string, ctx TemplateContext, recipientFooter string) (subject, html, text string, err error) {
 	for _, link := range []string{ctx.SignURL, ctx.DownloadURL, ctx.AuditCertURL, ctx.PackagePortalURL, ctx.OpenURL, ctx.ApproveURL, ctx.DenyURL, ctx.UpgradeURL} {
 		if err := validateEmailLink(link); err != nil {
 			return "", "", "", err
@@ -88,11 +97,11 @@ func Render(kind string, ctx TemplateContext) (subject, html, text string, err e
 	if err != nil {
 		return "", "", "", err
 	}
-	htmlBody, err := renderHTMLTemplate(kind, ctx)
+	htmlBody, err := renderHTMLTemplate(kind, ctx, recipientFooter)
 	if err != nil {
 		return "", "", "", err
 	}
-	textBody, err := renderTextTemplate(kind, ctx)
+	textBody, err := renderTextTemplate(kind, ctx, recipientFooter)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -163,9 +172,9 @@ func renderSubject(kind string, ctx TemplateContext) (string, error) {
 // Templates live inline in this file (see the const block below); design
 // rationale: keep the binary self-contained so a misconfigured embed FS
 // can't ever silently ship empty emails.
-func renderHTMLTemplate(kind string, ctx TemplateContext) (string, error) {
+func renderHTMLTemplate(kind string, ctx TemplateContext, recipientFooter string) (string, error) {
 	if recipientLocalized(kind) {
-		return localizedHTML(kind, ctx), nil
+		return localizedHTML(kind, ctx, recipientFooter), nil
 	}
 	src := htmlFor(kind)
 	if src == "" {
@@ -182,9 +191,9 @@ func renderHTMLTemplate(kind string, ctx TemplateContext) (string, error) {
 	return buf.String(), nil
 }
 
-func renderTextTemplate(kind string, ctx TemplateContext) (string, error) {
+func renderTextTemplate(kind string, ctx TemplateContext, recipientFooter string) (string, error) {
 	if recipientLocalized(kind) {
-		return localizedText(kind, ctx), nil
+		return localizedText(kind, ctx, recipientFooter), nil
 	}
 	src := textFor(kind)
 	if src == "" {
@@ -272,7 +281,7 @@ func localizedSubject(kind string, ctx TemplateContext) string {
 	return i18n.T(i18n.Normalize(ctx.Locale), catalogPrefix(kind, ctx)+".subject", emailParams(ctx))
 }
 
-func localizedHTML(kind string, ctx TemplateContext) string {
+func localizedHTML(kind string, ctx TemplateContext, recipientFooter string) string {
 	loc := i18n.Normalize(ctx.Locale)
 	p := emailParams(ctx)
 	prefix := catalogPrefix(kind, ctx)
@@ -281,7 +290,9 @@ func localizedHTML(kind string, ctx TemplateContext) string {
 	heading := esc(i18n.T(loc, prefix+".heading", p))
 	body := esc(i18n.T(loc, prefix+".body", p))
 	cta := esc(i18n.T(loc, prefix+".cta", p))
-	footer := esc(i18n.T(loc, footerKey(kind, ctx), p))
+	// This is the native footer slot, before any owner introduction is joined.
+	// Never search or replace arbitrary authored text for a product name.
+	footer := esc(recipientFooter)
 	url := ctaURL(kind, ctx)
 	urlEsc := esc(url)
 
@@ -312,14 +323,14 @@ func localizedHTML(kind string, ctx TemplateContext) string {
 </body></html>`, eyebrow, heading, body, ctaBlock, extra, footer)
 }
 
-func localizedText(kind string, ctx TemplateContext) string {
+func localizedText(kind string, ctx TemplateContext, recipientFooter string) string {
 	loc := i18n.Normalize(ctx.Locale)
 	p := emailParams(ctx)
 	prefix := catalogPrefix(kind, ctx)
 	heading := i18n.T(loc, prefix+".heading", p)
 	body := i18n.T(loc, prefix+".body", p)
 	cta := i18n.T(loc, prefix+".cta", p)
-	footer := i18n.T(loc, footerKey(kind, ctx), p)
+	footer := recipientFooter
 	url := ctaURL(kind, ctx)
 	if url == "" {
 		return fmt.Sprintf("%s\n\n%s\n\n%s\n", heading, body, footer)

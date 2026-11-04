@@ -317,8 +317,10 @@ actions are refused. Surface/text contrast must be at least4.5:1. Introduction
 HTML retains its narrower formatting-only contract with no attributes or CSS.
 Hash preserves actual action URLs, signing mode, deadlines and security/issuer
 content, themes native CTA/readability and uses workspace presentation branding.
-Empty legacy design preserves the existing message bytes. Rendered/frozen logo
-bytes are self-contained; final SMTP MIME embeds the same digest bytes by CID.
+Empty design keeps the native layout. Newly prepared recipient footers use the
+send-frozen company presentation or a neutral fallback; previously queued bodies
+are not rewritten. Rendered/frozen logo bytes are self-contained; final SMTP MIME
+embeds the same digest bytes by CID.
 
 Preview is synthetic and never saves, sends or invokes AI. Proposal requires
 all Preview fields plus `prompt` (1..4096 UTF-8 bytes), through the MCP tool or
@@ -1303,7 +1305,7 @@ transaction as their provisional response, audit and optional package receipt.
 A deterministic report/payload size refusal returns HTTP 409 with:
 
 ```json
-{"error":"this negotiation's evidence report has reached Hash's size limit; contact the sender before continuing"}
+{"error":"this negotiation's evidence report has reached its size limit; contact the sender before continuing"}
 ```
 
 That refusal rolls back legal response/receipt/audit/notification/finalization

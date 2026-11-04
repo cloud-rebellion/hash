@@ -64,10 +64,10 @@ func InviteNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlByte
 			}
 		}
 	}
-	footer, e := translated(footerKey(KindInvite, ctx))
-	if e != nil {
-		return 0, 0, 0, e
-	}
+	// Raw renders use a neutral native footer. The service-email calculator
+	// separately prices growth for its already-retained frozen company name.
+	footer := int64(len(nativeEmailFooterFallbackV1))
+	var e error
 	htmlBytes, e = inviteAddBytesV1(htmlBytes, footer, 6)
 	if e != nil {
 		return 0, 0, 0, e

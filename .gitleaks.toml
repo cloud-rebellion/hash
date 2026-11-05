@@ -111,3 +111,12 @@ condition = "AND"
 paths = ['''^internal/presignexecute/record_test\.go$''']
 regexTarget = "secret"
 regexes = ['''^s\.OriginalCredentialSha256$''']
+
+# Generated API-route Go method selector, not a Vault credential.
+# Keep both the Hash subtree and history-preserving public-mirror path forms.
+[[rules.allowlists]]
+description = "Reviewed generated API route handler selector: exact documentation paths and extracted value"
+condition = "AND"
+paths = ['''^docs/API-ROUTES\.md$''', '''^hash/docs/API-ROUTES\.md$''']
+regexTarget = "secret"
+regexes = ['''^s\.handleUploadBrandAssetV1$''']

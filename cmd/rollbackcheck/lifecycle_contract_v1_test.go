@@ -6,18 +6,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	hashdb "github.com/bright-interaction/hash/internal/db"
 	"testing"
+
+	hashdb "github.com/bright-interaction/hash/internal/db"
 )
 
-func TestCompiledLifecycle484BindsActualEmbeddedM118WithoutDatabase(t *testing.T) {
+func TestCompiledLifecycle484BindsActualEmbeddedM123WithoutDatabase(t *testing.T) {
 	t.Setenv("HASH_DB_URL", "")
 	got, err := compiledLifecycleReportV1()
 	if err != nil {
 		t.Fatal(err)
 	}
 	digest, versions, err := hashdb.EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 122 || got.SchemaVersion != 1 || got.LifecycleContractVersion != 8 || got.MigrationsSHA256 != digest {
+	if err != nil || len(versions) == 0 || versions[len(versions)-1] != 123 || got.SchemaVersion != 1 || got.LifecycleContractVersion != 8 || got.MigrationsSHA256 != digest {
 		t.Fatalf("compiled lifecycle not bound to actual embedded tree: %+v %v", got, err)
 	}
 	raw, err := json.Marshal(got)

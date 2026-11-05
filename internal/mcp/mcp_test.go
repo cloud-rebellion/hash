@@ -448,6 +448,89 @@ func TestResourcesRead_RequiresReadScope(t *testing.T) {
 	}
 }
 
+func TestResourcesRead_DesignResourcesRequireReadScope(t *testing.T) {
+	for _, resource := range []struct{ name, uri string }{
+		{"html_master", "hash://schema/html-master"},
+		{"designed_documents", "hash://guides/designed-documents"},
+	} {
+		t.Run(resource.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name   string
+				auth   bool
+				scopes []string
+				allow  bool
+			}{
+				{name: "read", auth: true, scopes: []string{"read"}, allow: true},
+				{name: "authoring_only", auth: true, scopes: []string{"write:authoring"}},
+				{name: "empty_scopes", auth: true},
+				{name: "unauthenticated"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					body, err := json.Marshal(map[string]any{
+						"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+						"params": map[string]any{"uri": resource.uri},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+					if tc.auth {
+						req = withSessionContext(req, uuid.New(), uuid.New(), "viewer", "viewer@example.test")
+						req = withTokenScopes(req, tc.scopes...)
+					}
+					rr := httptest.NewRecorder()
+					New(Deps{}).Handler().ServeHTTP(rr, req)
+					var resp response
+					if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+						t.Fatal(err)
+					}
+					if !tc.allow {
+						if resp.Error == nil || resp.Error.Code != codeUnauthorized {
+							t.Fatalf("resource read = %+v, want unauthorized", resp)
+						}
+						return
+					}
+					if resp.Error != nil {
+						t.Fatalf("read-scoped resource failed: %+v", resp.Error)
+					}
+					encoded, err := json.Marshal(resp.Result)
+					if err != nil || !bytes.Contains(encoded, []byte(resource.uri)) {
+						t.Fatalf("response does not bind requested resource: %s, err=%v", encoded, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestResourcesRead_UnclassifiedRegistrationFailsClosed(t *testing.T) {
+	s := NewServer()
+	called := false
+	s.RegisterResource(Resource{
+		URI: "hash://unreviewed/static", Name: "unreviewed", MimeType: "application/json",
+		Loader: func(_ *http.Request) (any, error) { called = true; return map[string]bool{"unsafe": true}, nil },
+	})
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+		"params": map[string]any{"uri": "hash://unreviewed/static"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req = withSessionContext(req, uuid.New(), uuid.New(), "owner", "owner@example.test")
+	req = withTokenScopes(req, "read")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	var resp response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil || resp.Error.Code != codeUnauthorized || called {
+		t.Fatalf("unclassified resource must refuse before loader: error=%+v, called=%v", resp.Error, called)
+	}
+}
+
 func TestResourcesRead_Unknown(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "resources/read",
 		map[string]any{"uri": "test://no-such"}, true)

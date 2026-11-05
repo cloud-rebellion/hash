@@ -159,6 +159,11 @@ func (e *extractor) walk(block *ast.BlockStmt, prefix string, gates, conditions 
 			}
 			position := e.fs.Position(call.Pos())
 			handler := e.expression(call.Args[1])
+			if selector, ok := call.Args[1].(*ast.SelectorExpr); ok {
+				if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "s" {
+					handler = "(*Server)." + selector.Sel.Name
+				}
+			}
 			if _, inline := call.Args[1].(*ast.FuncLit); inline && position.Filename == noticeAccessSourceV1 {
 				handler = fmt.Sprintf("inline handler at %s:%d", position.Filename, position.Line)
 			}

@@ -149,11 +149,13 @@ var mcpToolRequiredScopes = map[string]string{
 }
 
 var mcpResourceRequiredScopes = map[string]string{
-	"hash://meta/capabilities": mcpScopeRead,
-	"hash://schema/blocks":     mcpScopeRead,
-	"hash://users/me":          mcpScopeRead,
-	"hash://documents/recent":  mcpScopeRead,
-	"hash://events/recent":     mcpScopeRead,
+	"hash://schema/html-master":        mcpScopeRead,
+	"hash://guides/designed-documents": mcpScopeRead,
+	"hash://meta/capabilities":         mcpScopeRead,
+	"hash://schema/blocks":             mcpScopeRead,
+	"hash://users/me":                  mcpScopeRead,
+	"hash://documents/recent":          mcpScopeRead,
+	"hash://events/recent":             mcpScopeRead,
 }
 
 func validMCPRequiredScope(scope string) bool {

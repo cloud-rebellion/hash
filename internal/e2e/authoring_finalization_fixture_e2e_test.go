@@ -100,7 +100,7 @@ func finishAuthoringFinalizationE2E(t *testing.T, ctx context.Context, q *genera
 		}
 	}
 	for _, a := range audiences {
-		mail, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{ToEmail: a.email, Subject: "Synthetic authoring report", HtmlBody: "<p>Synthetic report fixture</p>", TextBody: "Synthetic report fixture", HeadersJson: []byte(`{}`)})
+		mail, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: doc.OrgID, ToEmail: a.email, Subject: "Synthetic authoring report", HtmlBody: "<p>Synthetic report fixture</p>", TextBody: "Synthetic report fixture", HeadersJson: []byte(`{}`)})
 		must(t, err, "queue synthetic completion report reference")
 		rows, err := q.InsertParticipantReportDeliveryV1(ctx, generated.InsertParticipantReportDeliveryV1Params{Audience: a.kind, RecipientID: a.recipient, EmailDeliveryID: mail.ID, DocumentID: doc.ID, OrgID: doc.OrgID})
 		authoringFixtureRows(t, "bind actual synthetic outbox message", rows, 1, err)

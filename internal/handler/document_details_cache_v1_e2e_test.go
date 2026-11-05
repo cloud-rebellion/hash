@@ -179,10 +179,24 @@ func TestOwnedDocumentDetailsMCPExpiryPreservesAndMetadataWriteInvalidatesE2E(t 
 	if json.Unmarshal(changed.Metadata, &metadata) != nil || metadata["crm_deal"] != "metadata-fixture-deal" || bytes.Equal(changed.Metadata, current.Metadata) {
 		t.Fatal("true metadata intent was suppressed")
 	}
+	if !sameSignerDocumentSource(current, changed) || changed.Name != current.Name || changed.ExpiresAt != current.ExpiresAt || !changed.UpdatedAt.Time.After(current.UpdatedAt.Time) {
+		t.Fatal("metadata merge changed source/details or failed its current edit witness")
+	}
+	after := ownedDetailsCachesReadV1(t, q, changed)
+	if after.policy != before.policy || after.report != before.report || after.response == before.response {
+		t.Fatal("metadata merge changed unrelated measurements or retained the old response measurement")
+	}
 	var caches int
-	if err := q.f.pool.QueryRow(q.f.ctx, "SELECT count(*)::integer FROM html_creation_response_sizes_v1 WHERE document_id=$1 AND org_id=$2", doc.ID, q.f.org).Scan(&caches); err != nil || caches != 0 {
-		t.Fatal("true metadata write retained stale response measurement", err)
-	} //nolint:rawsql -- exact expected invalidation, never repair
-	ownedDetailsResponseReadV1(t, q, changed, false)
+	var exactWire bool
+	if err := q.f.pool.QueryRow(q.f.ctx, `SELECT count(*)::integer,coalesce(bool_and(
+ r.blocks_wire_bytes=coalesce(octet_length(d.blocks_json::text),0)
+ AND r.metadata_wire_bytes=coalesce(octet_length(d.metadata::text),0)
+ AND r.measurement_server_version_num=current_setting('server_version_num')::integer
+ AND r.measured_at IS NOT NULL),false)
+ FROM html_creation_response_sizes_v1 r JOIN documents d ON d.id=r.document_id AND d.org_id=r.org_id
+ WHERE r.document_id=$1 AND r.org_id=$2 AND d.updated_at=$3`, doc.ID, q.f.org, changed.UpdatedAt).Scan(&caches, &exactWire); err != nil || caches != 1 || !exactWire {
+		t.Fatal("metadata merge lacks its single exact fresh response measurement", caches, exactWire, err)
+	} //nolint:rawsql -- read-only oracle for the actual same-transaction measurement, never repair
+	ownedDetailsResponseReadV1(t, q, changed, true)
 	ownedDetailsConsumedV1(t, q)
 }

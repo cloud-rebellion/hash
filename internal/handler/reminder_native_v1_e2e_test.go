@@ -72,11 +72,14 @@ func TestNativeAutomaticReminderConcurrentWorkersCompleteActualReportV1E2E(t *te
 	q := newOwnedPublicReadFixtureV1(t)
 	f := q.f
 	doc, parties := q.createSentV1(t)
+	bootstrap := q.lookupV1(t, parties[0].Token)
+	if err := bootstrap.CloseReadV1(); err != nil {
+		t.Fatal("actual invitation bootstrap retirement", err)
+	}
 	defer q.assertObserversOnlyV1(t)
 	oldMail := completedCompanionOutboxIDsV1(t, q)
-	if _, err := f.pool.Exec(f.ctx, "UPDATE reminders SET next_fire_at=clock_timestamp()-interval '1 minute' WHERE document_id=$1", doc.ID); err != nil {
-		t.Fatal(err)
-	} //nolint:rawsql -- make the real Send-created schedule due; no legal evidence/status is fabricated
+	due := nativeReminderDueTime255(t, f, doc.ID)
+	f.s.Send.Now = func() time.Time { return due }
 	actor := send.Actor{OrgID: f.org, Email: "stale-worker-presentation@example.test", Via: "worker", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return auth.ErrMutationPermissionRevoked }}
 	type result struct {
 		count int

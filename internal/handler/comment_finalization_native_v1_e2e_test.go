@@ -124,12 +124,30 @@ func ownedEnvelopeChildCommentBeforeFreeze165V1(t *testing.T, q *ownedPublicRead
 	if err != nil || child.Status != "sent" {
 		t.Fatal("exact genuine child not sent", err)
 	}
+	if !child.ParentEnvelopeID.Valid {
+		t.Fatal("genuine envelope child lost its ceremony root")
+	}
+	rootID := uuid.UUID(child.ParentEnvelopeID.Bytes)
+	var childRecipients, rootControllers, childControllers, outboxBefore int
+	if err = q.f.pool.QueryRow(q.f.ctx, `SELECT
+ (SELECT count(*)::integer FROM recipients WHERE document_id=$1),
+ (SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$2 AND org_id=$3),
+ (SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$1 AND org_id=$3),
+ (SELECT count(*)::integer FROM email_deliveries WHERE smtp_org_id=$3)`, childID, rootID, q.f.org).Scan(&childRecipients, &rootControllers, &childControllers, &outboxBefore); err != nil || childRecipients != 0 || rootControllers != 1 || childControllers != 0 {
+		t.Fatal("normal root Send lost its actual root-only recipient/controller topology", err, childRecipients, rootControllers, childControllers)
+	} //nolint:rawsql -- observe genuine public constructor/Send rows, never repair a confirmation
 	w := httptest.NewRecorder()
 	q.f.s.Routes().ServeHTTP(w, nativeCommentRequest163V1(t, q, q.f.ctx, child, "sender", "", "", q.cookie))
 	var response commentResponse
 	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &response) != nil || response.Body != nativeCommentBody163V1 || response.AuthorSide != "sender" {
 		t.Fatal("genuine exact-child native comment unavailable", w.Code)
 	}
+	var outboxAfter int
+	if err = q.f.pool.QueryRow(q.f.ctx, `SELECT
+ (SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$1 AND org_id=$2),
+ (SELECT count(*)::integer FROM email_deliveries WHERE smtp_org_id=$2)`, childID, q.f.org).Scan(&childControllers, &outboxAfter); err != nil || childControllers != 0 || outboxAfter != outboxBefore {
+		t.Fatal("zero-recipient child comment fabricated a controller confirmation or email", err, childControllers, outboxBefore, outboxAfter)
+	} //nolint:rawsql -- empty notification output must not manufacture legal or delivery rows
 	var rows, events, measured int
 	if err = q.f.pool.QueryRow(q.f.ctx, `SELECT
  (SELECT count(*)::integer FROM document_comments WHERE document_id=$1 AND body=$3 AND author_side='sender' AND user_id=$4),
@@ -151,10 +169,6 @@ func ownedEnvelopeChildCommentBeforeFreeze165V1(t *testing.T, q *ownedPublicRead
 	// Public recipients belong to the actual ceremony root. The shared oracle
 	// requires a real expected recipient even for this staff-only observation;
 	// do not invent one or obtain a new signer credential.
-	if !child.ParentEnvelopeID.Valid {
-		t.Fatal("genuine envelope child lost its ceremony root")
-	}
-	rootID := uuid.UUID(child.ParentEnvelopeID.Bytes)
 	parties, err := q.f.q.ListRecipientsByDocument(q.f.ctx, rootID)
 	if err != nil || len(parties) != 2 || parties[0].DocumentID != rootID {
 		t.Fatal("actual ceremony parties unavailable for child audit oracle", err)

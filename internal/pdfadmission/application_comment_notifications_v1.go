@@ -42,12 +42,6 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	} else if !w.recipientsRead {
 		return ErrCommentRequestV1
 	}
-	companyName, err := w.readTenantPresentationNameLockedV1(call, w.sourceDocument)
-	if err != nil {
-		return err
-	}
-	out := &applicationCommentNotificationsV1{}
-	m.notifications = out
 	count := int64(0)
 	if signer {
 		count = 1
@@ -58,6 +52,18 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 			}
 		}
 	}
+	companyName := ""
+	// Envelope children can carry staff comments without local recipients.
+	// Only an actual outgoing message consumes a frozen presentation identity.
+	if count > 0 {
+		var err error
+		companyName, err = w.readTenantPresentationNameLockedV1(call, w.sourceDocument)
+		if err != nil {
+			return err
+		}
+	}
+	out := &applicationCommentNotificationsV1{}
+	m.notifications = out
 	raw := int64(2 * unsafe.Sizeof(applicationCommentNotificationsV1{}))
 	controls := int64(4*unsafe.Sizeof(dispatch.Message{}) + 4*unsafe.Sizeof(dispatch.TemplateContext{}) + 4*unsafe.Sizeof(generated.EmailDelivery{}) + 4*unsafe.Sizeof(generated.EnqueueEmailDeliveryParams{}) + 8*unsafe.Sizeof(uintptr(0)) + 4*unsafe.Sizeof(sync.Once{}))
 	if !htmlInputAddV1(&raw, count, controls) || !htmlInputAddV1(&raw, count, dispatch.CommentNotificationTemplateSourceBytesV1()*64) || !htmlInputAddV1(&raw, int64(len(orgName)), 2*(count+1)) || !htmlInputAddV1(&raw, int64(len(companyName)), 2*(count+1)) || !htmlInputAddV1(&raw, int64(len(baseURL)), 2) || !htmlInputAddV1(&raw, 1, 2*(int64(len("/documents/"))+36)) {

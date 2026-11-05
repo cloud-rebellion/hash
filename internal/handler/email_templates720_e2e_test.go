@@ -20,6 +20,14 @@ func email720Body(revision int64, subject, html, text string) string {
 	raw, _ := json.Marshal(emailtemplates.Input{ExpectedRevision: revision, SubjectTemplate: subject, HTMLTemplate: html, TextTemplate: text})
 	return string(raw)
 }
+
+func email720Fixture(t *testing.T) folderFixture695 {
+	t.Helper()
+	// Email sources and retained responses use the genuine native work runtime,
+	// including its joined cleanup; the folder-only fixture has no admission.
+	q := newOwnedAutomationAuthorizationFixtureV1(t)
+	return folderFixture695{lifecycleAuthorizationFixture: q.f, cookie: q.cookie}
+}
 func email720Counts(t *testing.T, f folderFixture695) (int64, int64) {
 	t.Helper()
 	var revisions, events int64
@@ -29,7 +37,7 @@ func email720Counts(t *testing.T, f folderFixture695) (int64, int64) {
 	return revisions, events
 }
 func TestEmailTemplate720OwnerRevisionPreviewAndTenantE2E(t *testing.T) {
-	f := folderSetup695(t)
+	f := email720Fixture(t)
 	path := "/api/v1/email-templates/email.invite"
 	r, e := email720Counts(t, f)
 	if r != 0 {
@@ -71,7 +79,7 @@ func TestEmailTemplate720OwnerRevisionPreviewAndTenantE2E(t *testing.T) {
 	if err := f.pool.QueryRow(f.ctx, `SELECT count(*)=1 AND bool_and(document_id IS NULL AND actor_user_id=$2 AND payload_json->>'kind'='email.invite' AND payload_json->>'revision'='1') FROM events WHERE org_id=$1 AND kind='email_template.updated'`, f.org, f.user.ID).Scan(&truthful); err != nil || !truthful {
 		t.Fatal("email settings audit lost kind/org/actor/revision", err)
 	}
-	other := folderSetup695(t)
+	other := email720Fixture(t)
 	if w := other.request(http.MethodGet, "/api/v1/email-templates", ""); w.Code != 200 || strings.Contains(w.Body.String(), "For {{org_name}}") {
 		t.Fatal("other organization read source", w.Code)
 	}
@@ -103,7 +111,7 @@ func TestEmailTemplate720OwnerRevisionPreviewAndTenantE2E(t *testing.T) {
 	}
 }
 func TestEmailTemplate720ConcurrentCASAndImmutableHistoryE2E(t *testing.T) {
-	f := folderSetup695(t)
+	f := email720Fixture(t)
 	path := "/api/v1/email-templates/email.invite"
 	var wait sync.WaitGroup
 	results := make(chan int, 2)
@@ -136,8 +144,13 @@ func TestEmailTemplate720ConcurrentCASAndImmutableHistoryE2E(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, `UPDATE org_email_template_revisions_v1 SET subject_template='rewritten' WHERE org_id=$1`, f.org); err == nil {
 		t.Fatal("historical source was mutable")
 	}
-	if w := f.request(http.MethodPut, path, email720Body(1, "", "", "")); w.Code != 200 {
-		t.Fatal("reset failed", w.Code)
+	reset := f.request(http.MethodPut, path, email720Body(1, "", "", ""))
+	if reset.Code != 200 {
+		t.Fatal("reset failed", reset.Code)
+	}
+	var defaults emailtemplates.Template
+	if err := json.Unmarshal(reset.Body.Bytes(), &defaults); err != nil || defaults.Revision != 2 || defaults.SubjectTemplate != "" || defaults.HTMLTemplate != "" || defaults.TextTemplate != "" || defaults.DesignJSON != "" {
+		t.Fatal("reset did not retain an exact empty-source default edition", err)
 	}
 	if r, _ := email720Counts(t, f); r != 2 {
 		t.Fatal("reset destroyed history")

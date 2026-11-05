@@ -32,7 +32,15 @@ func submitDocumentPurposeE2E(f lifecycleAuthorizationFixture, cookie string, id
 func TestDocumentPurposeAtomicCreationAndNativeSendFenceE2E(t *testing.T) {
 	for _, transport := range []string{"rest", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
-			f, _ := setupDocumentCreationE2E(t, "blocks")
+			q := newOwnedAutomationAuthorizationFixtureV1(t)
+			ownedCreationPrepareProPlanV1(t, q)
+			f := q.f
+			user, roleErr := f.q.UpdateUserRole(f.ctx, generated.UpdateUserRoleParams{ID: f.user.ID, OrgID: f.org, Role: "sender"})
+			if roleErr != nil {
+				t.Fatal("configure original purpose fixture sender", roleErr)
+			}
+			f.user = user
+			q.f = f
 			credential, _, _ := documentCreationCredentialE2E(t, f, transport, false)
 			name := "Purpose explicit " + transport
 			w := submitDocumentCreationE2E(f, f.ctx, transport, credential, map[string]any{"name": name, "source_kind": "blocks", "purpose": "document"})
@@ -90,7 +98,7 @@ func TestDocumentPurposeAtomicCreationAndNativeSendFenceE2E(t *testing.T) {
 func TestDocumentPurposeCannotReclassifyRecipientsOrSentEvidenceE2E(t *testing.T) {
 	for _, sent := range []bool{false, true} {
 		t.Run(map[bool]string{false: "recipient draft", true: "sent"}[sent], func(t *testing.T) {
-			f := setupLifecycleAuthorizationE2E(t, "sender", sent, false)
+			f := setupNativeLifecycleAuthorization256(t, "sender", sent, false)
 			cookie := dsrSessionCookieE2E(t, f.s, f.user.ID, f.user.SessionGeneration, time.Hour)
 			before := f.snapshot(t)
 			got := submitDocumentPurposeE2E(f, cookie, f.doc.ID, f.doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), "document")

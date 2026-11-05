@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/documentfolders"
+	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -68,15 +69,7 @@ func (f folderFixture695) document(t *testing.T, name, status string) *generated
 		t.Fatal(err)
 	}
 	if status != "draft" {
-		// This is explicitly a synthetic status-shaped row to test filing
-		// immutability, not a legal signing or completion acceptance fixture.
-		if _, err = f.pool.Exec(f.ctx, `UPDATE documents SET status=$2 WHERE id=$1`, d.ID, status); err != nil {
-			t.Fatal(err)
-		}
-		d, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: d.ID, OrgID: f.org})
-		if err != nil {
-			t.Fatal(err)
-		}
+		t.Fatal("non-draft filing fixtures must use genuine send and completion")
 	}
 	return d
 }
@@ -238,18 +231,37 @@ func folderPreservedState695(t *testing.T, f folderFixture695, id uuid.UUID) str
 	return state
 }
 func TestDocumentFolderFilingPreservesCompletedSourceCachesAndEventsE2E(t *testing.T) {
-	f := folderSetup695(t)
+	// Completion must pass the real immutable output/publication guards. A
+	// synthetic status change cannot establish a completed source/cache tuple.
+	q := newOwnedPublicReadFixtureV1(t)
+	q.f.s.Sign.Storage = q.f.s.Storage
+	sent, parties := q.createSentV1(t)
+	ownedCreationAssertDrainedV1(t, q, 1)
+	for index, party := range parties {
+		rc := q.lookupV1(t, party.Token)
+		notice, err := q.f.s.signerPrivacyNotice(signerReadRequestE2E(party.Token, ""), rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence, err := signerArticle13NoticeEvidence(rc, notice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := q.f.s.Sign.Sign(q.f.ctx, rc, sign.SignInput{TypedName: party.Name, Font: "Caveat", Notice: evidence, IP: "127.0.0.1", UserAgent: "Synthetic completed filing qualifier"})
+		if closeErr := rc.CloseReadV1(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		q.assertObserversOnlyV1(t)
+		if err != nil || result == nil || result.Completed != (index == len(parties)-1) {
+			t.Fatal("genuine filing fixture failed all-party completion", err)
+		}
+	}
+	f := folderFixture695{lifecycleAuthorizationFixture: q.f, cookie: q.cookie}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: sent.ID, OrgID: f.org})
+	if err != nil || doc.Status != "completed" || !sameSignerDocumentSource(sent, doc) || !doc.CompletionEffectiveAtBound || !doc.CompletionEffectiveAt.Valid || !doc.CompletedAt.Valid || doc.CompletedAt != doc.CompletionEffectiveAt || !doc.FinalizationRetainUntil.Valid {
+		t.Fatal("filing fixture lacks genuine frozen completion/source", err)
+	}
 	folder := f.folder(t, "Completed")
-	doc := f.document(t, "Synthetic completed status", "completed")
-	if _, err := f.q.MeasureSignatureFitHTMLPolicyDocumentV1(f.ctx, generated.MeasureSignatureFitHTMLPolicyDocumentV1Params{DocumentID: doc.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.q.MeasureNativeBlocksResponseV1(f.ctx, generated.MeasureNativeBlocksResponseV1Params{DocumentID: doc.ID, OrgID: f.org, ExpectedUpdatedAt: doc.UpdatedAt}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.q.MeasureSignerDocumentReportV1(f.ctx, generated.MeasureSignerDocumentReportV1Params{DocumentID: doc.ID, OrgID: f.org}); err != nil {
-		t.Fatal(err)
-	}
 	before := folderPreservedState695(t, f, doc.ID)
 	f.move(t, doc.ID, &folder.ID, 200)
 	f.move(t, doc.ID, nil, 200)

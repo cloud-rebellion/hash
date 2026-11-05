@@ -192,14 +192,6 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 	if !s.validLockedV1(call) || !s.due || s.prepared || !w.recipientsRead || w.sourceActor == nil || w.sourceActor.OrgID != s.document.OrgID || (s.automatic && w.sourceActor.ID != s.document.SenderID) || queue && !delivery || policyTime.IsZero() {
 		return ErrReminderV1
 	}
-	companyName := ""
-	if delivery {
-		var err error
-		companyName, err = w.readTenantPresentationNameLockedV1(call, s.document)
-		if err != nil {
-			return err
-		}
-	}
 	count := int64(0)
 	for _, row := range w.sourceRecipients {
 		if row == nil || row.DocumentID != s.document.ID {
@@ -207,6 +199,14 @@ func (r *ApplicationReminderV1) PrepareV1(call context.Context, publicURL, orgNa
 		}
 		if reminderEligibleV1(row) {
 			count++
+		}
+	}
+	companyName := ""
+	if delivery && count > 0 {
+		var err error
+		companyName, err = w.readTenantPresentationNameLockedV1(call, s.document)
+		if err != nil {
+			return err
 		}
 	}
 	raw := int64(65536)

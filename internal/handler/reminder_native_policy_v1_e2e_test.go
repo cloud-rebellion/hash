@@ -81,7 +81,7 @@ func TestNativeReminderOwnerAndSenderCompleteAcknowledgementV1E2E(t *testing.T) 
 			if err != nil || recipient.ID != parties[1].RecipientID || token == parties[1].Token {
 				t.Fatal("actual acknowledgement token rotation association", err)
 			}
-			wantSubject, wantHTML, wantText, err := dispatch.Render(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: doc.Name, SenderName: f.user.Email, SenderEmail: f.user.Email, RecipientName: recipient.Name, OrgName: f.s.Send.OrgName, Locale: recipient.Locale, SignURL: f.s.PublicURL + "/sign/" + token, Acknowledgement: true})
+			wantSubject, wantHTML, wantText, err := dispatch.RenderServiceEmailV1(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: doc.Name, SenderName: f.user.Email, SenderEmail: f.user.Email, RecipientName: recipient.Name, OrgName: nativeReminderCompany255(t, f, doc.ID), Locale: recipient.Locale, SignURL: f.s.PublicURL + "/sign/" + token, Acknowledgement: true}, nil)
 			if err != nil || subject != wantSubject || html != wantHTML || text != wantText {
 				t.Fatal("acknowledgement reminder lost its actual mode, locale or canonical sender", err)
 			}
@@ -112,6 +112,26 @@ func nativeReminderToken255(t *testing.T, publicURL, text string) string {
 	return match[1]
 }
 
+// The real Send producer selected both this timestamp and its frozen policy.
+// Tests advance Engine.Now; they never rewrite the first-fire authority.
+func nativeReminderDueTime255(t *testing.T, f lifecycleAuthorizationFixture, document uuid.UUID) time.Time {
+	t.Helper()
+	schedule, err := f.q.GetReminderForUpdate(f.ctx, document)
+	if err != nil || schedule == nil || schedule.DocumentID != document || !schedule.NextFireAt.Valid || schedule.LastFiredAt.Valid || schedule.FiresRemaining <= 0 {
+		t.Fatal("genuine untouched first reminder schedule unavailable", err)
+	}
+	return schedule.NextFireAt.Time
+}
+
+func nativeReminderCompany255(t *testing.T, f lifecycleAuthorizationFixture, document uuid.UUID) string {
+	t.Helper()
+	confirmation, err := f.q.GetDocumentLawfulBasisConfirmation(f.ctx, generated.GetDocumentLawfulBasisConfirmationParams{DocumentID: document, OrgID: f.org})
+	if err != nil || confirmation == nil || confirmation.DocumentID != document || confirmation.OrgID != f.org || !confirmation.ConfirmedAt.Valid || strings.TrimSpace(confirmation.ControllerName) == "" {
+		t.Fatal("actual send-frozen controller unavailable", err)
+	}
+	return strings.TrimSpace(confirmation.ControllerName)
+}
+
 func nativeReminderActor255(f lifecycleAuthorizationFixture, automatic bool) send.Actor {
 	if automatic {
 		return send.Actor{OrgID: f.org, Via: "worker", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return auth.ErrMutationPermissionRevoked }}
@@ -134,14 +154,12 @@ func TestNativeReminderFinalDocumentDeadlineRollsBackV1E2E(t *testing.T) {
 			q, f, _ := nativeReminderAuthorizationFixture255(t, false)
 			defer q.assertObserversOnlyV1(t)
 			base := time.Now().UTC()
+			if automatic {
+				base = nativeReminderDueTime255(t, f, f.doc.ID)
+			}
 			if _, err := f.pool.Exec(f.ctx, "UPDATE documents SET expires_at=$2 WHERE id=$1", f.doc.ID, base.Add(time.Minute)); err != nil {
 				t.Fatal(err)
 			} //nolint:rawsql -- original final-deadline fixture policy, never fake a legal response/history
-			if automatic {
-				if _, err := f.pool.Exec(f.ctx, "UPDATE reminders SET next_fire_at=$2 WHERE document_id=$1", f.doc.ID, base.Add(-time.Minute)); err != nil {
-					t.Fatal(err)
-				} //nolint:rawsql -- make the genuine Send-created schedule due
-			}
 			before := nativeReminderSnapshot254(t, q, f.doc.ID)
 			var elapsed atomic.Bool
 			var elapsedReads atomic.Int32

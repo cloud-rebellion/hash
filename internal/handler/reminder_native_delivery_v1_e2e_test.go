@@ -28,9 +28,8 @@ func TestNativeReminderNilMailerKeepsOriginalNoDeliveryBehaviorV1E2E(t *testing.
 			q, f, parties := nativeReminderAuthorizationFixture255(t, false)
 			defer q.assertObserversOnlyV1(t)
 			if automatic {
-				if _, err := f.pool.Exec(f.ctx, "UPDATE reminders SET next_fire_at=clock_timestamp()-interval '1 minute' WHERE document_id=$1", f.doc.ID); err != nil {
-					t.Fatal(err)
-				} //nolint:rawsql -- make the genuine Send-created schedule due
+				due := nativeReminderDueTime255(t, f, f.doc.ID)
+				f.s.Send.Now = func() time.Time { return due }
 			}
 			oldMail := completedCompanionOutboxIDsV1(t, q)
 			before := make([]*generated.Recipient, len(parties))
@@ -105,9 +104,8 @@ func TestNativeReminderDirectMailerRetainsActualMessageUntilLastUseV1E2E(t *test
 			q, f, parties := nativeReminderAuthorizationFixture255(t, false)
 			defer q.assertObserversOnlyV1(t)
 			if automatic {
-				if _, err := f.pool.Exec(f.ctx, "UPDATE reminders SET next_fire_at=clock_timestamp()-interval '1 minute' WHERE document_id=$1", f.doc.ID); err != nil {
-					t.Fatal(err)
-				} //nolint:rawsql -- make only the real existing reminder schedule due
+				due := nativeReminderDueTime255(t, f, f.doc.ID)
+				f.s.Send.Now = func() time.Time { return due }
 			}
 			oldMail := completedCompanionOutboxIDsV1(t, q)
 			held := &nativeReminderHoldingMailer255{entered: make(chan nativeReminderHeldDelivery255, len(parties)), exited: make(chan struct{}, len(parties)), release: make(chan struct{})}
@@ -173,7 +171,7 @@ func TestNativeReminderDirectMailerRetainsActualMessageUntilLastUseV1E2E(t *test
 					t.Fatal("direct output is not bound to the actual unique rotated recipient and sender", err)
 				}
 				seen[msg.To] = true
-				wantSubject, wantHTML, wantText, err := dispatch.Render(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: f.doc.Name, SenderName: f.user.Email, SenderEmail: f.user.Email, RecipientName: recipient.Name, OrgName: f.s.Send.OrgName, Locale: recipient.Locale, SignURL: f.s.PublicURL + "/sign/" + token, Acknowledgement: !f.doc.RequiresSignature})
+				wantSubject, wantHTML, wantText, err := dispatch.RenderServiceEmailV1(dispatch.KindReminder, dispatch.TemplateContext{DocumentName: f.doc.Name, SenderName: f.user.Email, SenderEmail: f.user.Email, RecipientName: recipient.Name, OrgName: nativeReminderCompany255(t, f, f.doc.ID), Locale: recipient.Locale, SignURL: f.s.PublicURL + "/sign/" + token, Acknowledgement: !f.doc.RequiresSignature}, nil)
 				if err != nil || msg.Subject != wantSubject || msg.HTML != wantHTML || msg.Text != wantText {
 					t.Fatal("actual retained direct output differs from its original render", err)
 				}

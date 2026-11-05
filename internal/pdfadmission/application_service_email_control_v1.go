@@ -68,11 +68,16 @@ func (o *ApplicationServiceEmailControlV1) AdmitSourceV1(ctx context.Context, h 
 	if err = o.grant.TryGrowParentV1(ctx, 8*wire+applicationServiceEmailHeaderWorkV1()); err != nil {
 		return err
 	}
-	close, err := o.admission.acquire(ctx, o.org, workguard.VectorV1{DBStagingBytes: wire})
-	if err != nil {
-		return err
+	// A retained reset edition has no source payload. Its header and parent
+	// bookkeeping remain owned; there is no DB body to acquire a zero-cost
+	// grant for. Non-empty editions retain their exact staging loan.
+	if wire > 0 {
+		close, err := o.admission.acquire(ctx, o.org, workguard.VectorV1{DBStagingBytes: wire})
+		if err != nil {
+			return err
+		}
+		o.closes = append(o.closes, close)
 	}
-	o.closes = append(o.closes, close)
 	o.reads++
 	return nil
 }

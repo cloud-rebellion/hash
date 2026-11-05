@@ -246,7 +246,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 				return nil, err
 			}
 			result, err := blockauthoring.AttachDocumentMetadataV1(r.Context(), blockauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit}, blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "mcp", Tool: "attach_metadata"}, id, p.Key, p.Value)
-			return &ownedMetadataDocumentResultV1{result}, err
+			return &ownedMetadataDocumentResultV1{result}, canonicalBlockMutationErrorV1(err)
 		},
 	})
 }

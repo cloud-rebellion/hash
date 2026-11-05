@@ -481,9 +481,8 @@ func TestAutomaticReminderKeepsLockedScheduleAuthorityWithoutActorE2E(t *testing
 	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.pool.Exec(f.ctx, `UPDATE reminders SET next_fire_at=clock_timestamp()-interval '1 minute' WHERE document_id=$1`, doc.ID); err != nil {
-		t.Fatal(err)
-	}
+	due := f.reminderDueTime(t, doc.ID)
+	f.engine.Now = func() time.Time { return due }
 	worker := sendengine.Actor{OrgID: f.orgID, Email: f.user.Email, Via: "worker", Authorize: func(context.Context, pgx.Tx, *generated.User) error { return auth.ErrMutationPermissionRevoked }}
 	type result struct {
 		count int
@@ -566,11 +565,8 @@ func TestAutomaticReminderFinalDocumentDeadlineRollsBackArtifactsE2E(t *testing.
 	if _, err := f.send(t, f.ctx, f.actor(), doc.ID); err != nil {
 		t.Fatal(err)
 	}
-	base := time.Now().UTC()
+	base := f.reminderDueTime(t, doc.ID)
 	if _, err := f.pool.Exec(f.ctx, `UPDATE documents SET expires_at=$2 WHERE id=$1`, doc.ID, base.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.pool.Exec(f.ctx, `UPDATE reminders SET next_fire_at=$2 WHERE document_id=$1`, doc.ID, base.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	before := f.snapshot(t, doc.ID)
@@ -739,6 +735,17 @@ func (f *sendAdmissionFixture) document(t *testing.T, id uuid.UUID) *generated.D
 		t.Fatal(err)
 	}
 	return doc
+}
+
+// Read the real Send-created first fire. Advancing only the policy clock keeps
+// the locked M121 schedule and its immutable policy snapshot mutually exact.
+func (f *sendAdmissionFixture) reminderDueTime(t *testing.T, document uuid.UUID) time.Time {
+	t.Helper()
+	schedule, err := f.q.GetReminderForUpdate(f.ctx, document)
+	if err != nil || schedule == nil || schedule.DocumentID != document || !schedule.NextFireAt.Valid || schedule.LastFiredAt.Valid || schedule.FiresRemaining <= 0 {
+		t.Fatal("genuine untouched first reminder schedule unavailable", err)
+	}
+	return schedule.NextFireAt.Time
 }
 
 func (f *sendAdmissionFixture) authorize(_ context.Context, _ pgx.Tx, user *generated.User) error {

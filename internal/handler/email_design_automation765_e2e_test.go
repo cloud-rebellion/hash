@@ -179,6 +179,10 @@ func TestAutomation121NativePreferenceOccupiedDownAndReUp765E2E(t *testing.T) {
 	migration := stdlib.OpenDB(*f.pool.Config().ConnConfig.Copy())
 	migration.SetMaxOpenConns(1)
 	defer migration.Close()
+	initialVersion, err := mdb.GetMigrationVersionContext(f.ctx, migration)
+	if err != nil || initialVersion < 122 {
+		t.Fatal("current preference fixture migration version", initialVersion, err)
+	}
 	if err := mdb.RunMigrationsDownToContext(f.ctx, migration, 120); err == nil {
 		t.Fatal("occupied121 preferences erased by Down")
 	}
@@ -187,10 +191,10 @@ func TestAutomation121NativePreferenceOccupiedDownAndReUp765E2E(t *testing.T) {
 		t.Fatal("occupied121 boundary/source changed", version, err)
 	}
 	if err = mdb.RunMigrationsContext(f.ctx, migration); err != nil {
-		t.Fatal("genuine122 re-Up", err)
+		t.Fatal("genuine migration re-Up", err)
 	}
 	version, err = mdb.GetMigrationVersionContext(f.ctx, migration)
-	if err != nil || version != 122 || snapshot() != before {
+	if err != nil || version != initialVersion || snapshot() != before {
 		t.Fatal("re-Up changed retained sender preference", version, err)
 	}
 	if err = migration.Close(); err != nil {

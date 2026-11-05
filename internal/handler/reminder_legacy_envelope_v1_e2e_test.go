@@ -43,17 +43,22 @@ func TestNativeReminderLegacyChildNoopAndRootCompletionV1E2E(t *testing.T) {
 	beforeRoot := nativeReminderSnapshot254(t, q, root)
 	beforeChild := nativeReminderSnapshot254(t, q, children[0])
 	beforeMail := completedCompanionOutboxIDsV1(t, q)
-	var childRecipients, childSchedules int
+	var childRecipients, childSchedules, rootControllers, childControllers int
 	if err := f.pool.QueryRow(f.ctx, `SELECT
  (SELECT count(*)::integer FROM recipients WHERE document_id=$1),
- (SELECT count(*)::integer FROM reminders WHERE document_id=$1)`, children[0]).Scan(&childRecipients, &childSchedules); err != nil || childRecipients != 0 || childSchedules != 0 {
-		t.Fatal("normal root Send unexpectedly authored child recipients or schedules", err)
+ (SELECT count(*)::integer FROM reminders WHERE document_id=$1),
+ (SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$2 AND org_id=$3),
+ (SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$1 AND org_id=$3)`, children[0], root, f.org).Scan(&childRecipients, &childSchedules, &rootControllers, &childControllers); err != nil || childRecipients != 0 || childSchedules != 0 || rootControllers != 1 || childControllers != 0 {
+		t.Fatal("normal root Send lost its actual root-only recipient/schedule/controller topology", err, childRecipients, childSchedules, rootControllers, childControllers)
 	} //nolint:rawsql -- observe the actual public constructor/Send topology only
 	count, err := f.s.Send.Remind(f.ctx, actor, children[0], false)
 	if err != nil || count != 0 {
 		t.Fatalf("explicit genuine child reminder count=%d err=%v", count, err)
 	}
 	q.assertObserversOnlyV1(t)
+	if err := f.pool.QueryRow(f.ctx, "SELECT count(*)::integer FROM document_lawful_basis_confirmations WHERE document_id=$1 AND org_id=$2", children[0], f.org).Scan(&childControllers); err != nil || childControllers != 0 {
+		t.Fatal("zero-output child reminder fabricated a controller confirmation", err, childControllers)
+	} //nolint:rawsql -- a no-op must not repair or manufacture a legal snapshot
 	if nativeReminderSnapshot254(t, q, root) != beforeRoot || nativeReminderSnapshot254(t, q, children[0]) != beforeChild {
 		t.Fatal("zero-recipient child reminder changed its own or root ceremony")
 	}

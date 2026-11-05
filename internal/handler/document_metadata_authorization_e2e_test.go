@@ -98,6 +98,17 @@ func setupDocumentMetadataAuthorization756(t *testing.T, role, tool string) life
 	return setupLifecycleAuthorizationE2E(t, role, false, false)
 }
 
+func awaitDocumentMetadataAuditLock756E2E(t *testing.T, f lifecycleAuthorizationFixture, held pgx.Tx, tool string) {
+	t.Helper()
+	if tool == "attach_metadata" && (f.s.Send == nil || f.s.Send.WorkRuntime == nil ||
+		!f.s.Send.WorkRuntime.MatchesPoolV1(f.pool) || f.s.Send.WorkRuntime.SessionsV1() != f.s.HTMLCreationSessions) {
+		t.Fatal("metadata waiter requires the genuine shared-pool work runtime")
+	}
+	// This fixture's direct sessions are born from the original pool's exact
+	// ConnConfig. The legacy separate-HTML-factory registry is not its identity.
+	awaitNativeTemplateLockE2E(t, f, held, "AcquireOrgChainLock", false)
+}
+
 func TestDocumentMetadataMCPOriginalCredentialAfterParentWaitE2E(t *testing.T) {
 	for _, tool := range []string{"set_expiry", "attach_metadata"} {
 		for _, change := range []string{"key-delete", "scope-reduction", "key-expiry", "token-revocation", "member-demotion"} {
@@ -178,7 +189,7 @@ func TestDocumentMetadataMCPAuditWaitRollsBackE2E(t *testing.T) {
 				defer cancel()
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- submitDocumentMetadataE2E(f, ctx, tool, mint.Plaintext) }()
-				awaitNativeTemplateLockE2E(t, f, blocked, "AcquireOrgChainLock", tool == "attach_metadata")
+				awaitDocumentMetadataAuditLock756E2E(t, f, blocked, tool)
 				if failure == "expiry" {
 					deadline := time.Now().Add(3 * time.Second)
 					expired := false

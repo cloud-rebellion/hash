@@ -6,15 +6,20 @@ package handler
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/webhooksecret"
 	"github.com/google/uuid"
 )
@@ -25,17 +30,35 @@ func TestChatWebhook766NativeCommentsFanoutE2E(t *testing.T) {
 	q := newOwnedAutomationAuthorizationFixtureV1(t)
 	doc, parties := q.createSentV1(t)
 	notice := nativeCommentNotice163V1(t, q, parties[0].Token)
-	keys, err := webhooksecret.NewKeyringHex("1717171717171717171717171717171717171717171717171717171717171717", "")
+	// Use the same varied synthetic key recipe as the native delivery fixture;
+	// repeated-byte keys are deliberately refused by the production keyring.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 17)
+	}
+	keys, err := webhooksecret.NewKeyringHex(hex.EncodeToString(key), "")
 	if err != nil {
 		t.Fatal("synthetic webhook keyring unavailable")
 	}
 	q.f.s.WebhookSecrets = keys
 	dispatch.RegisterWebhookFanout(q.f.s.Audit, q.f.q)
 	published := make(map[uuid.UUID]bool)
+	var publishedMu sync.Mutex
+	publishedSnapshot := func() map[uuid.UUID]bool {
+		publishedMu.Lock()
+		defer publishedMu.Unlock()
+		copy := make(map[uuid.UUID]bool, len(published))
+		for id, committed := range published {
+			copy[id] = committed
+		}
+		return copy
+	}
 	q.f.s.Audit.Subscribe(func(ctx context.Context, id uuid.UUID, entry audit.Entry) {
 		if entry.Kind == audit.KindCommentPosted {
 			row, err := q.f.q.GetEventByID(ctx, id)
+			publishedMu.Lock()
 			published[id] = err == nil && row.Kind == entry.Kind && row.DocumentID.Valid && uuid.UUID(row.DocumentID.Bytes) == doc.ID
+			publishedMu.Unlock()
 		}
 	})
 	createEndpoint := func(events []string, want int) webhookEndpointResponse {
@@ -72,14 +95,41 @@ func TestChatWebhook766NativeCommentsFanoutE2E(t *testing.T) {
 			if json.Unmarshal(w.Body.Bytes(), &comment) != nil || comment.ID == "" {
 				t.Fatal("native comment receipt unavailable")
 			}
+			// Publication hooks are asynchronous. Wait for the actual native audit
+			// consumer and every hook to join before observing their queue effects.
+			joined, cancelJoin := context.WithTimeout(q.f.ctx, audit.AuditHookTimeout+time.Second)
+			ticker := time.NewTicker(10 * time.Millisecond)
+			for {
+				// The native registry retires an ended original admission only
+				// after its consumer, backend and client have all really joined.
+				if err := q.runtime.ReconcileCleanupV1(joined); err != nil && !errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1) {
+					ticker.Stop()
+					cancelJoin()
+					t.Fatal("native comment cleanup reconciliation failed", err)
+				}
+				if q.runtime.SessionsV1().PendingV1().HTMLAdmissions == 0 {
+					break
+				}
+				select {
+				case <-ticker.C:
+				case <-joined.Done():
+					ticker.Stop()
+					cancelJoin()
+					t.Fatal("native comment publication did not join", q.runtime.SessionsV1().PendingV1())
+				}
+			}
+			ticker.Stop()
+			cancelJoin()
+			ownedRevisionConsumedV1(t, q)
+			committed := publishedSnapshot()
 			rows, err := q.f.q.ListDeliveriesByEndpoint(q.f.ctx, generated.ListDeliveriesByEndpointParams{EndpointID: selected.ID, Limit: 100})
-			if err != nil || len(rows) != len(published) || len(rows) == 0 {
-				t.Fatal("postcommit comment fanout did not queue one delivery per original event")
+			if err != nil || len(rows) != len(committed) || len(rows) == 0 {
+				t.Fatalf("postcommit comment fanout rows=%d published=%d database_error=%t", len(rows), len(committed), err != nil)
 			}
 			matched := 0
 			for _, row := range rows {
 				event, err := dispatch.LoadEvent(q.f.ctx, q.f.q, row.EventID)
-				if err != nil || !published[row.EventID] || event.Document["id"] != doc.ID.String() || event.Kind != audit.KindCommentPosted {
+				if err != nil || !committed[row.EventID] || event.Document["id"] != doc.ID.String() || event.Kind != audit.KindCommentPosted {
 					t.Fatal("queue lacks durable native source association")
 				}
 				if event.Payload["comment_id"] != comment.ID {
@@ -113,10 +163,10 @@ func TestChatWebhook766NativeCommentsFanoutE2E(t *testing.T) {
 	}
 	// A refused native signer post must add neither a shared comment nor callback.
 	before := captureNativeCommentState163V1(t, q, doc)
-	publishedBefore := len(published)
+	publishedBefore := len(publishedSnapshot())
 	w := httptest.NewRecorder()
 	q.f.s.Routes().ServeHTTP(w, nativeCommentRequest163V1(t, q, q.f.ctx, doc, "signer", parties[0].Token, "", ""))
-	if w.Code < 400 || len(published) != publishedBefore {
+	if w.Code < 400 || len(publishedSnapshot()) != publishedBefore {
 		t.Fatal("comment without current notice emitted a callback")
 	}
 	assertNativeCommentUnchanged163V1(t, q, doc, before)

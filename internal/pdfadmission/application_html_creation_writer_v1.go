@@ -260,7 +260,7 @@ func (w *ApplicationHTMLCreationWriterV1) UpdateMetadataRedactionReport(ctx cont
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.valid(ctx) || !w.created || w.sourceWritten || p.ID != w.document || len(p.MetadataRedactionReport) > 1<<20 {
+	if !w.valid(ctx) || !w.created || w.doc == nil || w.sourceWritten || p.ID != w.document || len(p.MetadataRedactionReport) > 1<<20 {
 		return ErrHTMLCreationWriterV1
 	}
 	n, err := sourcejson.PostgreSQLJSONBWireUpperBoundV1(ctx, p.MetadataRedactionReport)
@@ -270,6 +270,24 @@ func (w *ApplicationHTMLCreationWriterV1) UpdateMetadataRedactionReport(ctx cont
 	if err := w.queries.UpdateMetadataRedactionReport(ctx, p); err != nil {
 		return err
 	}
+	// The acknowledged report update advances the M67 parent clock. Retain the
+	// actual same-row result, as the plain-PDF writer does, so purpose recording
+	// cannot hand later CAS writes the original INSERT's stale timestamp. This
+	// fresh row/report remains inside the original funded creator allowance.
+	doc, err := w.queries.GetDocument(ctx, generated.GetDocumentParams{ID: w.document, OrgID: w.org})
+	if err != nil {
+		return err
+	}
+	if doc == nil || !applicationStampV1(doc.UpdatedAt) || int64(len(doc.MetadataRedactionReport)) > n {
+		return ErrHTMLCreationWriterV1
+	}
+	expected := *w.doc
+	expected.UpdatedAt = doc.UpdatedAt
+	expected.MetadataRedactionReport = doc.MetadataRedactionReport
+	if !htmlSendDocumentExactTupleEqualV1(&expected, doc) {
+		return ErrHTMLCreationWriterV1
+	}
+	w.doc = htmlRevisionCloneDocumentV1(doc)
 	// Only acknowledged worker output replaces the default bound. This is
 	// retained under the original creator loan, never an old-row refresh.
 	w.reportWireUpperBound = n

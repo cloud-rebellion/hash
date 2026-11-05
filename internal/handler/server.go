@@ -31,6 +31,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/branding"
+	brandcatalog "github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/crmconnection"
@@ -101,6 +102,7 @@ type Server struct {
 	Queries                *generated.Queries
 	Storage                *storage.Client
 	Audit                  *audit.Logger
+	BrandCatalog           *brandcatalog.ServiceV1
 	OIDC                   *auth.OIDC
 	StaffAuthMailBox       *secretbox.Box
 	staffAuthLimits        nativeStaffAuthLimits
@@ -423,6 +425,11 @@ func (s *Server) Routes() http.Handler {
 			r.Use(httprate.LimitByIP(automationGlobalIPPerMinute, time.Minute))
 			r.Use(auth.RequireAPIKey(s.APIKeys))
 			r.Use(automationOrgRateLimit(automationOrgRequestsPerMinute))
+			// Catalog imports use the same organization key/owner transaction as
+			// MCP, with an independently bounded body for exact larger originals.
+			// This does not enlarge the MCP JSON-RPC envelope.
+			r.With(auth.RequireRole(auth.RoleOwner)).Post("/brand-assets", s.handleUploadBrandAssetV1)
+			r.With(auth.RequireRole(auth.RoleOwner)).Get("/brand-assets/uploads/{requestID}", s.handleGetBrandUploadStatusV1)
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireRole(auth.RoleViewer))
 				r.Use(requireAutomationDocumentRead)
@@ -568,6 +575,19 @@ func (s *Server) Routes() http.Handler {
 
 		// Phase 8.5: org-level brand theming. Read = any session; edits = owner.
 		r.Get("/branding", s.handleGetOrgBranding)
+		r.Get("/brand-profiles", s.handleListBrandProfilesV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/brand-profiles", s.handleCreateBrandProfileV1)
+		r.Get("/brand-profiles/{profileID}", s.handleGetBrandProfileV1)
+		r.Get("/brand-profiles/{profileID}/revisions", s.handleListBrandProfileRevisionsV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/brand-profiles/{profileID}/revisions", s.handleReviseBrandProfileV1)
+		r.Get("/branding/default-profile", s.handleGetBrandDefaultV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Put("/branding/default-profile", s.handleSelectBrandDefaultV1)
+		r.Get("/brand-assets", s.handleListBrandAssetsV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Post("/brand-assets", s.handleUploadBrandAssetV1)
+		r.Get("/brand-assets/{assetID}", s.handleGetBrandAssetV1)
+		r.Get("/brand-assets/{assetID}/revisions", s.handleListBrandAssetRevisionsV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/brand-assets/uploads/{requestID}", s.handleGetBrandUploadStatusV1)
+		r.Get("/brand-assets/{assetID}/revisions/{revision}/content", s.handleGetBrandAssetContentV1)
 		r.With(auth.RequireRole(auth.RoleOwner)).Put("/branding", s.handleUpsertOrgBranding)
 		r.With(auth.RequireRole(auth.RoleOwner)).Post("/branding/extract", s.handleExtractBrandingPalette)
 		r.With(auth.RequireRole(auth.RoleOwner)).Post("/branding/logo", s.handleUploadBrandingLogo)

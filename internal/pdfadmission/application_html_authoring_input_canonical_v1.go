@@ -322,7 +322,7 @@ func htmlInputHTMLNamesV1(ctx context.Context, s string) error {
 		}
 		if !end {
 			allowed := false
-			for _, name := range [...]string{"main", "article", "section", "header", "footer", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "br", "hr", "strong", "b", "em", "i", "u", "s", "small", "sup", "sub", "blockquote", "pre", "code", "ul", "ol", "li", "dl", "dt", "dd", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col", "img", "figure", "figcaption"} {
+			for _, name := range [...]string{"main", "article", "section", "header", "footer", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "br", "hr", "strong", "b", "em", "i", "u", "s", "small", "sup", "sub", "blockquote", "pre", "code", "ul", "ol", "li", "dl", "dt", "dd", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col", "img", "figure", "figcaption", "a"} {
 				if htmlInputHTMLNameEqualV1(s[start:i], name) {
 					allowed = true
 					break
@@ -354,7 +354,7 @@ func htmlInputHTMLNamesV1(ctx context.Context, s string) error {
 			}
 			if !end && i != start {
 				allowed := false
-				for _, name := range [...]string{"class", "id", "title", "lang", "dir", "data-hash-value", "data-hash-section", "src", "alt", "width", "height", "colspan", "rowspan", "scope"} {
+				for _, name := range [...]string{"class", "id", "title", "lang", "dir", "data-hash-value", "data-hash-section", "src", "alt", "width", "height", "colspan", "rowspan", "scope", "href"} {
 					if htmlInputHTMLNameEqualV1(s[start:i], name) {
 						allowed = true
 						break

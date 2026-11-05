@@ -53,11 +53,11 @@ func registerAuthoringTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "create_document",
 		Write:       true,
-		Description: "Create a draft. Explicit purpose document or presentation creates content without a signing workflow; signing enables recipients and Send. Omission preserves historical signing. Templates provide design, not an inherited purpose. source_kind chooses blocks or a PDF template.",
+		Description: "Create a simple native-block draft or use an existing PDF template. Use blocks for explicit simple content/structured contracts; prefer the versioned design tools for new proposals, quotes, reports and page-layout brochures. Explicit purpose document or presentation creates content without a signing workflow; signing enables recipients and Send. Omission preserves historical signing. Templates provide design, not an inherited purpose.",
 		InputSchema: schemaObject(map[string]any{
 			"name":                      stringSchema("human-readable document name"),
 			"purpose":                   documentPurposeSchemaV1(),
-			"source_kind":               map[string]any{"type": "string", "enum": []string{"blocks", "pdf"}, "description": "blocks (agent) or pdf (uploaded template)"},
+			"source_kind":               map[string]any{"type": "string", "enum": []string{"blocks", "pdf"}, "description": "blocks (simple structured content) or pdf (uploaded template); designed HTML uses the versioned design tools"},
 			"template_id":               stringSchema("optional template uuid to instantiate from"),
 			"expected_template_version": map[string]any{"type": "integer", "minimum": 1, "description": "reviewed current PDF layout template version"},
 			"parties":                   map[string]any{"type": "array", "maxItems": pdflayout.MaxParties, "items": schemaObject(map[string]any{"role": stringSchema("declared party role"), "name": stringSchema("fresh party name"), "email": stringSchema("fresh party email"), "locale": stringSchema("ceremony language")}, []string{"role", "name", "email"})},
@@ -125,7 +125,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:  "create_pdf_document",
 		Write: true,
-		Description: "Create a signable pdf-source document in ONE step from a designed proposal, skipping the template detour. " +
+		Description: "Compatibility PDF intake: create a PDF-source document from existing PDF bytes or render HTML once. The HTML master is NOT retained for editing. Prefer the versioned create_design_template -> preview_design_template -> explicit owner approval -> create_document_from_design workflow for new designed proposals, quotes, reports or brochures. " +
 			"Supply EITHER pdf_base64 (a base64-encoded PDF) OR html (a designed HTML page rendered to PDF with its own CSS/@page preserved). " +
 			"Choose purpose document/presentation for ordinary content, or signing before adding recipients/fields and sending. Omission preserves legacy signing.",
 		InputSchema: schemaObject(map[string]any{

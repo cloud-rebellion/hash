@@ -47,6 +47,7 @@ type htmlTemplatePreviewReceipt struct {
 	PDFSHA256             string    `json:"pdf_sha256"`
 	PageCount             int       `json:"page_count"`
 	SessionSHA256         string    `json:"session_sha256"`
+	CredentialID          uuid.UUID `json:"credential_id,omitempty"`
 	IssuedAt              time.Time `json:"issued_at"`
 	ExpiresAt             time.Time `json:"expires_at"`
 }
@@ -68,7 +69,9 @@ func (p htmlTemplatePreviewReceipt) validate(now time.Time) error {
 	if p.SchemaVersion != 1 || p.PreviewID == uuid.Nil || p.OrgID == uuid.Nil || p.ReviewerID == uuid.Nil ||
 		p.TemplateID == uuid.Nil || p.Version <= 0 || p.PageCount <= 0 || p.PageCount > sanitize.MaxPDFPages ||
 		!htmlPreviewSHA256(p.TemplateContentSHA256) || !htmlPreviewSHA256(p.MaterializationSHA256) ||
-		!htmlPreviewSHA256(p.PDFSHA256) || !htmlPreviewSHA256(p.SessionSHA256) ||
+		!htmlPreviewSHA256(p.PDFSHA256) ||
+		(p.CredentialID == uuid.Nil && !htmlPreviewSHA256(p.SessionSHA256)) ||
+		(p.CredentialID != uuid.Nil && p.SessionSHA256 != "") ||
 		p.IssuedAt.IsZero() || p.ExpiresAt.IsZero() || p.IssuedAt.After(now) ||
 		!p.ExpiresAt.After(p.IssuedAt) || p.ExpiresAt.Sub(p.IssuedAt) > htmlTemplatePreviewTTL || !now.Before(p.ExpiresAt) {
 		return errHTMLTemplatePreviewReceipt
@@ -92,7 +95,7 @@ func (s *Server) validateHTMLTemplatePreviewReceipt(r *http.Request, user auth.S
 		return receipt, errHTMLTemplatePreviewReceipt
 	}
 	request := &http.Request{Body: io.NopCloser(bytes.NewReader(payload))}
-	if err := decodeSignerJSON(request, &receipt); err != nil || receipt.validate(time.Now()) != nil ||
+	if err := decodeSignerJSON(request, &receipt); err != nil || receipt.validate(time.Now()) != nil || receipt.CredentialID != uuid.Nil ||
 		receipt.OrgID != user.OrgID || receipt.ReviewerID != user.UserID || receipt.TemplateID != templateID ||
 		receipt.Version != version || receipt.TemplateContentSHA256 != contentSHA256 || receipt.PDFSHA256 != pdfSHA256 ||
 		subtle.ConstantTimeCompare([]byte(receipt.SessionSHA256), []byte(htmlPreviewSessionSHA256(cookie.Value))) != 1 {
@@ -119,7 +122,7 @@ func htmlTemplatePreviewReceiptAuthorization(original auth.TransactionAuthorizat
 }
 
 func (s *Server) mintHTMLTemplatePreviewReceipt(receipt htmlTemplatePreviewReceipt) (string, error) {
-	if s == nil || s.Cookies == nil || receipt.validate(time.Now()) != nil {
+	if s == nil || s.Cookies == nil || receipt.CredentialID != uuid.Nil || receipt.validate(time.Now()) != nil {
 		return "", errHTMLTemplatePreviewReceipt
 	}
 	payload, err := json.Marshal(receipt)

@@ -24,6 +24,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/branding"
+	brandcatalog "github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/importguard"
 	"github.com/bright-interaction/hash/internal/sanitize"
@@ -161,12 +162,7 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 			if err != nil {
 				return nil, fmt.Errorf("%w: font_body: %s", errOwnerMutationInput, err)
 			}
-			return q.UpsertOrgBranding(ctx, generated.UpsertOrgBrandingParams{
-				OrgID: sess.OrgID, PrimaryHex: merged.PrimaryHex, AccentHex: merged.AccentHex,
-				SurfaceHex: merged.SurfaceHex, TextHex: merged.TextHex, MutedHex: merged.MutedHex,
-				LogoUrl: merged.LogoURL, LogoAlt: merged.LogoAlt, FontHeading: merged.FontHeading,
-				FontBody: merged.FontBody, SignatureColor: merged.SignatureColor,
-			})
+			return brandcatalog.UpdateLegacyProjectionTxV1(ctx, q, actor, merged)
 		},
 		func(*generated.OrgBranding) audit.Entry {
 			return audit.Entry{

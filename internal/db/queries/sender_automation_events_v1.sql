@@ -22,7 +22,7 @@ FOR SHARE;
 -- name: GetSenderAutomationEventIdentityV1 :one
 SELECT e.id AS audit_event_id,d.sent_at,
  COALESCE(CASE WHEN e.kind='document.signed' THEN s.id ELSE NULL END,
- '00000000-0000-0000-0000-000000000000'::uuid) AS signature_id
+ '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS signature_id
 FROM events e JOIN documents d ON d.id=e.document_id AND d.org_id=e.org_id
 LEFT JOIN signatures s ON s.document_id=d.id AND s.recipient_id=e.recipient_id
 WHERE e.id=sqlc.arg(audit_event_id)::uuid

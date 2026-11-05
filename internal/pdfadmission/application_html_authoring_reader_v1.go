@@ -321,14 +321,38 @@ func (r *ApplicationHTMLAuthoringReaderV1) ReadTemplateRevisionExpectedV1(ctx co
 }
 
 func (r *ApplicationHTMLAuthoringReaderV1) readTemplateRevisionExpectedV1(ctx context.Context, id uuid.UUID, version int32, expected *htmlAuthoringExpectedTemplatePinsV1) (*generated.Template, *generated.HtmlTemplateRevision, error) {
+	return r.readTemplateRevisionPinsV1(ctx, id, version, expected, expected)
+}
+
+// ReadRetainedTemplateRevisionExpectedV1 binds the requested immutable revision
+// without pretending it is the current parent. Only actual locked scalar
+// headers grant body work; a mismatched digest refuses before the retained body.
+// The existing current-version Expected method above keeps its old semantics.
+func (r *ApplicationHTMLAuthoringReaderV1) ReadRetainedTemplateRevisionExpectedV1(ctx context.Context, id uuid.UUID, version int32, contentSHA256 string) (*generated.Template, *generated.HtmlTemplateRevision, error) {
+	if version < 1 || len(contentSHA256) != 64 {
+		return nil, nil, ErrHTMLAuthoringReadV1
+	}
+	decoded, err := hex.DecodeString(contentSHA256)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != contentSHA256 {
+		return nil, nil, ErrHTMLAuthoringReadV1
+	}
+	expected := htmlAuthoringExpectedTemplatePinsV1{version: version, matchDigest: true}
+	copy(expected.digest[:], decoded)
+	return r.readTemplateRevisionPinsV1(ctx, id, version, nil, &expected)
+}
+
+func (r *ApplicationHTMLAuthoringReaderV1) readTemplateRevisionPinsV1(ctx context.Context, id uuid.UUID, version int32, parentExpected, expected *htmlAuthoringExpectedTemplatePinsV1) (*generated.Template, *generated.HtmlTemplateRevision, error) {
 	if r == nil || r.self != r {
 		return nil, nil, ErrHTMLAuthoringReadV1
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	t, err := r.readTemplateExpectedV1(ctx, id, false, expected)
+	t, err := r.readTemplateExpectedV1(ctx, id, false, parentExpected)
 	if err != nil {
 		return nil, nil, err
+	}
+	if expected != nil && parentExpected == nil && version > t.Version {
+		return nil, nil, ErrHTMLAuthoringChangedV1
 	}
 	h, err := r.queries.GetHTMLAuthoringRevisionHeaderV1(ctx, generated.GetHTMLAuthoringRevisionHeaderV1Params{TemplateID: id, OrgID: t.OrgID, Version: version})
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/branding"
+	"github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/collab"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/config"
@@ -492,36 +493,6 @@ func run() (runErr error) {
 	// is fine for the v1.1 customer set.
 	collabHub := collab.NewHub(queries)
 
-	// MCP server is built last so it can reference every dependency
-	// (signer + evidence + branding resolver + envelopes + eidas + AI
-	// apps) by value without us having to wire late-bound setters.
-	mcpServer := mcp.New(mcp.Deps{
-		PDFCreationSessions: workRuntime.SessionsV1(),
-		Pool:                pool,
-		Queries:             queries,
-		Storage:             store,
-		PDF:                 pdfClient,
-		Audit:               auditLog,
-		Mailer:              mailer,
-		Versions:            versionsEngine,
-		Resolver:            resolverEngine,
-		AIRuntime:           aiRuntime,
-		Envelopes:           envelopesEngine,
-		EIDAS:               eidasEngine,
-		Evidence:            evidenceBuilder,
-		Clarifier:           clarifier,
-		Negotiator:          negotiator,
-		Bilingual:           bilingual,
-		RiskAnalyzer:        riskAnalyzer,
-		Compliance:          complianceSeeder,
-		Billing:             billingEngine,
-		Send:                sendEngine,
-		PublicURL:           cfg.PublicURL,
-		Environment:         cfg.Environment,
-		WebhookSecrets:      webhookKeys,
-		RenderEmail:         renderEmailForMCP(cfg.OperatorName),
-	})
-
 	var noticeAccess *noticeaccess.EngineV1
 	if workRuntime != nil {
 		noticeAccess, err = workRuntime.NewLaterAmendmentNoticeAccessV1(store, cookies, cfg.PublicURL)
@@ -529,7 +500,9 @@ func run() (runErr error) {
 			return errors.New("configured notice access runtime unavailable")
 		}
 	}
+	brandCatalog := catalog.NewServiceV1(pool, auditLog, store)
 	srv := &handler.Server{
+		BrandCatalog:               brandCatalog,
 		Pool:                       pool,
 		NoticeAccess:               noticeAccess,
 		HTMLCreationSessions:       workRuntime.SessionsV1(),
@@ -540,7 +513,6 @@ func run() (runErr error) {
 		StaffAuthMailBox:           staffAuthMailBox,
 		Cookies:                    cookies,
 		APIKeys:                    apiKeys,
-		MCP:                        mcpServer,
 		Sign:                       signEngine,
 		Send:                       sendEngine,
 		Mailer:                     mailer,
@@ -581,6 +553,39 @@ func run() (runErr error) {
 		AIEUHosts:                  strings.Split(strings.ReplaceAll(cfg.AIEUHostsAllowlist, " ", ""), ","),
 		CSPScriptSrc:               frontendScriptCSP(), // allow the SvelteKit inline bootstrap under strict CSP
 	}
+
+	// Build MCP after the native handler so its typed design bridge shares
+	// the owned HTML services and original transport authorization.
+	mcpServer := mcp.New(mcp.Deps{
+		Design:              srv.MCPDesignBridgeV1(),
+		BrandCatalog:        brandCatalog,
+		PDFCreationSessions: workRuntime.SessionsV1(),
+		Pool:                pool,
+		Queries:             queries,
+		Storage:             store,
+		PDF:                 pdfClient,
+		Audit:               auditLog,
+		Mailer:              mailer,
+		Versions:            versionsEngine,
+		Resolver:            resolverEngine,
+		AIRuntime:           aiRuntime,
+		Envelopes:           envelopesEngine,
+		EIDAS:               eidasEngine,
+		Evidence:            evidenceBuilder,
+		Clarifier:           clarifier,
+		Negotiator:          negotiator,
+		Bilingual:           bilingual,
+		RiskAnalyzer:        riskAnalyzer,
+		Compliance:          complianceSeeder,
+		Billing:             billingEngine,
+		Send:                sendEngine,
+		PublicURL:           cfg.PublicURL,
+		Environment:         cfg.Environment,
+		WebhookSecrets:      webhookKeys,
+		RenderEmail:         renderEmailForMCP(cfg.OperatorName),
+	})
+
+	srv.MCP = mcpServer
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

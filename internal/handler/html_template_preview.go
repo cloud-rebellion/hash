@@ -195,87 +195,26 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer closeConsumer()
-	if err := scanHTMLMaster(ctx, content.MasterJSON); err != nil {
-		writeScanError(w, err)
-		return
-	}
-	rendered, err := materializeHTMLTemplatePreview(content, in.Values, in.Sections)
+	cleaned, pages, materializationSHA, err := s.renderHTMLTemplatePDFV1(ctx, actor, content, in)
 	if err != nil {
-		s.writeHTMLTemplateError(w, "materialize HTML template preview", err)
-		return
-	}
-	// Scanning and materialization may wait; never start Chromium with an already
-	// expired/revoked original credential even though its output would be refused.
-	if err := s.checkHTMLTemplatePreviewAuthor(ctx, actor); err != nil {
-		s.writeHTMLTemplateError(w, "authorize HTML template preview render", err)
-		return
-	}
-	pdf, err := s.Sign.PDF.HTMLToPDF(ctx, rendered.HTML, render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"})
-	if err != nil {
-		// Provider diagnostics can echo submitted text. Do not log or return them.
-		writeError(w, http.StatusServiceUnavailable, "HTML template preview rendering unavailable")
-		return
-	}
-	if len(pdf) == 0 || len(pdf) > sanitize.MaxPDFBytes {
-		writeError(w, http.StatusBadRequest, "rendered template preview could not be accepted")
-		return
-	}
-	master, err := htmlmaster.Decode(content.MasterJSON)
-	if err != nil {
-		s.writeHTMLTemplateError(w, "decode template preview", err)
-		return
-	}
-	compiled, err := htmlmaster.Compile(master)
-	if err != nil {
-		s.writeHTMLTemplateError(w, "compile template preview", err)
-		return
-	}
-	var cleaned sanitize.Result
-	pages := 0
-	if compiled.SigningPagePolicy() != nil {
-		values := map[string]string{}
-		if err := json.Unmarshal(content.DefaultsJSON, &values); err != nil {
-			writeError(w, http.StatusBadRequest, "template defaults invalid")
-			return
+		if errors.Is(err, errHTMLTemplatePreviewRenderV1) {
+			writeError(w, http.StatusServiceUnavailable, errHTMLTemplatePreviewRenderV1.Error())
+		} else if !writePDFWorkerError(w, err) {
+			if errors.Is(err, malwarescan.ErrDetected) || errors.Is(err, malwarescan.ErrUnavailable) {
+				writeScanError(w, err)
+			} else if errors.Is(err, errHTMLTemplatePreviewInvalidV1) {
+				writeError(w, http.StatusBadRequest, errHTMLTemplatePreviewInvalidV1.Error())
+			} else {
+				s.writeHTMLTemplateError(w, "render HTML template preview", err)
+			}
 		}
-		for name, value := range in.Values {
-			values[name] = value
-		}
-		composed, composeErr := s.composeHTMLSigningPage(ctx, compiled, htmlmaster.Input{Values: values, Sections: in.Sections}, pdf)
-		err = composeErr
-		if err == nil {
-			cleaned = composed.Result
-			pages = composed.Composition.FinalPages
-		}
-	} else {
-		cleaned, err = sanitize.CleanWithContext(ctx, "html-template-preview", "application/pdf", pdf)
-	}
-	if err != nil {
-		if writePDFWorkerError(w, err) {
-			return
-		}
-		if errors.Is(err, malwarescan.ErrDetected) || errors.Is(err, malwarescan.ErrUnavailable) {
-			writeScanError(w, err)
-			return
-		}
-		writeError(w, http.StatusBadRequest, "rendered template preview could not be accepted")
-		return
-	}
-	if pages == 0 {
-		pages, err = sanitize.PageCountWithContext(ctx, cleaned.Bytes)
-	}
-	if err != nil || cleaned.Report.UnsupportedT || len(cleaned.Bytes) == 0 || len(cleaned.Bytes) > sanitize.MaxPDFBytes || pages <= 0 || pages > sanitize.MaxPDFPages {
-		if writePDFWorkerError(w, err) {
-			return
-		}
-		writeError(w, http.StatusBadRequest, "rendered template preview could not be accepted")
 		return
 	}
 	pdfDigest := sha256.Sum256(cleaned.Bytes)
 	now := time.Now().UTC()
 	receipt := htmlTemplatePreviewReceipt{SchemaVersion: 1, PreviewID: uuid.New(), OrgID: u.OrgID, ReviewerID: u.UserID,
 		TemplateID: id, Version: in.ExpectedVersion, TemplateContentSHA256: content.SHA256,
-		MaterializationSHA256: rendered.ContentDigest, PDFSHA256: hex.EncodeToString(pdfDigest[:]), PageCount: pages,
+		MaterializationSHA256: materializationSHA, PDFSHA256: hex.EncodeToString(pdfDigest[:]), PageCount: pages,
 		SessionSHA256: htmlPreviewSessionSHA256(cookie.Value), IssuedAt: now, ExpiresAt: now.Add(htmlTemplatePreviewTTL)}
 	token, err := s.mintHTMLTemplatePreviewReceipt(receipt)
 	if err != nil {
@@ -301,7 +240,7 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 	h.Set("X-Hash-Template-Id", id.String())
 	h.Set("X-Hash-Template-Version", strconv.FormatInt(int64(in.ExpectedVersion), 10))
 	h.Set("X-Hash-Template-Content-SHA256", content.SHA256)
-	h.Set("X-Hash-Materialization-SHA256", rendered.ContentDigest)
+	h.Set("X-Hash-Materialization-SHA256", materializationSHA)
 	h.Set("X-Hash-PDF-SHA256", receipt.PDFSHA256)
 	h.Set("X-Hash-PDF-Pages", strconv.Itoa(pages))
 	h.Set("X-Hash-Preview-Receipt", token)
@@ -309,4 +248,65 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 	setDocumentPreviewHeaders(w, false)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(cleaned.Bytes)
+}
+
+var errHTMLTemplatePreviewRenderV1 = errors.New("HTML template preview rendering unavailable")
+var errHTMLTemplatePreviewInvalidV1 = errors.New("rendered template preview could not be accepted")
+
+// The two transports share rendering, production PDF sanitization, signing-page
+// composition and the original credential check. The caller retains content's
+// native owner until the exact PDF response has been serialized.
+func (s *Server) renderHTMLTemplatePDFV1(ctx context.Context, actor authoring.Actor, content htmlmaster.TemplateCommitment, in htmlTemplatePreviewInput) (cleaned sanitize.Result, pages int, materializationSHA string, failure error) {
+	if err := scanHTMLMaster(ctx, content.MasterJSON); err != nil {
+		return cleaned, 0, "", err
+	}
+	rendered, err := materializeHTMLTemplatePreview(content, in.Values, in.Sections)
+	if err != nil {
+		return cleaned, 0, "", err
+	}
+	if err = s.checkHTMLTemplatePreviewAuthor(ctx, actor); err != nil {
+		return cleaned, 0, "", err
+	}
+	pdf, err := s.Sign.PDF.HTMLToPDF(ctx, rendered.HTML, render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"})
+	if err != nil {
+		return cleaned, 0, "", errHTMLTemplatePreviewRenderV1
+	}
+	if len(pdf) == 0 || len(pdf) > sanitize.MaxPDFBytes {
+		return cleaned, 0, "", errHTMLTemplatePreviewInvalidV1
+	}
+	master, err := htmlmaster.Decode(content.MasterJSON)
+	if err != nil {
+		return cleaned, 0, "", err
+	}
+	compiled, err := htmlmaster.Compile(master)
+	if err != nil {
+		return cleaned, 0, "", err
+	}
+	if compiled.SigningPagePolicy() != nil {
+		values := map[string]string{}
+		if err = json.Unmarshal(content.DefaultsJSON, &values); err != nil {
+			return cleaned, 0, "", errHTMLTemplatePreviewInvalidV1
+		}
+		for name, value := range in.Values {
+			values[name] = value
+		}
+		composed, e := s.composeHTMLSigningPage(ctx, compiled, htmlmaster.Input{Values: values, Sections: in.Sections}, pdf)
+		err = e
+		if err == nil {
+			cleaned = composed.Result
+			pages = composed.Composition.FinalPages
+		}
+	} else {
+		cleaned, err = sanitize.CleanWithContext(ctx, "html-template-preview", "application/pdf", pdf)
+	}
+	if err != nil {
+		return cleaned, 0, "", errors.Join(errHTMLTemplatePreviewInvalidV1, err)
+	}
+	if pages == 0 {
+		pages, err = sanitize.PageCountWithContext(ctx, cleaned.Bytes)
+	}
+	if err != nil || cleaned.Report.UnsupportedT || len(cleaned.Bytes) == 0 || len(cleaned.Bytes) > sanitize.MaxPDFBytes || pages <= 0 || pages > sanitize.MaxPDFPages {
+		return cleaned, 0, "", errors.Join(errHTMLTemplatePreviewInvalidV1, err)
+	}
+	return cleaned, pages, rendered.ContentDigest, nil
 }

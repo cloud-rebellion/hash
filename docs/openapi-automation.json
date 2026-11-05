@@ -34,7 +34,7 @@
               "minLength": 1,
               "x-maxUtf8Bytes": 200
             },
-            "description": "Exactly one header; 1\u2013200 UTF-8 bytes, no control characters or surrounding whitespace. Namespace by producer/workflow/event; no personal data."
+            "description": "Exactly one header; 1–200 UTF-8 bytes, no control characters or surrounding whitespace. Namespace by producer/workflow/event; no personal data."
           }
         ],
         "requestBody": {
@@ -1305,6 +1305,201 @@
           }
         }
       }
+    },
+    "/api/automation/v1/brand-assets": {
+      "post": {
+        "operationId": "uploadBrandAsset",
+        "summary": "Retain an exact versioned original asset and safe PNG variant",
+        "description": "Organization-wide OWNER API key with write:authoring and branding entitlement. Document-scoped keys are refused. Strict UTF-8 JSON <=14MiB, including base64. The MCP envelope remains <=1MiB; this machine endpoint accepts larger originals with the same original key and native owner transaction checks. request_id binds the exact immutable import intent. Exact committed replays return the same asset/revision with201. After an uncertain acknowledgement inspect the upload status before any repeat. Uncertain or concurrent unselected provider versions may be retained under the durable intent for later audited cleanup; published versions are never deleted as compensation. Existing document artifacts are not rewritten.",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandAssetUpload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Exact original/render versions committed, or identical committed request replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandAsset"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input, unsafe SVG, image limits or unsupported variant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid or expired original API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Branding entitlement unavailable for this organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner, scope, document-key or live credential refusal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested existing asset is unavailable to this organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request intent or expected revision changed; inspect current state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Scanner, storage, import capacity or database unavailable; inspect uncertain request state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/v1/brand-assets/uploads/{requestID}": {
+      "get": {
+        "operationId": "getBrandAssetUpload",
+        "summary": "Observe one exact durable upload request",
+        "description": "Organization-wide OWNER API key with read scope. Metadata-only observation; performs no upload, resume, cleanup or implicit retry. Other organizations receive404. preparing means no committed asset revision is yet acknowledged. committed identifies an immutable asset_id/revision; use the catalog metadata reader to obtain exact original/render commitments.",
+        "security": [
+          {
+            "BearerKey": []
+          },
+          {
+            "HeaderKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact current durable request state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandAssetUploadStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request UUID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid original key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner, read scope, document-key or credential refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upload request in this organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Observation unavailable; do not infer failed publication.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1686,6 +1881,176 @@
             "const": false
           }
         }
+      },
+      "BrandAssetUpload": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "asset_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Omit/null for new asset. An existing asset ID requires its exact current expected_revision."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "x-maxUtf8Bytes": 160
+          },
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/svg+xml"
+            ]
+          },
+          "original_base64": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 11184812,
+            "contentEncoding": "base64",
+            "description": "Exact original bytes: PNG <=8MiB/16384px/16M pixels; inert SVG <=2MiB. No reencoding."
+          },
+          "render_png_base64": {
+            "type": "string",
+            "maxLength": 2796204,
+            "contentEncoding": "base64",
+            "description": "Optional exact supplied PNG <=2MiB/4096px/4M pixels. Required for SVG and originals outside render limits; no automatic artwork conversion."
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision",
+          "name",
+          "media_type",
+          "original_base64"
+        ]
+      },
+      "BrandAssetObject": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/svg+xml"
+            ]
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "version_id",
+          "sha256",
+          "bytes",
+          "media_type",
+          "width",
+          "height"
+        ]
+      },
+      "BrandAsset": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "original": {
+            "$ref": "#/components/schemas/BrandAssetObject"
+          },
+          "render": {
+            "$ref": "#/components/schemas/BrandAssetObject"
+          },
+          "render_method": {
+            "type": "string",
+            "enum": [
+              "original_png_v1",
+              "provided_png_v1"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "asset_id",
+          "revision",
+          "name",
+          "original",
+          "render",
+          "render_method",
+          "created_at"
+        ]
+      },
+      "BrandAssetUploadStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "asset_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "committed"
+            ]
+          }
+        },
+        "required": [
+          "request_id",
+          "asset_id",
+          "revision",
+          "state"
+        ]
       }
     }
   }

@@ -14,7 +14,7 @@ import (
 // Version8 also owns M117 staff credentials and sealed recovery mail. Older
 // workers do not decode that ciphertext and cannot safely consume its queue.
 // M118 filing, M119 email content, M120 scoped SMTP, M121 finite automation
-// and M122 bounded email design retain this writer
+// M122 bounded email design and M123 retained brand profiles retain this writer
 // contract: workers consume the same already-rendered durable message bodies.
 const LifecycleContractVersionV1 = 8
 
@@ -30,12 +30,12 @@ func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err er
 }
 
 func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
-	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122 migration tree")
-	if len(versions) == 0 || len(versions) > 122 {
+	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122/M123 migration tree")
+	if len(versions) == 0 || len(versions) > 123 {
 		return unsupported
 	}
 	highest := versions[len(versions)-1]
-	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 {
+	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 && highest != 123 {
 		return unsupported
 	}
 	seen := make(map[int64]bool, len(versions))
@@ -60,6 +60,9 @@ func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
 	}
 	if highest >= 122 {
 		names = append(names, "00122_service_email_design.sql")
+	}
+	if highest >= 123 {
+		names = append(names, "00123_org_brand_profiles.sql")
 	}
 	for index, name := range names {
 		info, err := fs.Stat(migrations, "migrations/"+name)

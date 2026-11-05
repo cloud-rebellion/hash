@@ -68,7 +68,7 @@ func registerReadTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "get_template",
-		Description: "Fetch a single template by id (org-scoped).",
+		Description: "Fetch a current template by id (org-scoped). For exact retained HTML source use get_design_template with version and expected_content_sha256.",
 		InputSchema: schemaObject(map[string]any{
 			"id": stringSchema("template id (uuid)"),
 		}, []string{"id"}),
@@ -117,6 +117,17 @@ func registerReadTools(s *Server, d Deps) {
 					return result, errors.New("template not found")
 				}
 				return result, err
+			}
+			if header.SourceKind == "html" {
+				if d.Design == nil {
+					return nil, errors.New("native HTML template reader unavailable")
+				}
+				actor, err := designActorV1(r.Context(), uuid.Nil, false)
+				if err != nil {
+					return nil, err
+				}
+				value, err := d.Design.ReadTemplateV1(r.Context(), actor, id, DesignTemplateReadInputV1{LegacyResponse: true})
+				return &designOwnedResultV1{state: &designOwnedStateV1{value: value.Value, release: value.Release}}, err
 			}
 			t, err := d.Queries.GetTemplate(r.Context(), generated.GetTemplateParams{ID: id, OrgID: u.OrgID})
 			if errors.Is(err, pgx.ErrNoRows) {

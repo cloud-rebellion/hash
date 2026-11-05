@@ -30,6 +30,21 @@ const (
 // deliberately narrower: actions that advance or terminate a ceremony, send
 // communications, rotate signer links, or configure its automatic expiry.
 var mcpToolRequiredScopes = map[string]string{
+	"list_brand_profiles": mcpScopeRead, "get_brand_profile": mcpScopeRead, "get_default_brand_profile": mcpScopeRead, "list_brand_profile_revisions": mcpScopeRead,
+	"list_brand_asset_revisions": mcpScopeRead, "get_brand_asset_upload": mcpScopeRead,
+	"list_brand_assets": mcpScopeRead, "get_brand_asset": mcpScopeRead, "resolve_brand_design_assets": mcpScopeRead,
+	"save_brand_profile": mcpScopeWriteAuthoring, "select_default_brand_profile": mcpScopeWriteAuthoring, "upload_brand_asset": mcpScopeWriteAuthoring,
+	"get_design_template":           mcpScopeRead,
+	"preview_design_template":       mcpScopeRead,
+	"get_document_design_source":    mcpScopeRead,
+	"get_document_design_history":   mcpScopeRead,
+	"download_document_pdf":         mcpScopeRead,
+	"create_design_template":        mcpScopeWriteAuthoring,
+	"update_design_template":        mcpScopeWriteAuthoring,
+	"approve_design_template":       mcpScopeWriteAuthoring,
+	"create_document_from_design":   mcpScopeWriteAuthoring,
+	"revise_document_design_values": mcpScopeWriteAuthoring,
+	"review_document_design":        mcpScopeWriteAuthoring,
 	// Read-only tools.
 	"list_service_email_templates":   mcpScopeRead,
 	"preview_service_email_template": mcpScopeRead,
@@ -222,6 +237,8 @@ func scopedDocLookup(ctx context.Context, q *generated.Queries, docID, orgID uui
 // create_eidas_rule became reachable by a doc token), whereas an allow-list
 // confines every current AND future org-level tool by default.
 var docScopeSafeTools = map[string]bool{
+	"get_document_design_source": true, "get_document_design_history": true, "download_document_pdf": true,
+	"revise_document_design_values": true, "review_document_design": true,
 	// read (get_document/list_recipients/get_document_events call EnforceDocScope;
 	// list_documents + search_documents self-confine to the scoped doc)
 	"get_document": true, "list_recipients": true, "get_document_events": true,
@@ -271,9 +288,11 @@ var docScopeSafeTools = map[string]bool{
 // Keep only static product metadata/schema and the already-authenticated
 // caller identity here; document and event feeds expose sibling records.
 var docScopeSafeResources = map[string]bool{
-	"hash://meta/capabilities": true,
-	"hash://schema/blocks":     true,
-	"hash://users/me":          true,
+	"hash://schema/html-master":        true,
+	"hash://guides/designed-documents": true,
+	"hash://meta/capabilities":         true,
+	"hash://schema/blocks":             true,
+	"hash://users/me":                  true,
 }
 
 // docTokenAllows reports whether a request may call the named tool given its

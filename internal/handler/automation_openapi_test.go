@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	brandcatalog "github.com/bright-interaction/hash/internal/branding/catalog"
 )
 
 // Prevent published client contracts from quietly losing or inventing fields
@@ -42,6 +44,10 @@ func TestAutomationOpenAPIWireFields(t *testing.T) {
 		{"PreparedDocumentSendResult", automationDocumentSendResponse{}, "document_id,status"},
 		{"PackageSendObservation", packageSendInputV1{}, "expected_updated_at,package_id,generation"},
 		{"PackageSendOutcome", packageSendResponseV1{}, "attempt_id,outcome,reconciliation_required"},
+		{"BrandAssetUpload", brandcatalog.AssetUploadV1{}, "request_id,expected_revision,name,media_type,original_base64"},
+		{"BrandAsset", brandcatalog.AssetV1{}, "asset_id,revision,name,original,render,render_method,created_at"},
+		{"BrandAssetObject", brandcatalog.ObjectV1{}, "version_id,sha256,bytes,media_type,width,height"},
+		{"BrandAssetUploadStatus", brandcatalog.UploadStatusV1{}, "request_id,asset_id,revision,state"},
 	}
 	for _, c := range cases {
 		schema, ok := spec.Components.Schemas[c.schema]

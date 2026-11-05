@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/branding"
+	"github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -121,8 +122,9 @@ func registerBrandingTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
+			actor := authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}
 			row, err := authoring.CommitOwnerMutation(r.Context(), d.Pool, d.Audit,
-				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize},
+				actor,
 				func(ctx context.Context, q *generated.Queries) (*generated.OrgBranding, error) {
 					base, err := loadOrgBrandingStrict(ctx, q, u.OrgID)
 					if err != nil {
@@ -143,12 +145,7 @@ func registerBrandingTools(s *Server, d Deps) {
 					if err != nil {
 						return nil, fmt.Errorf("font_body: %w", err)
 					}
-					return q.UpsertOrgBranding(ctx, generated.UpsertOrgBrandingParams{
-						OrgID: u.OrgID, PrimaryHex: merged.PrimaryHex, AccentHex: merged.AccentHex,
-						SurfaceHex: merged.SurfaceHex, TextHex: merged.TextHex, MutedHex: merged.MutedHex,
-						LogoUrl: merged.LogoURL, LogoAlt: merged.LogoAlt, FontHeading: merged.FontHeading,
-						FontBody: merged.FontBody, SignatureColor: merged.SignatureColor,
-					})
+					return catalog.UpdateLegacyProjectionTxV1(ctx, q, actor, merged)
 				},
 				func(*generated.OrgBranding) audit.Entry {
 					return audit.Entry{OrgID: u.OrgID, ActorUserID: &u.UserID, Kind: audit.KindDocumentUpdated,

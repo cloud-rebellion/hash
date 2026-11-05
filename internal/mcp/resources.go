@@ -12,6 +12,8 @@ import (
 )
 
 func registerResources(s *Server, d Deps) {
+	s.RegisterResource(Resource{URI: "hash://schema/html-master", Name: "Editable HTML master schema", Description: "Generic inert HTML/CSS/assets schema, declared text and native limits.", MimeType: "application/json", Loader: func(_ *http.Request) (any, error) { return htmlMasterSchemaV1(), nil }})
+	s.RegisterResource(Resource{URI: "hash://guides/designed-documents", Name: "Branded designed-document workflow", Description: "Choose designed HTML or simple blocks; discover brand assets; preserve terms; render and visually inspect EVERY page before explicit review.", MimeType: "text/plain", Loader: func(_ *http.Request) (any, error) { return designedDocumentGuideV1, nil }})
 	s.RegisterResource(Resource{
 		URI:         "hash://meta/capabilities",
 		Name:        "Hash capabilities",
@@ -112,7 +114,6 @@ func capabilitiesPayload(s *Server) map[string]any {
 			"any cross-org data",
 		},
 		"out_of_scope": []string{
-			"webhook endpoint config (use the REST surface at /api/v1/webhooks)",
 			"api-key minting (use the REST surface at /api/v1/api-keys)",
 			"OIDC / Zitadel administration",
 		},
@@ -129,6 +130,7 @@ func capabilitiesPayload(s *Server) map[string]any {
 		"lifecycle": map[string]any{
 			"states": []string{"draft", "sent", "completed", "declined", "voided", "expired"},
 			"stages": []map[string]any{
+				{"stage": "design (draft)", "tools": "Read hash://guides/designed-documents and hash://schema/html-master; create_design_template, preview_design_template, explicit approve_design_template, create_document_from_design, download_document_pdf, get_document_design_source/history, revise_document_design_values, explicit review_document_design", "note": "Prefer designed HTML for proposals/quotes/reports/brochures unless simple blocks are requested. Editable master lives in versioned template; instantiated documents freeze a version. Rendering or source readback is not every-page visual inspection, contractual approval or Send."},
 				{"stage": "author (draft)", "tools": "create_document, append_block/update_block/reorder_blocks, add_recipient, update_recipient, delete_recipient, add_signature_field, add_document_field, set_variables, bind_variable; verify with list_recipients + list_document_fields", "note": "only mutable in draft; recipients are editable up to send"},
 				{"stage": "send", "tools": "send_document", "note": "OUTWARD ACTION: queues invitations after immutable evidence sealing. Saved attachments require the exact reviewed package_send observation; status=sealing is pending, not sent. Inspect uncertain outcomes with get_document_send_attempt. Confirm with the human first. void_document / remind_recipient manage a sent doc"},
 				{"stage": "track", "tools": "get_document, list_recipients, get_document_events, document_brief prompt", "note": "poll recipient status while the ceremony runs"},

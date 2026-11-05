@@ -10,6 +10,9 @@ API surface. This guide is not a complete OpenAPI contract for that surface.
 
 See [draft document attachments](DOCUMENT-ATTACHMENTS-API.md) for the bounded
 staff REST/MCP selection and observation contract, outcomes and recovery.
+See [branded designed documents through MCP](MCP-DESIGNED-DOCUMENTS.md) for
+versioned HTML sources, exact brand assets, explicit owner design approval and
+the separate requirement to visually inspect every PDF page.
 See [later amendments and agreed notice](LATER-AMENDMENTS-API.md) for the separate
 owner/session create/issue/revoke and authorized history reads, exact head/request
 reconciliation, initial visible-policy freeze and optional signer disclosure.

@@ -129,6 +129,104 @@ type BlockEmbedding struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type BrandAssetRevisionsV1 struct {
+	OrgID             uuid.UUID          `json:"org_id"`
+	AssetID           uuid.UUID          `json:"asset_id"`
+	Revision          int64              `json:"revision"`
+	RequestID         uuid.UUID          `json:"request_id"`
+	Name              string             `json:"name"`
+	OriginalKey       string             `json:"original_key"`
+	OriginalVersionID string             `json:"original_version_id"`
+	OriginalSha256    []byte             `json:"original_sha256"`
+	OriginalBytes     int64              `json:"original_bytes"`
+	OriginalMediaType string             `json:"original_media_type"`
+	OriginalWidth     int32              `json:"original_width"`
+	OriginalHeight    int32              `json:"original_height"`
+	RenderKey         string             `json:"render_key"`
+	RenderVersionID   string             `json:"render_version_id"`
+	RenderSha256      []byte             `json:"render_sha256"`
+	RenderBytes       int64              `json:"render_bytes"`
+	RenderWidth       int32              `json:"render_width"`
+	RenderHeight      int32              `json:"render_height"`
+	RenderMethod      string             `json:"render_method"`
+	CreatedBy         uuid.UUID          `json:"created_by"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+type BrandAssetUploadsV1 struct {
+	OrgID            uuid.UUID          `json:"org_id"`
+	RequestID        uuid.UUID          `json:"request_id"`
+	AssetID          uuid.UUID          `json:"asset_id"`
+	Revision         int64              `json:"revision"`
+	ExpectedRevision int64              `json:"expected_revision"`
+	InputSha256      []byte             `json:"input_sha256"`
+	OriginalKey      string             `json:"original_key"`
+	RenderKey        string             `json:"render_key"`
+	State            string             `json:"state"`
+	CreatedBy        uuid.UUID          `json:"created_by"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type BrandAssetsV1 struct {
+	OrgID        uuid.UUID          `json:"org_id"`
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name"`
+	HeadRevision int64              `json:"head_revision"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedBy    uuid.UUID          `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type BrandDesignTemplateBindingsV1 struct {
+	OrgID           uuid.UUID          `json:"org_id"`
+	TemplateID      uuid.UUID          `json:"template_id"`
+	TemplateVersion int32              `json:"template_version"`
+	ProfileID       uuid.UUID          `json:"profile_id"`
+	ProfileRevision int64              `json:"profile_revision"`
+	ProfileSha256   []byte             `json:"profile_sha256"`
+	SelectedSlots   []string           `json:"selected_slots"`
+	CreatedBy       uuid.UUID          `json:"created_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type BrandOrgDefaultsV1 struct {
+	OrgID             uuid.UUID          `json:"org_id"`
+	ProfileID         uuid.UUID          `json:"profile_id"`
+	ProfileRevision   int64              `json:"profile_revision"`
+	SelectionRevision int64              `json:"selection_revision"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type BrandProfileRevisionAssetsV1 struct {
+	OrgID           uuid.UUID `json:"org_id"`
+	ProfileID       uuid.UUID `json:"profile_id"`
+	ProfileRevision int64     `json:"profile_revision"`
+	Slot            string    `json:"slot"`
+	AssetID         uuid.UUID `json:"asset_id"`
+	AssetRevision   int64     `json:"asset_revision"`
+}
+
+type BrandProfileRevisionsV1 struct {
+	OrgID         uuid.UUID          `json:"org_id"`
+	ProfileID     uuid.UUID          `json:"profile_id"`
+	Revision      int64              `json:"revision"`
+	Name          string             `json:"name"`
+	ProfileJson   json.RawMessage    `json:"profile_json"`
+	ContentSha256 []byte             `json:"content_sha256"`
+	CreatedBy     uuid.UUID          `json:"created_by"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type BrandProfilesV1 struct {
+	OrgID        uuid.UUID          `json:"org_id"`
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name"`
+	HeadRevision int64              `json:"head_revision"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedBy    uuid.UUID          `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type BrightcrmWebhookReceipt struct {
 	DeliveryCorrelation string             `json:"delivery_correlation"`
 	PayloadCorrelation  string             `json:"payload_correlation"`

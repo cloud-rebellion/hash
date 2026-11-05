@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/hash/internal/aiapps"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
@@ -29,6 +30,8 @@ import (
 
 // Deps gathers the runtime dependencies the tool + resource handlers need.
 type Deps struct {
+	Design              DesignBridgeV1
+	BrandCatalog        catalog.BrandProfilesV1
 	PDFCreationSessions *pdfadmission.ApplicationSessionFactoryV1
 	Pool                *pgxpool.Pool
 	Queries             *generated.Queries
@@ -75,6 +78,8 @@ func New(d Deps) *Server {
 	s.billing = d.Billing // central MinFeature enforcement in handleToolsCall
 
 	registerReadTools(s, d)
+	registerDesignToolsV1(s, d)
+	registerBrandCatalogToolsV1(s, d)
 	registerAuthoringTools(s, d)
 	registerWorkflowTools(s, d)
 	registerVersionTools(s, d)

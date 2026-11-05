@@ -100,7 +100,8 @@ test('actual EN/SV logo fields disable unsupported editing while keeping legacy 
       const empty = m.render(m.Fields, { props: { ...props, logoURL: '' } }).body;
       expect(empty).not.toContain(locale === 'sv' ? 'Rensa logotypens URL' : 'Clear logo URL');
       const page = m.render(m.Page).body;
-      expect(page).toContain(locale === 'sv' ? 'Dokumenttema' : 'Document theme');
+      expect(page).toContain(locale === 'sv' ? 'Varumärke' : 'Branding');
+      expect(page).toContain(locale === 'sv' ? 'Varumärkesfiler' : 'Brand assets');
       expect(page).not.toContain('every rendered document');
     }
     expect(requests).toBe(0);

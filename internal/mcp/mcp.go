@@ -273,7 +273,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, req request) {
 			"name":    "hash",
 			"version": "0.1.0",
 		},
-		"instructions": "Hash: agent-native document creation and e-signing. Use tools/list to see available authoring + read tools, resources/list for live state and the block schema, prompts/list for starter frames. The block tree schema is at hash://schema/blocks.",
+		"instructions": "Hash: agent-native document creation and e-signing. Default proposals, quotes, reports and page-layout brochures to editable versioned HTML designs; use native blocks for explicit simple documents or structured content/contracts. Start with hash://guides/designed-documents and hash://schema/html-master; discover exact brand profiles/asset slots, save/preview the design and visually inspect EVERY rendered PDF page before explicit owner design approval. Save/readback/render/hash success is not visual proof. create_pdf_document is compatibility PDF intake and loses the editable HTML master. Choose document/presentation/signing purpose explicitly; design work does not add recipients or authorize Send. Preserve supplied terms and flag missing facts. Use tools/list, resources/list and prompts/list for the current interfaces; hash://schema/blocks describes the simple route.",
 	})
 }
 

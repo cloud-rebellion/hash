@@ -245,7 +245,7 @@ var allowedElements = map[string]bool{
 	"strong": true, "b": true, "em": true, "i": true, "u": true, "s": true, "small": true, "sup": true, "sub": true,
 	"blockquote": true, "pre": true, "code": true, "ul": true, "ol": true, "li": true, "dl": true, "dt": true, "dd": true,
 	"table": true, "thead": true, "tbody": true, "tfoot": true, "tr": true, "th": true, "td": true, "caption": true,
-	"colgroup": true, "col": true, "img": true, "figure": true, "figcaption": true,
+	"colgroup": true, "col": true, "img": true, "figure": true, "figcaption": true, "a": true,
 }
 var voidElements = map[string]bool{"br": true, "hr": true, "img": true, "col": true}
 
@@ -318,6 +318,10 @@ func validateAttrs(element string, attrs []html.Attribute) error {
 		case "src":
 			if element != "img" || !strings.HasPrefix(attr.Val, "hash-asset:") || !namePattern.MatchString(strings.TrimPrefix(attr.Val, "hash-asset:")) {
 				return invalid("image source")
+			}
+		case "href":
+			if element != "a" || !validSourceLinkV1(attr.Val) {
+				return invalid("source link")
 			}
 		case "alt", "width", "height":
 			if element != "img" {

@@ -4,6 +4,7 @@
   import { getBranding, saveBranding, type OrgBranding } from '$lib/api/client';
   import { Palette, Save } from 'lucide-svelte';
   import BrandingLogoFields from '$lib/components/BrandingLogoFields.svelte';
+  import BrandAssetLibrary from '$lib/components/BrandAssetLibrary.svelte';
 
   let branding = $state<Partial<OrgBranding>>({});
   let loading = $state(true);
@@ -61,7 +62,7 @@
   <div class="mb-8 flex items-baseline justify-between">
     <div class="space-y-2">
       <p class="page-eyebrow">{$ui("Settings · Branding")}</p>
-      <h1 class="page-title">{$ui("Document theme")}</h1>
+      <h1 class="page-title">{$ui("Branding")}</h1>
     </div>
     <button class="btn btn-primary" onclick={save} disabled={saving || loading}>
       <Save class="size-4" /> {$ui(saving ? 'Saving...' : 'Save changes')}
@@ -145,4 +146,5 @@
       </p>
     </section>
   {/if}
+  <BrandAssetLibrary />
 </div>

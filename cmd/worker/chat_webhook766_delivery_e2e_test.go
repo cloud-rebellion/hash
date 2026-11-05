@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -35,8 +36,22 @@ func TestChatWebhook766SignedDeliveryRetryE2E(t *testing.T) {
 	logger := audit.New(f.w.queries, f.pool)
 	dispatch.RegisterWebhookFanout(logger, f.w.queries)
 	comment, document, recipient := uuid.NewString(), uuid.New(), uuid.New()
-	id, err := logger.Log(f.ctx, audit.Entry{OrgID: f.orgID, DocumentID: &document, RecipientID: &recipient, Kind: audit.KindCommentPosted, IP: "192.0.2.1", Payload: map[string]any{"comment_id": comment, "side": "signer", "body": webhookE2EPrivateMarker, "comment_body_sha256": webhookE2EPrivateMarker, "notice_snapshot": map[string]any{"private": webhookE2EPrivateMarker}, "link": webhookE2EPrivateMarker}})
+	tx, err := f.pool.Begin(f.ctx)
+	webhookE2ECheck(t, err, "begin canonical chat fixture audit")
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	pending, err := logger.LogTx(f.ctx, tx, audit.Entry{OrgID: f.orgID, DocumentID: &document, RecipientID: &recipient, Kind: audit.KindCommentPosted, IP: "192.0.2.1", Payload: map[string]any{"comment_id": comment, "side": "signer", "body": webhookE2EPrivateMarker, "comment_body_sha256": webhookE2EPrivateMarker, "notice_snapshot": map[string]any{"private": webhookE2EPrivateMarker}, "link": webhookE2EPrivateMarker}})
 	webhookE2ECheck(t, err, "append chat delivery fixture audit")
+	webhookE2ECheck(t, tx.Commit(f.ctx), "commit canonical chat fixture audit")
+	published := make(chan struct{})
+	logger.PublishJoinedV1(pending, func() { close(published) })
+	deadline := time.NewTimer(audit.AuditHookTimeout + time.Second)
+	defer deadline.Stop()
+	select {
+	case <-published:
+	case <-deadline.C:
+		t.Fatal("actual postcommit chat fanout did not join")
+	}
+	id := pending.ID
 	eventBefore := f.eventSnapshot(t, id)
 	rows, err := f.w.queries.ListDeliveriesByEndpoint(f.ctx, generated.ListDeliveriesByEndpointParams{EndpointID: ep.id, Limit: 100})
 	webhookE2ECheck(t, err, "read actual chat fanout queue")

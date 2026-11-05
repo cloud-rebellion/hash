@@ -24,6 +24,13 @@ func TestAutomationSenderEvents766NativeViewSignOptInAndDedupeE2E(t *testing.T) 
 			q := newOwnedPublicReadFixtureV1(t)
 			f := q.f
 			f.s.Sign.Storage = f.s.Storage
+			// Creation owns the established one-observer recipe. The first
+			// genuine signer lookup below starts its distinct second observer.
+			doc, parties := q.createSentV1(t)
+			if len(parties) != 2 || doc.SenderID != f.user.ID {
+				t.Fatal("fixture lost genuine two-party document sender")
+			}
+			ownedCreationAssertDrainedV1(t, q, 1)
 			setPreference := func(revision int, enabled bool) {
 				t.Helper()
 				response := ownedBlocksTemplateCallV1(t, f, q.cookie, http.MethodPut,
@@ -31,19 +38,16 @@ func TestAutomationSenderEvents766NativeViewSignOptInAndDedupeE2E(t *testing.T) 
 				if response.Code != http.StatusOK {
 					t.Fatalf("native preference CAS=%d", response.Code)
 				}
-				q.assertObserversOnlyV1(t)
 			}
 			if mode != "default-off" {
 				setPreference(0, true)
-			}
-			doc, parties := q.createSentV1(t)
-			if len(parties) != 2 || doc.SenderID != f.user.ID {
-				t.Fatal("fixture lost genuine two-party document sender")
+				ownedCreationAssertDrainedV1(t, q, 1)
 			}
 			router := f.s.Routes()
 			for index, party := range parties {
 				if mode == "opt-out-before-second-party" && index == 1 {
 					setPreference(1, false)
+					q.assertObserversOnlyV1(t)
 				}
 				rc := q.lookupV1(t, party.Token)
 				notice, err := f.s.signerPrivacyNotice(signerReadRequestE2E(party.Token, ""), rc)

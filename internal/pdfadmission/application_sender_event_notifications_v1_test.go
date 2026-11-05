@@ -60,11 +60,10 @@ func (x *senderEventTxTestV1) QueryRow(_ context.Context, sql string, args ...an
 		if x.kind == "document.signed" {
 			sig = x.signature
 		}
-		return row(struct {
-			AuditEventID uuid.UUID
-			SentAt       pgtype.Timestamptz
-			SignatureID  uuid.UUID
-		}{event, x.stamp, sig})
+		// Decode the signature column through pgx's real UUID wire codec. A
+		// synthetic uuid.UUID stored directly in interface{} hid the SQLC
+		// untyped CASE projection defect exposed by the real PostgreSQL journey.
+		return senderEventIdentityWireRowTestV1{event: event, stamp: x.stamp, signature: sig}
 	case strings.Contains(sql, "GetSenderAutomationRecipientV1"):
 		if x.mode == "missing-sender" {
 			return htmlRevisionReadRowTestV1{err: pgx.ErrNoRows}
@@ -95,6 +94,30 @@ func (x *senderEventTxTestV1) QueryRow(_ context.Context, sql string, args ...an
 	default:
 		return htmlRevisionReadRowTestV1{err: errors.New("unexpected source dispatch")}
 	}
+}
+
+// Only SQL/backend rows are synthetic. The generated Scan destination and real
+// pgx codec decide whether the UUID projection retains its declared Go type.
+type senderEventIdentityWireRowTestV1 struct {
+	event, signature uuid.UUID
+	stamp            pgtype.Timestamptz
+}
+
+func (r senderEventIdentityWireRowTestV1) Scan(dest ...any) error {
+	if len(dest) != 3 {
+		return errors.New("unexpected native identity projection width")
+	}
+	event, ok := dest[0].(*uuid.UUID)
+	if !ok {
+		return errors.New("unexpected audit identity destination")
+	}
+	*event = r.event
+	stamp, ok := dest[1].(*pgtype.Timestamptz)
+	if !ok {
+		return errors.New("unexpected send epoch destination")
+	}
+	*stamp = r.stamp
+	return pgtype.NewMap().Scan(pgtype.UUIDOID, pgtype.BinaryFormatCode, r.signature[:], dest[2])
 }
 
 func TestSenderEventNoticeActualNativeProducerDecisionsAndRetirementV1(t *testing.T) {

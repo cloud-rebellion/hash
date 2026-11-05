@@ -9,7 +9,9 @@ import (
 	"net/http"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
@@ -22,10 +24,20 @@ func (s *Server) writeHTMLTemplateOwnedV1(r *http.Request, user, org, id uuid.UU
 	if err != nil {
 		return nil, nil, err
 	}
+	return s.writeHTMLTemplateActorOwnedV1(r.Context(), authoring.Actor{OrgID: org, UserID: user, Authorize: authorize}, id, in, content)
+}
+
+// Transport-specific admission supplies the original live authorization. The
+// session wrapper and MCP bridge share the same native writer and audit gates.
+func (s *Server) writeHTMLTemplateActorOwnedV1(parent context.Context, actor authoring.Actor, id uuid.UUID, in htmlTemplateInput, content htmlmaster.TemplateCommitment, bundles ...*catalog.DesignBundleV1) (result *generated.Template, closeConsumer func(), failure error) {
+	org, user, authorize := actor.OrgID, actor.UserID, actor.Authorize
+	if org == uuid.Nil || user == uuid.Nil || authorize == nil {
+		return nil, nil, auth.ErrMutationPermissionRevoked
+	}
 	if s.Audit == nil {
 		return nil, nil, pdfadmission.ErrHTMLAuthoringReadV1
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
+	ctx, cancel := context.WithTimeout(parent, authoring.MutationTimeout)
 	defer cancel()
 	create := id == uuid.Nil
 	if create {
@@ -78,6 +90,17 @@ func (s *Server) writeHTMLTemplateOwnedV1(r *http.Request, user, org, id uuid.UU
 		result, err = writer.PersistV1(ctx, reader)
 		if err != nil {
 			return err
+		}
+		if len(bundles) > 1 {
+			return catalog.ErrInputV1
+		}
+		if len(bundles) == 1 && bundles[0] != nil {
+			if s.BrandCatalog == nil {
+				return catalog.ErrUnavailableV1
+			}
+			if err = s.BrandCatalog.BindTemplateRevisionV1(ctx, tx, actor, result.ID, result.Version, bundles[0]); err != nil {
+				return err
+			}
 		}
 		kind := audit.KindTemplateUpdated
 		if create {

@@ -23,7 +23,72 @@ x-browser-work-runtime: &browser-work-runtime
   HASH_WORK_DB_CONNECTION_ALLOCATION: '16'
 
 services:
+  workspace-smtp:
+    # Test-only verified TLS submission. The fixture generates its private keys
+    # in memory; this volume contains only the public CA trusted by these two
+    # disposable Hash processes. Nothing listens on a published host port.
+    image: golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca
+    working_dir: /fixture
+    command: ["sh", "-eu", "-c", "go build -o /tmp/workspace-smtp /fixture/main.go; exec /tmp/workspace-smtp"]
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 128
+    tmpfs:
+      # Executable only for this trusted Go fixture's temporary binary.
+      - /tmp:rw,exec,nosuid,nodev,size=192m,mode=1777
+      # Keep Go's default cache inside this disposable container's RAM budget.
+      - /root/.cache/go-build:rw,noexec,nosuid,nodev,size=512m,mode=0700
+    environment:
+      GOTOOLCHAIN: local
+      GOPROXY: "off"
+      GOSUMDB: "off"
+      GOMAXPROCS: '2'
+      GOFLAGS: '-p=1'
+    volumes:
+      - ./e2e/fixtures/workspace-smtp/main.go:/fixture/main.go:ro
+      - browser_smtp_public_ca:/trust
+    depends_on:
+      mailhog:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 60s
+    networks:
+      browser-smtp:
+        aliases: ["smtp.hash.test"]
+  mailhog:
+    networks: ["default", "browser-smtp"]
   hash:
-    environment: *browser-work-runtime
+    environment:
+      <<: *browser-work-runtime
+      SSL_CERT_FILE: /usr/local/share/hash-browser-smtp/ca.pem
+    volumes:
+      - browser_smtp_public_ca:/usr/local/share/hash-browser-smtp:ro
+    depends_on:
+      workspace-smtp:
+        condition: service_healthy
+    networks: ["default", "hash-renderer", "browser-smtp"]
   worker:
-    environment: *browser-work-runtime
+    environment:
+      <<: *browser-work-runtime
+      SSL_CERT_FILE: /usr/local/share/hash-browser-smtp/ca.pem
+    volumes:
+      - browser_smtp_public_ca:/usr/local/share/hash-browser-smtp:ro
+    depends_on:
+      workspace-smtp:
+        condition: service_healthy
+    networks: ["default", "hash-renderer", "browser-smtp"]
+
+volumes:
+  browser_smtp_public_ca:
+
+networks:
+  browser-smtp:
+    internal: true

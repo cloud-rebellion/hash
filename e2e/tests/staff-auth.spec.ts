@@ -537,6 +537,23 @@ test.describe('native staff sales journey', () => {
       const subscription = await salesJSON504(page, origin, '/api/v1/billing/subscription');
       requireCheck(subscription.billing_enabled === true && subscription.plan?.slug === 'free' && subscription.plan.document_quota_monthly >= 1 && subscription.plan.recipient_quota_monthly >= 2 && subscription.plan.features?.evidence_bundle === false, 'Ordinary measured free entitlement is required; do not upgrade or bypass it for this proof');
 
+      stage = 'native owner configures its own verified TLS submission transport';
+      // Fresh workspaces require their own transport. Auth mail deliberately
+      // uses installation SMTP; successful registration does not configure
+      // document delivery. Exercise the ordinary owner API instead of seeding
+      // a legacy row or silently falling back to installation SMTP.
+      const smtpBefore = await salesJSON504(page, origin, '/api/v1/workspace-smtp');
+      requireCheck(smtpBefore.mode === 'unconfigured' && smtpBefore.revision === 0 && smtpBefore.configured === false, 'Fresh workspace unexpectedly inherited a document-mail transport');
+      const smtpHost = process.env.HASH_E2E_WORKSPACE_SMTP_HOST || 'smtp.hash.test';
+      const smtpAfter = await salesJSON504(page, origin, '/api/v1/workspace-smtp', 'PUT', {
+        expected_revision: smtpBefore.revision, host: smtpHost, port: 465, tls_mode: 'tls',
+        sender_name: 'Synthetic Sales Company', sender_email: 'sales-sender@example.test',
+        credentials_action: 'replace', username: '', password: ''
+      });
+      requireCheck(smtpAfter.mode === 'configured' && smtpAfter.configured === true && smtpAfter.revision === 1
+        && smtpAfter.host === smtpHost && smtpAfter.port === 465 && smtpAfter.tls_mode === 'tls'
+        && smtpAfter.username_set === false && smtpAfter.password_set === false, 'Owner TLS transport configuration was not retained');
+
       stage = 'cookie-authenticated contract creation';
       const document = await salesJSON504(page, origin, '/api/v1/documents', 'POST', {
         name: contractName, source_kind: 'blocks', variables_json: {}, blocks_json: { version: 1, blocks: [

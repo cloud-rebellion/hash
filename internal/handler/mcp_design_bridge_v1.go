@@ -221,7 +221,7 @@ func (b *mcpDesignBridgeV1) PreviewTemplateV1(parent context.Context, a mcp.Desi
 	if err != nil {
 		return out, err
 	}
-	_, closeRecheck, err := s.loadHTMLTemplatePreview(ctx, a.Actor, id, in.ExpectedVersion, in.ExpectedContentSHA256, nil, nil)
+	closeRecheck, err := s.recheckHTMLTemplatePreview(ctx, a.Actor, id, in.ExpectedVersion, in.ExpectedContentSHA256)
 	if err != nil {
 		return out, err
 	}

@@ -64,6 +64,18 @@ func materializeHTMLTemplatePreview(content htmlmaster.TemplateCommitment, sampl
 // all locks before scanner, renderer or parser work. Repeat after that work so a
 // changed/archived design or revoked session never releases PDF bytes or proof.
 func (s *Server) loadHTMLTemplatePreview(ctx context.Context, actor authoring.Actor, id uuid.UUID, version int32, digest string, values, sections map[string]string) (result htmlmaster.TemplateCommitment, closeConsumer func(), failure error) {
+	return s.readHTMLTemplatePreviewV1(ctx, actor, id, version, digest, values, sections, false)
+}
+
+// The final check compares saved source and live authority only. Its discarded
+// result cannot fund another materialization; the original content owner stays
+// retained until the caller finishes serializing the exact PDF and its proof.
+func (s *Server) recheckHTMLTemplatePreview(ctx context.Context, actor authoring.Actor, id uuid.UUID, version int32, digest string) (closeConsumer func(), failure error) {
+	_, closeConsumer, failure = s.readHTMLTemplatePreviewV1(ctx, actor, id, version, digest, nil, nil, true)
+	return closeConsumer, failure
+}
+
+func (s *Server) readHTMLTemplatePreviewV1(ctx context.Context, actor authoring.Actor, id uuid.UUID, version int32, digest string, values, sections map[string]string, recheckOnly bool) (result htmlmaster.TemplateCommitment, closeConsumer func(), failure error) {
 	o, err := s.openHTMLAuthoringV1(ctx, actor.OrgID, id)
 	if err != nil {
 		return result, nil, err
@@ -92,7 +104,20 @@ func (s *Server) loadHTMLTemplatePreview(ctx context.Context, actor authoring.Ac
 		if template.Version != version || hex.EncodeToString(template.HtmlContentSha256) != digest {
 			return errHTMLTemplateConflict
 		}
-		response, err := toHTMLTemplateDetailResponseOwnedV1(ctx, o.reader, template, revision)
+		var response templateResponse
+		if recheckOnly {
+			current, readErr := o.reader.CanonicalCurrentTemplateV1(ctx, template.ID, template.Version)
+			if readErr != nil {
+				return readErr
+			}
+			retained, readErr := o.reader.CanonicalRetainedTemplateRecheckV1(ctx, revision.TemplateID, revision.Version)
+			if readErr != nil {
+				return readErr
+			}
+			response, err = toHTMLTemplateDetailCanonicalV1(template, revision, current, retained)
+		} else {
+			response, err = toHTMLTemplateDetailResponseOwnedV1(ctx, o.reader, template, revision)
+		}
 		if errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
 			return err
 		}
@@ -221,7 +246,7 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusServiceUnavailable, "HTML template preview proof unavailable")
 		return
 	}
-	_, closeRecheck, err := s.loadHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256, nil, nil)
+	closeRecheck, err := s.recheckHTMLTemplatePreview(ctx, actor, id, in.ExpectedVersion, in.ExpectedContentSHA256)
 	if err != nil {
 		s.writeHTMLTemplateError(w, "recheck HTML template preview", err)
 		return

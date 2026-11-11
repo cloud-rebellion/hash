@@ -64,7 +64,7 @@ function fixture(existing = true) {
     env[name] = (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind, args, resolve, reject }));
   }
   const names = ['invalidatePreview', 'detail', 'samePin', 'adopt', 'recordError', 'checkedIdentity', 'loadInitial', 'save', 'readLatest', 'adoptLatest',
-    'addAsset', 'changeSigningPage', 'changeSigningLogo', 'generatePreview', 'receiveProof', 'approve', 'protectNavigation', 'protectUnload'];
+    'addAsset', 'changeSigningPage', 'changeSigningLogo', 'generatePreview', 'receiveProof', 'approve', 'reviewSavedVersion', 'protectNavigation', 'protectUnload'];
   const source = readFileSync(new URL('./HtmlTemplateEditor.svelte', import.meta.url), 'utf8');
   const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(names.map((name) => callback(source, name)).join('\n'));
   const actions = new Function('env', `with(env) { ${code}; return { ${names.join(',')} }; }`)(env);
@@ -75,6 +75,29 @@ function installPreview(state: ReturnType<typeof fixture>) {
   state.env.preview = preview(); state.env.previewActor = userID; state.env.previewSamples = JSON.stringify({ values: state.env.samples, sections: state.env.sectionSamples });
   state.env.previewSequence = 1; state.env.allPagesSeen = true; state.env.acknowledged = true;
 }
+
+test('saved design review shortcut focuses the approval panel without discarding dirty inputs or dispatching writes', () => {
+  const state = fixture(), navigation: unknown[] = [];
+  state.env.reviewPanel = { scrollIntoView: (options: unknown) => navigation.push(['scroll', options]), focus: (options: unknown) => navigation.push(['focus', options]) };
+  state.env.draft.html += '<p>Unsaved wording</p>'; state.env.samples.company = 'Unsaved preview sample';
+  state.env.assetName = 'Pending logo';
+  const entered = htmlAuthorFingerprint(state.env.draft), baseline = state.env.baseline;
+  state.actions.reviewSavedVersion();
+  expect(navigation).toEqual([['scroll', { block: 'start' }], ['focus', { preventScroll: true }]]);
+  expect(state.calls).toHaveLength(0); expect(htmlAuthorFingerprint(state.env.draft)).toBe(entered); expect(state.env.baseline).toBe(baseline);
+  expect(state.env.dirty).toBe(true); expect(state.env.samples.company).toBe('Unsaved preview sample'); expect(state.env.assetName).toBe('Pending logo');
+  expect(state.env.preview).toBeNull(); expect(state.env.allPagesSeen).toBe(false); expect(state.env.acknowledged).toBe(false);
+});
+test('saved design review shortcut ignores an absent saved revision or departed editor', () => {
+  for (const condition of ['unsaved', 'disposed', 'different template', 'absent panel']) {
+    const state = fixture(condition !== 'unsaved');
+    state.env.reviewPanel = { scrollIntoView: () => { throw new Error('Unexpected scroll'); }, focus: () => { throw new Error('Unexpected focus'); } };
+    if (condition === 'disposed') state.env.disposed = true;
+    if (condition === 'different template') state.env.templateID = 'different';
+    if (condition === 'absent panel') state.env.reviewPanel = null;
+    state.actions.reviewSavedVersion(); expect(state.calls).toHaveLength(0);
+  }
+});
 
 test('CREATE success then readback 401/403/404 retains exact acknowledged pin and never dispatches a second CREATE', async () => {
   for (const status of [401, 403, 404]) {

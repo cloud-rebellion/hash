@@ -39,6 +39,7 @@
   let assetName = $state('');
   let pendingAssetFile = $state.raw<File | null>(null);
   let assetFile = $state.raw<HTMLInputElement | null>(null);
+  let reviewPanel = $state.raw<HTMLElement | null>(null);
   let disposed = false;
   let operation = 0;
   let rowKey = 0;
@@ -325,6 +326,11 @@
       }
     } finally { if (current() && selected === operation) busy = null; }
   }
+  function reviewSavedVersion() {
+    if (!current() || !saved || !reviewPanel) return;
+    reviewPanel.scrollIntoView({ block: 'start' });
+    reviewPanel.focus({ preventScroll: true });
+  }
   function protectNavigation(navigation: Navigation) {
     if (!navigation.willUnload && navigation.to?.url.pathname !== navigation.from?.url.pathname && (dirty || sampleDirty || assetDraftDirty || busy)
         && !window.confirm(busy ? 'This request may still complete. Leave and discard local design inputs?' : 'Leave and discard unsaved design or preview inputs?')) navigation.cancel();
@@ -347,9 +353,12 @@
   {#if loading}<p role="status">{$ui("Loading design and permissions…")}</p>{/if}
   {#if error}<p role="alert" class="card p-4 text-danger text-sm">{$ui(error)}</p>{/if}
   {#if !loading && !me}<button class="btn btn-secondary" onclick={knownID ? readLatest : loadInitial}>{$ui(knownID ? 'Reload session and inspect saved revision' : 'Reload session')}</button>{/if}
-  {#if saved}<div class="text-sm space-y-1"><p>{$ui("Saved version")} {saved.version} · {$ui(approved ? 'Approved revision' : 'Awaiting owner approval')}{$ui(dirty ? ' · Unsaved changes' : '')}</p>
-    {#if approved}<p class="text-text-secondary">{$ui("Approved")} {new Date(saved.html_approval!.approved_at!).toLocaleString()}{$ui(". Any saved source, default, wording or asset change creates a new revision for review.")}</p>{/if}
-    {#if !sourceID}<a href={`/templates/${saved.id}/html`} class="underline">{$ui("Open this saved design’s permanent editor link")}</a>{/if}</div>{/if}
+  {#if saved}<div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="text-sm space-y-1"><p>{$ui("Saved version")} {saved.version} · {$ui(approved ? 'Approved revision' : 'Awaiting owner approval')}{$ui(dirty ? ' · Unsaved changes' : '')}</p>
+      {#if approved}<p class="text-text-secondary">{$ui("Approved")} {new Date(saved.html_approval!.approved_at!).toLocaleString()}{$ui(". Any saved source, default, wording or asset change creates a new revision for review.")}</p>{/if}
+      {#if !sourceID}<a href={`/templates/${saved.id}/html`} class="underline">{$ui("Open this saved design’s permanent editor link")}</a>{/if}</div>
+    <button type="button" class="btn btn-secondary" aria-controls="saved-design-review" onclick={reviewSavedVersion}>{$ui("Saved design preview and approval")}</button>
+  </div>{/if}
   {#if needsRefresh || writeUncertain}<div class="card p-4 space-y-3 text-sm"><p>{$ui("Your local inputs are retained. Inspect the current saved revision before another write.")}</p>
     {#if acknowledgedSave}<p>{$ui("Save acknowledged for version")} {acknowledgedSave.version}. <a class="underline" href={`/templates/${acknowledgedSave.id}/html`}>{$ui("Open that saved design")}</a>.</p>{/if}
     {#if knownID}<button class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>{$ui("Check current saved revision")}</button>{:else}<a href="/templates" class="underline">{$ui("Check the template library")}</a>{/if}</div>{/if}
@@ -473,7 +482,7 @@
     </form>
   {/if}
   {#if saved}
-    <section class="card p-6 space-y-4" aria-label={$ui("Saved design preview and approval")}>
+    <section bind:this={reviewPanel} id="saved-design-review" tabindex="-1" class="card p-6 space-y-4 scroll-mt-6" aria-label={$ui("Saved design preview and approval")}>
       <h2 class="font-display text-lg">{$ui("Preview saved revision")} {saved.version}</h2>
       <p class="text-sm text-text-secondary">{$ui("These values and wording samples are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.")}</p>
       {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">{$ui("This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.")}</p>{/if}

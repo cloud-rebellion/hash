@@ -11,6 +11,7 @@
     onStateChange?: (blocked: boolean) => void; onSourceChange?: (source: HTMLDocumentSource | null) => void;
     onEditorStateChange?: (clean: boolean) => void; externalBusy?: boolean; mutationBlocked?: boolean; reconciliationBusy?: boolean } = $props();
   const sourceID = untrack(() => document.id), sourceOrg = untrack(() => document.org_id);
+  const signingPurpose = $derived(document.purpose === 'signing');
   let retained = $state<HTMLDocumentSource | null>(null);
   let values = $state<Record<string, string>>({}), sections = $state<Record<string, string>>({}), summary = $state('');
   let baseline = $state('');
@@ -146,7 +147,7 @@
 
 <section class="card p-6 mb-6 space-y-4" aria-label={$ui("Revise HTML document")}>
   <h2 class="font-display text-lg">{$ui("Document values and wording")}</h2>
-  <p class="text-sm text-text-secondary">{$ui("The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review")}{$ui(retained?.source_schema_version === 3 ? ', and both signature locations are regenerated for the new PDF' : ' and field placement')} {$ui("before sending.")}</p>
+  <p class="text-sm text-text-secondary">{$ui("The approved layout, CSS, assets and template defaults stay fixed. Change only this document’s declared information or text sections. Saving renders a new immutable PDF revision; its content needs fresh human review")}{#if signingPurpose}{$ui(retained?.source_schema_version === 3 ? ', and both signature locations are regenerated for the new PDF' : ' and field placement')} {$ui("before sending.")}{:else}.{/if}</p>
   {#if loading}<p role="status" class="text-sm">{$ui("Loading retained document source…")}</p>{/if}
   {#if error}<p role="alert" class="text-sm text-danger">{$ui(error)}</p>{/if}
   {#if needsRefresh || uncertain}<div class="text-sm space-y-2"><p>{$ui("Your local inputs are retained. Inspect the saved revision before another write.")}</p>

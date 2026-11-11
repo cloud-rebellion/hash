@@ -162,14 +162,37 @@ function blockToolbarFixture(): string {
   visit(ast.fragment); if (!props || !conditional) throw Error('Actual signature toolbar boundary missing');
   return `<script lang="ts">import {ui} from '$lib/staffPreferences'; import {Signature} from 'lucide-svelte'; ${source.slice(props.start, props.end)} const insertSignatureField=()=>{throw Error('SSR must not dispatch');};</script>${source.slice(conditional.start, conditional.end)}`;
 }
+function reviewedRouteFixture(): string {
+  const source = readFileSync(new URL('../../routes/documents/[id]/+page.svelte', import.meta.url), 'utf8'), ast: any = parse(source, { modern: true });
+  const declarations = ['savedPurpose', 'signingPurpose'].map(name => {
+    const declaration = ast.instance.content.body.find((node: any) => node.type === 'VariableDeclaration' && node.declarations.some((item: any) => item.id?.name === name));
+    if (!declaration) throw Error('Actual saved-purpose copy boundary missing');
+    return source.slice(declaration.start, declaration.end);
+  });
+  const paragraphs: string[] = [];
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.name === 'p' && typeof node.start === 'number' && typeof node.end === 'number') {
+      const text = source.slice(node.start, node.end);
+      if (text.includes('This exact PDF has been reviewed.') || text.includes('Load and reconcile the retained document values before viewing or changing signature locations.')) { paragraphs.push(text); return; }
+    }
+    for (const value of Object.values(node)) { if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value === 'object') visit(value); }
+  };
+  visit(ast.fragment); if (paragraphs.length !== 2) throw Error('Actual route review copy missing');
+  return `<script lang="ts">import {ui} from '$lib/staffPreferences'; import {documentPurpose} from '$lib/documentPurpose'; let {doc,htmlSource=null}=$props(); ${declarations.join('\n')}</script>${paragraphs.join('\n')}`;
+}
 async function views() {
   return renderer ??= (async () => {
     const lib = resolve(dirname(fileURLToPath(import.meta.url)), '..');
     const build = await Bun.build({ entrypoints: ['editor-view-entry'], target: 'bun', plugins: [{ name: 'actual-editor-views', setup(builder) {
       builder.onResolve({ filter: /^editor-view-entry$/ }, () => ({ path: 'entry', namespace: 'test' }));
-      builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: `export {default as Select} from ${JSON.stringify(resolve(lib, 'components/DocumentPurposeSelect.svelte'))}; export {default as Strip} from ${JSON.stringify(resolve(lib, 'components/PDFPageStrip.svelte'))}; export {default as Toolbar} from 'editor-toolbar'; export {render} from 'svelte/server'; export {setStaffLocale} from ${JSON.stringify(resolve(lib, 'staffPreferences.ts'))};`, loader: 'ts', resolveDir: process.cwd() }));
+      builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: `export {default as Select} from ${JSON.stringify(resolve(lib, 'components/DocumentPurposeSelect.svelte'))}; export {default as Strip} from ${JSON.stringify(resolve(lib, 'components/PDFPageStrip.svelte'))}; export {default as Review} from ${JSON.stringify(resolve(lib, 'components/HtmlPDFReview.svelte'))}; export {default as Revision} from ${JSON.stringify(resolve(lib, 'components/HtmlDocumentRevision.svelte'))}; export {default as Designer} from ${JSON.stringify(resolve(lib, 'components/PdfFieldDesigner.svelte'))}; export {default as ReviewedRoute} from 'reviewed-route'; export {default as Toolbar} from 'editor-toolbar'; export {render} from 'svelte/server'; export {setStaffLocale} from ${JSON.stringify(resolve(lib, 'staffPreferences.ts'))};`, loader: 'ts', resolveDir: process.cwd() }));
       builder.onResolve({ filter: /^editor-toolbar$/ }, () => ({ path: 'toolbar', namespace: 'actual-toolbar' }));
       builder.onLoad({ filter: /.*/, namespace: 'actual-toolbar' }, () => ({ contents: compile(blockToolbarFixture(), { filename: resolve(lib, 'components/BlockEditor/ToolbarFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() }));
+      builder.onResolve({ filter: /^reviewed-route$/ }, () => ({ path: 'reviewed-route', namespace: 'actual-review-copy' }));
+      builder.onLoad({ filter: /.*/, namespace: 'actual-review-copy' }, () => ({ contents: compile(reviewedRouteFixture(), { filename: resolve(lib, 'components/ReviewedRouteFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() }));
+      builder.onResolve({ filter: /^\$app\/navigation$/ }, () => ({ path: 'navigation', namespace: 'ssr-navigation' }));
+      builder.onLoad({ filter: /.*/, namespace: 'ssr-navigation' }, () => ({ contents: 'export const beforeNavigate = () => {};', loader: 'js' }));
       builder.onResolve({ filter: /^\$lib\/pdf$/ }, () => ({ path: 'browser-only-pdf', namespace: 'no-ssr-pdf' }));
       builder.onLoad({ filter: /.*/, namespace: 'no-ssr-pdf' }, () => ({ contents: `throw new Error('Server rendering must not load the browser-only PDF renderer');`, loader: 'js' }));
       builder.onResolve({ filter: /^\$lib\// }, args => ({ path: Bun.resolveSync('./' + args.path.slice(5), lib) }));
@@ -182,6 +205,47 @@ async function views() {
     try { const path = join(tmp, 'views.mjs'); writeFileSync(path, await build.outputs[0].text()); return await import(pathToFileURL(path).href); } finally { rmSync(tmp, { recursive: true, force: true }); }
   })();
 }
+test('actual EN/SV PDF review and revision copy follows saved purpose without implying a signing workflow', async () => {
+  const view = await views(), originalFetch = globalThis.fetch; let requests = 0;
+  globalThis.fetch = (() => { requests++; throw Error('SSR copy verification must not fetch'); }) as typeof fetch;
+  try {
+    for (const locale of ['en', 'sv']) {
+      view.setStaffLocale(locale);
+      for (const purpose of ['document', 'presentation', 'signing', undefined, null, 'SIGNING', 'unknown']) {
+        const signing = purpose === 'signing', document = { id: 'doc', org_id: 'org', purpose, status: 'draft', source_kind: 'pdf', updated_at: 'observed', pdf_sha256: 'a'.repeat(64), has_html_source: true, html_review_required: true };
+        const props = { document, canReview: true, hasSigningPage: true, revisionBlocked: true, onReviewed() {}, onRefresh() {} };
+        const review = view.render(view.Review, { props }).body;
+        expect(review).toContain(locale === 'sv' ? 'Godkänn denna PDF' : 'Approve this PDF');
+        expect(review.includes(locale === 'sv' ? 'för sändning' : 'for sending')).toBe(signing);
+        expect(review.includes(locale === 'sv' ? 'innan du skickar' : 'before sending')).toBe(signing);
+        expect(review.includes(locale === 'sv' ? 'signaturplaceringarna' : 'signature locations')).toBe(signing);
+        // Copy cannot bypass the existing rendered-page/acknowledgement gate.
+        const approveButton = review.match(/<button\b[^>]*class="btn btn-primary"[^>]*>[\s\S]*?<\/button>/)?.[0];
+        expect(approveButton).toBeDefined(); expect(approveButton).toContain('disabled');
+        const restricted = view.render(view.Review, { props: { ...props, canReview: false } }).body;
+        expect(restricted.includes(locale === 'sv' ? 'innan den kan skickas' : 'before it can be sent')).toBe(signing);
+        const revision = view.render(view.Revision, { props: { document, onRevised() {} } }).body;
+        expect(revision.includes(locale === 'sv' ? 'fältplacering' : 'field placement')).toBe(signing);
+        expect(revision.includes(locale === 'sv' ? 'innan du skickar' : 'before sending')).toBe(signing);
+        for (const hasSigningPage of [false, true]) {
+          const reviewed = { ...document, html_review_required: false };
+          const status = view.render(view.Review, { props: { ...props, document: reviewed, hasSigningPage } }).body;
+          const route = view.render(view.ReviewedRoute, { props: { doc: reviewed, htmlSource: { source_schema_version: hasSigningPage ? 3 : 1 } } }).body;
+          for (const html of [status, route]) {
+            expect(html).toContain(locale === 'sv' ? 'Exakt denna PDF har granskats.' : 'This exact PDF has been reviewed.');
+            expect(html.includes(locale === 'sv' ? 'innan du skickar' : 'before sending')).toBe(signing);
+            if (signing) expect(html).toContain(locale === 'sv' ? hasSigningPage ? 'Verifiera båda genererade signaturplaceringarna' : 'Lägg till mottagare' : hasSigningPage ? 'Verify both generated signature locations' : 'Add recipients');
+          }
+          expect(route.includes(locale === 'sv' ? 'ändrar signaturplaceringar' : 'changing signature locations')).toBe(signing);
+        }
+        const pages = view.render(view.Designer, { props: { documentID: 'doc', fieldsEnabled: signing, readonly: true } }).body;
+        expect(pages).not.toContain(locale === 'sv' ? 'Byt till Signering' : 'Switch to Signing');
+        expect(pages.includes(locale === 'sv' ? 'Välj en sida nedan för att visa den sparade PDF:en.' : 'Select a page below to view the saved PDF.')).toBe(!signing);
+      }
+    }
+    expect(requests).toBe(0);
+  } finally { globalThis.fetch = originalFetch; view.setStaffLocale('en'); }
+});
 test('actual compiled signature toolbar hides non-signing actions while default template authoring retains its control', async () => {
   const view = await views(); view.setStaffLocale('en');
   expect(view.render(view.Toolbar, { props: { document: {}, signingFieldsEnabled: false } }).body).not.toContain('Sig field');

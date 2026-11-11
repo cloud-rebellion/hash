@@ -19,6 +19,7 @@
   const sourceStamp = untrack(() => document.updated_at);
   const sourceSHA = untrack(() => document.pdf_sha256 ?? '');
   const sourceCommitment = untrack(() => document.html_source_commitment ?? '');
+  const signingPurpose = $derived(document.purpose === 'signing');
   let loading = $state(true);
   let rendering = $state(false);
   let busy = $state(false);
@@ -145,10 +146,10 @@
 <section class="card p-6 mb-6 space-y-4" aria-label={$ui("Review generated PDF")}>
   <div>
     <h2 class="font-display text-lg">{$ui("Review the generated PDF")}</h2>
-    <p class="text-sm text-text-secondary mt-1">{$ui("Check the printed information, wording, page breaks and layout before sending. This review applies to this exact PDF.")}</p>
-    {#if hasSigningPage}<p class="text-sm mt-2">{$ui("Review the final signing page too: both company and representative details, saved branding, and the two generated signature locations.")}</p>{/if}
+    <p class="text-sm text-text-secondary mt-1">{$ui(signingPurpose ? "Check the printed information, wording, page breaks and layout before sending. This review applies to this exact PDF." : "Check the printed information, wording, page breaks and layout. This review applies to this exact PDF.")}</p>
+    {#if signingPurpose && hasSigningPage}<p class="text-sm mt-2">{$ui("Review the final signing page too: both company and representative details, saved branding, and the two generated signature locations.")}</p>{/if}
   </div>
-  {#if revisionBlocked}<p role="note" class="text-sm text-warning">{$ui("Save or reconcile the document values and wording before approving or sending. This PDF does not include unsaved local changes.")}</p>{/if}
+  {#if revisionBlocked}<p role="note" class="text-sm text-warning">{$ui(signingPurpose ? "Save or reconcile the document values and wording before approving or sending. This PDF does not include unsaved local changes." : "Save or reconcile the document values and wording before approving. This PDF does not include unsaved local changes.")}</p>{/if}
   {#if loading}<p role="status" class="text-sm">{$ui("Loading and verifying the PDF…")}</p>{/if}
   {#if error}
     <p role="alert" class="text-sm text-danger">{$ui(error)}</p>
@@ -171,14 +172,14 @@
     {#if canReview}
       <label class="flex gap-3 items-start text-sm">
         <input type="checkbox" bind:checked={acknowledged} disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !!error} class="mt-1" />
-        <span>{$ui("I have reviewed every page of this PDF and approve its printed content and layout")}{$ui(hasSigningPage ? ', including both printed parties and signature locations on the final signing page' : '')}.</span>
+        <span>{$ui("I have reviewed every page of this PDF and approve its printed content and layout")}{$ui(signingPurpose && hasSigningPage ? ', including both printed parties and signature locations on the final signing page' : '')}.</span>
       </label>
       {#if !allPagesSeen && pageCount > 0}<p class="text-sm text-text-secondary">{$ui("Open every page before approving this PDF.")}</p>{/if}
-      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !acknowledged || !!error} onclick={approve}>{$ui(busy ? 'Recording review…' : 'Approve this PDF for sending')}</button>
+      <button type="button" class="btn btn-primary" disabled={revisionBlocked || loading || rendering || busy || !allPagesSeen || !pageCountMatches || !acknowledged || !!error} onclick={approve}>{$ui(busy ? 'Recording review…' : signingPurpose ? 'Approve this PDF for sending' : 'Approve this PDF')}</button>
     {:else}
-      <p class="text-sm" role="note">{$ui("The document's sender or an owner must review this PDF before it can be sent.")}</p>
+      <p class="text-sm" role="note">{$ui(signingPurpose ? "The document's sender or an owner must review this PDF before it can be sent." : "The document's sender or an owner must review this PDF.")}</p>
     {/if}
   {:else}
-    <p class="text-sm text-success" role="status">{$ui("This exact PDF has been reviewed.")} {$ui(hasSigningPage ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}</p>
+    <p class="text-sm text-success" role="status">{$ui("This exact PDF has been reviewed.")}{#if signingPurpose} {$ui(hasSigningPage ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}{/if}</p>
   {/if}
 </section>

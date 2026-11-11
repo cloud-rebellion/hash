@@ -391,7 +391,7 @@
       <button type="button" class="btn text-xs {!fitPage ? 'btn-primary' : 'btn-secondary'}" aria-pressed={!fitPage} disabled={loading || saving || !!draft || !!error || refreshingRecipients} onclick={() => setPageFit(false)}>{$ui('Larger page')}</button>
     </div>
   </div>
-  {#if !fieldsEnabled}<p class="text-sm text-text-secondary mb-4">{$ui('Select a page below to view the saved PDF. Switch to Signing to add recipients and fillable fields.')}</p>
+  {#if !fieldsEnabled}<p class="text-sm text-text-secondary mb-4">{$ui('Select a page below to view the saved PDF.')}</p>
   {:else if generated}<p class="text-sm text-text-secondary mb-4 leading-relaxed">{$ui("Both signature locations are generated from the approved design and locked to this exact PDF and its printed parties. Change document values or wording above to create a new PDF; Hash regenerates its locations for fresh review.")}</p>
   {:else if readonly}<p class="text-sm text-text-secondary mb-4 leading-relaxed">{$ui("The saved field positions are shown for viewing.")}</p>
   {:else}<p class="text-sm text-text-secondary mb-4 leading-relaxed">

@@ -754,7 +754,7 @@
           onReviewed={(updated) => { if(!receiveHTMLDocument(updated, documentScope)) throw new Error('The displayed agreement changed. Refresh and reconcile the saved review.'); }} onRefresh={refreshHTMLDocument} />
       {/key}
       {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
-        <p class="text-sm text-success mb-4" role="status">{$ui("This exact PDF has been reviewed.")} {$ui(htmlSource?.source_schema_version === 3 ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}</p>
+        <p class="text-sm text-success mb-4" role="status">{$ui("This exact PDF has been reviewed.")}{#if signingPurpose} {$ui(htmlSource?.source_schema_version === 3 ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}{/if}</p>
       {/if}
     {/if}
     {#if doc.has_html_source}{#key doc.id}<HtmlDocumentHistory document={doc} />{/key}{/if}
@@ -873,7 +873,7 @@
       <!-- Review is the only view until the exact PDF is approved; the designer and preview mount afterwards. -->
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
-        {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Load and reconcile the retained document values before viewing or changing signature locations.")}</p>
+        {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui(signingPurpose ? "Load and reconcile the retained document values before viewing or changing signature locations." : "Load and reconcile the retained document values before viewing the saved PDF.")}</p>
         {:else}
         {#key `${doc.id}:${savedPurpose}:${doc.pdf_sha256}:${doc.html_source_commitment}:${doc.html_materialization_revision}`}<PdfFieldDesigner documentID={doc.id} {recipientRevision}
           hasHTMLSource={doc.has_html_source === true} pdfSHA256={doc.pdf_sha256} htmlSourceCommitment={doc.html_source_commitment} {htmlSource}

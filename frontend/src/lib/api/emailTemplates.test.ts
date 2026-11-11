@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { emailTemplateKinds, editableEmailTemplateKinds, type EmailTemplateKind } from '../emailTemplateEditor';
-import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate } from './emailTemplates';
+import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate, getWorkspaceEmailPreferences, saveWorkspaceEmailPreferences } from './emailTemplates';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -27,7 +27,7 @@ describe('email template HTTP contract', () => {
     await expect(listEmailTemplates(new AbortController().signal)).rejects.toThrow();
   });
   test('builtin-only kinds reject save/custom preview before HTTP but permit native blank preview', async () => {
-    const calls = respond({ schema_version: 1, synthetic: true, revision: 0, subject: 'Built in', html: '', text: '', mandatory_content_preserved: true });
+    const calls = respond({ schema_version: 1, synthetic: true, revision: 0, subject: 'Built in', html: '', text: '', mandatory_content_preserved: true, locale: 'en' });
     await expect(saveEmailTemplate('email.voided', input, new AbortController().signal)).rejects.toThrow();
     await expect(previewEmailTemplate('email.voided', input, new AbortController().signal)).rejects.toThrow(); expect(calls).toHaveLength(0);
     await previewEmailTemplate('email.voided', { expected_revision: 0, subject_template: '', html_template: '', text_template: '' }, new AbortController().signal);
@@ -44,7 +44,7 @@ describe('email template HTTP contract', () => {
     expect(JSON.parse(String(calls[0].options.body))).toEqual(input);
   });
   test('preview is synthetic, revision-bound and performs no save or send request', async () => {
-    const calls = respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: '<p>Sample</p>', text: 'Sample', mandatory_content_preserved: true });
+    const calls = respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: '<p>Sample</p>', text: 'Sample', mandatory_content_preserved: true, locale: 'en' });
     await previewEmailTemplate('email.invite', input, new AbortController().signal);
     expect(calls).toHaveLength(1); expect(calls[0].path).toBe('/api/v1/email-templates/email.invite/preview'); expect(calls[0].options.method).toBe('POST');
     expect(JSON.parse(String(calls[0].options.body))).toEqual(input);
@@ -61,7 +61,7 @@ describe('email template HTTP contract', () => {
     respond(item('email.reminder', 3)); await expect(saveEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
     respond(item(undefined, 2)); await expect(saveEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
     for (const patch of [{ revision: 3 }, { synthetic: false }, { mandatory_content_preserved: false }]) {
-      respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: '', text: '', mandatory_content_preserved: true, ...patch });
+      respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: '', text: '', mandatory_content_preserved: true, locale: 'en', ...patch });
       await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
     }
   });
@@ -77,7 +77,7 @@ import { proposeEmailDesign } from './emailTemplates';
 const designSource = () => JSON.stringify(defaultEmailDesign());
 const proposal = () => ({ schema_version: 1, saved: false, kind: 'email.invite', expected_revision: 2,
   input: { ...input, design_json: designSource() },
-  preview: { schema_version: 1, synthetic: true, revision: 2, subject: 'Proposal', html: '<p>Native</p>', text: 'Native', mandatory_content_preserved: true } });
+  preview: { schema_version: 1, synthetic: true, revision: 2, subject: 'Proposal', html: '<p>Native</p>', text: 'Native', mandatory_content_preserved: true, locale: 'en' } });
 test('design omission is preserved and explicit empty design is forwarded for CAS clearing', async () => {
   for (const draft of [input, { ...input, design_json: '' }, { ...input, design_json: designSource() }]) {
     const calls = respond({ ...item(undefined, 3), ...draft, revision: 3 });
@@ -115,11 +115,56 @@ test('configured-workspace AI proposal is one explicit POST and rejects saved, f
   }
 });
 test('preview supports bounded complete branded HTML and rejects an oversized stream', async () => {
-  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(200000), text: '', mandatory_content_preserved: true });
+  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(200000), text: '', mandatory_content_preserved: true, locale: 'en' });
   expect((await previewEmailTemplate('email.invite', input, new AbortController().signal)).html.length).toBe(200000);
-  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(262145), text: '', mandatory_content_preserved: true });
+  respond({ schema_version: 1, synthetic: true, revision: 2, subject: 'Sample', html: 'a'.repeat(262145), text: '', mandatory_content_preserved: true, locale: 'en' });
   await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
   let cancelled = false;
   globalThis.fetch = (async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(4 * 1024 * 1024)); }, cancel() { cancelled = true; } }))) as typeof fetch;
   await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow('bound'); expect(cancelled).toBe(true);
+});
+
+
+const emailPreferences = (revision = 0, locale: 'en' | 'sv' = 'en') => ({ schema_version: 1 as const, org_id: '22222222-2222-4222-8222-222222222222', revision, locale, updated_at: revision ? '2030-01-01T12:00:00Z' : null });
+test('workspace language GET is owner-session scoped and does not save a browser-derived default', async () => {
+  const calls = respond(emailPreferences()); const signal = new AbortController().signal;
+  expect(await getWorkspaceEmailPreferences(signal)).toEqual(emailPreferences()); expect(calls).toHaveLength(1); expect(calls[0].path).toBe('/api/v1/email-preferences');
+  expect(calls[0].options).toMatchObject({ method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal }); expect(calls[0].options.body).toBeUndefined();
+});
+test('explicit preference PUT forwards only locale and observed CAS, including the same-value revision advance', async () => {
+  for (const locale of ['en', 'sv'] as const) {
+    const calls = respond(emailPreferences(1, locale)); await saveWorkspaceEmailPreferences(emailPreferences(), locale, new AbortController().signal);
+    expect(calls).toHaveLength(1); expect(calls[0].path).toBe('/api/v1/email-preferences'); expect(calls[0].options.method).toBe('PUT'); expect(JSON.parse(String(calls[0].options.body))).toEqual({ expected_revision: 0, locale });
+  }
+});
+test('preference responses bind exact organization, revision and selected language without raw server diagnostics', async () => {
+  for (const patch of [{ org_id: '33333333-3333-4333-8333-333333333333' }, { revision: 0 }, { locale: 'en' }, { updated_at: null }]) {
+    respond({ ...emailPreferences(1, 'sv'), ...patch }); await expect(saveWorkspaceEmailPreferences(emailPreferences(), 'sv', new AbortController().signal)).rejects.toThrow();
+  }
+  for (const status of [401, 403, 409, 503]) {
+    respond({ error: 'PRIVATE account and SMTP data' }, status);
+    try { await saveWorkspaceEmailPreferences(emailPreferences(), 'sv', new AbortController().signal); throw Error('Unexpected acceptance'); }
+    catch (error) { expect(error).toMatchObject({ status }); expect(String(error)).not.toContain('PRIVATE'); }
+  }
+  const calls = respond(emailPreferences(1)); await expect(saveWorkspaceEmailPreferences(emailPreferences(), 'SV' as any, new AbortController().signal)).rejects.toThrow(); expect(calls).toHaveLength(0);
+});
+test('newly editable kinds retain saved content while voided cannot acquire a stored edition', async () => {
+  for (const kind of ['email.declined', 'email.quota_warning_80'] as const) {
+    respond({ ...item(kind, 3), ...input, revision: 3 }); expect((await saveEmailTemplate(kind, input, new AbortController().signal)).kind).toBe(kind);
+  }
+});
+test('synthetic preview reports its real language and non-quota samples cannot silently switch locale', async () => {
+  const sample = { schema_version: 1, synthetic: true, revision: 2, subject: 'Literal subject', html: '<p>Literal prose</p>', text: 'Literal prose', mandatory_content_preserved: true };
+  for (const locale of ['en', 'sv']) { respond({ ...sample, locale }); expect((await previewEmailTemplate('email.quota_warning_80', input, new AbortController().signal)).locale).toBe(locale); }
+  for (const locale of [undefined, 'sv-SE', 'SV', null]) { respond({ ...sample, locale }); await expect(previewEmailTemplate('email.quota_warning_80', input, new AbortController().signal)).rejects.toThrow(); }
+  respond({ ...sample, locale: 'sv' }); await expect(previewEmailTemplate('email.invite', input, new AbortController().signal)).rejects.toThrow();
+});
+
+test('preference revision limits remain exact at the JavaScript safe-integer boundary', async () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  respond(emailPreferences(maximum, 'sv')); expect((await getWorkspaceEmailPreferences(new AbortController().signal)).revision).toBe(maximum);
+  const calls = respond(emailPreferences(maximum, 'sv'));
+  await saveWorkspaceEmailPreferences(emailPreferences(maximum - 1), 'sv', new AbortController().signal); expect(JSON.parse(String(calls[0].options.body)).expected_revision).toBe(maximum - 1);
+  const refused = respond(emailPreferences(maximum)); await expect(saveWorkspaceEmailPreferences(emailPreferences(maximum), 'sv', new AbortController().signal)).rejects.toThrow(); expect(refused).toHaveLength(0);
+  respond(emailPreferences(maximum + 1)); await expect(getWorkspaceEmailPreferences(new AbortController().signal)).rejects.toThrow();
 });

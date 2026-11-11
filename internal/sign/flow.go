@@ -40,6 +40,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/documentpackage"
+	"github.com/bright-interaction/hash/internal/emailtemplates"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/i18n"
@@ -1392,7 +1393,13 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 		if err != nil {
 			return fmt.Errorf("load decline notification sender: %w", err)
 		}
-		notificationMessages, err = e.prepareNotificationTx(ctx, q, lockedDoc.OrgID, dispatch.KindDeclined, sender.Email, dispatch.TemplateContext{
+		// Keep the locked document's explicit language and original sender
+		// destination. Only the saved immutable edition changes presentation;
+		// the recipient/token/notice/status transaction remains authoritative.
+		if !e.WorkRuntime.MatchesPoolV1(e.Pool) {
+			return pdfadmission.ErrWorkRuntimeV1
+		}
+		rendered, err := emailtemplates.PrepareNativeV1(ctx, e.WorkRuntime.WorkV1(), tx, lockedDoc.OrgID, dispatch.KindDeclined, dispatch.TemplateContext{
 			DocumentName:  lockedDoc.Name,
 			Locale:        lockedDoc.DefaultLocale,
 			SenderName:    sender.Name,
@@ -1403,6 +1410,17 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 		})
 		if err != nil {
 			return fmt.Errorf("prepare decline notification: %w", err)
+		}
+		defer rendered.CloseConsumerV1()
+		notificationMessages = []dispatch.Message{{
+			OrgID: lockedDoc.OrgID, To: sender.Email,
+			Subject: rendered.Subject, HTML: rendered.HTML, Text: rendered.Text,
+			ReplyTo: sender.Email, FromName: e.OrgName,
+		}}
+		if usesDurableEmailQueue(e.Mailer) {
+			if err := enqueueNotificationEmailsTx(ctx, q, notificationMessages); err != nil {
+				return fmt.Errorf("prepare decline notification: %w", err)
+			}
 		}
 	}
 	declinedPayload, err := responseAuditPayload(map[string]any{"reason": reason}, evidence.Notice)

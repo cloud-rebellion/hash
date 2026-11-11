@@ -52,11 +52,11 @@ func ServiceEmailKindV1(kind string) bool {
 	return false
 }
 
-// These kinds have real owned native producer integration. Catalog-only,
-// legacy raw-transaction and operator-worker notices keep their builtin copy.
+// These kinds have real owned native producer integration. M128 adds only
+// existing decline/quota producers; voided remains catalog-only and builtin.
 func ServiceEmailTemplateEditableKindV1(kind string) bool {
 	switch kind {
-	case KindInvite, KindReminder, KindCompletedSigner, KindCompletedSender, KindChangesRequested, KindNewComment:
+	case KindInvite, KindReminder, KindCompletedSigner, KindCompletedSender, KindChangesRequested, KindNewComment, KindDeclined, KindQuotaWarning80:
 		return true
 	default:
 		return false

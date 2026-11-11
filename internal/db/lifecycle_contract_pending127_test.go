@@ -11,11 +11,11 @@ import (
 
 func TestEmbeddedPending127KeepsWriterNineAndRequiresItsNamedFloor(t *testing.T) {
 	want, versions, err := EmbeddedMigrationsIdentity()
-	if err != nil || versions[len(versions)-1] != 127 {
-		t.Fatal("embedded tree does not end at M127", err)
+	if err != nil || versions[len(versions)-1] != 128 {
+		t.Fatal("embedded tree does not end at M128", err)
 	}
-	if version, digest, err := EmbeddedLifecycleIdentityV1(); err != nil || version != 9 || digest != want {
-		t.Fatal("M127 adds an undrained queue that older writers ignore and must keep writer contract 9", version, digest, err)
+	if version, digest, err := EmbeddedLifecycleIdentityV1(); err != nil || version != LifecycleContractVersionV1 || digest != want {
+		t.Fatal("actual tree lost its writer and migration identity", version, digest, err)
 	}
 	tail := []int64{115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127}
 	build := func() fstest.MapFS {
@@ -30,7 +30,7 @@ func TestEmbeddedPending127KeepsWriterNineAndRequiresItsNamedFloor(t *testing.T)
 		t.Fatal("M127 accepted without its named migration")
 	}
 	f["migrations/00127_pending_object_deletions.sql"] = f["migrations/00123_org_brand_profiles.sql"]
-	if err := requireReviewedLifecycleTreeV1(f, tail); err != nil {
+	if version, err := reviewedLifecycleContractVersionV1(f, tail); err != nil || version != 9 {
 		t.Fatal("reviewed M127 tree refused", err)
 	}
 	for _, mode := range []fs.FileMode{fs.ModeDir, fs.ModeSymlink} {

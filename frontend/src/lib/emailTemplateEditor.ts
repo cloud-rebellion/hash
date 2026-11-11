@@ -8,6 +8,7 @@ export const emailTemplateKinds = [
 export type EmailTemplateKind = typeof emailTemplateKinds[number];
 export const editableEmailTemplateKinds: readonly EmailTemplateKind[] = [
   'email.invite', 'email.reminder', 'email.completed_signer', 'email.completed_sender', 'email.changes_requested', 'email.new_comment',
+  'email.declined', 'email.quota_warning_80',
 ];
 export interface EmailTemplateFields {
   subject_template: string;
@@ -30,6 +31,7 @@ export interface EmailTemplateCatalog {
   preview_synthetic: true;
 }
 export interface EmailTemplatePreview {
+  locale: WorkspaceEmailLocale;
   schema_version: 1;
   synthetic: true;
   revision: number;
@@ -197,7 +199,7 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
     try {
       const result = await request.wait(ports.preview(selected.kind, draft, request.signal));
       if (!current(request.operation)) return false;
-      if (result.revision !== draft.expected_revision || !result.synthetic || !result.mandatory_content_preserved) {
+      if (result.revision !== draft.expected_revision || !result.synthetic || !result.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.locale)) {
         throw new Error('Unbound preview');
       }
       publish({ preview: result, previewOutdated: false });
@@ -234,7 +236,7 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
       if (!current(request.operation)) return false;
       if (result.schema_version !== 1 || result.saved !== false || result.kind !== selected.kind || result.expected_revision !== selected.revision
           || result.input.expected_revision !== selected.revision || result.preview.revision !== selected.revision
-          || !result.preview.synthetic || !result.preview.mandatory_content_preserved
+          || !result.preview.synthetic || !result.preview.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.preview.locale)
           || Object.keys(emailDraftProblems(result.input, state.catalog!.limits)).length) throw new Error('Unbound design proposal');
       publish({ proposal: result });
       return true;
@@ -253,8 +255,12 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
     return true;
   }
   function discardProposal() { if (!disposed && !state.busy) publish({ proposal: null }); }
+  function invalidateQuotaPreview() {
+    if (disposed || state.busy || state.selected?.kind !== 'email.quota_warning_80') return false;
+    publish({ preview: null, previewOutdated: false, proposal: null }); return true;
+  }
   function dispose() { disposed = true; sequence++; controller?.abort(); cleanupRequest?.(); cleanupRequest = null; controller = null; }
-  return { subscribe: store.subscribe, load, select, edit, cancel, preview, save, propose, acceptProposal, discardProposal, dispose };
+  return { subscribe: store.subscribe, load, select, edit, cancel, preview, save, propose, acceptProposal, discardProposal, invalidateQuotaPreview, dispose };
 }
 
 // No preview resources, scripts, forms, navigation or parent privileges. The UI
@@ -262,4 +268,108 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
 export function emailPreviewDocument(html: string): string {
   const policy = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-src 'none'; base-uri 'none'; form-action 'none'; navigate-to 'none'";
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="referrer" content="no-referrer"></head><body style="margin:0;background:white;color:#171717">${html}</body></html>`;
+}
+
+
+export type WorkspaceEmailLocale = 'en' | 'sv';
+export interface WorkspaceEmailPreferences {
+  schema_version: 1; org_id: string; revision: number; locale: WorkspaceEmailLocale; updated_at: string | null;
+}
+export const isWorkspaceEmailLocale = (value: unknown): value is WorkspaceEmailLocale => value === 'en' || value === 'sv';
+export function emailPreviewLocale(kind: EmailTemplateKind, value: unknown): value is WorkspaceEmailLocale {
+  return isWorkspaceEmailLocale(value) && (kind === 'email.quota_warning_80' || value === 'en');
+}
+export function checkedWorkspaceEmailPreferences(value: unknown): WorkspaceEmailPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Email preferences contract rejected');
+  const row = value as Record<string, unknown>;
+  const timestamp = typeof row.updated_at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(row.updated_at) && Number.isFinite(Date.parse(row.updated_at));
+  if (Object.keys(row).some(key => !['schema_version','org_id','revision','locale','updated_at'].includes(key)) || row.schema_version !== 1
+      || typeof row.org_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(row.org_id)
+      || row.org_id === '00000000-0000-0000-0000-000000000000' || !Number.isSafeInteger(row.revision) || Number(row.revision) < 0
+      || !isWorkspaceEmailLocale(row.locale) || (row.revision === 0 ? row.locale !== 'en' || row.updated_at !== null : !timestamp)) throw new Error('Email preferences contract rejected');
+  return row as unknown as WorkspaceEmailPreferences;
+}
+export interface WorkspaceEmailPreferencesPorts {
+  load(signal: AbortSignal): Promise<WorkspaceEmailPreferences>;
+  save(saved: WorkspaceEmailPreferences, locale: WorkspaceEmailLocale, signal: AbortSignal): Promise<WorkspaceEmailPreferences>;
+}
+export interface WorkspaceEmailPreferencesState {
+  saved: WorkspaceEmailPreferences | null; draftLocale: WorkspaceEmailLocale | ''; dirty: boolean;
+  busy: 'loading' | 'saving' | null; authorized: boolean; unconfirmed: boolean; error: string | null; notice: string | null;
+}
+class WorkspaceEmailScopeChanged extends Error {}
+// This owner setting has its own finite request and CAS. Neither UI language nor
+// unsaved template prose supplies its value, and reloading never discards either.
+export function createWorkspaceEmailPreferences(ports: WorkspaceEmailPreferencesPorts, options: { requestTimeoutMs?: number } = {}) {
+  const timeoutMs = options.requestTimeoutMs ?? 30000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new RangeError('Invalid request deadline');
+  let state: WorkspaceEmailPreferencesState = { saved: null, draftLocale: '', dirty: false, busy: null, authorized: false, unconfirmed: false, error: null, notice: null };
+  const store = writable(state); let disposed = false, sequence = 0, orgID: string | null = null;
+  let active: AbortController | null = null, release: (() => void) | null = null;
+  const publish = (patch: Partial<WorkspaceEmailPreferencesState>) => { state = { ...state, ...patch }; store.set(state); };
+  function begin(busy: 'loading' | 'saving') {
+    if (disposed || state.busy) return null;
+    const id = ++sequence, controller = new AbortController(); active = controller;
+    let timedOut = false, reject!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, fail) => { reject = fail; });
+    const abort = () => reject(timedOut ? new EmailRequestTimeout() : new Error('Request cancelled'));
+    controller.signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    release = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); };
+    publish({ busy, error: null, notice: null });
+    return { id, signal: controller.signal, wait: <T>(promise: Promise<T>) => Promise.race([promise, aborted]) };
+  }
+  const current = (id: number) => !disposed && id === sequence;
+  function finish(id: number) { if (current(id)) { release?.(); release = null; active = null; publish({ busy: null }); } }
+  function checked(value: WorkspaceEmailPreferences) {
+    const saved = checkedWorkspaceEmailPreferences(value);
+    if (orgID && saved.org_id !== orgID) throw new WorkspaceEmailScopeChanged();
+    if (state.saved && (saved.revision < state.saved.revision || saved.revision === state.saved.revision && (saved.locale !== state.saved.locale || saved.updated_at !== state.saved.updated_at))) throw new Error('Email preference snapshot regressed');
+    return saved;
+  }
+  function failed(error: unknown, saving: boolean) {
+    const status = Number((error as { status?: number })?.status) || 0;
+    const scopeChanged = error instanceof WorkspaceEmailScopeChanged;
+    const unknown = saving && (status === 0 || status >= 500);
+    publish({ authorized: scopeChanged || status === 401 || status === 403 ? false : state.authorized,
+      unconfirmed: state.unconfirmed || scopeChanged || status === 409 || unknown || (!saving && state.saved !== null),
+      error: scopeChanged ? 'The workspace changed. Reload this settings page before changing its email language.'
+        : status === 401 ? 'Your session has expired. Please sign in again.' : status === 403 ? 'Only workspace owners can change the email language.'
+        : status === 409 ? 'The saved email language changed. Load it before saving again.'
+        : unknown ? 'Saving the email language is unconfirmed. Load the saved value before another save.'
+        : saving ? 'The email language was not saved. Check your selection and try again.' : 'The saved email language could not be loaded. Try again.' });
+  }
+  async function load(externalBlocked = false) {
+    if (externalBlocked) return false;
+    const request = begin('loading'); if (!request) return false;
+    try {
+      const saved = checked(await request.wait(ports.load(request.signal))); if (!current(request.id)) return false;
+      orgID ??= saved.org_id;
+      const draftLocale = state.dirty ? state.draftLocale : saved.locale, dirty = draftLocale !== saved.locale;
+      const wasUnconfirmed = state.unconfirmed;
+      publish({ saved, draftLocale, dirty, unconfirmed: false, authorized: true,
+        notice: dirty ? 'The latest saved language is loaded. Review your unsaved selection.' : wasUnconfirmed ? 'The saved email language is confirmed. Already queued emails are unchanged.' : null }); return true;
+    } catch (error) { if (current(request.id)) failed(error, false); return false; }
+    finally { finish(request.id); }
+  }
+  function edit(value: unknown) {
+    if (disposed || state.busy || state.unconfirmed || !state.saved || state.saved.revision >= Number.MAX_SAFE_INTEGER || !state.authorized || !isWorkspaceEmailLocale(value)) return false;
+    publish({ draftLocale: value, dirty: value !== state.saved.locale, error: null, notice: null }); return true;
+  }
+  function cancel() {
+    if (disposed || state.busy || state.unconfirmed || !state.saved) return false;
+    publish({ draftLocale: state.saved.locale, dirty: false, error: null, notice: null }); return true;
+  }
+  async function save(externalBlocked = false) {
+    if (disposed || externalBlocked || state.busy || state.unconfirmed || !state.saved || state.saved.revision >= Number.MAX_SAFE_INTEGER || !state.authorized || !state.dirty || !isWorkspaceEmailLocale(state.draftLocale)) return false;
+    const before = state.saved, locale = state.draftLocale, request = begin('saving'); if (!request) return false;
+    try {
+      const saved = checked(await request.wait(ports.save(before, locale, request.signal))); if (!current(request.id)) return false;
+      if (saved.org_id !== before.org_id || saved.revision !== before.revision + 1 || saved.locale !== locale) throw new Error('Saved email preference identity rejected');
+      publish({ saved, draftLocale: saved.locale, dirty: false, unconfirmed: false, notice: 'Email language saved. Already queued emails and custom wording are unchanged.' }); return true;
+    } catch (error) { if (current(request.id)) failed(error, true); return false; }
+    finally { finish(request.id); }
+  }
+  function dispose() { if (!disposed) { disposed = true; sequence++; active?.abort(); release?.(); active = null; release = null; } }
+  return { subscribe: store.subscribe, load, edit, cancel, save, dispose };
 }

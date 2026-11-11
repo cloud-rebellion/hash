@@ -28,26 +28,51 @@ import (
 // Version9 also owns M124 in-place draft edits: forward template moves and the
 // append-only PDF revision/review history. An older writer would not honour the
 // send-time review gate, so it must not resume a database that holds those rows.
-const LifecycleContractVersionV1 = 9
+// Version10 owns M128's frozen English/Swedish package-incorporation versions
+// and response validation, as well as workspace email preferences and editions.
+// An older writer does not understand Swedish package consent. The release must
+// quiesce all old writers before migrating; this identity is an admission and
+// rollback contract, not a database-session fence for already-running SQL.
+const LifecycleContractVersionV1 = 10
 
 func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err error) {
 	digest, versions, err := EmbeddedMigrationsIdentity()
 	if err != nil {
 		return 0, "", err
 	}
-	if err := requireReviewedLifecycleTreeV1(embeddedMigrations, versions); err != nil {
+	reviewed, err := reviewedLifecycleContractVersionV1(embeddedMigrations, versions)
+	if err != nil {
 		return 0, "", err
+	}
+	if reviewed != LifecycleContractVersionV1 {
+		return 0, "", fmt.Errorf("embedded lifecycle tree does not match this writer contract")
 	}
 	return LifecycleContractVersionV1, digest, nil
 }
 
+// Reviewed historical cohorts keep their original writer identity. They do not
+// inherit the current binary's version when a later named migration is added.
+func reviewedLifecycleContractVersionV1(migrations fs.FS, versions []int64) (int, error) {
+	if err := requireReviewedLifecycleTreeV1(migrations, versions); err != nil {
+		return 0, err
+	}
+	switch highest := versions[len(versions)-1]; {
+	case highest >= 128:
+		return 10, nil
+	case highest >= 124:
+		return 9, nil
+	default:
+		return 8, nil
+	}
+}
+
 func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
-	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122/M123/M124/M125/M126/M127 migration tree")
-	if len(versions) == 0 || len(versions) > 127 {
+	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122/M123/M124/M125/M126/M127/M128 migration tree")
+	if len(versions) == 0 || len(versions) > 128 {
 		return unsupported
 	}
 	highest := versions[len(versions)-1]
-	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 && highest != 123 && highest != 124 && highest != 125 && highest != 126 && highest != 127 {
+	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 && highest != 123 && highest != 124 && highest != 125 && highest != 126 && highest != 127 && highest != 128 {
 		return unsupported
 	}
 	seen := make(map[int64]bool, len(versions))
@@ -87,6 +112,9 @@ func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
 	}
 	if highest >= 127 {
 		names = append(names, "00127_pending_object_deletions.sql")
+	}
+	if highest >= 128 {
+		names = append(names, "00128_workspace_email_and_signing_languages.sql")
 	}
 	for index, name := range names {
 		info, err := fs.Stat(migrations, "migrations/"+name)

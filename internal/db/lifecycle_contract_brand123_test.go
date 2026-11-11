@@ -14,20 +14,20 @@ func brand123LifecycleFiles() fstest.MapFS {
 	return f
 }
 
-func TestEmbeddedBrand123RetainsWriterEightAndActualMigrationIdentity(t *testing.T) {
+func TestEmbeddedBrand123KeepsActualMigrationIdentity(t *testing.T) {
 	want, versions, err := EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) != 127 || versions[len(versions)-1] != 127 {
+	if err != nil || len(versions) != 128 || versions[len(versions)-1] != 128 {
 		t.Fatal("actual embedded brand migration tree differs", versions, err)
 	}
 	version, digest, err := EmbeddedLifecycleIdentityV1()
-	if err != nil || version != 9 || digest != want {
-		t.Fatal("named actual brand sidecars changed/refused the existing writer contract", version, digest, err)
+	if err != nil || version != LifecycleContractVersionV1 || digest != want {
+		t.Fatal("actual tree lost its writer and migration identity", version, digest, err)
 	}
 }
 
 func TestReviewedBrand123KeepsNamedFloorsAndFutureRefusals(t *testing.T) {
 	tail := []int64{115, 116, 117, 118, 119, 120, 121, 122, 123}
-	if err := requireReviewedLifecycleTreeV1(brand123LifecycleFiles(), tail); err != nil {
+	if version, err := reviewedLifecycleContractVersionV1(brand123LifecycleFiles(), tail); err != nil || version != 8 {
 		t.Fatal("reviewed named brand tail refused", err)
 	}
 	for name, versions := range map[string][]int64{

@@ -2,14 +2,15 @@
   import { onMount, untrack } from 'svelte';
   import { ArrowLeft, Check, ChevronRight, Code2, Eye, FileText, Mail, RotateCcw, Save, ShieldCheck, Sparkles, Palette, Upload, X } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
-  import { createEmailTemplateEditor, canEditEmailTemplate, emailDraftProblems, emailFieldBytes, emailPreviewDocument, type EmailTemplateKind, type EmailField } from '$lib/emailTemplateEditor';
-  import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate, proposeEmailDesign } from '$lib/api/emailTemplates';
+  import { createEmailTemplateEditor, createWorkspaceEmailPreferences, canEditEmailTemplate, emailDraftProblems, emailFieldBytes, emailPreviewDocument, type EmailTemplateKind, type EmailField } from '$lib/emailTemplateEditor';
+  import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate, proposeEmailDesign, getWorkspaceEmailPreferences, saveWorkspaceEmailPreferences } from '$lib/api/emailTemplates';
 
   import { emailDesignDraft, localEmailLogo, type EmailDesign } from '$lib/emailDesign';
   import EmailTemplateSampleSend from './EmailTemplateSampleSend.svelte';
 
-  let { controller }: { controller?: ReturnType<typeof createEmailTemplateEditor> } = $props();
+  let { controller, preferenceController }: { controller?: ReturnType<typeof createEmailTemplateEditor>; preferenceController?: ReturnType<typeof createWorkspaceEmailPreferences> } = $props();
   const editor = untrack(() => controller) ?? createEmailTemplateEditor({ load: listEmailTemplates, preview: previewEmailTemplate, save: saveEmailTemplate, propose: proposeEmailDesign });
+  const preferences = untrack(() => preferenceController) ?? createWorkspaceEmailPreferences({ load: getWorkspaceEmailPreferences, save: saveWorkspaceEmailPreferences });
   let format = $state<'html' | 'text'>('html');
   const info: Record<EmailTemplateKind, { name: string; description: string }> = {
     'email.invite': { name: 'Signature invitation', description: 'When a recipient is invited to review and sign.' },
@@ -19,7 +20,7 @@
     'email.declined': { name: 'Signature declined', description: 'When a recipient declines the document.' },
     'email.changes_requested': { name: 'Changes requested', description: 'When a recipient asks the sender for changes.' },
     'email.new_comment': { name: 'New comment', description: 'A notification about a document comment.' },
-    'email.voided': { name: 'Document voided', description: 'When a sent document is voided.' },
+    'email.voided': { name: 'Document voided', description: 'Catalog preview for voided documents.' },
     'email.quota_warning_80': { name: 'Usage warning', description: 'When the workspace approaches its plan limit.' },
   };
   const selectedInfo = $derived($editor.selected ? info[$editor.selected.kind] : null);
@@ -31,12 +32,30 @@
   let alive = true;
   const design = $derived(emailDesignDraft($editor.draft.design_json));
   const activePreview = $derived($editor.proposal?.preview ?? $editor.preview);
-  const busy = $derived($editor.busy !== null || logoBusy);
+  const languageBlocked = $derived($editor.busy !== null || logoBusy || ($editor.selected?.kind === 'email.quota_warning_80' && !!$editor.proposal));
+  const busy = $derived($editor.busy !== null || logoBusy || $preferences.busy !== null);
+  const languageLocked = $derived(languageBlocked || $preferences.busy !== null || !$preferences.authorized || !$preferences.saved || $preferences.unconfirmed || ($preferences.saved?.revision ?? 0) >= Number.MAX_SAFE_INTEGER);
+  const quotaLanguageBlocked = $derived($editor.selected?.kind === 'email.quota_warning_80' && (!$preferences.saved || !$preferences.authorized || $preferences.dirty || $preferences.unconfirmed));
   const locked = $derived(busy || !$editor.authorized);
   const editable = $derived(canEditEmailTemplate($editor.selected));
   const editorLocked = $derived(locked || !editable);
   const previewHTML = $derived(activePreview ? emailPreviewDocument(activePreview.html) : '');
-  onMount(() => { void editor.load(); return () => { alive = false; editor.dispose(); }; });
+  onMount(() => { void editor.load(); void preferences.load(); return () => { alive = false; editor.dispose(); preferences.dispose(); }; });
+
+  async function loadEmailLanguage() {
+    if (!alive || languageBlocked) return false;
+    const loaded = await preferences.load();
+    if (!alive) return false;
+    if (loaded) editor.invalidateQuotaPreview();
+    return loaded;
+  }
+  async function saveEmailLanguage() {
+    if (!alive || languageBlocked) return false;
+    const saved = await preferences.save();
+    if (!alive) return false;
+    if (saved || $preferences.unconfirmed) editor.invalidateQuotaPreview();
+    return saved;
+  }
 
   function resetToBuiltIn() {
     if (editorLocked) return;
@@ -80,6 +99,23 @@
     <p>{$ui('Design, preview and test your emails. Configure this workspace’s own sender and SMTP server in Delivery settings.')} <a href="/settings/delivery" class="underline underline-offset-4">{$ui('Email delivery')}</a></p>
   </div>
 
+  <section class="card overflow-hidden" aria-labelledby="workspace-email-language-heading">
+    <div class="border-b border-border bg-bg-elevated px-5 py-4"><h2 id="workspace-email-language-heading" class="text-base font-medium">{$ui('Workspace email language')}</h2><p class="mt-2 max-w-3xl text-xs leading-relaxed text-text-secondary">{$ui('Usage warnings use this saved language. Sign-in and document emails keep their existing language choices. Custom wording is never translated automatically.')}</p></div>
+    <form class="space-y-3 p-5" onsubmit={(event) => { event.preventDefault(); void saveEmailLanguage(); }}>
+      {#if $preferences.busy === 'loading'}<p class="text-sm text-text-secondary" role="status">{$ui('Loading saved email language…')}</p>{/if}
+      {#if $preferences.error}<p class="text-sm text-danger" role="alert">{$ui($preferences.error)}</p>{/if}
+      {#if $preferences.notice}<p class="text-sm text-text-secondary" role="status">{$ui($preferences.notice)}</p>{/if}
+      <div class="flex flex-wrap items-end gap-3"><label for="workspace-email-language" class="block text-xs font-medium">{$ui('Language')}<select id="workspace-email-language" class="mt-2 block min-w-40 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-sm" value={$preferences.draftLocale} disabled={languageLocked} onchange={(event) => preferences.edit(event.currentTarget.value)}><option value="" disabled>{$ui('Choose a language')}</option><option value="en">{$ui('English')}</option><option value="sv">{$ui('Swedish')}</option></select></label>
+        <button type="submit" class="btn btn-primary" disabled={languageLocked || !$preferences.dirty} aria-busy={$preferences.busy === 'saving'}><Save class="size-3.5" />{$ui($preferences.busy === 'saving' ? 'Saving…' : 'Save email language')}</button>
+        <button type="button" class="btn btn-secondary" disabled={languageLocked || !$preferences.dirty} onclick={() => preferences.cancel()}>{$ui('Cancel')}</button>
+        <button type="button" class="btn btn-secondary" disabled={languageBlocked || $preferences.busy !== null} onclick={() => { void loadEmailLanguage(); }}><RotateCcw class="size-3.5" />{$ui('Load saved language')}</button>
+      </div>
+      {#if $preferences.saved}<p class="text-xs text-text-secondary">{$ui('Saved language: {language}', { language: $ui($preferences.saved.locale === 'sv' ? 'Swedish' : 'English') })}{#if $preferences.dirty} · {$ui('Unsaved changes')}{/if}</p>{/if}
+      {#if $preferences.saved && $preferences.saved.revision >= Number.MAX_SAFE_INTEGER}<p class="text-xs text-warning" role="note">{$ui('The saved email language has reached its revision limit.')}</p>{/if}
+      {#if $editor.selected?.kind === 'email.quota_warning_80' && $editor.proposal}<p class="text-xs text-text-secondary">{$ui('Accept or discard the AI proposal before changing the workspace email language.')}</p>{/if}
+    </form>
+  </section>
+
   {#if $editor.error}
     <div class="rounded-xl border border-danger/40 bg-danger/5 p-4 text-sm" role="alert">
       <p class="text-danger">{$ui($editor.error)}</p>
@@ -112,7 +148,7 @@
           <div><h2 id="email-editor-heading" class="text-base font-medium text-text-primary">{$ui(selectedInfo.name)}</h2><p class="mt-1 text-xs text-text-secondary">{$ui(selectedInfo.description)}</p></div>
           <span class="rounded-full border border-border px-2.5 py-1 text-[10px] text-text-secondary">{$ui($editor.dirty ? 'Unsaved changes' : 'Up to date')}</span>
         </div>
-        {#if !editable}<p class="border-b border-border bg-bg-elevated px-5 py-3 text-xs leading-relaxed text-text-secondary" role="note">{$ui('This message uses built-in content. Customization is unavailable. You can preview its standard content.')}</p>{/if}
+        {#if !editable}<p class="border-b border-border bg-bg-elevated px-5 py-3 text-xs leading-relaxed text-text-secondary" role="note">{$ui($editor.selected.kind === 'email.voided' ? 'Catalog preview only. Voiding a document does not send this email.' : 'This message uses built-in content. Customization is unavailable. You can preview its standard content.')}</p>{/if}
         <div class="grid xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.9fr)]">
           <div class="min-w-0 space-y-5 p-5">
             <label class="block" for="email-template-subject">
@@ -156,7 +192,7 @@
                 <p class="text-xs leading-relaxed text-text-secondary">{$ui('Uses your enabled workspace AI provider. Describe the style and content; review the proposal before adding it to your draft. Nothing is saved or sent automatically.')}</p>
                 <label for="email-design-prompt" class="sr-only">{$ui('Describe your email design')}</label>
                 <textarea id="email-design-prompt" rows="3" class="w-full rounded-lg border border-border bg-bg-surface p-3 text-xs leading-relaxed text-text-primary" placeholder={$ui('Describe your email design')} value={prompt} disabled={editorLocked} oninput={(event) => prompt = event.currentTarget.value}></textarea>
-                <div class="flex flex-wrap items-center justify-between gap-2"><a href="/settings/ai" class="text-xs text-text-secondary underline underline-offset-4">{$ui('Workspace AI settings')}</a><button type="button" class="btn btn-secondary" disabled={editorLocked || invalid || $editor.conflict || !prompt.trim() || emailFieldBytes(prompt) > 4096} aria-busy={$editor.busy === 'proposing'} onclick={() => editor.propose(prompt)}><Sparkles class="size-3.5" /> {$ui($editor.busy === 'proposing' ? 'Creating proposal…' : 'Create design proposal')}</button></div>
+                <div class="flex flex-wrap items-center justify-between gap-2"><a href="/settings/ai" class="text-xs text-text-secondary underline underline-offset-4">{$ui('Workspace AI settings')}</a><button type="button" class="btn btn-secondary" disabled={editorLocked || quotaLanguageBlocked || invalid || $editor.conflict || !prompt.trim() || emailFieldBytes(prompt) > 4096} aria-busy={$editor.busy === 'proposing'} onclick={() => editor.propose(prompt)}><Sparkles class="size-3.5" /> {$ui($editor.busy === 'proposing' ? 'Creating proposal…' : 'Create design proposal')}</button></div>
                 {#if $editor.proposal}
                   <div class="space-y-3 border-t border-border pt-3" role="status"><p class="text-xs font-medium text-text-primary">{$ui('Review AI proposal')}</p><p class="text-xs leading-relaxed text-text-secondary">{$ui('The preview shows the proposed email. Accepting replaces this unsaved subject, introduction and design. Save changes separately after review.')}</p><dl class="space-y-2 text-xs"><dt class="text-text-muted">{$ui('Subject')}</dt><dd class="break-words text-text-primary">{$editor.proposal.input.subject_template || $ui('Built-in subject')}</dd><dt class="text-text-muted">{$ui('HTML introduction')}</dt><dd><pre class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-text-secondary">{$editor.proposal.input.html_template}</pre></dd><dt class="text-text-muted">{$ui('Plain text introduction')}</dt><dd><pre class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-text-secondary">{$editor.proposal.input.text_template}</pre></dd></dl><div class="flex flex-wrap gap-2"><button type="button" class="btn btn-primary" disabled={editorLocked || $editor.conflict} onclick={() => editor.acceptProposal()}>{$ui('Use proposal in draft')}</button><button type="button" class="btn btn-secondary" disabled={busy} onclick={() => editor.discardProposal()}>{$ui('Discard proposal')}</button></div></div>
                 {/if}
@@ -186,13 +222,15 @@
             </div>
             <div class="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
               <button type="button" class="text-xs text-text-secondary underline decoration-border underline-offset-4 hover:text-text-primary disabled:no-underline" disabled={editorLocked || (!$editor.draft.subject_template && !$editor.draft.html_template && !$editor.draft.text_template)} onclick={resetToBuiltIn}>{$ui('Use built-in content')}</button>
-              <button type="button" class="btn btn-secondary" disabled={locked || invalid || $editor.conflict || !!$editor.proposal} onclick={() => editor.preview()} aria-busy={$editor.busy === 'previewing'}><Eye class="size-3.5" /> {$ui($editor.busy === 'previewing' ? 'Generating preview…' : 'Generate preview')}</button>
+              <button type="button" class="btn btn-secondary" disabled={locked || quotaLanguageBlocked || invalid || $editor.conflict || !!$editor.proposal} onclick={() => editor.preview()} aria-busy={$editor.busy === 'previewing'}><Eye class="size-3.5" /> {$ui($editor.busy === 'previewing' ? 'Generating preview…' : 'Generate preview')}</button>
             </div>
           </div>
 
           <aside class="min-w-0 border-t border-border bg-bg-elevated p-5 xl:border-l xl:border-t-0" aria-label={$ui('Email preview')}>
             <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-xs font-medium text-text-primary">{$ui('Preview')}</h3><span class="rounded-full border border-border px-2 py-1 text-[9px] uppercase tracking-wider text-text-muted">{$ui($editor.proposal ? 'AI proposal · not saved' : 'Sample data')}</span></div>
             <p class="mb-4 text-xs leading-relaxed text-text-secondary">{$ui('No email is sent. Action links in this preview cannot be used.')}</p>
+            <p class="mb-4 text-xs leading-relaxed text-text-secondary">{$ui($editor.selected.kind === 'email.quota_warning_80' ? 'Usage-warning samples use the saved workspace email language.' : 'This sample uses English. Actual document emails use their saved document or recipient language.')}</p>
+            {#if quotaLanguageBlocked}<p class="mb-3 text-xs text-warning" role="note">{$ui('Save or reconcile the workspace email language before previewing or testing this usage warning.')}</p>{/if}
             {#if activePreview}
               {#if !$editor.proposal && $editor.previewOutdated}<p class="mb-3 text-xs text-warning" role="status">{$ui('This preview is out of date. Generate it again after editing.')}</p>{/if}
               <div class="overflow-hidden rounded-lg border border-border bg-white text-neutral-900" class:preview-outdated={!$editor.proposal && $editor.previewOutdated}>
@@ -200,11 +238,12 @@
                 {#if format === 'html'}<div inert><iframe title={$ui('Synthetic HTML email preview')} srcdoc={previewHTML} sandbox="" referrerpolicy="no-referrer" tabindex="-1" class="h-[430px] w-full border-0 pointer-events-none" aria-hidden="true"></iframe></div>
                 {:else}<pre class="max-h-[430px] overflow-auto whitespace-pre-wrap break-words p-4 font-sans text-xs leading-relaxed">{activePreview.text}</pre>{/if}
               </div>
+              <p class="mt-3 text-xs text-text-secondary">{$ui('Preview language: {language}', { language: $ui(activePreview.locale === 'sv' ? 'Swedish' : 'English') })}</p>
               <p class="mt-3 flex items-center gap-1.5 text-[10px] text-text-muted"><ShieldCheck class="size-3" /> {$ui('Required content preserved · revision {revision}', { revision: activePreview.revision })}</p>
             {:else}
               <div class="flex min-h-[330px] flex-col items-center justify-center rounded-lg border border-dashed border-border px-6 text-center"><Mail class="mb-3 size-7 stroke-1 text-text-muted" /><p class="text-sm font-medium text-text-primary">{$ui('Review before saving')}</p><p class="mt-2 max-w-xs text-xs leading-relaxed text-text-secondary">{$ui('Generate a sample to see your design and introduction together with Hash’s required content.')}</p></div>
             {/if}
-            <div class="mt-5">{#key $editor.selected.kind + ':' + $editor.selected.revision}<EmailTemplateSampleSend kind={$editor.selected.kind} revision={$editor.selected.revision} disabled={busy || $editor.dirty || !$editor.authorized || $editor.conflict} />{/key}</div>
+            <div class="mt-5">{#key $editor.selected.kind + ':' + $editor.selected.revision}<EmailTemplateSampleSend kind={$editor.selected.kind} revision={$editor.selected.revision} disabled={busy || quotaLanguageBlocked || $editor.dirty || !$editor.authorized || $editor.conflict} />{/key}</div>
           </aside>
         </div>
         <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-bg-elevated px-5 py-4">

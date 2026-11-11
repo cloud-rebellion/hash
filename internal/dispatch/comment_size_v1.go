@@ -11,7 +11,8 @@ var errCommentNotificationSizeV1 = errors.New("comment notification size overflo
 
 // Bounds ONE actual unchanged KindNewComment output by concrete components.
 // This is logical work/output accounting, not allocator/RSS or SQL authority.
-// Original Render still decides URL policy. Both templates use html/template.
+// Original Render still decides URL policy. The text bound conservatively
+// retains the HTML escape factor even though plain text preserves literal data.
 func CommentNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlBytes, textBytes int64, err error) {
 	subjectBytes, err = addCommentNotificationBytesV1(int64(len(commentSubjectPrefixV1(ctx.Locale))), int64(len(ctx.DocumentName)), 1)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/documentpackage"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -132,7 +133,7 @@ func (w *ApplicationHTMLSendWorkV1) CreatePackageIntentV1(call context.Context, 
 	if err != nil {
 		return out, err
 	}
-	if row == nil || row.AttemptID != id || row.OrgID != c.OrgID || row.DocumentID != c.DocumentID || row.PackageID != c.PackageID || row.CaptureRevision != c.Revision || row.PreviousRevision != c.PreviousRevision || row.CapturedDraftGeneration != c.DraftGeneration || !applicationStampEqualV1(row.CapturedRootUpdatedAt, d.UpdatedAt) || row.ManifestBytes != c.ManifestBytes || row.MemberCount != c.MemberCount || row.PdfBytes != c.PDFBytes || row.PdfPages != c.PDFPages || !bytes.Equal(row.ManifestSha256, c.CanonicalSHA256[:]) || !bytes.Equal(row.LegalCommitmentSha256, c.CommitmentSHA256[:]) || row.ActorUserID != w.sourceActor.ID || row.TerminalOutcome.Valid || row.TerminalAt.Valid || row.RetentionStartedAt.Valid || row.RetentionCompletedAt.Valid || !applicationStampV1(row.CreatedAt) || !applicationStampV1(row.Article13NoticeEpochAt) || !applicationStampV1(row.RetainUntil) || !row.RetainUntil.Time.Equal(storage.EvidenceRetentionDeadline(row.Article13NoticeEpochAt.Time, article13.RetentionYearsV1)) {
+	if row == nil || row.IncorporationVersion != documentpackage.IncorporationCopyForLocaleV1(d.DefaultLocale).Version || row.AttemptID != id || row.OrgID != c.OrgID || row.DocumentID != c.DocumentID || row.PackageID != c.PackageID || row.CaptureRevision != c.Revision || row.PreviousRevision != c.PreviousRevision || row.CapturedDraftGeneration != c.DraftGeneration || !applicationStampEqualV1(row.CapturedRootUpdatedAt, d.UpdatedAt) || row.ManifestBytes != c.ManifestBytes || row.MemberCount != c.MemberCount || row.PdfBytes != c.PDFBytes || row.PdfPages != c.PDFPages || !bytes.Equal(row.ManifestSha256, c.CanonicalSHA256[:]) || !bytes.Equal(row.LegalCommitmentSha256, c.CommitmentSHA256[:]) || row.ActorUserID != w.sourceActor.ID || row.TerminalOutcome.Valid || row.TerminalAt.Valid || row.RetentionStartedAt.Valid || row.RetentionCompletedAt.Valid || !applicationStampV1(row.CreatedAt) || !applicationStampV1(row.Article13NoticeEpochAt) || !applicationStampV1(row.RetainUntil) || !row.RetainUntil.Time.Equal(storage.EvidenceRetentionDeadline(row.Article13NoticeEpochAt.Time, article13.RetentionYearsV1)) {
 		return out, ErrHTMLSendPackageIntentV1
 	}
 	intent, err := w.queries.CreateDocumentPackageSealingIntentV1(call, generated.CreateDocumentPackageSealingIntentV1Params{AttemptID: id, OrgID: c.OrgID, DocumentID: c.DocumentID, ActorIp: a.IP, Via: a.Via, Tool: a.Tool})

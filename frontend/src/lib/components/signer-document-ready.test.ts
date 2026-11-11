@@ -3,7 +3,10 @@ import { signerCeremonyKey, signerPDFScopeKey, validateSignerPDFObservation } fr
 import { createSignerViewRecorder } from '../signerView';
 import { completionArtifactLinks } from '../completionArtifacts';
 import { checkedSignerPackage, signerPackageResponse } from '../signerPackage';
+import { signerPackageIncorporations } from '../signerPackageIncorporation';
 import { postWithLookupRetry, isLookupRefusalBody } from '../signerLookupRetry';
+import { get } from 'svelte/store';
+import { locale, preferLocale } from '../i18n';
 
 const source = await Bun.file(new URL('../../routes/sign/[token]/+page.svelte', import.meta.url)).text();
 const transpiler = new Bun.Transpiler({ loader: 'ts' });
@@ -30,7 +33,7 @@ function fixture(kind = 'pdf', packageObserved = true) {
     signError: null, loadError: null, documentHTML: '',
     signerCeremonyKey, signerPDFScopeKey, validateSignerPDFObservation, completionArtifactLinks, postWithLookupRetry, isLookupRefusalBody, signAttempt: 0, $t: (k: string) => 'T:' + k,
     signerNoticeHeaders: (digest: string, acknowledged: boolean) => ({ digest, acknowledged }),
-    setLocale() {}, loadComments() {}, synchronizeCommentScope() {}, tick: async () => {},
+    preferLocale() {}, loadComments() {}, synchronizeCommentScope() {}, tick: async () => {},
     fetch: (url: string, options: unknown) => new Promise((resolve, reject) => calls.push({ url, options, resolve, reject }))
   };
   const gateFunctions = source.slice(source.indexOf('  function currentCeremonyKey()'), source.indexOf('  $effect.pre('));
@@ -128,7 +131,7 @@ test('only current whole-package consent dispatches the exact observed package r
       manifest_sha256: 'b'.repeat(64), legal_commitment_sha256: 'c'.repeat(64),
       main: { title: 'Main agreement', category: '', pdf_sha256: 'a'.repeat(64), bytes: 100, pages: 1 },
       annexes: [{ title: 'DPA', category: 'Data protection', pdf_sha256: 'd'.repeat(64), bytes: 80, pages: 1 }],
-      incorporation: { version: 'hash-package-incorporation-v1', sha256: 'e'.repeat(64), text: 'Synthetic package consent copy' }
+      incorporation: { version: 'hash-package-incorporation-v1', sha256: signerPackageIncorporations['hash-package-incorporation-v1'].sha256, text: signerPackageIncorporations['hash-package-incorporation-v1'].text }
     } }, scope);
     if (!value) throw new Error('Expected the observed package fixture');
     const response = signerPackageResponse(value), expectedResponse = { ...response };
@@ -609,4 +612,103 @@ test('a refused signer lookup shows translated text, not raw JSON, and keeps the
   f.calls[2].resolve(lookupRefusalResponse());
   await pending;
   expect(f.env.signError).toBe('T:adopt.lookupUnavailable');
+});
+
+test('actual validated signer context selects only server EN/SV interface without reading or persisting browser preferences', async () => {
+  const previous = get(locale), descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  let reads = 0, writes = 0;
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => { reads++; return 'de'; }, setItem: () => { writes++; } } });
+  try {
+    for (const selected of ['sv', 'en', 'de', 'sv-SE', undefined, null]) {
+      locale.set('de');
+      const f = fixture('pdf', false);
+      f.env.preferLocale = preferLocale;
+      f.env.noticeAcknowledged = false;
+      const englishNotice = { title: 'Canonical English privacy notice' };
+      const loaded = { ...f.env.ctx, recipient: { ...f.env.ctx.recipient, locale: selected }, privacy: { ...f.env.ctx.privacy, copy: englishNotice } };
+      const pending = f.load('original-token', new AbortController().signal);
+      f.calls[0].resolve({ ok: true, json: async () => loaded });
+      await pending;
+      expect(get(locale)).toBe(selected === 'sv' ? 'sv' : 'en');
+      expect(f.env.ctx.privacy.copy).toEqual(englishNotice);
+      expect(f.env.ctx.privacy.notice_digest).toBe('current-notice');
+      expect(f.env.noticeAcknowledged).toBe(false);
+      expect(reads).toBe(0); expect(writes).toBe(0);
+    }
+  } finally {
+    locale.set(previous);
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else Reflect.deleteProperty(globalThis, 'localStorage');
+  }
+});
+
+test('actual token-context reset returns the interface to English without persisting or granting new proof', () => {
+  const previous = get(locale), descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  let writes = 0;
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'sv', setItem: () => { writes++; } } });
+  try {
+    const f = fixture('pdf', false);
+    f.env.preferLocale = preferLocale;
+    f.env.invalidateCommentScope = () => {};
+    const start = source.indexOf('  function resetRouteState()'), end = source.indexOf('  async function load(', start);
+    const resetCode = source.slice(start, end);
+    // Give the existing callback its full ordinary state namespace; no source
+    // authority, token replacement, field response or admission is fabricated.
+    for (const match of resetCode.matchAll(/^\s+([A-Za-z_$][\w$]*)\s*(?:=|\+=)/gm)) {
+      if (!(match[1] in f.env)) f.env[match[1]] = undefined;
+    }
+    const reset = bind('  function resetRouteState()', '  async function load(', 'resetRouteState', f.env);
+    locale.set('sv');
+    reset();
+    expect(get(locale)).toBe('en'); expect(writes).toBe(0);
+    expect(f.env.ctx).toBeNull(); expect(f.env.noticeAcknowledged).toBe(false);
+    expect(f.env.documentReady).toBe(false); expect(f.env.fieldsFilled).toBe(false);
+    expect(f.calls).toHaveLength(0);
+    expect(source).not.toContain('setLocale(');
+  } finally {
+    locale.set(previous);
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else Reflect.deleteProperty(globalThis, 'localStorage');
+  }
+});
+
+
+test('canonical privacy language metadata is closed while retained missing metadata remains English-compatible', async () => {
+  for (const copyLocale of [undefined, 'en', 'sv', null, 'sv-SE', 'de', 1]) {
+    const f = fixture('pdf', false);
+    const notice = { title: copyLocale === 'sv' ? 'Oförändrade serverord' : 'Unchanged server wording' };
+    const loaded = { ...f.env.ctx, privacy: { ...f.env.ctx.privacy, copy_locale: copyLocale, copy: notice } };
+    f.env.ctx = null; f.env.noticeAcknowledged = false; f.env.fieldsFilled = false;
+    const pending = f.load('original-token', new AbortController().signal);
+    f.calls[0].resolve({ ok: true, json: async () => loaded }); await pending;
+    if (copyLocale === undefined || copyLocale === 'en' || copyLocale === 'sv') {
+      expect(f.env.ctx.privacy.copy).toEqual(notice);
+      expect(f.env.ctx.privacy.notice_digest).toBe('current-notice');
+      expect(f.env.ctx.privacy.copy_locale).toBe(copyLocale);
+      expect(f.env.loadError).toBeNull();
+    } else {
+      expect(f.env.ctx).toBeNull(); expect(f.env.fieldsFilled).toBe(false);
+      expect(f.env.loadError).toBe('T:sign.noticeUnavailable');
+    }
+    expect(f.env.noticeAcknowledged).toBe(false); expect(f.calls).toHaveLength(1);
+  }
+});
+
+test('package language callback stays current, independent of consent bytes, and cannot duplicate initial comment loading', () => {
+  const f = fixture('pdf', false), key = f.env.currentCeremonyKey(), epoch = f.env.ceremonyEpoch;
+  f.env.viewState.confirmed = true; let reads = 0;
+  f.env.loadComments = () => { reads++; };
+  const response = { incorporation_version: 'hash-package-incorporation-v1', consent: true };
+  f.env.updatePackageReview({ key, ready: true, settled: true, response, canonicalLocale: 'en' }, epoch);
+  expect(f.env.packageReview.canonicalLocale).toBe('en'); expect(reads).toBe(1);
+  expect(f.env.packageReview.response).toEqual(response);
+  expect(f.env.packageReview.response).not.toHaveProperty('canonicalLocale');
+  f.env.updatePackageReview({ key, ready: true, settled: true, response, canonicalLocale: 'sv' }, epoch - 1);
+  expect(f.env.packageReview.canonicalLocale).toBe('en'); expect(reads).toBe(1);
+  f.env.updatePackageReview({ key, ready: true, settled: true, response, canonicalLocale: 'sv' }, epoch);
+  expect(f.env.packageReview.canonicalLocale).toBe('sv'); expect(reads).toBe(1);
+  f.env.updatePackageReview({ key, ready: true, settled: true, response, canonicalLocale: 'unknown' }, epoch);
+  expect(f.env.packageReview.canonicalLocale).toBeUndefined(); expect(reads).toBe(1);
+  f.env.updatePackageReview({ key, ready: true, settled: true }, epoch);
+  expect(f.env.packageReview.canonicalLocale).toBeUndefined(); expect(f.env.packageReview.response).toBeUndefined();
 });

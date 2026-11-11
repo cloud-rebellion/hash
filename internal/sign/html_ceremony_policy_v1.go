@@ -59,7 +59,10 @@ func (p *presentedCredentialV1) validateLockedPinsV1(rc *RecipientContext, recip
 		pins.noticeCommitted != p.noticeCommitted || pins.name != p.documentName || pins.lawfulBasis != p.lawfulBasis {
 		return ErrInvalidNoticeEvidence
 	}
-	return checkSignerReadExpiryV1(recipient.MagicTokenExpiresAt, pins.expiresAt, now)
+	if err := checkSignerReadExpiryV1(recipient.MagicTokenExpiresAt, pins.expiresAt, now); err != nil {
+		return err
+	}
+	return validateLockedNoticeLocaleV1(rc, recipient)
 }
 func validateLockedRecipientPinsV1(rc *RecipientContext, fresh *generated.Recipient, pins htmlCeremonyDocumentPinsV1, now time.Time) error {
 	if rc != nil && rc.presentedCredential != nil {
@@ -75,7 +78,21 @@ func validateLockedRecipientPinsV1(rc *RecipientContext, fresh *generated.Recipi
 	if err := checkMagicLinkExpiry(rc.Recipient, rc.Document, now); err != nil {
 		return err
 	}
-	return checkSignerReadExpiryV1(fresh.MagicTokenExpiresAt, pins.expiresAt, now)
+	if err := checkSignerReadExpiryV1(fresh.MagicTokenExpiresAt, pins.expiresAt, now); err != nil {
+		return err
+	}
+	return validateLockedNoticeLocaleV1(rc, fresh)
+}
+
+// A changed server recipient language requires a fresh disclosure and
+// acknowledgement after a wait, just like changed material notice text. Unknown
+// locales have the same exact EN fallback; no browser language is consulted.
+func validateLockedNoticeLocaleV1(original *RecipientContext, fresh *generated.Recipient) error {
+	if original == nil || original.Recipient == nil || fresh == nil ||
+		article13.CopyLocaleV1(original.Recipient.Locale) != article13.CopyLocaleV1(fresh.Locale) {
+		return ErrInvalidNoticeEvidence
+	}
+	return nil
 }
 
 func (p *presentedCredentialV1) validateLockedIdentityV1(rc *RecipientContext, recipient *generated.Recipient, pins htmlCeremonyDocumentPinsV1) error {

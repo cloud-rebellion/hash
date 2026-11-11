@@ -30,7 +30,8 @@ const (
 // deliberately narrower: actions that advance or terminate a ceremony, send
 // communications, rotate signer links, or configure its automatic expiry.
 var mcpToolRequiredScopes = map[string]string{
-	"list_brand_profiles": mcpScopeRead, "get_brand_profile": mcpScopeRead, "get_default_brand_profile": mcpScopeRead, "list_brand_profile_revisions": mcpScopeRead,
+	"get_workspace_email_preferences": mcpScopeRead,
+	"list_brand_profiles":             mcpScopeRead, "get_brand_profile": mcpScopeRead, "get_default_brand_profile": mcpScopeRead, "list_brand_profile_revisions": mcpScopeRead,
 	"list_brand_asset_revisions": mcpScopeRead, "get_brand_asset_upload": mcpScopeRead,
 	"list_brand_assets": mcpScopeRead, "get_brand_asset": mcpScopeRead, "resolve_brand_design_assets": mcpScopeRead,
 	"save_brand_profile": mcpScopeWriteAuthoring, "select_default_brand_profile": mcpScopeWriteAuthoring, "upload_brand_asset": mcpScopeWriteAuthoring,
@@ -94,6 +95,7 @@ var mcpToolRequiredScopes = map[string]string{
 	"search_documents":               mcpScopeRead,
 
 	// Document/content and configuration authoring.
+	"save_workspace_email_preferences": mcpScopeWriteAuthoring,
 	"propose_service_email_design":     mcpScopeWriteAuthoring,
 	"save_service_email_template":      mcpScopeWriteAuthoring,
 	"add_document_field":               mcpScopeWriteAuthoring,

@@ -899,6 +899,7 @@ type DocumentPackageSendAttemptsV1 struct {
 	TerminalOutcome         pgtype.Text        `json:"terminal_outcome"`
 	TerminalAt              pgtype.Timestamptz `json:"terminal_at"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	IncorporationVersion    string             `json:"incorporation_version"`
 }
 
 type DocumentPackageSendCompletionsV1 struct {
@@ -1471,6 +1472,13 @@ type OrgBranding struct {
 	SchemaVersion  int32              `json:"schema_version"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OrgEmailPreferencesV1 struct {
+	OrgID     uuid.UUID          `json:"org_id"`
+	Revision  int64              `json:"revision"`
+	Locale    string             `json:"locale"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
 type OrgEmailTemplateHeadsV1 struct {

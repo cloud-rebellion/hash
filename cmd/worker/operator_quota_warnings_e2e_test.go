@@ -19,6 +19,7 @@ import (
 func TestOperatorQuotaWarningAtomicConcurrentE2E(t *testing.T) {
 	ctx, pool, w, orgID, userID, _ := setupSoftDeletePurgeE2E(t)
 	w.audit = audit.New(w.queries, pool)
+	bindQuotaWarningRuntime128E2E(t, w)
 	w.baseURL = "https://hash.example.test"
 	w.billing = billing.NewOperator(w.queries, []config.OperatorEntitlement{{OrgID: orgID, PlanSlug: "free", ReviewRef: "test-reviewed-plan"}})
 	if err := w.billing.ValidateOperatorPlans(ctx); err != nil {

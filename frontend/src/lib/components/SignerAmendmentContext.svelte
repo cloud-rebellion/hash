@@ -1,24 +1,26 @@
 <script lang="ts">
  import { signerAmendmentProcess, type SignerAmendmentDisclosure } from '$lib/signerAmendment';
+ import { locale } from '$lib/i18n';
+ import { signerRoomText } from '$lib/signerRoomUi';
  let { disclosure }: { disclosure: SignerAmendmentDisclosure } = $props();
 </script>
-<section class="amendment-disclosure" aria-label="Amendment to an earlier agreement">
- <p class="eyebrow">Amendment to an earlier agreement</p>
+<section class="amendment-disclosure" aria-label={signerRoomText($locale, 'Amendment to an earlier agreement')}>
+ <p class="eyebrow">{signerRoomText($locale, 'Amendment to an earlier agreement')}</p>
  <h2>{disclosure.original_name}</h2>
- <p>Selected process: <strong>{signerAmendmentProcess(disclosure.mode)}</strong></p>
- <p>{disclosure.mode === 'signature' ? 'This separate amendment asks for fresh signatures.' : 'This separate amendment asks for an explicit acknowledgement using Accept. No signature is collected.'} Review the current amendment and accompanying documents before responding.</p>
- <p>The original signed agreement and its evidence remain saved. This reference describes the recorded relationship; it does not determine when changes take legal effect.</p>
- <details><summary>Saved agreement and amendment references</summary>
+ <p>{signerRoomText($locale, 'Selected process')}: <strong>{signerRoomText($locale, signerAmendmentProcess(disclosure.mode))}</strong></p>
+ <p>{signerRoomText($locale, disclosure.mode === 'signature' ? 'This separate amendment asks for fresh signatures.' : 'This separate amendment asks for an explicit acknowledgement using Accept. No signature is collected.')} {signerRoomText($locale, 'Review the current amendment and accompanying documents before responding.')}</p>
+ <p>{signerRoomText($locale, 'The original signed agreement and its evidence remain saved. This reference describes the recorded relationship; it does not determine when changes take legal effect.')}</p>
+ <details><summary>{signerRoomText($locale, 'Saved agreement and amendment references')}</summary>
   <dl>
-   <dt>Original agreement ID</dt><dd>{disclosure.original_document_id}</dd>
-   <dt>Original signed PDF SHA-256</dt><dd>{disclosure.original_final_pdf_sha256}</dd>
-   <dt>Original evidence report SHA-256</dt><dd>{disclosure.original_report_sha256}</dd>
-   <dt>Original evidence report PDF SHA-256</dt><dd>{disclosure.original_report_pdf_sha256}</dd>
-   <dt>Amendment ID</dt><dd>{disclosure.amendment_id}</dd>
-   <dt>Amendment revision</dt><dd>{disclosure.revision}</dd>
-   <dt>Saved amendment file commitment SHA-256</dt><dd>{disclosure.file_commitment_sha256}</dd>
+   <dt>{signerRoomText($locale, 'Original agreement ID')}</dt><dd>{disclosure.original_document_id}</dd>
+   <dt>{signerRoomText($locale, 'Original signed PDF SHA-256')}</dt><dd>{disclosure.original_final_pdf_sha256}</dd>
+   <dt>{signerRoomText($locale, 'Original evidence report SHA-256')}</dt><dd>{disclosure.original_report_sha256}</dd>
+   <dt>{signerRoomText($locale, 'Original evidence report PDF SHA-256')}</dt><dd>{disclosure.original_report_pdf_sha256}</dd>
+   <dt>{signerRoomText($locale, 'Amendment ID')}</dt><dd>{disclosure.amendment_id}</dd>
+   <dt>{signerRoomText($locale, 'Amendment revision')}</dt><dd>{disclosure.revision}</dd>
+   <dt>{signerRoomText($locale, 'Saved amendment file commitment SHA-256')}</dt><dd>{disclosure.file_commitment_sha256}</dd>
   </dl>
-  <p>These are saved document identifiers. This link permits review of the current amendment; access to the original agreement's private files is separate.</p>
+  <p>{signerRoomText($locale, "These are saved document identifiers. This link permits review of the current amendment; access to the original agreement's private files is separate.")}</p>
  </details>
 </section>
 <style>

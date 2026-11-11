@@ -202,11 +202,15 @@ func (s Service) Propose(ctx context.Context, actor authoring.Actor, kind string
 			return e
 		}
 		defer closeRender()
-		subject, body, text, e := dispatch.RenderServiceEmailV1(kind, SyntheticContext(), &tpl)
+		previewContext, e := syntheticContextV1(fresh, tx, actor.OrgID, kind)
 		if e != nil {
 			return e
 		}
-		out = Proposal{SchemaVersion: 1, Kind: kind, ExpectedRevision: in.ExpectedRevision, Input: candidate, Preview: Preview{SchemaVersion: 1, Synthetic: true, Revision: in.ExpectedRevision, Subject: subject, HTML: body, Text: text, MandatoryContentPreserved: true}, Saved: false, owner: owner}
+		subject, body, text, e := dispatch.RenderServiceEmailV1(kind, previewContext, &tpl)
+		if e != nil {
+			return e
+		}
+		out = Proposal{SchemaVersion: 1, Kind: kind, ExpectedRevision: in.ExpectedRevision, Input: candidate, Preview: Preview{SchemaVersion: 1, Locale: previewContext.Locale, Synthetic: true, Revision: in.ExpectedRevision, Subject: subject, HTML: body, Text: text, MandatoryContentPreserved: true}, Saved: false, owner: owner}
 		return nil
 	})
 	return

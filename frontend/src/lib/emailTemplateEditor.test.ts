@@ -2,14 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { get } from 'svelte/store';
 import { createEmailTemplateEditor, emailDraftProblems, emailPreviewDocument, emailTemplateKinds, editableEmailTemplateKinds, canEditEmailTemplate,
   type EmailTemplate, type EmailTemplateCatalog, type EmailTemplateEditorPorts, type EmailTemplateInput,
-  type EmailTemplatePreview, type EmailTemplateKind } from './emailTemplateEditor';
+  type EmailTemplatePreview, type EmailTemplateKind, createWorkspaceEmailPreferences, checkedWorkspaceEmailPreferences, type WorkspaceEmailPreferences, type WorkspaceEmailPreferencesPorts } from './emailTemplateEditor';
 
 const template = (kind: EmailTemplateKind = emailTemplateKinds[0], revision = 0): EmailTemplate => ({ kind, revision, editable: editableEmailTemplateKinds.includes(kind),
   subject_template: '', html_template: '', text_template: '', mandatory_content: 'appended_by_hash', variables: ['document_name', 'recipient_name'] });
 const catalogue = (): EmailTemplateCatalog => ({ schema_version: 1, preview_synthetic: true,
   limits: { subject_bytes: 256, html_bytes: 16384, text_bytes: 8192 }, templates: emailTemplateKinds.map(kind => template(kind)) });
 const rendered = (revision = 0): EmailTemplatePreview => ({ schema_version: 1, synthetic: true, revision,
-  subject: 'Example document', html: '<p>Example recipient</p>', text: 'Example recipient', mandatory_content_preserved: true });
+  locale: 'en', subject: 'Example document', html: '<p>Example recipient</p>', text: 'Example recipient', mandatory_content_preserved: true });
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function setup(overrides: Partial<EmailTemplateEditorPorts> = {}, options: { requestTimeoutMs?: number } = {}) {
@@ -24,9 +24,9 @@ function setup(overrides: Partial<EmailTemplateEditorPorts> = {}, options: { req
 }
 
 describe('owner email template callbacks', () => {
-  test('three built-in kinds cannot edit/save but can preview their exact blank revision0', async () => {
+  test('voided remains catalog-only and can preview only its exact blank revision0', async () => {
     const { editor, calls } = setup(); await editor.load();
-    for (const kind of ['email.declined', 'email.voided', 'email.quota_warning_80'] as const) {
+    for (const kind of ['email.voided'] as const) {
       expect(editor.select(kind)).toBe(true); expect(canEditEmailTemplate(get(editor).selected)).toBe(false);
       expect(editor.edit('subject_template', 'Ignored edition')).toBe(false); expect(await editor.save()).toBe(false);
       expect(await editor.preview()).toBe(true);
@@ -189,4 +189,82 @@ test('editing after a proposal invalidates it, and malformed design refuses befo
   const { editor, calls } = setup({ propose: async (kind, input) => ({ schema_version: 1, kind, expected_revision: input.expected_revision, saved: false, input: { ...input, design_json: branded() }, preview: rendered() }) });
   await editor.load(); await editor.propose('Style'); editor.edit('text_template', 'Manual edit'); expect(get(editor).proposal).toBeNull(); expect(editor.acceptProposal()).toBe(false);
   editor.edit('design_json', JSON.stringify({ ...defaultEmailDesign(), layout_html: '<div>Missing slot</div>' })); expect(await editor.preview()).toBe(false); expect(await editor.save()).toBe(false); expect(calls.preview).toHaveLength(0); expect(calls.save).toHaveLength(0); editor.dispose();
+});
+
+
+test('declined and quota editing requires the actual native editable capability', async () => {
+  for (const kind of ['email.declined', 'email.quota_warning_80'] as const) {
+    const active = setup(); await active.editor.load(); expect(active.editor.select(kind)).toBe(true);
+    expect(active.editor.edit('text_template', 'Literal wording, inte översatt')).toBe(true); expect(await active.editor.save()).toBe(true);
+    expect(active.calls.save[0].text_template).toBe('Literal wording, inte översatt'); active.editor.dispose();
+    const denied = setup({ load: async () => ({ ...catalogue(), templates: [{ ...template(kind), editable: false }] }) });
+    await denied.editor.load(); expect(denied.editor.edit('text_template', 'Blocked')).toBe(false); expect(await denied.editor.save()).toBe(false); denied.editor.dispose();
+  }
+});
+test('quota-preview invalidation preserves literal template draft fields and never reloads, saves or sends', async () => {
+  const { editor, calls } = setup(); await editor.load(); editor.select('email.quota_warning_80'); editor.edit('text_template', 'Keep my wording');
+  expect(await editor.preview()).toBe(true); expect(get(editor).preview?.locale).toBe('en');
+  const before = { ...get(editor).draft }; expect(editor.invalidateQuotaPreview()).toBe(true);
+  expect(get(editor).draft).toEqual(before); expect(get(editor).dirty).toBe(true); expect(get(editor).preview).toBeNull(); expect(calls.load).toBe(1); expect(calls.save).toEqual([]);
+  editor.cancel(); editor.select('email.invite'); expect(await editor.preview()).toBe(true); expect(editor.invalidateQuotaPreview()).toBe(false); expect(get(editor).preview).not.toBeNull(); editor.dispose();
+});
+const workspaceID = '22222222-2222-4222-8222-222222222222';
+const preferences = (revision = 0, locale: 'en' | 'sv' = 'en'): WorkspaceEmailPreferences => ({ schema_version: 1, org_id: workspaceID, revision, locale, updated_at: revision ? '2030-01-01T12:00:00.123456Z' : null });
+function preferenceSetup(overrides: Partial<WorkspaceEmailPreferencesPorts> = {}, requestTimeoutMs = 30000) {
+  const calls: { saved: WorkspaceEmailPreferences; locale: string; signal: AbortSignal }[] = [];
+  const form = createWorkspaceEmailPreferences({ load: async () => preferences(), save: async (saved, locale, signal) => { calls.push({ saved, locale, signal }); return preferences(saved.revision + 1, locale); }, ...overrides }, { requestTimeoutMs });
+  return { form, calls };
+}
+test('workspace language is empty until server truth loads and explicit save retains the exact CAS', async () => {
+  const { form, calls } = preferenceSetup(); expect(get(form).draftLocale).toBe(''); expect(get(form).authorized).toBe(false); expect(form.edit('sv')).toBe(false);
+  await form.load(); expect(get(form).saved).toEqual(preferences()); expect(get(form).draftLocale).toBe('en'); expect(calls).toEqual([]);
+  form.edit('sv'); expect(get(form).saved?.locale).toBe('en'); expect(get(form).dirty).toBe(true); expect(await form.save()).toBe(true);
+  expect(calls).toHaveLength(1); expect(calls[0].saved).toEqual(preferences()); expect(calls[0].locale).toBe('sv'); expect(get(form).saved).toEqual(preferences(1, 'sv')); expect(get(form).notice).toContain('custom wording'); form.dispose();
+});
+test('preference conflict and unknown outcome retain intent and forbid a second save until an explicit read', async () => {
+  for (const error of [{ status: 409 }, { status: 503 }, new Error('PRIVATE transport details')]) {
+    let saves = 0, reads = 0;
+    const { form } = preferenceSetup({ load: async () => ++reads === 1 ? preferences() : preferences(2), save: async () => { saves++; throw error; } });
+    await form.load(); form.edit('sv'); expect(await form.save()).toBe(false); expect(get(form).saved?.revision).toBe(0); expect(get(form).draftLocale).toBe('sv'); expect(get(form).unconfirmed).toBe(true);
+    expect(get(form).error).not.toContain('PRIVATE'); expect(await form.save()).toBe(false); expect(form.edit('en')).toBe(false); expect(form.cancel()).toBe(false); expect(saves).toBe(1);
+    expect(await form.load()).toBe(true); expect(get(form).saved?.revision).toBe(2); expect(get(form).draftLocale).toBe('sv'); expect(get(form).dirty).toBe(true); expect(get(form).unconfirmed).toBe(false); form.dispose();
+  }
+});
+test('readback after a lost reply can confirm the current saved language without inventing another write', async () => {
+  let reads = 0, saves = 0;
+  const { form } = preferenceSetup({ load: async () => ++reads === 1 ? preferences() : preferences(1, 'sv'), save: async () => { saves++; throw { status: 503 }; } });
+  await form.load(); form.edit('sv'); await form.save(); await form.load();
+  expect(get(form).saved).toEqual(preferences(1, 'sv')); expect(get(form).dirty).toBe(false); expect(get(form).notice).toContain('confirmed'); expect(saves).toBe(1); form.dispose();
+});
+test('locale save timeout releases its finite request, keeps the selection and ignores late success', async () => {
+  const response = deferred<WorkspaceEmailPreferences>(); let signal!: AbortSignal;
+  const { form } = preferenceSetup({ save: async (_saved, _locale, value) => { signal = value; return response.promise; } }, 10);
+  await form.load(); form.edit('sv'); expect(await form.save()).toBe(false); expect(signal.aborted).toBe(true); expect(get(form).busy).toBeNull(); expect(get(form).unconfirmed).toBe(true);
+  response.resolve(preferences(1, 'sv')); await Promise.resolve(); expect(get(form).saved?.revision).toBe(0); expect(get(form).draftLocale).toBe('sv'); form.dispose();
+});
+test('owner revocation and foreign or regressed preferences cannot rebind a preserved draft', async () => {
+  for (const error of [{ status: 401 }, { status: 403 }]) {
+    const { form } = preferenceSetup({ save: async () => { throw error; } }); await form.load(); form.edit('sv'); await form.save();
+    expect(get(form).authorized).toBe(false); expect(get(form).draftLocale).toBe('sv'); expect(await form.save()).toBe(false); form.dispose();
+  }
+  for (const next of [{ ...preferences(2), org_id: '33333333-3333-4333-8333-333333333333' }, preferences(), preferences(1, 'sv')]) {
+    let reads = 0; const { form } = preferenceSetup({ load: async () => ++reads === 1 ? preferences(1) : next });
+    await form.load(); form.edit('sv'); expect(await form.load()).toBe(false); expect(get(form).saved).toEqual(preferences(1)); expect(get(form).draftLocale).toBe('sv'); form.dispose();
+  }
+});
+test('one preference write owns its pending interval and disposal prevents a late saved notice', async () => {
+  const response = deferred<WorkspaceEmailPreferences>(); let writes = 0, signal!: AbortSignal;
+  const { form } = preferenceSetup({ save: async (_saved, _locale, value) => { writes++; signal = value; return response.promise; } });
+  await form.load(); form.edit('sv'); const pending = form.save(); expect(form.edit('en')).toBe(false); expect(await form.load()).toBe(false); expect(await form.save()).toBe(false); expect(writes).toBe(1);
+  form.dispose(); expect(signal.aborted).toBe(true); response.resolve(preferences(1, 'sv')); expect(await pending).toBe(false); expect(get(form).notice).toBeNull();
+});
+test('preference DTO is closed and an absent setting must be the explicit English revision0 snapshot', () => {
+  for (const row of [{ ...preferences(), locale: 'sv' }, { ...preferences(), locale: 'SV' }, { ...preferences(), org_id: '00000000-0000-0000-0000-000000000000' }, { ...preferences(), revision: Number.MAX_SAFE_INTEGER + 1 }, { ...preferences(1), updated_at: null }, { ...preferences(1), updated_at: 'yesterday' }, { ...preferences(), smtp_password: 'not part of this DTO' }]) expect(() => checkedWorkspaceEmailPreferences(row)).toThrow();
+});
+
+test('the maximum persisted preference revision remains readable but cannot start another write', async () => {
+  const snapshot = preferences(Number.MAX_SAFE_INTEGER);
+  expect(checkedWorkspaceEmailPreferences(snapshot)).toEqual(snapshot);
+  const { form, calls } = preferenceSetup({ load: async () => snapshot }); await form.load();
+  expect(form.edit('sv')).toBe(false); expect(await form.save()).toBe(false); expect(calls).toEqual([]); expect(get(form).unconfirmed).toBe(false); form.dispose();
 });

@@ -74,6 +74,7 @@ type signerPrivacyNotice struct {
 	PolicyURL         string                   `json:"policy_url"`
 	DSREndpoint       string                   `json:"dsr_endpoint"`  // POST /sign/{token}/dsr
 	NoticeDigest      string                   `json:"notice_digest"` // changes whenever material notice/ceremony context changes
+	CopyLocale        string                   `json:"copy_locale"`   // view metadata; exact rendered strings are in the snapshot
 	Copy              sign.Article13NoticeCopy `json:"copy"`
 }
 
@@ -197,7 +198,7 @@ func (s *Server) signerPrivacyNotice(r *http.Request, rc *sign.RecipientContext)
 	}
 	controller := strings.TrimSpace(confirmation.ControllerName)
 	controllerContact := strings.TrimSpace(confirmation.ControllerContact)
-	legalBasis, err := article13.LegalBasisDisclosureV1(rc.Document.LawfulBasis)
+	material, err := article13.LocalizedNoticeV1(rc.Document.Name, rc.Document.LawfulBasis, rc.Recipient.Locale)
 	if err != nil {
 		return signerPrivacyNotice{}, err
 	}
@@ -216,17 +217,15 @@ func (s *Server) signerPrivacyNotice(r *http.Request, rc *sign.RecipientContext)
 		ControllerContact: controllerContact,
 		Processor:         operator,
 		ProcessorEmail:    privacyContact,
-		// The signer SPA is intentionally English-only until every legal string
-		// has received counsel-reviewed translations. Keep the server-authored
-		// disclosure in that same language so the ceremony cannot mix locales.
-		PurposeSummary: article13.PurposeSummaryV1(rc.Document.Name),
-		LegalBasis:     legalBasis,
-		RetentionYears: article13.RetentionYearsV1,
-		JurisdictionDP: supervisoryAuthority,
-		PolicyURL:      policyURL,
-		DSREndpoint:    "/sign/" + chi.URLParam(r, "token") + "/dsr",
+		PurposeSummary:    material.PurposeSummary,
+		LegalBasis:        material.LegalBasisDisclosure,
+		RetentionYears:    article13.RetentionYearsV1,
+		JurisdictionDP:    supervisoryAuthority,
+		PolicyURL:         policyURL,
+		DSREndpoint:       "/sign/" + chi.URLParam(r, "token") + "/dsr",
 	}
-	notice.Copy = article13.RenderedCopyV1(rc.Document.Name)
+	notice.Copy = material.Copy
+	notice.CopyLocale = material.CopyLocale
 	evidence, err := signerArticle13NoticeEvidence(rc, notice)
 	if err != nil {
 		return signerPrivacyNotice{}, errors.New("signer privacy disclosure digest is unavailable")

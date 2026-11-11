@@ -109,9 +109,10 @@ type packageResponseHTTPFixture247 struct {
 // The older convenience helper assigns every party the legacy single-signer
 // role. A genuine two-party PDF requires unique named roles, each with its
 // own visible signature field; otherwise native Send correctly refuses it.
-func packageResponsePreparedSignedBirth247(t *testing.T, q *ownedPublicReadFixtureV1) (pdfadmission.HTMLSendPackageIntentMetadataV1, uuid.UUID) {
+func packageResponsePreparedSignedBirth247(t *testing.T, q *ownedPublicReadFixtureV1, defaultLocale ...string) (pdfadmission.HTMLSendPackageIntentMetadataV1, uuid.UUID) {
 	t.Helper()
 	root := packageImported220(t, q, "Two-party native package response")
+	root = packageRootLocaleV128(t, q, root, defaultLocale)
 	var lastRecipient uuid.UUID
 	for i, role := range []string{"provider", "customer"} {
 		input, err := json.Marshal(map[string]any{"email": role + "@package-response.test", "name": "Native package " + role, "role": role, "locale": "en"})
@@ -167,15 +168,15 @@ func packageResponsePreparedSignedBirth247(t *testing.T, q *ownedPublicReadFixtu
 	return m, lastRecipient
 }
 
-func newPackageResponseHTTPFixture247(t *testing.T, signed bool) packageResponseHTTPFixture247 {
+func newPackageResponseHTTPFixture247(t *testing.T, signed bool, defaultLocale ...string) packageResponseHTTPFixture247 {
 	t.Helper()
 	q := inspectionFixturePG236(t)
 	var m pdfadmission.HTMLSendPackageIntentMetadataV1
 	var recipient uuid.UUID
 	if signed {
-		m, recipient = packageResponsePreparedSignedBirth247(t, q)
+		m, recipient = packageResponsePreparedSignedBirth247(t, q, defaultLocale...)
 	} else {
-		m, recipient = packageCompletionPreparedBirth241(t, q, 2, false)
+		m, recipient = packageCompletionPreparedBirth241(t, q, 2, false, defaultLocale...)
 	}
 	inner := &packageRetentionNativePeer240{base: q.storagePeer, until: make(map[string]time.Time), entered: make(chan struct{}), getDone: make(chan struct{})}
 	peer := &packageResponseStoragePeer247{main: inner, until: make(map[string]time.Time), entered: make(chan struct{}), release: make(chan struct{})}
@@ -214,7 +215,11 @@ func newPackageResponseHTTPFixture247(t *testing.T, signed bool) packageResponse
 	var body struct {
 		Package *pdfadmission.SignerPackagePresentationV1 `json:"package"`
 	}
-	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Package == nil || body.Package.Incorporation != documentpackage.IncorporationCopyV1() || response.Header().Get("X-Hash-Document-Id") != m.Capture.DocumentID.String() || response.Header().Get("X-Hash-Recipient-Id") != recipient.String() || response.Header().Get("X-Hash-Notice-Digest") != notice.NoticeDigest {
+	expectedLocale := "en"
+	if len(defaultLocale) == 1 {
+		expectedLocale = defaultLocale[0]
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Package == nil || body.Package.Incorporation != documentpackage.IncorporationCopyForLocaleV1(expectedLocale) || response.Header().Get("X-Hash-Document-Id") != m.Capture.DocumentID.String() || response.Header().Get("X-Hash-Recipient-Id") != recipient.String() || response.Header().Get("X-Hash-Notice-Digest") != notice.NoticeDigest {
 		t.Fatal("actual package presentation/copy/scope unavailable", response.Code)
 	}
 	f.response = documentpackage.ResponseV1{ManifestSHA256: body.Package.ManifestSHA256, LegalCommitmentSHA256: body.Package.LegalCommitmentSHA256, IncorporationVersion: body.Package.Incorporation.Version, IncorporationSHA256: body.Package.Incorporation.SHA256, Consent: true}

@@ -1,12 +1,13 @@
 import { AttachmentPreviewFamily } from './documentAttachmentPreview';
 import { MAX_SIGNER_PDF_BYTES, MAX_SIGNER_PDF_PAGES, readBoundedSignerResponse, type SignerPDFObservation } from './signerPDF';
+import { signerPackageIncorporationLocale, validSignerPackageIncorporation, type SignerPackageIncorporation } from './signerPackageIncorporation';
 
 export type SignerPackageMember = Readonly<{ title: string; category: string; pdf_sha256: string; bytes: number; pages: number }>;
 export type SignerPackage = Readonly<{
   schema: 'hash-recipient-package-v1'; package_id: string; revision: string;
   manifest_sha256: string; legal_commitment_sha256: string;
   main: SignerPackageMember; annexes: readonly SignerPackageMember[];
-  incorporation: Readonly<{ version: 'hash-package-incorporation-v1'; sha256: string; text: string }>;
+  incorporation: SignerPackageIncorporation;
 }>;
 export type SignerPackageScope = Readonly<{
   token: string; key: string; documentID: string; recipientID: string; noticeDigest: string;
@@ -46,10 +47,7 @@ export function checkedSignerPackageDescriptorsV1(value: unknown): SignerPackage
     || typeof v.revision !== 'string' || !/^[1-9][0-9]{0,18}$/.test(v.revision) || BigInt(v.revision) > 9223372036854775807n
     || typeof v.manifest_sha256 !== 'string' || !SHA.test(v.manifest_sha256)
     || typeof v.legal_commitment_sha256 !== 'string' || !SHA.test(v.legal_commitment_sha256)
-    || !Array.isArray(v.annexes) || v.annexes.length > 16 || !object(v.incorporation)
-    || v.incorporation.version !== 'hash-package-incorporation-v1'
-    || typeof v.incorporation.sha256 !== 'string' || !SHA.test(v.incorporation.sha256)
-    || !label(v.incorporation.text, 4096)) throw new Error(unavailable);
+    || !Array.isArray(v.annexes) || v.annexes.length > 16 || !validSignerPackageIncorporation(v.incorporation)) throw new Error(unavailable);
   const main = member(v.main), annexes = v.annexes.map(member);
   if ([main, ...annexes].reduce((n, m) => n + m.bytes, 0) > MAX_SIGNER_PDF_BYTES
     || [main, ...annexes].reduce((n, m) => n + m.pages, 0) > MAX_SIGNER_PDF_PAGES) throw new Error(unavailable);
@@ -78,6 +76,9 @@ export function signerPackageKey(scope: SignerPackageScope, value: SignerPackage
 export function signerPackageResponse(value: SignerPackage): SignerPackageResponse {
   return { manifest_sha256: value.manifest_sha256, legal_commitment_sha256: value.legal_commitment_sha256,
     incorporation_version: value.incorporation.version, incorporation_sha256: value.incorporation.sha256, consent: true };
+}
+export function signerPackageLocale(value: SignerPackage): 'en' | 'sv' {
+  return signerPackageIncorporationLocale(value.incorporation);
 }
 export async function fetchSignerPackage(scope: SignerPackageScope, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<SignerPackage | null> {
   active(signal);

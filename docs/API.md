@@ -298,7 +298,7 @@ Organization owners use `list_service_email_templates` and
 key and live owner membership are checked in the same service transactions as
 REST settings; a proposal rechecks the current owner and revision after AI IO.
 
-List takes `{}` and returns nine kinds, six editable capabilities, revisions,
+List takes `{}` and returns nine kinds, eight editable capabilities, revisions,
 allowed variables and source byte limits. Preview and Save require `kind`,
 `expected_revision`, `subject_template`, `html_template` and `text_template`.
 REST uses `GET /api/v1/email-templates`, `PUT /api/v1/email-templates/{kind}`
@@ -309,6 +309,24 @@ response field means the legacy empty design. Revision conflicts require reload
 and review. Empty content strings select built-in copy; clear design separately
 to restore the entire legacy presentation. Built-in-only kinds permit revision
 zero, empty content and no design in synthetic Preview; they cannot be saved.
+Decline notices and quota warnings use saved editions at their existing native
+producers. Voided remains built-in-only; this adds no voided-email producer.
+Preview responses include `locale`: quota samples use the saved workspace email
+language, while other samples retain English. Custom source strings stay literal.
+The existing explicit saved-template SMTP test selects that same quota language
+inside its original guarded transaction; its recipient and frozen receipt stay
+unchanged. Changing the preference does not queue a test.
+
+Owners read or save the independent workspace email language with
+`GET /api/v1/email-preferences` and `PUT /api/v1/email-preferences`, or the
+organization-wide MCP tools `get_workspace_email_preferences` (`read`) and
+`save_workspace_email_preferences` (`write:authoring`). A missing setting is
+English at revision zero. Writes require the exact observed `expected_revision`
+and `locale` (`en` or `sv`); stale writes return 409. This affects future scheduled
+staff/quota copy, separately from staff UI, document and recipient languages.
+See [workspace email language](WORKSPACE-EMAIL-LANGUAGE.md) for the closed DTO,
+revision boundary and queued-message guarantees, and
+[native email work ownership](WORKSPACE-EMAIL-RESOURCES.md) for process admission.
 
 A v1 design has `schema_version:1`, `layout_html`, lowercase six-digit hex
 `background`, `surface`, `primary`, `text`, nullable `logo` and `logo_alt`.

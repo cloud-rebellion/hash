@@ -35,7 +35,7 @@ func TestEmailTemplate720SyntheticPreviewAndInput(t *testing.T) {
 	}
 }
 func TestEmailTemplate720UnwiredKindsCannotStoreIgnoredEdits(t *testing.T) {
-	for _, kind := range []string{dispatch.KindDeclined, dispatch.KindVoided, dispatch.KindQuotaWarning80} {
+	for _, kind := range []string{dispatch.KindVoided} {
 		if Default(kind).Editable {
 			t.Fatal("unwired kind advertised editable")
 		}

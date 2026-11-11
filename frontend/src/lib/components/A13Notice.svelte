@@ -1,5 +1,7 @@
 <script lang="ts">
   import { ShieldCheck, Info, ExternalLink } from 'lucide-svelte';
+  import { locale } from '$lib/i18n';
+  import { signerRoomError, signerRoomText } from '$lib/signerRoomUi';
 
   type Privacy = {
     controller: string;
@@ -13,6 +15,8 @@
     policy_url: string;
     dsr_endpoint: string;
 	notice_digest: string;
+    /** Display metadata only; legacy server notices are English. */
+    copy_locale?: 'en' | 'sv';
     copy: {
       title: string;
       intro: string;
@@ -130,6 +134,8 @@
         <h2 id="a13-title">{privacy.copy.title}</h2>
       </header>
 
+      <p class="a13-language">{signerRoomText($locale, privacy.copy_locale === 'sv' ? 'Privacy notice · Swedish' : 'Privacy notice · English')}</p>
+
       <p class="a13-intro">{privacy.copy.intro}</p>
 
       <dl class="a13-facts">
@@ -192,7 +198,7 @@
             </label>
             <button type="button" class="a13-primary" onclick={submitDSR}>{privacy.copy.send_request_label}</button>
             {#if requestStatus}
-              <p class="a13-status {requestStatus.ok ? 'ok' : 'err'}">{requestStatus.message}</p>
+              <p class="a13-status {requestStatus.ok ? 'ok' : 'err'}">{requestStatus.ok ? requestStatus.message : signerRoomError($locale, requestStatus.message, 'The privacy request could not be sent. Please try again.')}</p>
             {/if}
           </div>
         {/if}
@@ -251,6 +257,11 @@
     line-height: 1.5;
     margin: 0 0 1rem;
     color: #334155;
+  }
+  .a13-language {
+    margin: 0 0 .75rem;
+    color: #475569;
+    font-size: .75rem;
   }
   .a13-facts {
     margin: 0 0 0.75rem;

@@ -5,6 +5,7 @@ WITH candidate AS MATERIALIZED (
  SELECT c.package_id,c.revision,c.previous_revision,c.org_id,c.document_id,c.captured_root_updated_at,
  c.captured_draft_generation,octet_length(c.manifest)::integer AS manifest_bytes,
  c.manifest_sha256,c.legal_commitment_sha256,c.member_count,c.pdf_bytes,c.pdf_pages,c.created_by,
+ CASE WHEN d.default_locale='sv' THEN 'hash-package-incorporation-sv-v1' ELSE 'hash-package-incorporation-v1' END AS incorporation_version,
  GREATEST(statement_timestamp(),clock_timestamp(),COALESCE(d.article13_notice_epoch_at+interval '1 microsecond','-infinity'::timestamptz)) AS epoch
  FROM document_package_captures_v1 c JOIN documents d ON d.id=c.document_id AND d.org_id=c.org_id
  WHERE c.package_id=sqlc.arg(package_id)::uuid AND c.revision=sqlc.arg(capture_revision)::bigint
@@ -21,9 +22,9 @@ WITH candidate AS MATERIALIZED (
 )
 INSERT INTO document_package_send_attempts_v1(attempt_id,org_id,document_id,package_id,capture_revision,previous_revision,
  manifest_bytes,member_count,pdf_bytes,pdf_pages,captured_root_updated_at,captured_draft_generation,
- manifest_sha256,legal_commitment_sha256,actor_user_id,article13_notice_epoch_at,retain_until)
+ manifest_sha256,legal_commitment_sha256,actor_user_id,article13_notice_epoch_at,retain_until,incorporation_version)
 SELECT sqlc.arg(attempt_id)::uuid,org_id,document_id,package_id,revision,previous_revision,manifest_bytes,member_count,pdf_bytes,pdf_pages,
- captured_root_updated_at,captured_draft_generation,manifest_sha256,legal_commitment_sha256,created_by,epoch,hash_evidence_retain_until(epoch,7)
+ captured_root_updated_at,captured_draft_generation,manifest_sha256,legal_commitment_sha256,created_by,epoch,hash_evidence_retain_until(epoch,7),incorporation_version
 FROM candidate RETURNING *;
 
 -- name: CreateDocumentPackageSealingIntentV1 :one

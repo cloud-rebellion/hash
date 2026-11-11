@@ -6,7 +6,8 @@
     signerPDFScopeKey, validateSignerPDFFields, validateSignerPDFObservation,
     type SignerPDFField as Field, type SignerPDFObservation, type SignerPDFScope
   } from '$lib/signerPDF';
-  import { t } from '$lib/i18n';
+  import { locale, t } from '$lib/i18n';
+  import { signerRoomError, signerRoomFieldType, signerRoomText } from '$lib/signerRoomUi';
   import type { PdfDoc } from '$lib/pdf';
   import { ContinuousPDFPages } from '$lib/pdfPageResidency';
   import { captureFlarePDFViewError } from '$lib/flare-client';
@@ -278,30 +279,30 @@
 
   function fieldName(fieldID: string): string {
     const field = fields.find((candidate) => candidate.id === fieldID);
-    return field?.label || field?.type || 'field';
+    return field?.label || signerRoomFieldType($locale, field?.type ?? 'field');
   }
 </script>
 
 <div class="pdf-signer" data-pdf-ready={documentReady && !loading && !error} data-pdf-page-count={pages.length}>
   {#if error}
-    <div class="err" role="alert">{error}</div>
+    <div class="err" role="alert">{signerRoomError($locale, error)}</div>
   {/if}
   {#each Object.entries(saveErrors) as [fieldID, message] (fieldID)}
-    <div class="err" role="alert">Could not save {fieldName(fieldID)}: {message}</div>
+    <div class="err" role="alert">{signerRoomText($locale, 'Could not save {field}: {reason}', { field: fieldName(fieldID), reason: signerRoomError($locale, message) })}</div>
   {/each}
   {#if loading}
     <p class="muted">{$t('pdf.loading')}</p>
   {/if}
   <!-- Canvases must exist while loading, before tick/render begins. -->
     {#each pages as p (p.num)}
-      <div class="page" style="width:{p.w}px" aria-label="Document page {p.num}">
+      <div class="page" style="width:{p.w}px" aria-label={signerRoomText($locale, 'Document page {page}', { page: p.num })}>
         <canvas width="0" height="0" bind:this={canvasEls[p.num]} style="aspect-ratio:{p.w}/{p.h}"></canvas>
-        {#if !residentPages.includes(p.num)}<span class="page-loading" role="status">Rendering page {p.num}…</span>{/if}
+        {#if !residentPages.includes(p.num)}<span class="page-loading" role="status">{signerRoomText($locale, 'Rendering page {page}…', { page: p.num })}</span>{/if}
         {#if documentReady && !error}
         <div class="overlay">
           {#each fieldsOnPage(p.num) as f (f.id)}
             {#if f.type === 'signature' && readOnly}
-              <span class="fld sig" style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%">Signing paused</span>
+              <span class="fld sig" style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%">{signerRoomText($locale, 'Signing paused')}</span>
             {:else if f.type === 'signature'}
               <button
                 type="button"
@@ -351,7 +352,7 @@
                 disabled={readOnly || signed || !documentReady || !residentPages.includes(p.num) || Boolean(saving[f.id])}
                 onchange={() => void saveField(f)}
               >
-                <option value="">{f.label || 'Select…'}</option>
+                <option value="">{f.label || signerRoomText($locale, 'Select…')}</option>
                 {#each f.options?.choices ?? [] as c}
                   <option value={c}>{c}</option>
                 {/each}
@@ -362,7 +363,7 @@
                 data-field-id={f.id}
                 data-recipient-id={f.recipient_id ?? ''}
                 type={f.type === 'date' ? 'date' : 'text'}
-                placeholder={f.label || f.type}
+                placeholder={f.label || signerRoomFieldType($locale, f.type)}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 bind:value={buf[f.id]}
                 class:save-failed={Boolean(saveErrors[f.id])}

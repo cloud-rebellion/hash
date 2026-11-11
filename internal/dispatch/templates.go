@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"net/url"
 	"strings"
+	texttemplate "text/template"
 
 	"github.com/bright-interaction/hash/internal/i18n"
 )
@@ -204,7 +205,9 @@ func renderTextTemplate(kind string, ctx TemplateContext, recipientFooter string
 	if src == "" {
 		return "", fmt.Errorf("no text template for %s", kind)
 	}
-	tpl, err := template.New(kind).Parse(src)
+	// Plain-text MIME parts preserve literal data and URLs. HTML escaping
+	// remains confined to renderHTMLTemplate above.
+	tpl, err := texttemplate.New(kind).Parse(src)
 	if err != nil {
 		return "", err
 	}

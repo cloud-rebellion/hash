@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/documentpackage"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -222,6 +223,10 @@ func (w *ApplicationHTMLSendWorkV1) projectParticipantReportForSizingLockedV1(ca
 	}
 	for _, v := range responses {
 		if v == nil || !applicationStampV1(v.ResponseEventCreatedAt) || len(v.ManifestSha256) != 32 || len(v.LegalCommitmentSha256) != 32 || len(v.ResponseEventRowSha256) != 32 || len(v.IncorporationSha256) != 32 {
+			return render.ErrParticipantReportV1
+		}
+		copy, err := documentpackage.IncorporationCopyForVersionV1(v.IncorporationVersion)
+		if err != nil || copy.SHA256 != hex.EncodeToString(v.IncorporationSha256) {
 			return render.ErrParticipantReportV1
 		}
 		signature := ""

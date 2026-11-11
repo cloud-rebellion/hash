@@ -33,7 +33,9 @@ func registerServiceEmailTools(s *Server, d Deps) {
 	if d.Send != nil && d.Send.WorkRuntime != nil && d.Send.WorkRuntime.MatchesPoolV1(d.Pool) && d.Send.WorkRuntime.SessionsV1() == d.PDFCreationSessions {
 		work = d.Send.WorkRuntime.WorkV1()
 	}
-	registerServiceEmailToolsWithService(s, emailtemplates.Service{Pool: d.Pool, Audit: d.Audit, Work: work, Runtime: d.AIRuntime})
+	service := emailtemplates.Service{Pool: d.Pool, Audit: d.Audit, Work: work, Runtime: d.AIRuntime}
+	registerServiceEmailToolsWithService(s, service)
+	registerWorkspaceEmailPreferencesV1(s, service)
 }
 
 type serviceEmailProposalSettings interface {
@@ -99,7 +101,7 @@ func registerServiceEmailToolsWithService(s *Server, service serviceEmailSetting
 		description := "Preview service email subject and introductory content using synthetic data only; no save, send or AI provider call. Hash appends its protected action/security/legal content. Owner and organization-wide read key required; document tokens denied. Supply the observed expected_revision and all three source strings. Built-in-only kinds permit only revision zero with three empty strings. HTML supports safe formatting, no links/images/attributes/CSS; byte limits come from List. Optional design_json is the canonical full layout/palette/logo edition: exactly one {{native_content}} slot, validated embedded PNG/JPEG only; no remote resources or concealed native actions. Omit it to preserve the saved design, or use empty string to clear it."
 		if save {
 			name, scope = "save_service_email_template", mcpScopeWriteAuthoring
-			description = "Save organization service email subject and introductory content through the owner settings transaction with exact expected_revision CAS. Only the six editable kinds reported by List can be saved. Supply all three strings; all empty resets built-in content at a new revision. Hash retains protected action/security/legal content and its safe HTML/byte limits. A conflict requires reload and review. Owner and organization-wide write:authoring key required; document tokens denied. Affects future eligible messages, not frozen messages; no email send, SMTP, sender/tracking configuration, AI generation or implicit sending. Optional canonical design_json uses the same immutable revision; omission preserves the current design, empty explicitly clears it."
+			description = "Save organization service email subject and introductory content through the owner settings transaction with exact expected_revision CAS. Only the eight editable kinds reported by List can be saved. Supply all three strings; all empty resets built-in content at a new revision. Hash retains protected action/security/legal content and its safe HTML/byte limits. A conflict requires reload and review. Owner and organization-wide write:authoring key required; document tokens denied. Affects future eligible messages, not frozen messages; no email send, SMTP, sender/tracking configuration, AI generation or implicit sending. Optional canonical design_json uses the same immutable revision; omission preserves the current design, empty explicitly clears it."
 		}
 		s.RegisterTool(ToolDef{
 			Name: name, Description: description, MinRole: auth.RoleOwner, Write: save,

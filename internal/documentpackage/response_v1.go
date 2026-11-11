@@ -11,6 +11,9 @@ const ResponseSchemaV1 = "hash-package-response-v1"
 const IncorporationVersionV1 = "hash-package-incorporation-v1"
 const IncorporationSHA256V1 = "ed7e8d4a4b7e03bb600f94ccd6328e4f457528eb165f18fd0ca6ccfecb972670"
 const IncorporationTextV1 = "I have reviewed and agree to the main document and every attachment listed in this contract package. My signature or acknowledgement applies to the complete package identified by the displayed commitments."
+const IncorporationVersionSwedishV1 = "hash-package-incorporation-sv-v1"
+const IncorporationSHA256SwedishV1 = "24cfae89a52f479cbce33b71f99faec557ebd573279a9e5184bb51b17505a6de"
+const IncorporationTextSwedishV1 = "Jag har granskat och godkänner huvuddokumentet och varje bilaga som anges i detta avtalspaket. Min signatur eller bekräftelse gäller hela paketet som identifieras av de visade kontrollvärdena."
 
 var ErrResponseV1 = errors.New("documentpackage: explicit current whole-package consent required")
 
@@ -35,11 +38,47 @@ func IncorporationCopyV1() IncorporationV1 {
 	return IncorporationV1{Version: IncorporationVersionV1, SHA256: IncorporationSHA256V1, Text: IncorporationTextV1}
 }
 
-func (r ResponseV1) ValidateV1() error {
-	if !r.Consent || r.IncorporationVersion != IncorporationVersionV1 || r.IncorporationSHA256 != IncorporationCopyV1().SHA256 || !responseDigestV1(r.ManifestSHA256) || !responseDigestV1(r.LegalCommitmentSHA256) {
+// Select only when freezing a NEW Send attempt from its trusted root locale.
+// Historical attempts must resolve their immutable stored version instead.
+func IncorporationCopyForLocaleV1(locale string) IncorporationV1 {
+	if locale == "sv" {
+		return IncorporationV1{Version: IncorporationVersionSwedishV1, SHA256: IncorporationSHA256SwedishV1, Text: IncorporationTextSwedishV1}
+	}
+	return IncorporationCopyV1()
+}
+
+// Closed version/copy/hash pairs preserve legacy English evidence unchanged.
+func IncorporationCopyForVersionV1(version string) (IncorporationV1, error) {
+	switch version {
+	case IncorporationVersionV1:
+		return IncorporationCopyV1(), nil
+	case IncorporationVersionSwedishV1:
+		return IncorporationCopyForLocaleV1("sv"), nil
+	default:
+		return IncorporationV1{}, ErrResponseV1
+	}
+}
+
+func (c IncorporationV1) ValidateV1() error {
+	want, err := IncorporationCopyForVersionV1(c.Version)
+	if err != nil || c != want {
 		return ErrResponseV1
 	}
 	return nil
+}
+
+func (r ResponseV1) ValidateV1() error {
+	copy, err := IncorporationCopyForVersionV1(r.IncorporationVersion)
+	if err != nil || !r.Consent || r.IncorporationSHA256 != copy.SHA256 || !responseDigestV1(r.ManifestSHA256) || !responseDigestV1(r.LegalCommitmentSHA256) {
+		return ErrResponseV1
+	}
+	return nil
+}
+
+// Structural validity alone does not authorize a response to a different
+// frozen statement. The native owner supplies the actual stored Send copy.
+func (r ResponseV1) MatchesIncorporationV1(copy IncorporationV1) bool {
+	return r.ValidateV1() == nil && copy.ValidateV1() == nil && r.IncorporationVersion == copy.Version && r.IncorporationSHA256 == copy.SHA256
 }
 
 func responseDigestV1(s string) bool {

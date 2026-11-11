@@ -24,12 +24,9 @@ func TestReviewedLifecycleTree709Preserves117AndNamed118(t *testing.T) {
 		if versions[len(versions)-1] == 117 {
 			delete(files, "migrations/00118_document_folders.sql")
 		}
-		if err := requireReviewedLifecycleTreeV1(files, versions); err != nil {
+		if version, err := reviewedLifecycleContractVersionV1(files, versions); err != nil || version != 8 {
 			t.Fatalf("reviewed tree %v refused: %v", versions, err)
 		}
-	}
-	if LifecycleContractVersionV1 != 9 {
-		t.Fatal("filing sidecars changed the retained writer contract")
 	}
 }
 
@@ -87,7 +84,7 @@ func TestEmbeddedLifecycleIdentity709ReturnsNativeDigest(t *testing.T) {
 		t.Fatalf("read actual embedded tree: %v", err)
 	}
 	version, observed, err := EmbeddedLifecycleIdentityV1()
-	if err != nil || version != 9 || observed != digest || len(digest) != 64 {
+	if err != nil || version != LifecycleContractVersionV1 || observed != digest || len(digest) != 64 {
 		t.Fatalf("actual tree lost lifecycle/digest binding: version=%d error=%v", version, err)
 	}
 }

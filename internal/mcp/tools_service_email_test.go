@@ -106,7 +106,7 @@ func (f *serviceEmailDelegationFixture) List(ctx context.Context, a authoring.Ac
 	if err := f.authorize(ctx, a, "list"); err != nil {
 		return nil, err
 	}
-	return []emailtemplates.Template{emailtemplates.Default("email.invite"), emailtemplates.Default("email.declined")}, nil
+	return []emailtemplates.Template{emailtemplates.Default("email.invite"), emailtemplates.Default("email.declined"), emailtemplates.Default("email.quota_warning_80"), emailtemplates.Default("email.voided")}, nil
 }
 func (f *serviceEmailDelegationFixture) Preview(ctx context.Context, a authoring.Actor, k string, in emailtemplates.Input) (emailtemplates.Preview, error) {
 	f.kind, f.input = k, in
@@ -199,6 +199,23 @@ func TestServiceEmailMCPDelegatesOriginalCredentialAndExactInput(t *testing.T) {
 			if tc.op == "list" {
 				if !strings.Contains(result.Content[0].Text, `"editable":false`) || !strings.Contains(result.Content[0].Text, `"subject_bytes":256`) {
 					t.Fatal("list lost capabilities/limits")
+				}
+				var catalog struct {
+					Templates []emailtemplates.Template `json:"templates"`
+				}
+				if err := json.Unmarshal([]byte(result.Content[0].Text), &catalog); err != nil || len(catalog.Templates) != 4 {
+					t.Fatal("native capability catalog malformed", err)
+				}
+				want := map[string]bool{"email.invite": true, "email.declined": true, "email.quota_warning_80": true, "email.voided": false}
+				for _, row := range catalog.Templates {
+					expected, exists := want[row.Kind]
+					if !exists || row.Editable != expected {
+						t.Fatal("native editable/builtin capability changed", row.Kind)
+					}
+					delete(want, row.Kind)
+				}
+				if len(want) != 0 {
+					t.Fatal("native capability catalog omitted a kind")
 				}
 			} else if tc.op == "preview" && !strings.Contains(result.Content[0].Text, `"synthetic":true`) {
 				t.Fatal("preview lost synthetic marker")
@@ -351,7 +368,7 @@ func TestServiceEmailMCPNativeServiceRulesRemainAuthoritative(t *testing.T) {
 	}
 	registerServiceEmailToolsWithService(s, emailtemplates.Service{Work: work})
 	for name, args := range map[string]string{
-		"builtin-save": `{"kind":"email.declined","expected_revision":0,"subject_template":"","html_template":"","text_template":""}`,
+		"builtin-save": `{"kind":"email.voided","expected_revision":0,"subject_template":"","html_template":"","text_template":""}`,
 		"unknown":      strings.Replace(serviceEmailValidArgs, "email.invite", "email.unknown", 1), "negative": strings.Replace(serviceEmailValidArgs, `"expected_revision":7`, `"expected_revision":-1`, 1), "unsafe-html": strings.Replace(serviceEmailValidArgs, "<p>Intro</p>", "<a href='https://example.invalid'>x</a>", 1), "unknown-variable": strings.Replace(serviceEmailValidArgs, "recipient_name", "private_token", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -363,7 +380,7 @@ func TestServiceEmailMCPNativeServiceRulesRemainAuthoritative(t *testing.T) {
 		})
 	}
 	// Built-in preview source restrictions likewise come from the real service.
-	args := strings.Replace(serviceEmailValidArgs, "email.invite", "email.declined", 1)
+	args := strings.Replace(serviceEmailValidArgs, "email.invite", "email.voided", 1)
 	result := decodedToolResult(t, serviceEmailCall(t, s, v, "preview_service_email_template", args))
 	if !result.IsError || !strings.Contains(result.Content[0].Text, emailtemplates.ErrInput.Error()) {
 		t.Fatal(result)

@@ -10,11 +10,11 @@ import (
 
 func TestEmbeddedMeasure126KeepsWriterNineAndRequiresItsNamedFloor(t *testing.T) {
 	want, versions, err := EmbeddedMigrationsIdentity()
-	if err != nil || versions[len(versions)-1] != 127 {
-		t.Fatal("embedded tree does not end at M127", err)
+	if err != nil || versions[len(versions)-1] != 128 {
+		t.Fatal("embedded tree does not end at M128", err)
 	}
-	if version, digest, err := EmbeddedLifecycleIdentityV1(); err != nil || version != 9 || digest != want {
-		t.Fatal("M126 only backfills derived rows and must keep writer contract 9", version, digest, err)
+	if version, digest, err := EmbeddedLifecycleIdentityV1(); err != nil || version != LifecycleContractVersionV1 || digest != want {
+		t.Fatal("actual tree lost its writer and migration identity", version, digest, err)
 	}
 	tail := []int64{115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126}
 	f := brand123LifecycleFiles()
@@ -24,7 +24,7 @@ func TestEmbeddedMeasure126KeepsWriterNineAndRequiresItsNamedFloor(t *testing.T)
 		t.Fatal("M126 accepted without its named migration")
 	}
 	f["migrations/00126_measure_html_document_events.sql"] = f["migrations/00123_org_brand_profiles.sql"]
-	if err := requireReviewedLifecycleTreeV1(f, tail); err != nil {
+	if version, err := reviewedLifecycleContractVersionV1(f, tail); err != nil || version != 9 {
 		t.Fatal("reviewed M126 tree refused", err)
 	}
 	for _, mode := range []fs.FileMode{fs.ModeDir, fs.ModeSymlink} {

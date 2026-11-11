@@ -277,6 +277,9 @@ func (r ParticipantReportV2) writeHTMLV3(w *participantHTMLWriterV3, canonical [
 		w.field("Response event row SHA-256", p.EventRowSHA256, true)
 		w.field("Incorporation statement version", p.IncorporationVersion, true)
 		w.field("Incorporation statement SHA-256", p.IncorporationSHA256, true)
+		if text := participantReportSwedishIncorporationV128(p); text != "" {
+			w.field("Incorporation statement (Swedish)", text, false)
+		}
 		w.endMeta()
 		w.endRecord()
 	}

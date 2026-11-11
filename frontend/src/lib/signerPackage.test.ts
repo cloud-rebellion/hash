@@ -7,7 +7,7 @@ const hash = async (bytes: Uint8Array) => Array.from(new Uint8Array(await crypto
 const encode = (text: string) => new TextEncoder().encode(text);
 const main = encode('%PDF main'), annex = encode('%PDF annex');
 const mainSHA = await hash(main), annexSHA = await hash(annex);
-const text = 'I agree to the listed main document and attachments.';
+const text = 'I have reviewed and agree to the main document and every attachment listed in this contract package. My signature or acknowledgement applies to the complete package identified by the displayed commitments.';
 const copySHA = await hash(encode(text));
 const scope: SignerPackageScope = { token: 'original/token', key: 'current-ceremony',
   documentID: '10000000-0000-4000-8000-000000000001', recipientID: '20000000-0000-4000-8000-000000000001', noticeDigest: 'd'.repeat(64),

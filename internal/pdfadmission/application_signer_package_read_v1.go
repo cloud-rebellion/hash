@@ -191,7 +191,7 @@ func (w *ApplicationHTMLSendWorkV1) ReadSignerPackagePresentationV1(call context
 	if resolved.capture != nil {
 		c := resolved.observation.Capture
 		members := resolved.capture.Manifest().Input()
-		presentation = &SignerPackagePresentationV1{Schema: SignerPackagePresentationSchemaV1, Incorporation: documentpackage.IncorporationCopyV1(), PackageID: c.PackageID, Revision: strconv.FormatInt(c.Revision, 10), ManifestSHA256: hex.EncodeToString(c.CanonicalSHA256[:]), LegalCommitmentSHA256: hex.EncodeToString(c.CommitmentSHA256[:]), Main: signerPackageMemberProjectionV1(members.Main), Annexes: make([]SignerPackageMemberPresentationV1, len(members.Annexes))}
+		presentation = &SignerPackagePresentationV1{Schema: SignerPackagePresentationSchemaV1, Incorporation: resolved.incorporation, PackageID: c.PackageID, Revision: strconv.FormatInt(c.Revision, 10), ManifestSHA256: hex.EncodeToString(c.CanonicalSHA256[:]), LegalCommitmentSHA256: hex.EncodeToString(c.CommitmentSHA256[:]), Main: signerPackageMemberProjectionV1(members.Main), Annexes: make([]SignerPackageMemberPresentationV1, len(members.Annexes))}
 		for i, member := range members.Annexes {
 			presentation.Annexes[i] = signerPackageMemberProjectionV1(member)
 		}
@@ -208,11 +208,12 @@ func (w *ApplicationHTMLSendWorkV1) ReadSignerPackagePresentationV1(call context
 // This private result remains funded until its same-method consumer closes it.
 // Only native token-bound callers below may supply the already-owned scope.
 type applicationSignerPackageResolvedCaptureV1 struct {
-	observation SignerPackageReadObservationV1
-	attempt     HTMLSendPackageAttemptObservationV1
-	capture     *documentpackage.CaptureV1
-	close       func()
-	raw         int64
+	observation   SignerPackageReadObservationV1
+	attempt       HTMLSendPackageAttemptObservationV1
+	capture       *documentpackage.CaptureV1
+	incorporation documentpackage.IncorporationV1
+	close         func()
+	raw           int64
 }
 
 // Caller holds w.mu and has validated its concrete registered read input.
@@ -305,6 +306,11 @@ func (w *ApplicationHTMLSendWorkV1) resolveSignerPackageCaptureForProfileLockedV
 		if e != nil || attempt.Outcome != HTMLSendPackageAttemptCompletedV1 || !applicationStampV1(w.state.SentAt) || !attempt.Article13NoticeEpochAt.Equal(w.state.SentAt.Time) || !applicationStampEqualV1(w.state.SentAt, w.state.Article13NoticeEpochAt) || !w.state.Article13NoticeEpochV61Committed {
 			return resolved, ErrSignerPackageReadV1
 		}
+		incorporation, e := documentpackage.IncorporationCopyForVersionV1(row.IncorporationVersion)
+		if e != nil {
+			return resolved, ErrSignerPackageReadV1
+		}
+		resolved.incorporation = incorporation
 		completed, e := w.queries.InspectDocumentPackageSendCompletionV1(call, generated.InspectDocumentPackageSendCompletionV1Params{AttemptID: id, OrgID: c.OrgID, DocumentID: c.DocumentID, ExpectedManifestSha256: c.CanonicalSHA256[:], ExpectedLegalCommitmentSha256: c.CommitmentSHA256[:]})
 		if e != nil {
 			return resolved, e

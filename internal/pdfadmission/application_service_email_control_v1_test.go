@@ -133,8 +133,8 @@ func TestServiceEmailDesign760MultiKindCatalogRetiresActualParserWork(t *testing
 		}
 		catalog = append(catalog, *selected)
 	}
-	if len(catalog) != 9 || owner.reads != 6 {
-		t.Fatal("real nine-kind/six-editable catalog changed")
+	if len(catalog) != 9 || owner.reads != 8 {
+		t.Fatal("real nine-kind/eight-editable catalog changed")
 	}
 	// Serialize the entire retained catalog before closing its source owner.
 	beforeJSON := coordinator.SnapshotV1(org)

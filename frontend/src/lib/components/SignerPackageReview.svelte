@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy, tick, untrack } from 'svelte';
+  import { locale } from '$lib/i18n';
+  import { signerRoomError, signerRoomPages, signerRoomText, signerRoomViewerText } from '$lib/signerRoomUi';
   import VerifiedPDFPages from './VerifiedPDFPages.svelte';
-  import { fetchSignerPackage, fetchSignerPackagePDF, initialSignerPackagePreview, signerPackageResponse,
+  import { fetchSignerPackage, fetchSignerPackagePDF, initialSignerPackagePreview, signerPackageLocale, signerPackageResponse,
     SignerPackagePreviewController, type SignerPackage, type SignerPackagePreview, type SignerPackageResponse, type SignerPackageScope } from '$lib/signerPackage';
 
   let { scope, mainReady, disabled = false, onChange }: {
     scope: SignerPackageScope; mainReady: boolean; disabled?: boolean;
-    onChange: (state: { key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse }) => void;
+    onChange: (state: { key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse; canonicalLocale?: 'en' | 'sv' }) => void;
   } = $props();
   const original = untrack(() => scope);
   let value = $state.raw<SignerPackage | null>(null);
@@ -29,7 +31,8 @@
       && (value === null || canConsent && consent);
     const response = ready && value ? signerPackageResponse(value) : undefined;
     const settled = current() && !busy;
-    untrack(() => onChange({ key: original.key, ready, settled, ...(response ? { response } : {}) }));
+    const canonicalLocale = current() && loaded && value ? signerPackageLocale(value) : undefined;
+    untrack(() => onChange({ key: original.key, ready, settled, ...(response ? { response } : {}), ...(canonicalLocale ? { canonicalLocale } : {}) }));
   });
 
   async function refresh() {
@@ -69,56 +72,58 @@
 </script>
 
 {#if busy || error || value}
-<section aria-label="Contract package" class="mt-6 border-t border-border-light pt-6 space-y-4" data-signer-package>
+<section aria-label={signerRoomText($locale, 'Contract package')} class="mt-6 border-t border-border-light pt-6 space-y-4" data-signer-package>
   <div class="flex flex-wrap items-center justify-between gap-3">
-    <h2 class="font-display text-lg">Your contract package</h2>
-    <button type="button" class="btn btn-secondary" disabled={busy || disabled || preview.blocked} onclick={refresh}>Reload package</button>
+    <h2 class="font-display text-lg">{signerRoomText($locale, 'Your contract package')}</h2>
+    <button type="button" class="btn btn-secondary" disabled={busy || disabled || preview.blocked} onclick={refresh}>{signerRoomText($locale, 'Reload package')}</button>
   </div>
-  {#if busy}<p role="status" class="text-sm">Checking the agreement and its attachments…</p>{/if}
-  {#if error}<p role="alert" class="text-sm text-danger">{error}</p>{/if}
+  {#if busy}<p role="status" class="text-sm">{signerRoomText($locale, 'Checking the agreement and its attachments…')}</p>{/if}
+  {#if error}<p role="alert" class="text-sm text-danger">{signerRoomError($locale, error)}</p>{/if}
   {#if value && loaded}
-    <p class="text-sm text-text-secondary">Review the main document and each attachment. Your response will apply to these saved versions together.</p>
-    <ol class="space-y-3" aria-label="Documents in this agreement">
+    <p class="text-sm text-text-secondary">{signerRoomText($locale, 'Review the main document and each attachment. Your response will apply to these saved versions together.')}</p>
+    <ol class="space-y-3" aria-label={signerRoomText($locale, 'Documents in this agreement')}>
       <li class="border border-border-light rounded-md p-4 space-y-1">
-        <p class="text-sm font-medium">Main document · {value.main.title}</p>
-        <p class="text-xs text-text-secondary">{value.main.pages} page{value.main.pages === 1 ? '' : 's'} · Shown above</p>
-        <p class="text-xs" role="status">{mainReady ? 'Document ready for your review' : 'Waiting for the document view'}</p>
+        <p class="text-sm font-medium">{signerRoomText($locale, 'Main document')} · {value.main.title}</p>
+        <p class="text-xs text-text-secondary">{signerRoomPages($locale, value.main.pages)} · {signerRoomText($locale, 'Shown above')}</p>
+        <p class="text-xs" role="status">{signerRoomText($locale, mainReady ? 'Document ready for your review' : 'Waiting for the document view')}</p>
       </li>
       {#each value.annexes as member, i (i)}
         <li class="border border-border-light rounded-md p-4 space-y-2" data-package-position={i + 1}>
-          <p class="text-sm font-medium">Attachment {i + 1} · {member.title}</p>
-          <p class="text-xs text-text-secondary">{member.category ? member.category + ' · ' : ''}{member.pages} page{member.pages === 1 ? '' : 's'}</p>
+          <p class="text-sm font-medium">{signerRoomText($locale, 'Attachment {number}', { number: i + 1 })} · {member.title}</p>
+          <p class="text-xs text-text-secondary">{member.category ? member.category + ' · ' : ''}{signerRoomPages($locale, member.pages)}</p>
           <div class="flex flex-wrap items-center gap-3">
-            <button type="button" class="btn btn-secondary" disabled={disabled || busy || preview.blocked || preview.closing} onclick={() => open(i + 1)}>Review attachment</button>
-            <span class="text-xs" role="status">{reviewed[i + 1] ? 'All pages reviewed' : 'Review every page before continuing'}</span>
+            <button type="button" class="btn btn-secondary" disabled={disabled || busy || preview.blocked || preview.closing} onclick={() => open(i + 1)}>{signerRoomText($locale, 'Review attachment')}</button>
+            <span class="text-xs" role="status">{signerRoomText($locale, reviewed[i + 1] ? 'All pages reviewed' : 'Review every page before continuing')}</span>
           </div>
         </li>
       {/each}
     </ol>
-    {#if preview.error}<p role="alert" class="text-sm text-danger">{preview.error}</p>{/if}
-    {#if preview.opening || preview.closing}<p role="status" class="text-sm">{preview.closing ? 'Closing attachment…' : 'Verifying the attachment PDF…'}</p>{/if}
+    {#if preview.error}<p role="alert" class="text-sm text-danger">{signerRoomError($locale, preview.error)}</p>{/if}
+    {#if preview.opening || preview.closing}<p role="status" class="text-sm">{signerRoomText($locale, preview.closing ? 'Closing attachment…' : 'Verifying the attachment PDF…')}</p>{/if}
     {#if preview.selection}
       <div class="space-y-3" hidden={preview.opening || preview.closing}>
         <div class="flex flex-wrap items-center justify-between gap-3">
           <h3 class="font-medium">{preview.selection.title}</h3>
-          <button type="button" class="btn btn-secondary" disabled={disabled} onclick={() => controller.close()}>Close attachment</button>
+          <button type="button" class="btn btn-secondary" disabled={disabled} onclick={() => controller.close()}>{signerRoomText($locale, 'Close attachment')}</button>
         </div>
         {#key preview.selection.key}
           <VerifiedPDFPages bytes={preview.selection.bytes} proofKey={preview.selection.key} expectedPages={preview.selection.pages}
-            ariaLabel="Contract attachment" onProof={proof} onOwner={next => { owner = next; }} onRetirement={p => controller.observeRetirement(p)} />
+            ariaLabel={signerRoomText($locale, 'Contract attachment')} translate={text => signerRoomViewerText($locale, text)}
+            onProof={proof} onOwner={next => { owner = next; }} onRetirement={p => controller.observeRetirement(p)} />
         {/key}
       </div>
     {/if}
     <details class="text-xs text-text-secondary space-y-2">
-      <summary class="cursor-pointer">Verify this version · {value.revision}</summary>
-      <p class="pt-2">Package fingerprint</p><code class="block break-all">{value.manifest_sha256}</code>
-      <p>Agreement fingerprint</p><code class="block break-all">{value.legal_commitment_sha256}</code>
+      <summary class="cursor-pointer">{signerRoomText($locale, 'Verify this version · {revision}', { revision: value.revision })}</summary>
+      <p class="pt-2">{signerRoomText($locale, 'Package fingerprint')}</p><code class="block break-all">{value.manifest_sha256}</code>
+      <p>{signerRoomText($locale, 'Agreement fingerprint')}</p><code class="block break-all">{value.legal_commitment_sha256}</code>
     </details>
+    <p class="text-xs text-text-secondary">{signerRoomText($locale, signerPackageLocale(value) === 'sv' ? 'Agreement text · Swedish' : 'Agreement text · English')}</p>
     <label class="flex items-start gap-3 text-sm border border-border-light rounded-md p-4">
       <input type="checkbox" class="mt-1" bind:checked={consent} disabled={disabled || !canConsent} />
       <span>{value.incorporation.text}</span>
     </label>
-    {#if !allAttachmentsReviewed && value.annexes.length}<p class="text-xs text-text-secondary">Open each attachment and view every page to enable the package agreement.</p>{/if}
+    {#if !allAttachmentsReviewed && value.annexes.length}<p class="text-xs text-text-secondary">{signerRoomText($locale, 'Open each attachment and view every page to enable the package agreement.')}</p>{/if}
   {/if}
 </section>
 {/if}

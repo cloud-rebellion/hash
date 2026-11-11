@@ -223,6 +223,7 @@ WITH candidate AS MATERIALIZED (
  SELECT c.package_id,c.revision,c.previous_revision,c.org_id,c.document_id,c.captured_root_updated_at,
  c.captured_draft_generation,octet_length(c.manifest)::integer AS manifest_bytes,
  c.manifest_sha256,c.legal_commitment_sha256,c.member_count,c.pdf_bytes,c.pdf_pages,c.created_by,
+ CASE WHEN d.default_locale='sv' THEN 'hash-package-incorporation-sv-v1' ELSE 'hash-package-incorporation-v1' END AS incorporation_version,
  GREATEST(statement_timestamp(),clock_timestamp(),COALESCE(d.article13_notice_epoch_at+interval '1 microsecond','-infinity'::timestamptz)) AS epoch
  FROM document_package_captures_v1 c JOIN documents d ON d.id=c.document_id AND d.org_id=c.org_id
  WHERE c.package_id=$2::uuid AND c.revision=$3::bigint
@@ -239,10 +240,10 @@ WITH candidate AS MATERIALIZED (
 )
 INSERT INTO document_package_send_attempts_v1(attempt_id,org_id,document_id,package_id,capture_revision,previous_revision,
  manifest_bytes,member_count,pdf_bytes,pdf_pages,captured_root_updated_at,captured_draft_generation,
- manifest_sha256,legal_commitment_sha256,actor_user_id,article13_notice_epoch_at,retain_until)
+ manifest_sha256,legal_commitment_sha256,actor_user_id,article13_notice_epoch_at,retain_until,incorporation_version)
 SELECT $1::uuid,org_id,document_id,package_id,revision,previous_revision,manifest_bytes,member_count,pdf_bytes,pdf_pages,
- captured_root_updated_at,captured_draft_generation,manifest_sha256,legal_commitment_sha256,created_by,epoch,hash_evidence_retain_until(epoch,7)
-FROM candidate RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at
+ captured_root_updated_at,captured_draft_generation,manifest_sha256,legal_commitment_sha256,created_by,epoch,hash_evidence_retain_until(epoch,7),incorporation_version
+FROM candidate RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at, incorporation_version
 `
 
 type CreateDocumentPackageSendAttemptV1Params struct {
@@ -307,6 +308,7 @@ func (q *Queries) CreateDocumentPackageSendAttemptV1(ctx context.Context, arg Cr
 		&i.TerminalOutcome,
 		&i.TerminalAt,
 		&i.CreatedAt,
+		&i.IncorporationVersion,
 	)
 	return &i, err
 }
@@ -357,7 +359,7 @@ func (q *Queries) HasDocumentPackageSendHistoryV1(ctx context.Context, arg HasDo
 }
 
 const inspectDocumentPackageSendAttemptStateV1 = `-- name: InspectDocumentPackageSendAttemptStateV1 :one
-SELECT a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at,c.created_at AS capture_created_at,
+SELECT a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at, a.incorporation_version,c.created_at AS capture_created_at,
  (c.package_id IS NOT NULL AND c.previous_revision=a.previous_revision
  AND c.captured_root_updated_at=a.captured_root_updated_at
  AND c.captured_draft_generation=a.captured_draft_generation
@@ -406,6 +408,7 @@ type InspectDocumentPackageSendAttemptStateV1Row struct {
 	TerminalOutcome              pgtype.Text        `json:"terminal_outcome"`
 	TerminalAt                   pgtype.Timestamptz `json:"terminal_at"`
 	CreatedAt                    pgtype.Timestamptz `json:"created_at"`
+	IncorporationVersion         string             `json:"incorporation_version"`
 	CaptureCreatedAt             pgtype.Timestamptz `json:"capture_created_at"`
 	ExactCapture                 bool               `json:"exact_capture"`
 	IntentAttemptID              pgtype.UUID        `json:"intent_attempt_id"`
@@ -446,6 +449,7 @@ func (q *Queries) InspectDocumentPackageSendAttemptStateV1(ctx context.Context, 
 		&i.TerminalOutcome,
 		&i.TerminalAt,
 		&i.CreatedAt,
+		&i.IncorporationVersion,
 		&i.CaptureCreatedAt,
 		&i.ExactCapture,
 		&i.IntentAttemptID,
@@ -460,7 +464,7 @@ func (q *Queries) InspectDocumentPackageSendAttemptStateV1(ctx context.Context, 
 }
 
 const inspectDocumentPackageSendAttemptV1 = `-- name: InspectDocumentPackageSendAttemptV1 :one
-SELECT a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at,(EXISTS(SELECT 1 FROM send_sealing_intents i WHERE i.package_send_attempt_id=a.attempt_id
+SELECT a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at, a.incorporation_version,(EXISTS(SELECT 1 FROM send_sealing_intents i WHERE i.package_send_attempt_id=a.attempt_id
  AND i.org_id=a.org_id AND i.document_id=a.document_id))::boolean AS has_active_intent
 FROM document_package_send_attempts_v1 a
 WHERE a.attempt_id=$1::uuid AND a.org_id=$2::uuid AND a.document_id=$3::uuid
@@ -495,6 +499,7 @@ type InspectDocumentPackageSendAttemptV1Row struct {
 	TerminalOutcome         pgtype.Text        `json:"terminal_outcome"`
 	TerminalAt              pgtype.Timestamptz `json:"terminal_at"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	IncorporationVersion    string             `json:"incorporation_version"`
 	HasActiveIntent         bool               `json:"has_active_intent"`
 }
 
@@ -525,6 +530,7 @@ func (q *Queries) InspectDocumentPackageSendAttemptV1(ctx context.Context, arg I
 		&i.TerminalOutcome,
 		&i.TerminalAt,
 		&i.CreatedAt,
+		&i.IncorporationVersion,
 		&i.HasActiveIntent,
 	)
 	return &i, err
@@ -743,7 +749,7 @@ FROM send_sealing_intents i
 WHERE a.attempt_id=$1::uuid AND a.org_id=$2::uuid AND a.document_id=$3::uuid
  AND a.manifest_sha256=$4::bytea AND a.legal_commitment_sha256=$5::bytea
  AND a.terminal_outcome IS NULL AND i.package_send_attempt_id=a.attempt_id AND i.org_id=a.org_id AND i.document_id=a.document_id
-RETURNING a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at
+RETURNING a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at, a.incorporation_version
 `
 
 type SynchronizeDocumentPackageSendRetentionV1Params struct {
@@ -786,6 +792,7 @@ func (q *Queries) SynchronizeDocumentPackageSendRetentionV1(ctx context.Context,
 		&i.TerminalOutcome,
 		&i.TerminalAt,
 		&i.CreatedAt,
+		&i.IncorporationVersion,
 	)
 	return &i, err
 }
@@ -795,7 +802,7 @@ UPDATE document_package_send_attempts_v1 SET terminal_outcome=$1::text,terminal_
 WHERE attempt_id=$2::uuid AND org_id=$3::uuid AND document_id=$4::uuid
  AND manifest_sha256=$5::bytea AND legal_commitment_sha256=$6::bytea
  AND terminal_outcome IS NULL AND $1::text IN ('completed','aborted')
-RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at
+RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at, incorporation_version
 `
 
 type TerminalizeDocumentPackageSendAttemptV1Params struct {
@@ -840,6 +847,7 @@ func (q *Queries) TerminalizeDocumentPackageSendAttemptV1(ctx context.Context, a
 		&i.TerminalOutcome,
 		&i.TerminalAt,
 		&i.CreatedAt,
+		&i.IncorporationVersion,
 	)
 	return &i, err
 }

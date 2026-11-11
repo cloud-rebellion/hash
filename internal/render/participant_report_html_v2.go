@@ -166,6 +166,9 @@ func (r ParticipantReportV1) HTMLV2() (string, string, error) {
 		b.field("Response event row SHA-256", p.EventRowSHA256, true)
 		b.field("Incorporation statement version", p.IncorporationVersion, true)
 		b.field("Incorporation statement SHA-256", p.IncorporationSHA256, true)
+		if text := participantReportSwedishIncorporationV128(p); text != "" {
+			b.field("Incorporation statement (Swedish)", text, false)
+		}
 		b.endMeta()
 		b.endRecord()
 	}

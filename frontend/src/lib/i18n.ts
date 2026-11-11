@@ -1,7 +1,7 @@
-// Lightweight i18n for surfaces that opt in. The signer ceremony is
-// intentionally forced to English until every legal and transactional string
-// has a counsel-reviewed translation; the retained catalogs are not a claim
-// that localized signing is production-ready.
+// Lightweight i18n for surfaces that opt in. The signer selects only English
+// or Swedish interface copy from its validated server recipient context.
+// Canonical privacy/attachment notices remain verbatim versioned server copy;
+// localized controls do not translate or replace that consent evidence.
 //
 // Coverage: the 24 official EU languages plus Norwegian (Nordic/BankID). Every
 // lookup falls back to English per key, so a partial translation degrades
@@ -54,6 +54,39 @@ const en: Dict = {
   'common.cancel': 'Cancel',
   'common.decline': 'Decline',
   'common.loading': 'Loading…',
+  'common.document': 'Document',
+  'sign.linkUnavailable': 'This link is invalid or has expired.',
+  'sign.noticeUnavailable': 'The required privacy notice is unavailable.',
+  'sign.noticeRequired': 'Acknowledge the current privacy notice before continuing.',
+  'sign.documentLoadFailed': 'The document could not be loaded. Please reopen your signing link.',
+  'sign.documentEmpty': 'The document is empty. Please contact the sender.',
+  'sign.missingToken': 'Missing sign token',
+  'sign.nameRequired': 'Please type your name first.',
+  'sign.acceptFailed': 'Could not accept the document',
+  'sign.declineFailed': 'Could not decline the document ({status})',
+  'sign.view.unconfirmed': 'The document is displayed, but its view could not be confirmed with the sender. Please try again.',
+  'sign.view.retry': 'Retry view confirmation',
+  'sign.interfaceLanguage': 'English interface.',
+  'sign.privacyLanguage.en': 'Privacy notice: English.',
+  'sign.privacyLanguage.sv': 'Privacy notice: Swedish.',
+  'sign.packageLanguage.en': 'Package consent: English.',
+  'sign.packageLanguage.sv': 'Package consent: Swedish.',
+  'sign.currentDocument': 'Current document',
+  'sign.completed.downloadOriginals': 'Download original contract files',
+  'sign.preSign.label': 'Provider pre-signing disclosure',
+  'sign.preSign.title': 'Our company’s part is already signed',
+  'sign.preSign.executed': '{provider} pre-signed the provider’s part on',
+  'sign.preSign.review': 'Review the provider-signed agreement below. Your own signature still requires your explicit confirmation.',
+  'changes.requested.paused': 'Signing and field changes are paused. Review this version and continue the conversation below.',
+  'comments.history': 'Message history',
+  'comments.older': 'Older',
+  'comments.newer': 'Newer',
+  'comments.latest': 'Latest',
+  'comments.loading': 'Loading messages…',
+  'comments.retryRefresh': 'Retry message refresh',
+  'comments.refreshFailed': 'Messages could not be refreshed. Please try refreshing again.',
+  'comments.readFailed': 'Message history request failed (HTTP {status}).',
+  'comments.sendFailed': 'Message could not be sent (HTTP {status}). Your draft has been kept.',
   'sign.for': 'For {name} ({role})',
   'sign.declined.title': 'You declined this document',
   'sign.declined.body': 'The sender has been notified. You can close this tab.',
@@ -119,18 +152,60 @@ const sv: Dict = {
   'common.cancel': 'Avbryt',
   'common.decline': 'Avböj',
   'common.loading': 'Laddar…',
+  'common.document': 'Dokument',
+  'sign.linkUnavailable': 'Länken är ogiltig eller har gått ut.',
+  'sign.noticeUnavailable': 'Den obligatoriska integritetsinformationen är inte tillgänglig.',
+  'sign.noticeRequired': 'Bekräfta den aktuella integritetsinformationen innan du fortsätter.',
+  'sign.documentLoadFailed': 'Dokumentet kunde inte läsas in. Öppna signeringslänken igen.',
+  'sign.documentEmpty': 'Dokumentet är tomt. Kontakta avsändaren.',
+  'sign.missingToken': 'Signeringstoken saknas',
+  'sign.nameRequired': 'Skriv ditt namn först.',
+  'sign.acceptFailed': 'Dokumentet kunde inte accepteras',
+  'sign.declineFailed': 'Dokumentet kunde inte avböjas ({status})',
+  'sign.view.unconfirmed': 'Dokumentet visas, men visningen kunde inte bekräftas med avsändaren. Försök igen.',
+  'sign.view.retry': 'Försök bekräfta visningen igen',
+  'sign.interfaceLanguage': 'Svenskt gränssnitt.',
+  'sign.privacyLanguage.en': 'Integritetsinformation: engelska.',
+  'sign.privacyLanguage.sv': 'Integritetsinformation: svenska.',
+  'sign.packageLanguage.en': 'Godkännande av avtalspaketet: engelska.',
+  'sign.packageLanguage.sv': 'Godkännande av avtalspaketet: svenska.',
+  'sign.currentDocument': 'Aktuellt dokument',
+  'sign.completed.downloadOriginals': 'Ladda ner avtalets originalfiler',
+  'sign.preSign.label': 'Information om leverantörens försignering',
+  'sign.preSign.title': 'Vårt företags del är redan signerad',
+  'sign.preSign.executed': '{provider} försignerade leverantörens del den',
+  'sign.preSign.review': 'Granska det försignerade avtalet nedan. Din egen signatur kräver fortfarande din uttryckliga bekräftelse.',
+  'changes.requested.paused': 'Signering och ändringar i fälten är pausade. Granska den här versionen och fortsätt samtalet nedan.',
+  'comments.history': 'Meddelandehistorik',
+  'comments.older': 'Äldre',
+  'comments.newer': 'Nyare',
+  'comments.latest': 'Senaste',
+  'comments.loading': 'Läser in meddelanden…',
+  'comments.retryRefresh': 'Försök läsa in meddelandena igen',
+  'comments.refreshFailed': 'Meddelandena kunde inte läsas in. Försök läsa in dem igen.',
+  'comments.readFailed': 'Meddelandehistoriken kunde inte läsas in (HTTP {status}).',
+  'comments.sendFailed': 'Meddelandet kunde inte skickas (HTTP {status}). Ditt utkast finns kvar.',
   'sign.for': 'Till {name} ({role})',
   'sign.declined.title': 'Du avböjde dokumentet',
   'sign.declined.body': 'Avsändaren har meddelats. Du kan stänga fliken.',
   'sign.signed.title': 'Signerat',
   'sign.signed.allParties': 'Dokumentet är signerat av alla parter.',
   'sign.signed.download': 'Ladda ner signerad PDF',
+  'sign.completed.downloadAudit': 'Ladda ner signeringsintyg',
+  'sign.completed.downloadsUnavailable': 'Dokumentet är slutfört. Nedladdningslänkar är inte tillgängliga på den här sidan. Använd de tidsbegränsade länkarna i slutförandemejlet eller kontakta avsändaren för kopior.',
   'sign.signed.recorded': 'Din signatur är registrerad. Dokumentet slutförs när alla parter har signerat.',
   'sign.accept.title': 'Läs och acceptera',
   'sign.accept.body': 'Läs dokumentet och klicka på Acceptera för att bekräfta. Ingen signatur krävs.',
   'sign.accept.button': 'Acceptera',
   'sign.accepted.title': 'Accepterat',
   'sign.accepted.body': 'Din acceptans är registrerad. Du kan stänga fliken.',
+  'sign.accepted.completedTitle': 'Bekräftelsen är slutförd',
+  'sign.accepted.completedAllParties': 'Alla obligatoriska mottagare har bekräftat dokumentet.',
+  'sign.accepted.download': 'Ladda ner slutförd PDF',
+  'sign.accepted.completedRecorded': 'Bekräftelsen av dokumentet är slutförd. Använd den tidsbegränsade länken i slutförandemejlet eller kontakta avsändaren för en kopia.',
+  'sign.accept.legalNote': 'Hash registrerar din IP-adress, webbläsare, tidsstämpel och bekräftelsehändelse så att din acceptans kan styrkas i efterhand. Ingen signaturbild eller signaturrepresentation skapas.',
+  'sign.tierUnavailable.title': 'Den här signaturnivån är inte tillgänglig',
+  'sign.tierUnavailable.body': 'Hash erbjuder för närvarande inte produktionsklar signering på nivån {tier}. Dokumentet kan inte signeras här på den nivån. Kontakta avsändaren. Det nedgraderas inte till SES.',
   'sign.pdf.fillHint': 'Fyll i fälten i dokumentet och klicka sedan på en signaturruta (eller knappen nedan) för att signera där avsändaren markerat.',
   'sign.yourName': 'Ditt namn',
   'sign.namePlaceholder': 'Skriv ditt fullständiga namn',
@@ -1091,11 +1166,11 @@ export function setLocale(l: Locale) {
 // recipient choice) WITHOUT persisting. By default it only applies when the
 // visitor has not already chosen one themselves, so a visitor's toggle wins.
 //
-// With { force: true } it overrides any previously saved global preference.
-// The signer ceremony uses force because the sender DICTATES the document's
-// language: the whole experience must open in that one language, never mixing
-// a stale browser/localStorage pick (from some other document) with the
-// server strings. The in-page selector still lets the signer switch live.
+// With { force: true } it overrides any previously saved global preference
+// without persisting. The signer resets to English for a fresh context and
+// then chooses only en/sv from the validated server recipient. Its canonical
+// notices and authored contract content are displayed verbatim, independently
+// of the interface language. Other retained catalogs are not activated there.
 export function preferLocale(code: string, opts?: { force?: boolean }) {
   if (!opts?.force && typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY)) return;
   if (isLocale(code)) locale.set(code);

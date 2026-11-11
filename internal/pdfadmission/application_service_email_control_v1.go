@@ -189,6 +189,17 @@ var ErrServiceEmailControlV1 = errors.New("email design requires its original pr
 // self-contained render, frozen outbox strings, digest/JSON/MIME copies before
 // the sample helper allocates any of them. It supplies no send or SQL authority.
 func (o *ApplicationServiceEmailControlV1) ReserveSampleOutputV1(ctx context.Context) error {
+	return o.reserveMessageOutputV1(ctx, 2*dispatch.ServiceEmailDesignRenderedBytesV1)
+}
+
+// ReserveNativeOutputV1 uses the same bounded render/result workspace as the
+// existing sample operation, plus subject/row overhead in its DB staging loan.
+// It creates no sample receipt, destination, send, audit or SQL authority.
+func (o *ApplicationServiceEmailControlV1) ReserveNativeOutputV1(ctx context.Context) error {
+	return o.reserveMessageOutputV1(ctx, 2*dispatch.ServiceEmailDesignRenderedBytesV1+dispatch.ServiceEmailRenderedSubjectBytesV1+65536)
+}
+
+func (o *ApplicationServiceEmailControlV1) reserveMessageOutputV1(ctx context.Context, staging int64) error {
 	if o == nil {
 		return ErrServiceEmailControlV1
 	}
@@ -200,13 +211,38 @@ func (o *ApplicationServiceEmailControlV1) ReserveSampleOutputV1(ctx context.Con
 	if err := o.grant.TryGrowParentV1(ctx, 16*dispatch.ServiceEmailDesignRenderedBytesV1+65536+dispatch.ServiceEmailDesignFixedWorkBytesV1+64*(dispatch.ServiceEmailDesignSourceBytesV1+dispatch.ServiceEmailSubjectSourceBytesV1+dispatch.ServiceEmailHTMLSourceBytesV1+dispatch.ServiceEmailTextSourceBytesV1)); err != nil {
 		return err
 	}
-	close, err := o.admission.acquire(ctx, o.org, workguard.VectorV1{DBStagingBytes: 2 * dispatch.ServiceEmailDesignRenderedBytesV1})
+	close, err := o.admission.acquire(ctx, o.org, workguard.VectorV1{DBStagingBytes: staging})
 	if err != nil {
 		return err
 	}
 	o.closes = append(o.closes, close)
 	o.sampleReserved = true
 	return nil
+}
+
+// AdmitNativeContextV1 prices the actual concrete producer strings before any
+// native-template expansion or selected-edition parsing. Values are not copied,
+// interpreted, or exported, and callers supply no size vector.
+func (o *ApplicationServiceEmailControlV1) AdmitNativeContextV1(ctx context.Context, c dispatch.TemplateContext) error {
+	if o == nil {
+		return ErrServiceEmailControlV1
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.validLockedV1(ctx) {
+		return ErrServiceEmailControlV1
+	}
+	var total int64
+	for _, value := range []string{c.DocumentName, c.SenderName, c.SenderEmail, c.RecipientName, c.OrgName, c.Locale,
+		c.SignURL, c.BeaconURL, c.DownloadURL, c.AuditCertURL, c.PackagePortalURL, c.DownloadExpiresAt,
+		c.DeclineReason, c.BrandColor, c.ChangeQuote, c.ChangeContext, c.ChangeProposed,
+		c.OpenURL, c.ApproveURL, c.DenyURL, c.QuotaKind, c.PeriodResetAt, c.UpgradeURL, c.PlanName} {
+		if int64(len(value)) > dispatch.ServiceEmailDesignRenderedBytesV1-total {
+			return ErrServiceEmailControlV1
+		}
+		total += int64(len(value))
+	}
+	return o.grant.TryGrowParentV1(ctx, 64*total+65536)
 }
 
 func (o *ApplicationServiceEmailControlV1) MatchesOrgV1(ctx context.Context, org uuid.UUID) bool {

@@ -118,13 +118,13 @@ func (w *ApplicationHTMLSendWorkV1) validatePackageResponseLockedV1(call context
 		return ErrSignerReadCredentialV1
 	}
 	c := resolved.observation.Capture
-	if s.expected.ValidateV1() != nil || hex.EncodeToString(c.CanonicalSHA256[:]) != s.expected.ManifestSHA256 || hex.EncodeToString(c.CommitmentSHA256[:]) != s.expected.LegalCommitmentSHA256 {
+	if !s.expected.MatchesIncorporationV1(resolved.incorporation) || hex.EncodeToString(c.CanonicalSHA256[:]) != s.expected.ManifestSHA256 || hex.EncodeToString(c.CommitmentSHA256[:]) != s.expected.LegalCommitmentSHA256 {
 		return ErrPackageResponseChangedV1
 	}
 	// The new database binding also locks the actual recipient before effects,
 	// independently verifies current root/source and immutable M106/M103 identity,
 	// and binds the exact database-authored incorporation version and copy.
-	raw := int64(32768) + 8*int64(unsafe.Sizeof(generated.ListSignerPackageResponseBindingV1Row{})) + 16*int64(len(documentpackage.IncorporationTextV1))
+	raw := int64(32768) + 8*int64(unsafe.Sizeof(generated.ListSignerPackageResponseBindingV1Row{})) + 16*int64(len(documentpackage.IncorporationTextV1)+len(documentpackage.IncorporationTextSwedishV1))
 	closeRows, err := w.actor.acquireOwnedRetainedBodyV1(call, raw, raw)
 	if err != nil {
 		return errors.Join(ErrPackageResponseRequestV1, err)
@@ -134,7 +134,7 @@ func (w *ApplicationHTMLSendWorkV1) validatePackageResponseLockedV1(call context
 	if err != nil {
 		return err
 	}
-	copy := documentpackage.IncorporationCopyV1()
+	copy := resolved.incorporation
 	if len(rows) != 1 || rows[0] == nil {
 		return ErrPackageResponseChangedV1
 	}

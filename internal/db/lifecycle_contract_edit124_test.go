@@ -10,17 +10,17 @@ import (
 
 func TestEmbeddedEdit124BumpsWriterToNineAndRequiresItsNamedFloor(t *testing.T) {
 	want, versions, err := EmbeddedMigrationsIdentity()
-	if err != nil || versions[len(versions)-1] != 127 {
-		t.Fatal("embedded tree does not end at M127", err)
+	if err != nil || versions[len(versions)-1] != 128 {
+		t.Fatal("embedded tree does not end at M128", err)
 	}
 	version, digest, err := EmbeddedLifecycleIdentityV1()
-	if err != nil || version != 9 || digest != want {
-		t.Fatal("M124 must publish writer contract 9 with the actual migration identity", version, digest, err)
+	if err != nil || version != LifecycleContractVersionV1 || digest != want {
+		t.Fatal("actual tree lost its writer and migration identity", version, digest, err)
 	}
 	tail := []int64{115, 116, 117, 118, 119, 120, 121, 122, 123, 124}
 	f := brand123LifecycleFiles()
 	f["migrations/00124_draft_in_place_edit.sql"] = f["migrations/00123_org_brand_profiles.sql"]
-	if err := requireReviewedLifecycleTreeV1(f, tail); err != nil {
+	if version, err := reviewedLifecycleContractVersionV1(f, tail); err != nil || version != 9 {
 		t.Fatal("reviewed M124 tree refused", err)
 	}
 	for _, mode := range []fs.FileMode{fs.ModeDir, fs.ModeSymlink} {

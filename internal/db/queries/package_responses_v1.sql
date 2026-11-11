@@ -15,9 +15,9 @@ WITH root AS MATERIALIZED (
 )
 SELECT a.attempt_id,a.package_id,a.capture_revision,a.manifest_sha256,a.legal_commitment_sha256,
  root.sent_at,a.article13_notice_epoch_at,a.retain_until,a.member_count,
- hash_package_incorporation_version_v1()::text AS incorporation_version,
- hash_package_incorporation_text_v1()::text AS incorporation_text,
- hash_package_incorporation_sha256_v1()::bytea AS incorporation_sha256
+ a.incorporation_version::text AS incorporation_version,
+ hash_package_incorporation_text_for_version_v128(a.incorporation_version)::text AS incorporation_text,
+ hash_package_incorporation_sha256_for_version_v128(a.incorporation_version)::bytea AS incorporation_sha256
 FROM root JOIN document_package_send_attempts_v1 a ON a.org_id=root.org_id AND a.document_id=root.id
 JOIN party r ON r.document_id=root.id
 JOIN document_package_send_initial_invite_receipts_v1 i ON i.attempt_id=a.attempt_id AND i.org_id=a.org_id AND i.document_id=a.document_id AND i.recipient_id=r.id
@@ -42,7 +42,7 @@ INSERT INTO document_package_responses_v1(attempt_id,org_id,document_id,recipien
  response_kind,signature_id,response_event_id,response_event_row_sha256,response_event_created_at)
 SELECT a.attempt_id,a.org_id,a.document_id,party.id,a.package_id,a.capture_revision,
  a.manifest_sha256,a.legal_commitment_sha256,root.sent_at,a.article13_notice_epoch_at,
- hash_package_incorporation_version_v1(),hash_package_incorporation_sha256_v1(),
+ a.incorporation_version,hash_package_incorporation_sha256_for_version_v128(a.incorporation_version),
  CASE WHEN e.kind='document.signed' THEN 'signed' ELSE 'accepted' END,
  sqlc.narg(signature_id)::uuid,e.id,e.row_hash,e.created_at
 FROM root JOIN party ON party.document_id=root.id

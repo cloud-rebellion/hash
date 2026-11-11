@@ -27,7 +27,11 @@ const templateSampleHTMLNoticeV1 = "<p><strong>Test email — no signing request
 const templateSampleTextNoticeV1 = "Test email — no signing request. This sample uses synthetic document and recipient details. Its action links cannot be used to sign.\n\n"
 
 func renderedTemplateSampleV1(kind string, tpl dispatch.ServiceEmailTemplateV1) (subject, html, text string, err error) {
-	subject, html, text, err = dispatch.RenderServiceEmailV1(kind, emailtemplates.SyntheticContext(), &tpl)
+	return renderedTemplateSampleContextV1(kind, tpl, emailtemplates.SyntheticContext())
+}
+
+func renderedTemplateSampleContextV1(kind string, tpl dispatch.ServiceEmailTemplateV1, sample dispatch.TemplateContext) (subject, html, text string, err error) {
+	subject, html, text, err = dispatch.RenderServiceEmailV1(kind, sample, &tpl)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -73,7 +77,11 @@ func (s Service) TestSavedTemplateV1(ctx context.Context, a authoring.Actor, kin
 		if e != nil || address.Address != u.Email {
 			return audit.PendingEvent{}, ErrInput
 		}
-		subject, html, text, e := renderedTemplateSampleV1(kind, tpl)
+		sample, e := emailtemplates.SavedSampleContextForOwnerV1(ctx, tx, a, guard, kind)
+		if e != nil {
+			return audit.PendingEvent{}, e
+		}
+		subject, html, text, e := renderedTemplateSampleContextV1(kind, tpl, sample)
 		if e != nil {
 			return audit.PendingEvent{}, e
 		}

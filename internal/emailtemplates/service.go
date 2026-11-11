@@ -16,6 +16,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -48,6 +49,7 @@ type Template struct {
 type Preview struct {
 	owner                     *pdfadmission.ApplicationServiceEmailControlV1
 	SchemaVersion             int    `json:"schema_version"`
+	Locale                    string `json:"locale"`
 	Synthetic                 bool   `json:"synthetic"`
 	Revision                  int64  `json:"revision"`
 	Subject                   string `json:"subject"`
@@ -60,9 +62,12 @@ func Default(kind string) Template {
 	return Template{Kind: kind, Variables: dispatch.ServiceEmailVariablesV1(), MandatoryContent: "appended_by_hash", Editable: dispatch.ServiceEmailTemplateEditableKindV1(kind)}
 }
 func read(ctx context.Context, tx pgx.Tx, kind string, actor authoring.Actor) (Template, error) {
+	return readForOrgV1(ctx, tx, kind, actor.OrgID)
+}
+func readForOrgV1(ctx context.Context, tx pgx.Tx, kind string, org uuid.UUID) (Template, error) {
 	out := Default(kind)
 	q := generated.New(tx)
-	header, err := q.GetServiceEmailTemplateHeaderV1(ctx, generated.GetServiceEmailTemplateHeaderV1Params{OrgID: actor.OrgID, Kind: kind})
+	header, err := q.GetServiceEmailTemplateHeaderV1(ctx, generated.GetServiceEmailTemplateHeaderV1Params{OrgID: org, Kind: kind})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, nil
 	}
@@ -77,14 +82,14 @@ func read(ctx context.Context, tx pgx.Tx, kind string, actor authoring.Actor) (T
 	} else if header.DesignBytes > 0 {
 		return out, pdfadmission.ErrServiceEmailControlV1
 	}
-	row, err := generated.New(tx).GetServiceEmailTemplateV1(ctx, generated.GetServiceEmailTemplateV1Params{OrgID: actor.OrgID, Kind: kind})
+	row, err := generated.New(tx).GetServiceEmailTemplateV1(ctx, generated.GetServiceEmailTemplateV1Params{OrgID: org, Kind: kind})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, ErrInput
 	}
 	if err != nil {
 		return out, err
 	}
-	if row.OrgID != actor.OrgID || row.Kind != kind || row.Revision < 1 || !row.UpdatedAt.Valid || row.Revision != header.Revision || row.UpdatedAt != header.UpdatedAt || int64(len(row.SubjectTemplate)) != header.SubjectBytes || int64(len(row.HtmlTemplate)) != header.HtmlBytes || int64(len(row.TextTemplate)) != header.TextBytes || int64(len(row.DesignJson)) != header.DesignBytes || !bytes.Equal(row.DesignSha256, header.DesignSha256) || !bytes.Equal(row.DesignSha256, dispatch.ServiceEmailDesignDigestV1(row.DesignJson)) {
+	if row.OrgID != org || row.Kind != kind || row.Revision < 1 || !row.UpdatedAt.Valid || row.Revision != header.Revision || row.UpdatedAt != header.UpdatedAt || int64(len(row.SubjectTemplate)) != header.SubjectBytes || int64(len(row.HtmlTemplate)) != header.HtmlBytes || int64(len(row.TextTemplate)) != header.TextBytes || int64(len(row.DesignJson)) != header.DesignBytes || !bytes.Equal(row.DesignSha256, header.DesignSha256) || !bytes.Equal(row.DesignSha256, dispatch.ServiceEmailDesignDigestV1(row.DesignJson)) {
 		return out, ErrInput
 	}
 	tpl := dispatch.ServiceEmailTemplateV1{Revision: row.Revision, SubjectTemplate: row.SubjectTemplate, HTMLTemplate: row.HtmlTemplate, TextTemplate: row.TextTemplate, DesignJSON: row.DesignJson}
@@ -292,11 +297,15 @@ func (s Service) Preview(ctx context.Context, actor authoring.Actor, kind string
 			return e
 		}
 		defer closeRender()
-		subject, html, text, e := dispatch.RenderServiceEmailV1(kind, SyntheticContext(), &tpl)
+		previewContext, e := syntheticContextV1(ctx, tx, actor.OrgID, kind)
 		if e != nil {
 			return e
 		}
-		out = Preview{SchemaVersion: 1, Synthetic: true, Revision: current.Revision, Subject: subject, HTML: html, Text: text, MandatoryContentPreserved: true, owner: owner}
+		subject, html, text, e := dispatch.RenderServiceEmailV1(kind, previewContext, &tpl)
+		if e != nil {
+			return e
+		}
+		out = Preview{SchemaVersion: 1, Locale: previewContext.Locale, Synthetic: true, Revision: current.Revision, Subject: subject, HTML: html, Text: text, MandatoryContentPreserved: true, owner: owner}
 		return nil
 	})
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/emailtemplates"
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -75,6 +76,10 @@ func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.Li
 	if row == nil {
 		return flarereport.InvocationReturned
 	}
+	// The scheduled loop has no deadline. Retain its cancellation while bounding
+	// this original transaction/native Work operation, as the operator path does.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	quotaKind, used, limit, pct := pickTrippedQuota(row, quotaWarningThreshold)
 	if quotaKind == "" {
 		return flarereport.InvocationReturned
@@ -91,7 +96,7 @@ func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.Li
 	}
 	periodResetAt := ""
 	if row.CurrentPeriodEnd.Valid {
-		periodResetAt = row.CurrentPeriodEnd.Time.UTC().Format("January 2, 2006")
+		periodResetAt = row.CurrentPeriodEnd.Time.UTC().Format("2006-01-02")
 	}
 
 	tplCtx := dispatch.TemplateContext{
@@ -104,12 +109,6 @@ func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.Li
 		PeriodResetAt: periodResetAt,
 		UpgradeURL:    w.baseURL + "/settings/billing",
 	}
-	subj, html, text, err := dispatch.Render(dispatch.KindQuotaWarning80, tplCtx)
-	if err != nil {
-		slog.Warn("quota_warnings: render", "err", err)
-		return flarereport.InvocationPartial
-	}
-
 	if w.pool == nil || w.audit == nil {
 		slog.Warn("quota_warnings: atomic dependencies unavailable", "org_id", row.OrgID)
 		return flarereport.InvocationPartial
@@ -138,9 +137,23 @@ func (w *worker) sendQuotaWarningObserved(ctx context.Context, row *generated.Li
 	}
 
 	q := w.queries.WithTx(tx)
+	// Preference and immutable edition are selected only after the real period
+	// lock/dedup check, in the same transaction as every queue row and marker.
+	// Retain this process's original Work owner through commit; retries consume
+	// the already-frozen outbox bytes, never a later preference/template head.
+	if w.sendEngine == nil || !w.sendEngine.WorkRuntime.MatchesPoolV1(w.pool) {
+		slog.Warn("quota_warnings: process work unavailable", "org_id", row.OrgID)
+		return flarereport.InvocationPartial
+	}
+	rendered, err := emailtemplates.PrepareNativeV1(ctx, w.sendEngine.WorkRuntime.WorkV1(), tx, row.OrgID, dispatch.KindQuotaWarning80, tplCtx)
+	if err != nil {
+		slog.Warn("quota_warnings: render selected edition", "err", err)
+		return flarereport.InvocationPartial
+	}
+	defer rendered.CloseConsumerV1()
 	for _, u := range users {
 		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: row.OrgID,
-			ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`),
+			ToEmail: u.Email, Subject: rendered.Subject, HtmlBody: rendered.HTML, TextBody: rendered.Text, HeadersJson: []byte(`{}`),
 		}); err != nil {
 			slog.Warn("quota_warnings: enqueue", "to", dispatch.MaskEmail(u.Email), "err", dispatch.ScrubEmails(err.Error()))
 			return flarereport.InvocationPartial

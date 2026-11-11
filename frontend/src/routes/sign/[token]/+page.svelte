@@ -15,10 +15,16 @@
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
   import { signerCeremonyKey, validateSignerPDFObservation, type SignerPDFObservation, type SignerPDFScope } from '$lib/signerPDF';
   import { createSignerViewRecorder, type SignerViewScope, type SignerViewState } from '$lib/signerView';
-  import { t, setLocale } from '$lib/i18n';
+  import { t, preferLocale } from '$lib/i18n';
   import { completionArtifactLinks, type CompletionArtifactLinks } from '$lib/completionArtifacts';
 
+  // No stale browser or staff preference selects a recipient's interface.
+  preferLocale('en', { force: true });
+
   type Privacy = {
+    // Missing metadata is the retained English notice contract. Present
+    // metadata is validated before this context can open a viewer.
+    copy_locale?: 'en' | 'sv';
     controller: string;
     controller_contact: string;
     processor: string;
@@ -113,7 +119,7 @@
   let accepted = $state(false);
   let accepting = $state(false);
   let noticeAcknowledged = $state(false);
-  let packageReview = $state<{ key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse }>({ key: '', ready: false, settled: false });
+  let packageReview = $state<{ key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse; canonicalLocale?: 'en' | 'sv' }>({ key: '', ready: false, settled: false });
 
   let showDeclineModal = $state(false);
   let declineReason = $state('');
@@ -152,7 +158,7 @@
   const commentHistory = createCommentHistory<CommentScope>({
     readPage: async (scope, selection, signal) => {
       const res = await fetch(`/sign/${encodeURIComponent(scope.token)}/comments${commentQuery(selection)}`, { signal, cache: 'no-store' });
-      if (!res.ok) throw new Error(`Message history request failed (HTTP ${res.status}).`);
+      if (!res.ok) throw new Error($t('comments.readFailed', { status: res.status }));
       return res.json();
     },
     isCurrent: isCurrentCommentScope,
@@ -204,13 +210,13 @@
     postingComment = true;
     signError = null;
     try {
-      if (!noticeAcknowledged || acknowledgedScopeKey !== scope.ceremonyKey) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged || acknowledgedScopeKey !== scope.ceremonyKey) throw new Error($t('sign.noticeRequired'));
       const res = await fetch(`/sign/${encodeURIComponent(scope.token)}/comments`, {
         method: 'POST', headers: signerNoticeHeaders(scope.noticeDigest, true),
         body: JSON.stringify({ body: submittedBody.trim() })
       });
       if (!current()) return;
-      if (!res.ok) throw new Error(`Message could not be sent (HTTP ${res.status}). Your draft has been kept.`);
+      if (!res.ok) throw new Error($t('comments.sendFailed', { status: res.status }));
       if (commentBody === submittedBody) commentBody = '';
       postingComment = false;
       await loadComments(scope.token);
@@ -255,7 +261,7 @@
     if (!token) return;
     requestingChanges = true;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged) throw new Error($t('sign.noticeRequired'));
       const res = await fetch(`/sign/${encodeURIComponent(token)}/request-changes`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
@@ -337,11 +343,14 @@
     return documentDisplayed() && viewState.confirmed;
   }
 
-  function updatePackageReview(next: { key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse }, epoch: number) {
+  function updatePackageReview(next: { key: string; ready: boolean; settled: boolean; response?: SignerPackageResponse; canonicalLocale?: 'en' | 'sv' }, epoch: number) {
     if (epoch !== ceremonyEpoch || next.key !== currentCeremonyKey()) return;
+    const canonicalLocale = next.canonicalLocale === 'en' || next.canonicalLocale === 'sv' ? next.canonicalLocale : undefined;
     if (packageReview.key === next.key && packageReview.ready === next.ready && packageReview.settled === next.settled
+      && packageReview.canonicalLocale === canonicalLocale
       && JSON.stringify(packageReview.response) === JSON.stringify(next.response)) return;
-    packageReview = { ...next, ...(next.response ? { response: { ...next.response } } : {}) };
+    packageReview = { key: next.key, ready: next.ready, settled: next.settled,
+      ...(next.response ? { response: { ...next.response } } : {}), ...(canonicalLocale ? { canonicalLocale } : {}) };
     if (next.settled && packageCanLoad() && initialCommentKey !== next.key) {
       initialCommentKey = next.key;
       void loadComments(loadedToken);
@@ -410,6 +419,7 @@
   });
 
   function resetRouteState() {
+    preferLocale('en', { force: true });
     ceremonyEpoch += 1;
     viewRecorder.invalidate();
     ctx = null;
@@ -461,15 +471,22 @@
       const res = await fetch(`/sign/${encodeURIComponent(token)}`, { signal, cache: 'no-store' });
       if (signal.aborted) return;
       if (!res.ok) {
-        loadError = 'This link is invalid or has expired.';
+        loadError = $t('sign.linkUnavailable');
         return;
       }
       const loaded = await res.json() as Ctx;
       if (signal.aborted || token !== $page.params.token) return;
 	  if (!loaded.privacy?.notice_digest) {
-		loadError = 'The required privacy notice is unavailable.';
+		loadError = $t('sign.noticeUnavailable');
 		return;
 	  }
+      // Canonical copy is server material, not a translation of the interface.
+      // A legacy missing locale remains English; malformed metadata cannot be
+      // presented under a guessed language label.
+      if (loaded.privacy.copy_locale !== undefined && loaded.privacy.copy_locale !== 'en' && loaded.privacy.copy_locale !== 'sv') {
+        loadError = $t('sign.noticeUnavailable');
+        return;
+      }
       // Ordinary absent/null disclosure remains compatible. A present relation
       // must match this exact candidate and ceremony before any viewer opens.
       if (loaded.amendment_context !== undefined && loaded.amendment_context !== null) {
@@ -488,10 +505,9 @@
       ctx = loaded;
       const installedContext = ctx;
 
-	  // Legal translations have not all received counsel review. Keep the
-	  // complete signer ceremony in English until an approved catalog ships;
-	  // mixing translated chrome with English legal text is misleading.
-	  setLocale('en');
+      // Only interface copy follows this validated server recipient context.
+      // Canonical notices and document content remain verbatim server copy.
+      preferLocale(loaded.recipient.locale === 'sv' ? 'sv' : 'en', { force: true });
 
       // Reflect what this recipient has already done without fabricating a
       // download credential. Completion invalidates the magic-link token, so
@@ -530,10 +546,10 @@
       if (loaded.source_kind === 'blocks') {
         const docRes = await fetch(`/sign/${encodeURIComponent(token)}/document`, { signal, cache: 'no-store' });
         if (!currentLoad()) return;
-        if (!docRes.ok) throw new Error('The document could not be loaded. Please reopen your signing link.');
+        if (!docRes.ok) throw new Error($t('sign.documentLoadFailed'));
         const html = await docRes.text();
         if (!currentLoad()) return;
-        if (!html.trim()) throw new Error('The document is empty. Please contact the sender.');
+        if (!html.trim()) throw new Error($t('sign.documentEmpty'));
         documentHTML = html;
         await tick();
         if (!currentLoad()) return;
@@ -552,7 +568,7 @@
   }
 
   onMount(() => {
-	setLocale('en');
+    preferLocale('en', { force: true });
   });
   onDestroy(() => { routeDisposed = true; viewRecorder.dispose(); invalidateCommentScope(); commentHistory.dispose(); });
 
@@ -566,7 +582,7 @@
     untrack(() => {
       resetRouteState();
       if (!token) {
-        loadError = 'Missing sign token';
+        loadError = $t('sign.missingToken');
         return;
       }
       clearLegacyA13Acknowledgement(token);
@@ -579,7 +595,7 @@
     if (!ctx || changesRequested || requestingChanges) return;
     if (signing || accepting || declining || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined) return;
     if (!typedName.trim()) {
-      signError = 'Please type your name first.';
+      signError = $t('sign.nameRequired');
       return;
     }
     showAdoptModal = true;
@@ -614,7 +630,7 @@
     signing = true;
     signError = null;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged) throw new Error($t('sign.noticeRequired'));
       const res = await postWithLookupRetry(() => fetch(`/sign/${encodeURIComponent(token)}/sign`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
@@ -665,7 +681,7 @@
     accepting = true;
     signError = null;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged) throw new Error($t('sign.noticeRequired'));
       const res = await fetch(`/sign/${encodeURIComponent(token)}/accept`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
@@ -675,7 +691,7 @@
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         if (ceremonyKey !== currentCeremonyKey()) return;
-        throw new Error(data.error ?? 'Could not accept the document');
+        throw new Error(data.error ?? $t('sign.acceptFailed'));
       }
       const data = await res.json();
       if (ceremonyKey !== currentCeremonyKey()) return;
@@ -702,7 +718,7 @@
     declining = true;
     signError = null;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged) throw new Error($t('sign.noticeRequired'));
       const res = await fetch(`/sign/${encodeURIComponent(token)}/decline`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
@@ -712,7 +728,7 @@
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
-        throw new Error(data.error ?? `Could not decline the document (${res.status})`);
+        throw new Error(data.error ?? $t('sign.declineFailed', { status: res.status }));
       }
       declined = true;
       showDeclineModal = false;
@@ -742,7 +758,7 @@
     if (!token) return;
     requestingChanges = true;
     try {
-      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      if (!noticeAcknowledged) throw new Error($t('sign.noticeRequired'));
       const res = await fetch(`/sign/${encodeURIComponent(token)}/request-changes`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
@@ -794,7 +810,7 @@
   <header class="signer-bar">
     <div class="brand">
       <FileSignature class="size-4" />
-      <span>{ctx?.privacy?.controller || 'Document'}</span>
+      <span>{ctx?.privacy?.controller || $t('common.document')}</span>
     </div>
     <div class="bar-right">
       {#if ctx}
@@ -804,7 +820,15 @@
           <span>{$t('sign.for', { name: ctx.recipient.name, role: ctx.recipient.role })}</span>
         </div>
       {/if}
-	  <span class="ceremony-language">English legal/signing experience</span>
+      <span class="ceremony-language">
+        {$t('sign.interfaceLanguage')}
+        {#if ctx}
+          {#if ctx.privacy.copy_locale === 'sv'}{$t('sign.privacyLanguage.sv')}{:else}{$t('sign.privacyLanguage.en')}{/if}
+          {#if packageReview.key === currentCeremonyKey() && packageReview.settled}
+            {#if packageReview.canonicalLocale === 'sv'}{$t('sign.packageLanguage.sv')}{:else if packageReview.canonicalLocale === 'en'}{$t('sign.packageLanguage.en')}{/if}
+          {/if}
+        {/if}
+      </span>
     </div>
   </header>
 
@@ -830,7 +854,7 @@
         <a class="btn btn-secondary" href={completed.links.auditCertURL} download>
           {$t('sign.completed.downloadAudit')}
         </a>
-        {#if completed.links.packagePortalURL}<a class="btn btn-secondary" href={completed.links.packagePortalURL}>Download original contract files</a>{/if}
+        {#if completed.links.packagePortalURL}<a class="btn btn-secondary" href={completed.links.packagePortalURL}>{$t('sign.completed.downloadOriginals')}</a>{/if}
       {:else if completed.terminal}
         <p>{$t('sign.completed.downloadsUnavailable')}</p>
       {:else}
@@ -847,14 +871,14 @@
     <main class="signer-main">
       {#if ctx.amendment_context}<div class="amendment-context"><SignerAmendmentContext disclosure={ctx.amendment_context} /></div>{/if}
       {#if ctx.pre_sign_context}
-        <section class="state-card mb-4" aria-label="Provider pre-signing disclosure">
-          <h2>Our company’s part is already signed</h2>
-          <p>{ctx.pre_sign_context.provider_name} pre-signed the provider’s part on <time datetime={ctx.pre_sign_context.executed_at}>{ctx.pre_sign_context.executed_at}</time>.</p>
+        <section class="state-card mb-4" aria-label={$t('sign.preSign.label')}>
+          <h2>{$t('sign.preSign.title')}</h2>
+          <p>{$t('sign.preSign.executed', { provider: ctx.pre_sign_context.provider_name })} <time datetime={ctx.pre_sign_context.executed_at}>{ctx.pre_sign_context.executed_at}</time>.</p>
           <p class="whitespace-pre-wrap">{ctx.pre_sign_context.disclosure_text}</p>
-          <p>Review the provider-signed agreement below. Your own signature still requires your explicit confirmation.</p>
+          <p>{$t('sign.preSign.review')}</p>
         </section>
       {/if}
-      <article class="document-frame" aria-label="Current document">
+      <article class="document-frame" aria-label={$t('sign.currentDocument')}>
         {#if ctx.source_kind === 'pdf'}
           {#if ctx.pdf_observation}
           {#key JSON.stringify([ceremonyEpoch, currentCeremonyKey(), ctx.source_kind])}
@@ -892,15 +916,15 @@
       <aside class="signer-actions">
         {#if viewState.error}
           <div class="banner banner-danger" role="alert">
-            <p>{viewState.error}</p>
-            <button class="btn btn-secondary" disabled={viewState.pending || !documentDisplayed() || !noticeAcknowledged} onclick={() => viewRecorder.retry()}>Retry view confirmation</button>
+            <p>{$t('sign.view.unconfirmed')}</p>
+            <button class="btn btn-secondary" disabled={viewState.pending || !documentDisplayed() || !noticeAcknowledged} onclick={() => viewRecorder.retry()}>{$t('sign.view.retry')}</button>
           </div>
         {/if}
         {#if changesRequested}
-          <section class="negotiation-status" role="status" aria-label="Changes requested">
+          <section class="negotiation-status" role="status" aria-label={$t('changes.requested.title')}>
             <h2>{$t('changes.requested.title')}</h2>
             <p>{$t('changes.requested.body')}</p>
-            <p>Signing and field changes are paused. Review this version and continue the conversation below.</p>
+            <p>{$t('changes.requested.paused')}</p>
           </section>
           {#if ctx.source_kind === 'blocks'}
             <p class="anno-hint">{$t('changes.markHint')}</p>
@@ -975,18 +999,18 @@
 
         <div class="comments">
           <h3 class="section-eyebrow">{$t('comments.title')}</h3>
-          <nav aria-label="Message history" class="flex gap-2">
+          <nav aria-label={$t('comments.history')} class="flex gap-2">
             <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !olderCommentCursor}
-              onclick={() => olderCommentCursor && loadComments(undefined, undefined, { kind: 'before', cursor: olderCommentCursor })}>Older</button>
+              onclick={() => olderCommentCursor && loadComments(undefined, undefined, { kind: 'before', cursor: olderCommentCursor })}>{$t('comments.older')}</button>
             <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment || !newerCommentCursor}
-              onclick={() => newerCommentCursor && loadComments(undefined, undefined, { kind: 'after', cursor: newerCommentCursor })}>Newer</button>
-            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => loadComments()}>Latest</button>
+              onclick={() => newerCommentCursor && loadComments(undefined, undefined, { kind: 'after', cursor: newerCommentCursor })}>{$t('comments.newer')}</button>
+            <button type="button" class="btn btn-secondary" disabled={postingComment} onclick={() => loadComments()}>{$t('comments.latest')}</button>
           </nav>
-          <p role="status" aria-live="polite">{commentLoading ? 'Loading messages…' : ''}</p>
+          <p role="status" aria-live="polite">{commentLoading ? $t('comments.loading') : ''}</p>
           {#if commentRefreshError}
             <div role="alert">
-              <p class="error">{commentRefreshError}</p>
-              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>Retry message refresh</button>
+              <p class="error">{$t('comments.refreshFailed')}</p>
+              <button type="button" class="btn btn-secondary" disabled={commentLoading || postingComment} onclick={() => commentHistory.retry()}>{$t('comments.retryRefresh')}</button>
             </div>
           {/if}
           {#if comments.length}
@@ -1120,6 +1144,8 @@
   }
   .signer-bar {
     display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
     align-items: center;
     justify-content: space-between;
     padding: 0.85rem 1.25rem;
@@ -1129,6 +1155,9 @@
   }
   .brand {
     display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     align-items: center;
     gap: 0.5rem;
     font-family: var(--font-display);
@@ -1137,13 +1166,17 @@
   }
   .meta {
     display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     gap: 0.5rem;
     color: var(--t-text-muted);
     font-size: 12px;
   }
   .dot { opacity: 0.5; }
-  .bar-right { display: flex; align-items: center; gap: 1rem; }
-	.ceremony-language { color: var(--t-text-muted); font-size: 12px; }
+  .bar-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem 1rem; min-width: 0; max-width: 100%; margin-left: auto; }
+  .ceremony-language { color: var(--t-text-muted); font-size: 12px; max-width: 32rem; overflow-wrap: anywhere; text-align: right; }
   .loading { padding: 3rem; text-align: center; color: var(--t-text-muted); }
   .signer-main {
     display: grid;

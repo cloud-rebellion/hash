@@ -223,6 +223,9 @@ func (r ParticipantReportV1) HTMLV1() (string, string, error) {
 	section("Whole-package consent and response receipts")
 	for _, p := range r.Responses {
 		row(p.RecipientID, p.AttemptID, p.ManifestSHA256, p.LegalCommitmentSHA256, p.Kind, p.SignatureID, p.EventID, p.EventRowSHA256, p.At, p.IncorporationVersion, p.IncorporationSHA256)
+		if text := participantReportSwedishIncorporationV128(p); text != "" {
+			row("Incorporation statement (Swedish)", text)
+		}
 	}
 	end()
 	// The exact canonical projection is embedded, escaped, inside the detached

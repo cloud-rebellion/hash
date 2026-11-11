@@ -11,7 +11,8 @@
   import { onMount } from 'svelte';
   import { CheckCircle2, Loader2 } from 'lucide-svelte';
   import { signerNoticeHeaders } from '$lib/api/signerNotice';
-  import { t } from '$lib/i18n';
+  import { locale, t } from '$lib/i18n';
+  import { signerRoomError, signerRoomFieldType, signerRoomText } from '$lib/signerRoomUi';
 
   type Field = {
     id: string;
@@ -171,7 +172,7 @@
     <span>{$t('fields.loading')}</span>
   </div>
 {:else if loadError}
-  <p class="error mt-2" role="alert">{loadError}</p>
+  <p class="error mt-2" role="alert">{signerRoomError($locale, loadError)}</p>
 {:else if fields.length > 0}
   <h3 class="section-eyebrow">{$t('fields.required')}</h3>
   <p class="text-xs text-text-muted mb-3">{$t('fields.intro')}</p>
@@ -180,7 +181,7 @@
     {#each fields as f (f.id)}
       <label class="field-row">
         <span class="field-label">
-          {f.label ?? f.type}{#if f.required}<span class="req"> *</span>{/if}
+          {f.label ?? signerRoomFieldType($locale, f.type)}{#if f.required}<span class="req"> *</span>{/if}
           {#if f.completed_at}
             <CheckCircle2 class="size-3 inline text-success ml-1" />
           {/if}
@@ -214,7 +215,7 @@
           />
         {:else if f.type === 'dropdown'}
           <select class="field-input" disabled={saving} bind:value={buf[f.id]}>
-            <option value="">,  select ,</option>
+            <option value="">{signerRoomText($locale, 'Select…')}</option>
             {#each dropdownChoices(f) as choice (choice)}
               <option value={choice}>{choice}</option>
             {/each}
@@ -234,7 +235,7 @@
   </button>
 
   {#if saveError}
-    <p class="error mt-2" role="alert">{saveError}</p>
+    <p class="error mt-2" role="alert">{signerRoomError($locale, saveError)}</p>
   {/if}
   {#if savedAt && !saveError}
     <p class="text-xs text-text-muted mt-2">

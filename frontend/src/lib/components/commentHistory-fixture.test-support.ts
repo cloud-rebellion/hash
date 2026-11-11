@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { createCommentHistory, latestComments, commentQuery } from '../commentHistory';
 import { signerCeremonyKey } from '../signerPDF';
+import { get } from 'svelte/store';
+import { t } from '../i18n';
 export const staffSource = readFileSync(new URL('../../routes/documents/[id]/+page.svelte', import.meta.url), 'utf8');
 export const signerSource = readFileSync(new URL('../../routes/sign/[token]/+page.svelte', import.meta.url), 'utf8');
 const transpiler = new Bun.Transpiler({ loader: 'ts' });
@@ -23,7 +25,7 @@ export function chatFixture(signer = false) {
     commentBody: 'first', postingComment: false, comments: [message('retained')], commentRefreshError: null,
     commentLoading: false, olderCommentCursor: null, newerCommentCursor: null, error: null, signError: null,
     routeRevision: 1, documentRevision: 1, disposed: false, routeDisposed: false, loadedToken: 'token',
-    doc: { id: 'd', org_id: 'org' }, $page: { params: { id: 'd', token: 'token' } }, noticeAcknowledged: true,
+    doc: { id: 'd', org_id: 'org' }, $page: { params: { id: 'd', token: 'token' } }, $t: get(t), noticeAcknowledged: true,
     ctx: { document_id: 'doc', recipient: { id: 'recipient' }, privacy: { notice_digest: 'digest' }, source_kind: 'blocks' },
     signerCeremonyKey, signerNoticeHeaders: (digest: string, accepted: boolean) => ({ digest, accepted }),
     listComments: (id: string, selection: unknown, signal: AbortSignal) => new Promise((resolve, reject) => calls.push({ method: 'GET', id, selection, signal, resolve, reject })),

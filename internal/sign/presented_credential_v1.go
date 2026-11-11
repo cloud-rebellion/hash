@@ -208,14 +208,14 @@ func (e *Engine) validateFittedRequestV1(ctx context.Context, rc *RecipientConte
 	if err := validateNoticeEvidence(rc, in.Notice); err != nil {
 		return nil, err
 	}
-	legalBasis, err := article13.LegalBasisDisclosureV1(p.lawfulBasis)
+	material, err := article13.LocalizedNoticeV1(p.documentName, p.lawfulBasis, rc.Recipient.Locale)
 	if err != nil {
 		return nil, ErrInvalidNoticeEvidence
 	}
 	snapshot := in.Notice.Snapshot
 	if snapshot.Controller != strings.TrimSpace(p.controllerName) || snapshot.ControllerContact != strings.TrimSpace(p.controllerContact) ||
-		snapshot.PurposeSummary != article13.PurposeSummaryV1(p.documentName) || snapshot.LegalBasisDisclosure != legalBasis ||
-		snapshot.Copy != article13.RenderedCopyV1(p.documentName) {
+		snapshot.PurposeSummary != material.PurposeSummary || snapshot.LegalBasisDisclosure != material.LegalBasisDisclosure ||
+		snapshot.Copy != material.Copy {
 		return nil, ErrInvalidNoticeEvidence
 	}
 	if ctx.Err() != nil {

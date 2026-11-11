@@ -567,6 +567,8 @@ func (s *Server) Routes() http.Handler {
 		r.With(auth.RequireRole(auth.RoleSender)).Put("/templates/{id}/reminder-policy", s.handleTemplateReminderPolicyV1)
 		r.With(auth.RequireRole(auth.RoleSender)).Get("/documents/{id}/reminder-policy", s.handleDocumentReminderPolicyV1)
 		r.With(auth.RequireRole(auth.RoleSender)).Put("/documents/{id}/reminder-policy", s.handleDocumentReminderPolicyV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Get("/email-preferences", s.handleGetEmailPreferencesV1)
+		r.With(auth.RequireRole(auth.RoleOwner)).Put("/email-preferences", s.handleSaveEmailPreferencesV1)
 		r.With(auth.RequireRole(auth.RoleOwner)).Get("/email-templates", s.handleListEmailTemplates)
 		r.With(auth.RequireRole(auth.RoleOwner)).Put("/email-templates/{kind}", s.handleSaveEmailTemplate)
 		r.With(auth.RequireRole(auth.RoleOwner)).Post("/email-templates/{kind}/preview", s.handlePreviewEmailTemplate)

@@ -38,7 +38,7 @@ func TestChangeRequestDesignUsesExplicitNotificationLocaleV1(t *testing.T) {
 	}
 	for _, value := range []string{c.ChangeContext, c.ChangeQuote, c.DeclineReason, c.ChangeProposed} {
 		escaped := html.EscapeString(value)
-		if strings.Count(body, escaped) != 1 || strings.Count(text, escaped) != 1 {
+		if strings.Count(body, escaped) != 1 || strings.Count(text, value) != 1 {
 			t.Fatal("request text removed, shortened, duplicated or reinterpreted", value)
 		}
 	}

@@ -13,7 +13,9 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/emailtemplates"
 	"github.com/bright-interaction/hash/internal/flarereport"
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -91,12 +93,19 @@ func (w *worker) queueOperatorQuotaWarning(ctx context.Context, orgID uuid.UUID)
 	if err != nil {
 		return err
 	}
-	subj, html, text, err := dispatch.Render(dispatch.KindQuotaWarning80, dispatch.TemplateContext{OrgName: org.Name, PlanName: plan.Name, QuotaKind: kind, QuotaUsed: int(used), QuotaLimit: int(limit), QuotaPct: pct, PeriodResetAt: end.Format("January 2, 2006"), UpgradeURL: w.baseURL + "/settings/billing", InternalOperator: true})
+	// The saved workspace language and selected immutable edition belong to
+	// this same monthly-dedup transaction. A missing original process runtime
+	// fails closed; it never substitutes an owner identity or a new coordinator.
+	if w.sendEngine == nil || !w.sendEngine.WorkRuntime.MatchesPoolV1(w.pool) {
+		return pdfadmission.ErrWorkRuntimeV1
+	}
+	rendered, err := emailtemplates.PrepareNativeV1(ctx, w.sendEngine.WorkRuntime.WorkV1(), tx, orgID, dispatch.KindQuotaWarning80, dispatch.TemplateContext{OrgName: org.Name, PlanName: plan.Name, QuotaKind: kind, QuotaUsed: int(used), QuotaLimit: int(limit), QuotaPct: pct, PeriodResetAt: end.Format("2006-01-02"), UpgradeURL: w.baseURL + "/settings/billing", InternalOperator: true})
 	if err != nil {
 		return err
 	}
+	defer rendered.CloseConsumerV1()
 	for _, u := range users {
-		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: orgID, ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`)}); err != nil {
+		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{OrgID: orgID, ToEmail: u.Email, Subject: rendered.Subject, HtmlBody: rendered.HTML, TextBody: rendered.Text, HeadersJson: []byte(`{}`)}); err != nil {
 			return err
 		}
 	}

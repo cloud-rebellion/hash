@@ -32,9 +32,10 @@ import (
 func packageCompletionBirth241(t *testing.T, q *ownedPublicReadFixtureV1) (pdfadmission.HTMLSendPackageIntentMetadataV1, uuid.UUID) {
 	return packageCompletionPreparedBirth241(t, q, 1, true)
 }
-func packageCompletionPreparedBirth241(t *testing.T, q *ownedPublicReadFixtureV1, partyCount int, requiresSignature bool) (pdfadmission.HTMLSendPackageIntentMetadataV1, uuid.UUID) {
+func packageCompletionPreparedBirth241(t *testing.T, q *ownedPublicReadFixtureV1, partyCount int, requiresSignature bool, defaultLocale ...string) (pdfadmission.HTMLSendPackageIntentMetadataV1, uuid.UUID) {
 	t.Helper()
 	root := packageImported220(t, q, "Prepared main-only native Send")
+	root = packageRootLocaleV128(t, q, root, defaultLocale)
 	if partyCount < 1 {
 		t.Fatal("native completion preparation needs an actual party")
 	}

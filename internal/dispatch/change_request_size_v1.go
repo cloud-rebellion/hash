@@ -28,8 +28,8 @@ func ChangeRequestNotificationComponentsV1(ctx TemplateContext) (subjectBytes, h
 		}
 	}
 	// Each field occurs once in each body. Six bytes per source byte covers
-	// HTML text escaping, NUL/invalid UTF8 replacement and the text body's
-	// existing html/template escaping. Counting the complete source templates
+	// HTML text escaping and NUL/invalid UTF8 replacement; it conservatively
+	// overcounts the literal plain-text body. Counting the complete source templates
 	// also includes all optional literal branches and overcounts action syntax.
 	for _, value := range [...]string{ctx.RecipientName, ctx.DocumentName, ctx.ChangeContext, ctx.ChangeQuote, ctx.DeclineReason, ctx.ChangeProposed} {
 		htmlBytes, err = addChangeRequestNotificationBytesV1(htmlBytes, int64(len(value)), 6)

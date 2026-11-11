@@ -39,7 +39,8 @@ build: frontend-build
 test: test-go test-e2e
 
 test-go:
-	go test ./... -race -count=1 -timeout 60s
+	# Match CI: cancellation tests exercise real worker deadlines.
+	go test -race ./... -count=1 -timeout=300s
 
 test-e2e:
 	cd e2e && bun install --frozen-lockfile && bunx playwright test

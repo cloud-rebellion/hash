@@ -733,7 +733,7 @@ func (p *htmlInputScanV1) value(node htmlInputNodeV1, depth int) error {
 	return nil
 }
 
-// Reviewed 64-bit Go1.26.9/Go1.26.10 model: decoder buffers grow 2*cap+512; strings
+// Reviewed 64-bit Go1.26.9/Go1.26.10/Go1.26.11 model: decoder buffers grow 2*cap+512; strings
 // unquote into encodedLen+8 then at most one copied string. Each bounded map
 // stays below a 1024-slot table split (largest request map64 entries); growth
 // slots include all old groups. Typed element/header maxima are from the fixed
@@ -746,11 +746,11 @@ func htmlInputAddV1(total *int64, count, unit int64) bool {
 	return true
 }
 
-// The two exact versions share the source implementations used by this model.
-// Module, image and CI release policy separately requires Go1.26.10; retaining
-// Go1.26.9 here preserves only its already-reviewed model compatibility.
+// These exact versions share the JSON, map, string and typed-layout source
+// implementations used by this model. Module, image and CI release policy
+// separately requires Go1.26.11; older entries preserve model compatibility only.
 func htmlAuthoringInputRuntimeSupportedV1(version string, intSize int, info *debug.BuildInfo) bool {
-	if (version != "go1.26.9" && version != "go1.26.10") || intSize != 64 || info == nil {
+	if (version != "go1.26.9" && version != "go1.26.10" && version != "go1.26.11") || intSize != 64 || info == nil {
 		return false
 	}
 	for _, setting := range info.Settings {

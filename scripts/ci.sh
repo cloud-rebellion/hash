@@ -109,8 +109,8 @@ done
 # actually uses. Keep both modules, both image builders, and every Hash CI job
 # on the same reviewed security release.
 go_toolchain_policy() {
-  local expected="1.26.10" actual file
-  local builder="golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca"
+  local expected="1.26.11" actual file
+  local builder="golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb"
   actual="$(go env GOVERSION)" || return 1
   [ "$actual" = "go$expected" ] || {
     echo "Hash CI requires Go $expected; effective toolchain is $actual" >&2
@@ -561,7 +561,7 @@ dependency_image_policy() {
   done
   for required in \
     '# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e' \
-    'FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build' \
+    'FROM golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb AS build' \
     'GOTOOLCHAIN=local' \
     'CGO_ENABLED=0' \
     'GOPROXY=https://proxy.golang.org' \

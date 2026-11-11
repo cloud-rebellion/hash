@@ -240,7 +240,7 @@ func TestOrdinaryCohortsNativeMiniSuitePreservesWorkingDirectoryAndFailure(t *te
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module "+strings.TrimSuffix(hashModule, "/")+"\ngo 1.26.10\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module "+strings.TrimSuffix(hashModule, "/")+"\ngo 1.26.11\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(handler, "relative.fixture"), []byte("owned"), 0600); err != nil {

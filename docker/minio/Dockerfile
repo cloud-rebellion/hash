@@ -2,7 +2,7 @@
 # Local development/test storage only. Build the exact official source release:
 # https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z
 # This separate build context contains no Hash application or environment files.
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
+FROM golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb AS build
 ENV GOTOOLCHAIN=local \
     CGO_ENABLED=0 \
     GOMAXPROCS=2 \

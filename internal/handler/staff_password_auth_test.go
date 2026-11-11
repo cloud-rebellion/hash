@@ -6,12 +6,62 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestStaffAuthEmailLocaleValidationV1(t *testing.T) {
+	for _, item := range []struct{ input, want string }{
+		{"", "en"}, {"en", "en"}, {"sv", "sv"}, {"EN", "en"}, {" sv-SE ", "sv"}, {"en_GB", "en"},
+	} {
+		if got, err := normalizeStaffAuthEmailLocale(item.input); err != nil || got != item.want {
+			t.Fatalf("locale %q = %q, %v; want %q", item.input, got, err, item.want)
+		}
+	}
+	for _, input := range []string{"de", " ", "sv--SE", "sv\x00", strings.Repeat("s", 65)} {
+		if got, err := normalizeStaffAuthEmailLocale(input); err == nil || got != "" {
+			t.Fatalf("unsupported locale %q admitted as %q", input, got)
+		}
+	}
+}
+
+func TestStaffAuthEmailInvalidLocaleRejectedBeforeAccountWorkV1(t *testing.T) {
+	// No database, password hasher or mail configuration is available. Invalid
+	// locale is request validation, independent of whether an account exists.
+	s := &Server{PublicURL: "https://hash.example.test"}
+	router := s.Routes()
+	for _, path := range []string{"/api/v1/auth/register", "/api/v1/auth/forgot-password"} {
+		t.Run(path, func(t *testing.T) {
+			var firstResponse string
+			for _, email := range []string{"staff@example.test", "unknown@example.test"} {
+				input := map[string]string{"email": email, "locale": "de"}
+				if strings.HasSuffix(path, "/register") {
+					input["name"], input["company_name"], input["password"] = "Staff", "Independent", "a long password"
+				}
+				raw, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest("POST", s.PublicURL+path, strings.NewReader(string(raw)))
+				request.Header.Set("Origin", s.PublicURL)
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "locale is not supported") {
+					t.Fatalf("invalid locale reached account work: %d %s", response.Code, response.Body.String())
+				}
+				if firstResponse != "" && response.Body.String() != firstResponse {
+					t.Fatal("invalid locale response varies by account")
+				}
+				firstResponse = response.Body.String()
+			}
+		})
+	}
+}
 
 func TestNativeAuthStatusAndStrictOriginWithoutOIDC(t *testing.T) {
 	s := &Server{PublicURL: "https://hash.example.test"}

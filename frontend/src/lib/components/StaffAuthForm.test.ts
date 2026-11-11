@@ -20,12 +20,12 @@ function fixture(mode: StaffAuthMode) {
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 0, prevented = 0;
   const operation = (name: string) => (...args: any[]) => new Promise<void>((resolve, reject) => {
-    const signal = args[args.length - 1] as AbortSignal;
+    const signal = args.find(value => value instanceof AbortSignal) as AbortSignal;
     signal.addEventListener('abort', () => reject(new Error('PRIVATE aborted input')), { once: true });
     calls.push({ name, args, signal, resolve, reject });
   });
   const env: any = {
-    mode, tokenMode: mode === 'verify' || mode === 'reset', newPassword: mode === 'register' || mode === 'reset',
+    mode, $staffLocale: 'en', tokenMode: mode === 'verify' || mode === 'reset', newPassword: mode === 'register' || mode === 'reset',
     email: ' owner@example.test ', name: ' Owner ', company: ' Example ', password: ' unchanged passphrase ', confirmation: ' unchanged passphrase ',
     token: null, busy: false, complete: false, error: null, oidcEnabled: false, disposed: false, request: null, statusRequest: null,
     consumeStaffAuthToken, staffPasswordError, staffAuthErrorMessage, safeReturnPath, AbortController,
@@ -56,13 +56,30 @@ test('actual login/register/forgot handlers submit captured values once and wait
     const f = fixture(mode), pending = f.send();
     expect(f.prevented()).toBe(1); expect(f.env.busy).toBe(true); expect(f.calls).toHaveLength(1); expect(f.navigations).toEqual([]);
     expect(f.calls[0].name).toBe(mode);
-    const values = f.calls[0].args.slice(0, -1);
-    expect(values).toEqual(mode === 'login' ? ['owner@example.test', ' unchanged passphrase '] : mode === 'register' ? ['owner@example.test', 'Owner', 'Example', ' unchanged passphrase '] : ['owner@example.test']);
+    const values = f.calls[0].args.filter((value: unknown) => value !== f.calls[0].signal);
+    expect(values).toEqual(mode === 'login' ? ['owner@example.test', ' unchanged passphrase '] : mode === 'register' ? ['owner@example.test', 'Owner', 'Example', ' unchanged passphrase ', 'en'] : ['owner@example.test', 'en']);
     await f.send(); expect(f.calls).toHaveLength(1);
     f.calls[0].resolve(); await pending;
     expect(f.env.complete).toBe(true); expect(f.env.password).toBe(''); expect(f.env.confirmation).toBe(''); expect(f.timers.size).toBe(0);
     expect(f.navigations).toEqual(mode === 'login' ? ['/dashboard'] : []);
     await f.send(); expect(f.calls).toHaveLength(1);
+  }
+});
+
+test('registration and recovery submit the current selected staff language without changing generic completion', async () => {
+  for (const mode of ['register', 'forgot'] as const) {
+    for (const locale of ['sv', 'en'] as const) {
+      const f = fixture(mode);
+      f.env.$staffLocale = locale;
+      const pending = f.send();
+      expect(f.calls).toHaveLength(1);
+      expect(f.calls[0].args.at(-1)).toBe(locale);
+      expect(f.calls[0].signal).toBeInstanceOf(AbortSignal);
+      expect(f.env.complete).toBe(false);
+      f.calls[0].resolve(); await pending;
+      expect(f.env.complete).toBe(true); expect(f.env.error).toBeNull();
+      expect(f.navigations).toEqual([]); expect(f.timers.size).toBe(0);
+    }
   }
 });
 

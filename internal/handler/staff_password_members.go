@@ -27,11 +27,17 @@ func (s *Server) handleCreateStaffMember(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var in struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
-		Role  string `json:"role"`
+		Email  string `json:"email"`
+		Name   string `json:"name"`
+		Role   string `json:"role"`
+		Locale string `json:"locale"`
 	}
 	if !decodeStaffAuthJSON(w, r, &in) {
+		return
+	}
+	locale, err := normalizeStaffAuthEmailLocale(in.Locale)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	email, name, err := normalizeOIDCIdentity(in.Email, strings.TrimSpace(in.Name))
@@ -91,7 +97,7 @@ func (s *Server) handleCreateStaffMember(w http.ResponseWriter, r *http.Request)
 		staffAuthUnavailable(w)
 		return
 	}
-	if err := s.issueStaffAuthEmail(ctx, q, member, email, member.Name, "", "setup", ""); err != nil {
+	if err := s.issueStaffAuthEmail(ctx, q, member, email, member.Name, "", "setup", "", locale); err != nil {
 		staffAuthUnavailable(w)
 		return
 	}

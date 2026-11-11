@@ -95,6 +95,22 @@ func nativeStaff503Token(t *testing.T, ctx context.Context, s *Server, email str
 	return ""
 }
 
+func nativeStaff503AssertEmailCopy(t *testing.T, ctx context.Context, s *Server, email, subject, action, disclaimer string) {
+	t.Helper()
+	row, err := s.Queries.GetLatestStaffAuthEmail(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.HtmlBody != "" || row.TextBody != "" || len(row.StaffAuthCiphertext) == 0 || row.Subject != subject {
+		t.Fatal("selected account-email copy did not reach the sealed durable outbox")
+	}
+	message, err := dispatch.OpenStaffAuthEmail(s.StaffAuthMailBox, row.ID, row.ToEmail, row.Subject, row.StaffAuthCiphertext)
+	if err != nil || message.Subject != subject || !strings.Contains(message.HTML, ">"+action+"</a>") ||
+		!strings.HasPrefix(message.Text, action+":\n") || !strings.Contains(message.HTML, disclaimer) || !strings.Contains(message.Text, disclaimer) {
+		t.Fatal("queued account-email subject, CTA or plain text lost the request locale", err)
+	}
+}
+
 func nativeStaff503Setup(t *testing.T) (context.Context, *generated.Queries, *Server, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	ctx, _, q, s, org, owner := setupDSRE2E(t)
@@ -112,7 +128,7 @@ func TestNativeStaffRegistrationVerificationLoginRecoveryE2E(t *testing.T) {
 	email := uuid.NewString() + "@native503.test"
 	password := "a long initial password  "
 	registration := nativeStaff503Call(t, s, router, "/api/v1/auth/register", map[string]string{
-		"email": email, "name": "Staff Owner", "company_name": "Independent Company", "password": password,
+		"email": email, "name": "Staff Owner", "company_name": "Independent Company", "password": password, "locale": "sv",
 	}, "")
 	if registration.Code != 202 {
 		t.Fatalf("register=%d %s", registration.Code, registration.Body.String())
@@ -121,6 +137,7 @@ func TestNativeStaffRegistrationVerificationLoginRecoveryE2E(t *testing.T) {
 		t.Fatal("registration created an identity before mailbox proof", err)
 	}
 	token := nativeStaff503Token(t, ctx, s, email)
+	nativeStaff503AssertEmailCopy(t, ctx, s, email, "Verifiera din e-postadress för Hash", "Verifiera din e-postadress", "kan bara användas en gång")
 	for _, proof := range []map[string]string{{"token": token}, {"token": token, "password": "wrong registration password"}} {
 		refused := nativeStaff503Call(t, s, router, "/api/v1/auth/verify-email", proof, "")
 		if refused.Code != 400 {
@@ -173,12 +190,13 @@ func TestNativeStaffRegistrationVerificationLoginRecoveryE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forgot := nativeStaff503Call(t, s, router, "/api/v1/auth/forgot-password", map[string]string{"email": email}, "")
-	missing := nativeStaff503Call(t, s, router, "/api/v1/auth/forgot-password", map[string]string{"email": uuid.NewString() + "@native503.test"}, "")
+	forgot := nativeStaff503Call(t, s, router, "/api/v1/auth/forgot-password", map[string]string{"email": email, "locale": "sv"}, "")
+	missing := nativeStaff503Call(t, s, router, "/api/v1/auth/forgot-password", map[string]string{"email": uuid.NewString() + "@native503.test", "locale": "sv"}, "")
 	if forgot.Code != 202 || missing.Code != 202 || forgot.Body.String() != missing.Body.String() {
 		t.Fatal("recovery enumerates accounts")
 	}
 	recoveryToken := nativeStaff503Token(t, ctx, s, email)
+	nativeStaff503AssertEmailCopy(t, ctx, s, email, "Återställ ditt lösenord för Hash", "Återställ ditt lösenord", "kan bara användas en gång")
 	reset := nativeStaff503Call(t, s, router, "/api/v1/auth/reset-password", map[string]string{"token": recoveryToken, "password": "a new complete password"}, "")
 	if reset.Code != 200 {
 		t.Fatalf("reset=%d %s", reset.Code, reset.Body.String())
@@ -222,7 +240,17 @@ func TestNativeStaffInvitationPreservesTenantRoleAndExistingOIDCE2E(t *testing.T
 	router := s.Routes()
 	ownerCookie := dsrSessionCookieE2E(t, s, owner, 0, time.Hour)
 	email := uuid.NewString() + "@native503.test"
-	invited := nativeStaff503Call(t, s, router, "/api/v1/members", map[string]string{"email": email, "name": "Invited Viewer", "role": "viewer"}, ownerCookie)
+	invalidLocale := nativeStaff503Call(t, s, router, "/api/v1/members", map[string]string{"email": email, "name": "Invited Viewer", "role": "viewer", "locale": "de"}, ownerCookie)
+	if invalidLocale.Code != 400 {
+		t.Fatalf("invalid invitation locale=%d %s", invalidLocale.Code, invalidLocale.Body.String())
+	}
+	if _, err := q.GetUserByEmail(ctx, email); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatal("invalid invitation locale created a member", err)
+	}
+	if _, err := q.GetLatestStaffAuthEmail(ctx, email); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatal("invalid invitation locale queued email", err)
+	}
+	invited := nativeStaff503Call(t, s, router, "/api/v1/members", map[string]string{"email": email, "name": "Invited Viewer", "role": "viewer", "locale": "sv"}, ownerCookie)
 	if invited.Code != 202 {
 		t.Fatalf("invite=%d %s", invited.Code, invited.Body.String())
 	}
@@ -233,6 +261,7 @@ func TestNativeStaffInvitationPreservesTenantRoleAndExistingOIDCE2E(t *testing.T
 	if _, err := q.GetStaffPasswordCredentialForUser(ctx, member.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatal("owner set password before mailbox proof", err)
 	}
+	nativeStaff503AssertEmailCopy(t, ctx, s, email, "Välj ditt lösenord för Hash", "Välj ditt eget lösenord", "kan bara användas en gång")
 	token := nativeStaff503Token(t, ctx, s, email)
 	setup := nativeStaff503Call(t, s, router, "/api/v1/auth/reset-password", map[string]string{"token": token, "password": "viewer chooses own password"}, "")
 	if setup.Code != 200 {
@@ -253,11 +282,12 @@ func TestNativeStaffInvitationPreservesTenantRoleAndExistingOIDCE2E(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration := nativeStaff503Call(t, s, router, "/api/v1/auth/register", map[string]string{"email": existingEmail, "name": "Ignored rename", "company_name": "Ignored new company", "password": "existing sender native password"}, "")
+	registration := nativeStaff503Call(t, s, router, "/api/v1/auth/register", map[string]string{"email": existingEmail, "name": "Ignored rename", "company_name": "Ignored new company", "password": "existing sender native password", "locale": "sv-SE"}, "")
 	if registration.Code != 202 {
 		t.Fatal("existing account setup refused")
 	}
 	existingToken := nativeStaff503Token(t, ctx, s, existingEmail)
+	nativeStaff503AssertEmailCopy(t, ctx, s, existingEmail, "Välj ditt lösenord för Hash", "Välj ditt eget lösenord", "kan bara användas en gång")
 	verification := nativeStaff503Call(t, s, router, "/api/v1/auth/verify-email", map[string]string{"token": existingToken, "password": "existing sender native password"}, "")
 	if verification.Code != 400 {
 		t.Fatal("existing account installed a submitter-selected registration password")
@@ -274,6 +304,18 @@ func TestNativeStaffInvitationPreservesTenantRoleAndExistingOIDCE2E(t *testing.T
 	if err != nil || retained.OrgID != org || retained.Role != "sender" || retained.ZitadelSub != existing.ZitadelSub || retained.Name != existing.Name {
 		t.Fatal("mailbox proof replaced existing tenant, role or OIDC binding", err)
 	}
+	// Exercise older callers separately: omitting locale keeps English setup
+	// mail without replacing the original Swedish invitation link above.
+	legacyEmail := uuid.NewString() + "@native503.test"
+	if _, err := q.CreateUser(ctx, generated.CreateUserParams{OrgID: org, Email: legacyEmail, Name: "Pending legacy caller", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	forgot := nativeStaff503Call(t, s, router, "/api/v1/auth/forgot-password", map[string]string{"email": legacyEmail}, "")
+	if forgot.Code != 202 {
+		t.Fatalf("pending member recovery=%d %s", forgot.Code, forgot.Body.String())
+	}
+	nativeStaff503AssertEmailCopy(t, ctx, s, legacyEmail, "Set your Hash password", "Choose your own password", "can be used once")
+	nativeStaff503Token(t, ctx, s, legacyEmail)
 }
 
 func TestNativeStaffPendingRegistrationCannotAdoptLaterIdentityE2E(t *testing.T) {
@@ -286,6 +328,7 @@ func TestNativeStaffPendingRegistrationCannotAdoptLaterIdentityE2E(t *testing.T)
 	if registration.Code != 202 {
 		t.Fatal("pending registration unavailable")
 	}
+	nativeStaff503AssertEmailCopy(t, ctx, s, email, "Verify your Hash email", "Verify your email", "can be used once")
 	token := nativeStaff503Token(t, ctx, s, email)
 	later, err := q.CreateUser(ctx, generated.CreateUserParams{
 		OrgID: org, Email: email, Name: "Later verified member", Role: "viewer",

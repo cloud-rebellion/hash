@@ -1,3 +1,5 @@
+import type { StaffLocale } from '../staffPreferences';
+
 export type StaffAuthAction = 'login' | 'register' | 'verify-email' | 'forgot-password' | 'reset-password';
 export type StaffAuthStatus = { password_enabled: true; oidc_enabled: boolean };
 
@@ -70,7 +72,7 @@ async function post(action: StaffAuthAction, body: object, signal: AbortSignal):
 }
 
 export const loginWithPassword = (email: string, password: string, signal: AbortSignal) => post('login', { email, password }, signal);
-export const registerWorkspace = (email: string, name: string, company_name: string, password: string, signal: AbortSignal) => post('register', { email, name, company_name, password }, signal);
+export const registerWorkspace = (email: string, name: string, company_name: string, password: string, signal: AbortSignal, locale?: StaffLocale) => post('register', { email, name, company_name, password, ...(locale === undefined ? {} : { locale }) }, signal);
 export const verifyStaffEmail = (token: string, password: string, signal: AbortSignal) => post('verify-email', { token, password }, signal);
-export const forgotStaffPassword = (email: string, signal: AbortSignal) => post('forgot-password', { email }, signal);
+export const forgotStaffPassword = (email: string, signal: AbortSignal, locale?: StaffLocale) => post('forgot-password', { email, ...(locale === undefined ? {} : { locale }) }, signal);
 export const resetStaffPassword = (token: string, password: string, signal: AbortSignal) => post('reset-password', { token, password }, signal);

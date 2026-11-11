@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"html"
 	"io"
 	"mime"
 	"net/http"
@@ -31,6 +30,7 @@ import (
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/passwordhash"
+	"github.com/bright-interaction/hash/internal/recipients"
 )
 
 var errStaffAuthLink = errors.New("authentication link is invalid or expired")
@@ -129,6 +129,21 @@ func validStaffText(value string, required bool) bool {
 	return !strings.ContainsFunc(value, unicode.IsControl)
 }
 
+// Account email follows the language explicitly selected for this request.
+// Older API callers omit it and retain English; it is not an account preference.
+func normalizeStaffAuthEmailLocale(locale string) (string, error) {
+	if locale == "" {
+		return "en", nil
+	}
+	if len(locale) <= 64 {
+		normal, err := recipients.NormalizeLocale(locale)
+		if err == nil && (normal == "en" || normal == "sv") {
+			return normal, nil
+		}
+	}
+	return "", errors.New("locale is not supported")
+}
+
 func (s *Server) staffAuthReady(w http.ResponseWriter) bool {
 	if s.Pool == nil || s.Queries == nil || s.Audit == nil || s.Cookies == nil || s.StaffAuthMailBox == nil {
 		writeError(w, http.StatusServiceUnavailable, "authentication temporarily unavailable")
@@ -158,11 +173,17 @@ type staffRegistrationInput struct {
 	Name        string `json:"name"`
 	CompanyName string `json:"company_name"`
 	Password    string `json:"password"`
+	Locale      string `json:"locale"`
 }
 
 func (s *Server) handleStaffRegister(w http.ResponseWriter, r *http.Request) {
 	var in staffRegistrationInput
 	if !decodeStaffAuthJSON(w, r, &in) {
+		return
+	}
+	locale, err := normalizeStaffAuthEmailLocale(in.Locale)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	email, name, err := normalizeOIDCIdentity(in.Email, strings.TrimSpace(in.Name))
@@ -217,7 +238,7 @@ func (s *Server) handleStaffRegister(w http.ResponseWriter, r *http.Request) {
 		// Its owner chooses their own password through a setup link.
 		purpose, encoded, name, company = "setup", "", user.Name, ""
 	}
-	if err := s.issueStaffAuthEmail(ctx, q, user, email, name, company, purpose, encoded); err != nil {
+	if err := s.issueStaffAuthEmail(ctx, q, user, email, name, company, purpose, encoded, locale); err != nil {
 		staffAuthUnavailable(w)
 		return
 	}
@@ -228,7 +249,7 @@ func (s *Server) handleStaffRegister(w http.ResponseWriter, r *http.Request) {
 	staffAuthAccepted(w)
 }
 
-func (s *Server) issueStaffAuthEmail(ctx context.Context, q *generated.Queries, user *generated.User, email, name, company, purpose, encoded string) error {
+func (s *Server) issueStaffAuthEmail(ctx context.Context, q *generated.Queries, user *generated.User, email, name, company, purpose, encoded, locale string) error {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return err
@@ -243,19 +264,17 @@ func (s *Server) issueStaffAuthEmail(ctx context.Context, q *generated.Queries, 
 		input.UserID = pgtype.UUID{Bytes: user.ID, Valid: true}
 		input.SessionGeneration = pgtype.Int8{Int64: user.SessionGeneration, Valid: true}
 	}
-	path, subject, action := "/reset-password", "Set your Hash password", "Choose your own password"
+	path := "/reset-password"
 	if purpose == "register" {
 		input.PasswordHash = pgtype.Text{String: encoded, Valid: true}
-		path, subject, action = "/verify-email", "Verify your Hash email", "Verify your email"
+		path = "/verify-email"
 	} else if purpose == "reset" {
 		input.TtlSeconds = 30 * 60
-		subject, action = "Reset your Hash password", "Reset your password"
 	}
 	link := strings.TrimSuffix(s.PublicURL, "/") + path + "#token=" + token
-	message := dispatch.Message{
-		To: email, Subject: subject,
-		HTML: "<p>" + html.EscapeString(action) + " using the link below.</p><p><a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(action) + "</a></p><p>If you did not request this, ignore this email. The link expires and can be used once.</p>",
-		Text: action + ":\n" + link + "\n\nIf you did not request this, ignore this email. The link expires and can be used once.",
+	message, err := dispatch.StaffAuthEmailMessageV1(email, purpose, locale, link)
+	if err != nil {
+		return err
 	}
 	deliveryID := uuid.New()
 	sealed, err := dispatch.SealStaffAuthEmail(s.StaffAuthMailBox, deliveryID, message)
@@ -271,7 +290,7 @@ func (s *Server) issueStaffAuthEmail(ctx context.Context, q *generated.Queries, 
 	if err := q.IssueStaffAuthRequest(ctx, input); err != nil {
 		return err
 	}
-	return q.EnqueueStaffAuthEmail(ctx, generated.EnqueueStaffAuthEmailParams{ID: deliveryID, ToEmail: email, Subject: subject, StaffAuthCiphertext: sealed})
+	return q.EnqueueStaffAuthEmail(ctx, generated.EnqueueStaffAuthEmailParams{ID: deliveryID, ToEmail: email, Subject: message.Subject, StaffAuthCiphertext: sealed})
 }
 
 func parseStaffAuthToken(token string) ([]byte, error) {
@@ -517,9 +536,15 @@ func (s *Server) handleStaffPasswordLogin(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleStaffForgotPassword(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Email string `json:"email"`
+		Email  string `json:"email"`
+		Locale string `json:"locale"`
 	}
 	if !decodeStaffAuthJSON(w, r, &in) {
+		return
+	}
+	locale, err := normalizeStaffAuthEmailLocale(in.Locale)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	email, _, err := normalizeOIDCIdentity(in.Email, "")
@@ -559,7 +584,7 @@ func (s *Server) handleStaffForgotPassword(w http.ResponseWriter, r *http.Reques
 		staffAuthUnavailable(w)
 		return
 	}
-	if err := s.issueStaffAuthEmail(ctx, q, user, email, user.Name, "", purpose, ""); err != nil {
+	if err := s.issueStaffAuthEmail(ctx, q, user, email, user.Name, "", purpose, "", locale); err != nil {
 		staffAuthUnavailable(w)
 		return
 	}

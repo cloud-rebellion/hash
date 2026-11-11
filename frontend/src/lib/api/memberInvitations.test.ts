@@ -19,6 +19,21 @@ test('member invitation accepts only the generic202 acknowledgement and sends no
   }, () => new Response('PRIVATE response is intentionally not read', { status: 202 }));
 });
 
+test('member invitation explicitly carries Swedish or English setup-mail language without exposing account state', async () => {
+  const signal = new AbortController().signal;
+  for (const locale of ['sv', 'en'] as const) {
+    for (const account of ['new', 'existing', 'other-workspace']) {
+      const input: MemberInvitationInput = { email: `${account}@example.test`, name: 'Invitee', role: 'sender' };
+      await mocked(async calls => {
+        expect(await inviteMember(input, signal, locale)).toBeUndefined();
+        expect(calls).toHaveLength(1);
+        expect(JSON.parse(calls[0].options.body as string)).toEqual({ ...input, locale });
+        expect(calls[0].options).toMatchObject({ method: 'POST', credentials: 'include', cache: 'no-store', redirect: 'error', mode: 'cors', signal });
+      }, () => new Response(`PRIVATE ${account} account details`, { status: 202 }));
+    }
+  }
+});
+
 test('invitation refusals and unconfirmed responses stay generic and preserve status without leaking response data', async () => {
   for (const status of [200, 201, 400, 401, 403, 429, 503]) {
     await mocked(async () => {

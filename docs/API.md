@@ -66,12 +66,20 @@ Argon2id work limits. Use same-origin cookies; no browser bearer is returned.
 | Method/path | JSON input | Success |
 | --- | --- | --- |
 | GET `/api/v1/auth/status` | None | 200 `{"password_enabled":true,"oidc_enabled":false}`; OIDC flag reflects configuration |
-| POST `/api/v1/auth/register` | `email,name,company_name,password` | Generic202; verification email queued when applicable |
+| POST `/api/v1/auth/register` | `email,name,company_name,password`; optional `locale` | Generic202; verification email queued when applicable |
 | POST `/api/v1/auth/verify-email` | `token,password` | 200; requires mailbox proof and the original registration password, installs credential and mints the session cookie |
 | POST `/api/v1/auth/login` | `email,password` | 200 and session cookie; incorrect/missing accounts share generic401 |
-| POST `/api/v1/auth/forgot-password` | `email` | Generic202 for existing and unknown addresses |
+| POST `/api/v1/auth/forgot-password` | `email`; optional `locale` | Generic202 for existing and unknown addresses |
 | POST `/api/v1/auth/reset-password` | `token,password` | 200; invalidates older browser sessions and links; requires a new login |
-| POST `/api/v1/members` | `email,name,role` | Owner-only, current session required; generic202 and transactional setup mail |
+| POST `/api/v1/members` | `email,name,role`; optional `locale` | Owner-only, current session required; generic202 and transactional setup mail |
+
+For account emails, pass `locale: "en"` or `locale: "sv"`. The browser supplies
+the selected interface language. Omitted or empty locale selects English;
+the existing language normalizer also accepts regional forms such as `sv-SE`.
+Unsupported values or values over 64 bytes return 400 before account processing.
+The subject, HTML and plain text are rendered in that language when the email
+is queued. This request does not save a user or workspace language preference.
+Document and recipient notification languages are configured separately.
 
 New passwords require at least 12 Unicode code points and at most 1024 UTF-8
 bytes, without trimming. Pending registration stores a salted Argon2id hash

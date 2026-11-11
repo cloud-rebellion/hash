@@ -19,6 +19,13 @@ it a different role. SMTP acceptance and inbox delivery are separate outcomes;
 the Members screen confirms the request was accepted. Eligible accounts receive
 a password setup email.
 
+Choose English or Swedish in Hash before creating a workspace, requesting
+password recovery or inviting a colleague. The account email uses that selected
+language, including its subject and action button. API callers can supply the
+optional `locale` described in [the authentication API](API.md#native-staff-authentication);
+requests without it use English. Each queued email keeps its chosen language.
+Document and signing-email language choices are separate.
+
 Passwords support spaces and Unicode, with a minimum of 12 characters and a
 maximum of 1024 UTF-8 bytes. Hash stores salted password hashes. It uses its
 existing HttpOnly session cookie and rechecks current membership and session

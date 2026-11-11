@@ -17,14 +17,14 @@ function fixture(isOwner = true) {
   const calls: any[] = [], timers = new Map<number, { callback: () => void; delay: number }>();
   let timerID = 0, refreshes = 0;
   const env: any = {
-    isOwner, disposed: false, inviteEmail: 'invitee@example.test', inviteName: 'Invitee', inviteRole: 'sender',
+    isOwner, $staffLocale: 'en', disposed: false, inviteEmail: 'invitee@example.test', inviteName: 'Invitee', inviteRole: 'sender',
     inviteBusy: false, inviteError: null, inviteMessage: null, invitationRequest: null, AbortController, APIError,
     setTimeout: (callback: () => void, delay: number) => { const id = ++timerID; timers.set(id, { callback, delay }); return id; },
     clearTimeout: (id: number) => { timers.delete(id); },
     refresh: async () => { refreshes++; },
-    inviteMember: (input: unknown, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+    inviteMember: (input: unknown, signal: AbortSignal, locale?: string) => new Promise<void>((resolve, reject) => {
       signal.addEventListener('abort', () => reject(new Error('PRIVATE abort')), { once: true });
-      calls.push({ input, signal, resolve, reject });
+      calls.push({ input, signal, locale, resolve, reject });
     })
   };
   const actions = bind(env);
@@ -40,6 +40,19 @@ test('owner invitation waits for202 semantics, prevents duplicate requests and t
   expect(f.env.inviteMessage).toBe(accepted); expect(f.refreshes()).toBe(1);
   expect(f.env.inviteEmail).toBe(''); expect(f.env.inviteName).toBe(''); expect(f.env.inviteRole).toBe('sender');
   expect(f.env.inviteBusy).toBe(false); expect(f.timers.size).toBe(0);
+});
+
+test('member invitation captures the current staff language and keeps acknowledgement generic', async () => {
+  for (const locale of ['sv', 'en'] as const) {
+    const f = fixture(); f.env.$staffLocale = locale;
+    const pending = f.send();
+    expect(f.calls).toHaveLength(1); expect(f.calls[0].locale).toBe(locale);
+    expect(f.calls[0].signal).toBeInstanceOf(AbortSignal);
+    expect(f.env.inviteMessage).toBeNull();
+    f.calls[0].resolve(); await pending;
+    expect(f.env.inviteMessage).toBe(accepted); expect(f.env.inviteError).toBeNull();
+    expect(f.refreshes()).toBe(1); expect(f.timers.size).toBe(0);
+  }
 });
 
 test('viewer/empty requests cannot dispatch and permission refusal refreshes current identity without claiming an invitation', async () => {

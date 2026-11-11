@@ -80,9 +80,9 @@
     request = { controller, timer };
     try {
       if (mode === 'login') await loginWithPassword(email.trim(), password, controller.signal);
-      else if (mode === 'register') await registerWorkspace(email.trim(), name.trim(), company.trim(), password, controller.signal);
+      else if (mode === 'register') await registerWorkspace(email.trim(), name.trim(), company.trim(), password, controller.signal, $staffLocale);
       else if (mode === 'verify') await verifyStaffEmail(token!, password, controller.signal);
-      else if (mode === 'forgot') await forgotStaffPassword(email.trim(), controller.signal);
+      else if (mode === 'forgot') await forgotStaffPassword(email.trim(), controller.signal, $staffLocale);
       else await resetStaffPassword(token!, password, controller.signal);
       if (disposed || controller.signal.aborted) return;
       clearSecrets();

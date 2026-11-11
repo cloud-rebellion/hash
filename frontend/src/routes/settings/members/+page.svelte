@@ -60,7 +60,7 @@
     const timer = setTimeout(() => controller.abort(), 15_000);
     invitationRequest = { controller, timer };
     try {
-      await inviteMember({ email: inviteEmail, name: inviteName, role: inviteRole }, controller.signal);
+      await inviteMember({ email: inviteEmail, name: inviteName, role: inviteRole }, controller.signal, $staffLocale);
       if (disposed || controller.signal.aborted) return;
       inviteMessage = 'Invitation request accepted. Eligible accounts receive a password setup email.';
       inviteEmail = ''; inviteName = ''; inviteRole = 'sender';

@@ -28,6 +28,50 @@ test('native account transport uses fixed JSON POSTs, HttpOnly-cookie credential
   }, path => path.endsWith('/status') ? Response.json({ password_enabled: true, oidc_enabled: false }) : Response.json({}, { status: path.endsWith('/register') || path.endsWith('/forgot-password') ? 202 : 200 }));
 });
 
+test('registration and recovery explicitly carry Swedish or English mail language with opaque public acknowledgements', async () => {
+  const signal = new AbortController().signal;
+  for (const locale of ['sv', 'en'] as const) {
+    for (const account of ['existing', 'unknown']) {
+      const email = `${account}@example.test`;
+      await mocked(async calls => {
+        expect(await registerWorkspace(email, 'Owner', 'Company', 'unchanged passphrase', signal, locale)).toBeUndefined();
+        expect(await forgotStaffPassword(email, signal, locale)).toBeUndefined();
+        expect(calls.map(call => JSON.parse(call.options.body as string))).toEqual([
+          { email, name: 'Owner', company_name: 'Company', password: 'unchanged passphrase', locale },
+          { email, locale }
+        ]);
+        expect(calls.every(call => call.options.signal === signal && call.options.credentials === 'include' && call.options.cache === 'no-store' && call.options.redirect === 'error')).toBe(true);
+      }, () => new Response(`PRIVATE ${account} account details`, { status: 202 }));
+    }
+  }
+});
+
+test('public account-mail refusals do not reveal account state in either selected language', async () => {
+  const signal = new AbortController().signal;
+  for (const action of ['register', 'forgot'] as const) {
+    for (const status of [400, 401, 403, 409, 429, 503]) {
+      const messages: string[] = [];
+      for (const locale of ['sv', 'en'] as const) {
+        for (const account of ['existing', 'unknown']) {
+          await mocked(async () => {
+            let refused = false;
+            try {
+              if (action === 'register') await registerWorkspace(`${account}@example.test`, 'Owner', 'Company', 'unchanged passphrase', signal, locale);
+              else await forgotStaffPassword(`${account}@example.test`, signal, locale);
+            } catch (error) {
+              refused = true;
+              const message = staffAuthErrorMessage(error);
+              expect(message).not.toContain('PRIVATE'); messages.push(message);
+            }
+            expect(refused).toBe(true);
+          }, () => new Response(`PRIVATE ${account} account details`, { status }));
+        }
+      }
+      expect(new Set(messages).size).toBe(1);
+    }
+  }
+});
+
 test('account refusal and network errors never read or expose private upstream bodies', async () => {
   for (const status of [200, 202, 401, 403, 429, 500]) {
     await mocked(async () => {

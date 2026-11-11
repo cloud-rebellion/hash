@@ -14,9 +14,21 @@ import (
 // Version8 also owns M117 staff credentials and sealed recovery mail. Older
 // workers do not decode that ciphertext and cannot safely consume its queue.
 // M118 filing, M119 email content, M120 scoped SMTP, M121 finite automation
-// M122 bounded email design and M123 retained brand profiles retain this writer
-// contract: workers consume the same already-rendered durable message bodies.
-const LifecycleContractVersionV1 = 8
+// M122 bounded email design and M123 retained brand profiles retain version 8:
+// workers consume the same already-rendered durable message bodies.
+// M125 is a trigger-only INSERT guard on template revisions and keeps version 9.
+// M126 only backfills derived event size rows and keeps version 9.
+// M127 adds pending_object_deletions_v1, a durable queue of object versions that a
+// committed DSR erasure still owes the object store. It keeps version 9. A
+// version-9 writer that predates M127 ignores the table: it neither reads nor
+// writes rows that matter to it, and its own erasure keeps the old single
+// post-commit attempt. Rows written by this version are only ever drained by this
+// version's worker, and the Down refuses while any remain, so an older binary can
+// neither misread nor lose them and there is no reason to lock it out.
+// Version9 also owns M124 in-place draft edits: forward template moves and the
+// append-only PDF revision/review history. An older writer would not honour the
+// send-time review gate, so it must not resume a database that holds those rows.
+const LifecycleContractVersionV1 = 9
 
 func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err error) {
 	digest, versions, err := EmbeddedMigrationsIdentity()
@@ -30,12 +42,12 @@ func EmbeddedLifecycleIdentityV1() (version int, migrationsSHA256 string, err er
 }
 
 func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
-	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122/M123 migration tree")
-	if len(versions) == 0 || len(versions) > 123 {
+	unsupported := fmt.Errorf("embedded lifecycle contract requires the reviewed M117 or named M118/M119/M120/M121/M122/M123/M124/M125/M126/M127 migration tree")
+	if len(versions) == 0 || len(versions) > 127 {
 		return unsupported
 	}
 	highest := versions[len(versions)-1]
-	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 && highest != 123 {
+	if highest != 117 && highest != 118 && highest != 119 && highest != 120 && highest != 121 && highest != 122 && highest != 123 && highest != 124 && highest != 125 && highest != 126 && highest != 127 {
 		return unsupported
 	}
 	seen := make(map[int64]bool, len(versions))
@@ -63,6 +75,18 @@ func requireReviewedLifecycleTreeV1(migrations fs.FS, versions []int64) error {
 	}
 	if highest >= 123 {
 		names = append(names, "00123_org_brand_profiles.sql")
+	}
+	if highest >= 124 {
+		names = append(names, "00124_draft_in_place_edit.sql")
+	}
+	if highest >= 125 {
+		names = append(names, "00125_html_template_revision_insert_guard.sql")
+	}
+	if highest >= 126 {
+		names = append(names, "00126_measure_html_document_events.sql")
+	}
+	if highest >= 127 {
+		names = append(names, "00127_pending_object_deletions.sql")
 	}
 	for index, name := range names {
 		info, err := fs.Stat(migrations, "migrations/"+name)

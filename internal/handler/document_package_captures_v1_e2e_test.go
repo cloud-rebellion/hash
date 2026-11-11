@@ -108,11 +108,7 @@ func captureLoad219(t *testing.T, f lifecycleAuthorizationFixture, p *generated.
 func TestDocumentPackageCapturePersistenceV1E2E(t *testing.T) {
 	f, html := htmlMaterializationFixtureE2E(t)
 	html = packageFreshSyntheticReport222(t, f, html)
-	var err error
-	html, err = f.q.MarkDocumentHTMLReviewed(f.ctx, generated.MarkDocumentHTMLReviewedParams{ID: html.ID, OrgID: f.org, ExpectedUpdatedAt: html.UpdatedAt, ExpectedPdfSha256: html.PdfSha256, ReviewedBy: f.user.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	html = markHTMLReviewedHumanE2E(t, f, html)
 	root := packagePDF218(t, f, "Café / Cafe\u0301 agreement")
 	a := packagePDF218(t, f, "DPA imported")
 	p := packageHeader218(t, f, root)

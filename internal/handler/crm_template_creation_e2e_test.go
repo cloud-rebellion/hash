@@ -811,3 +811,37 @@ func TestCRMTemplateCreationConcurrentRequestAndDatabaseGuardsE2E(t *testing.T) 
 		f.unchanged(t, before)
 	})
 }
+
+// A draft created by CRM population must stay revisable: its creation event
+// needs a payload size row, or every later review and revise answers 503 (R2).
+func TestCRMTemplatePopulationDraftCanBeRevisedE2E(t *testing.T) {
+	f := setupCRMTemplateCreationE2E(t)
+	in, _ := f.command(t)
+	out := decodeCRMTemplateCreationE2E(t, submitHTMLDocumentCreationE2E(t, f.lifecycleAuthorizationFixture, f.template.ID, in, f.cookie), http.StatusCreated)
+	var unmeasured int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM events e WHERE e.document_id=$1 AND e.org_id=$2 AND NOT EXISTS (SELECT 1 FROM html_snapshot_event_payload_sizes_v1 s WHERE s.event_id=e.id)`, out.Document.ID, f.org).Scan(&unmeasured); err != nil || unmeasured != 0 { //nolint:rawsql -- measurement coverage inspection
+		t.Fatalf("events without a size row=%d %v", unmeasured, err)
+	}
+	doc, err := f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: out.Document.ID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, _ := htmlsource.Commitment(doc)
+	path := "/api/v1/documents/" + doc.ID.String()
+	review, _ := json.Marshal(htmlDocumentReviewInput{ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedPDFSHA256: hex.EncodeToString(doc.PdfSha256), ExpectedHTMLSourceCommitment: commit})
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, path+"/html/review", string(review), f.cookie); w.Code != http.StatusOK {
+		t.Fatalf("review of CRM-populated draft=%d %s", w.Code, w.Body.String())
+	}
+	if doc, err = f.q.GetDocument(f.ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: f.org}); err != nil {
+		t.Fatal(err)
+	}
+	commit, _ = htmlsource.Commitment(doc)
+	changed := htmlStringMap{}
+	for k, v := range in.Sections {
+		changed[k] = v + " revised"
+	}
+	revise, _ := json.Marshal(htmlDocumentRevisionInput{ExpectedUpdatedAt: doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedHTMLSourceCommitment: commit, Sections: changed, Summary: "Revise a CRM-populated draft"})
+	if w := submitSessionOperationE2E(f.s, http.MethodPost, path+"/html/revisions", string(revise), f.cookie); w.Code != http.StatusCreated && w.Code != http.StatusOK {
+		t.Fatalf("revise of CRM-populated draft=%d %s", w.Code, w.Body.String())
+	}
+}

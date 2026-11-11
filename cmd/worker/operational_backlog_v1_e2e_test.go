@@ -60,10 +60,11 @@ func TestOperationalBacklog426MetadataSQLSemanticsE2E(t *testing.T) {
 	}
 	exec(`CREATE TEMP TABLE email_deliveries(id bigint,status text,created_at timestamptz,next_attempt_at timestamptz) ON COMMIT DROP;
  CREATE TEMP TABLE documents(id bigint,org_id bigint,status text,deleted_at timestamptz,parent_envelope_id bigint) ON COMMIT DROP;
- CREATE TEMP TABLE document_finalization_intents(document_id bigint PRIMARY KEY,org_id bigint,created_at timestamptz) ON COMMIT DROP;`)
+ CREATE TEMP TABLE document_finalization_intents(document_id bigint PRIMARY KEY,org_id bigint,created_at timestamptz) ON COMMIT DROP;
+ CREATE TEMP TABLE pending_object_deletions_v1(id bigint,created_at timestamptz) ON COMMIT DROP;`)
 	q := generated.New(tx)
 	row, err := q.GetOperationalBacklogV1(ctx)
-	if err != nil || row.MailCount != 0 || row.MailFailedCount != 0 || row.MailFailedUnknownCreatedCount != 0 || row.MailFailedOldestObservedCreationAgeSeconds != 0 || row.MailFailedLimitReached || row.FinalizingRootCount != 0 || row.MailLimitReached || row.FinalizingLimitReached {
+	if err != nil || row.MailCount != 0 || row.MailFailedCount != 0 || row.MailFailedUnknownCreatedCount != 0 || row.MailFailedOldestObservedCreationAgeSeconds != 0 || row.MailFailedLimitReached || row.FinalizingRootCount != 0 || row.MailLimitReached || row.FinalizingLimitReached || row.PendingObjectCount != 0 || row.PendingObjectOldestObservedAgeSeconds != 0 || row.PendingObjectLimitReached {
 		t.Fatal("known empty query differs", err, row)
 	}
 	exec(`INSERT INTO email_deliveries VALUES
@@ -76,6 +77,13 @@ func TestOperationalBacklog426MetadataSQLSemanticsE2E(t *testing.T) {
 	row, err = q.GetOperationalBacklogV1(ctx)
 	if err != nil || row.MailCount != 3 || row.MailDueCount != 1 || row.MailUnknownCreatedCount != 1 || row.MailUnknownDueCount != 1 || row.MailOldestObservedAgeSeconds < 7200 || row.MailOldestObservedOverdueSeconds < 30 || row.MailFailedCount != 4 || row.MailFailedUnknownCreatedCount != 3 || row.MailFailedOldestObservedCreationAgeSeconds < 86400 || row.MailFailedLimitReached || row.FinalizingRootCount != 4 || row.FinalizingIntentCount != 2 || row.FinalizingMissingIntentCount != 2 || row.FinalizingUnknownIntentAgeCount != 1 || row.FinalizingOldestObservedIntentAgeSeconds < 3600 {
 		t.Fatal("leased/backoff, unknown clocks, root filters or org join changed", err, row)
+	}
+	// Pending object deletions: a row that keeps failing keeps growing the oldest
+	// age. Only the count and the age cross; the cap is flagged.
+	exec(`INSERT INTO pending_object_deletions_v1 VALUES (1,statement_timestamp()-interval '3 days'),(2,statement_timestamp()-interval '1 minute'),(3,statement_timestamp()+interval '1 hour');`)
+	row, err = q.GetOperationalBacklogV1(ctx)
+	if err != nil || row.PendingObjectCount != 3 || row.PendingObjectOldestObservedAgeSeconds < 259200 || row.PendingObjectLimitReached {
+		t.Fatal("pending object deletion count or oldest age changed", err, row)
 	}
 	var before string
 	if err := tx.QueryRow(ctx, `SELECT string_agg(row(id,status,created_at,next_attempt_at)::text,',' ORDER BY id) FROM email_deliveries`).Scan(&before); err != nil {
@@ -100,6 +108,11 @@ func TestOperationalBacklog426MetadataSQLSemanticsE2E(t *testing.T) {
 	row, err = q.GetOperationalBacklogV1(ctx)
 	if err != nil || row.MailCount != 1000 || !row.MailLimitReached || row.MailFailedCount != 1000 || !row.MailFailedLimitReached || row.MailFailedUnknownCreatedCount != 0 || row.MailFailedOldestObservedCreationAgeSeconds < 10800 || row.FinalizingRootCount != 1000 || !row.FinalizingLimitReached || row.FinalizingIntentCount+row.FinalizingMissingIntentCount != row.FinalizingRootCount {
 		t.Fatal("cap or overlapping-record semantics changed", err, row)
+	}
+	exec(`INSERT INTO pending_object_deletions_v1 SELECT n,statement_timestamp()-interval '1 hour' FROM generate_series(100,1200)n;`)
+	row, err = q.GetOperationalBacklogV1(ctx)
+	if err != nil || row.PendingObjectCount != 1000 || !row.PendingObjectLimitReached || row.PendingObjectOldestObservedAgeSeconds < 259200 {
+		t.Fatal("pending object cap or oldest-first ordering changed", err, row)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()

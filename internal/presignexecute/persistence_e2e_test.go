@@ -147,7 +147,8 @@ func setupExecutionNoticeE2E(t testing.TB, prior pgtype.Timestamptz) *executionF
 	execOK(t, ctx, pool, `INSERT INTO orgs(id,name) VALUES($1,'Synthetic delegated persistence')`, f.org)
 	execOK(t, ctx, pool, `INSERT INTO users(id,org_id,name,email,role) VALUES($1,$3,'Synthetic Owner','owner@example.test','owner'),($2,$3,'Synthetic Provider','provider@example.test','sender')`, f.owner, f.grantor, f.org)
 	execOK(t, ctx, pool, `INSERT INTO templates(id,org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256) VALUES($1,$2,'Synthetic source3','html',$3::jsonb,$4::jsonb,$5,$6)`, in.TemplateID, f.org, in.MasterJSON, in.DefaultVarsJSON, f.owner, unhex(in.TemplateContentSHA256))
-	execOK(t, ctx, pool, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by,approved_by,approved_at) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8)`, in.TemplateID, f.org, in.MasterJSON, in.DefaultVarsJSON, unhex(in.TemplateContentSHA256), f.owner, in.TemplateApprovedBy, in.TemplateApprovedAt)
+	execOK(t, ctx, pool, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6)`, in.TemplateID, f.org, in.MasterJSON, in.DefaultVarsJSON, unhex(in.TemplateContentSHA256), f.owner)
+	execOK(t, ctx, pool, `UPDATE html_template_revisions SET approved_by=$3,approved_at=$4 WHERE template_id=$1 AND version=1 AND org_id=$2`, in.TemplateID, f.org, in.TemplateApprovedBy, in.TemplateApprovedAt)
 	f.seedDocument(t, doc, rows)
 	master, err := htmlmaster.Decode(in.MasterJSON)
 	if err != nil {
@@ -240,6 +241,8 @@ func (f *executionFixture) seedDocument(t testing.TB, doc *generated.Document, r
 	mid := uuid.New()
 	execOK(t, f.ctx, tx, `INSERT INTO html_document_materializations(id,document_id,org_id,sequence,origin_commitment,source_json,source_commitment,pdf_key,pdf_sha256,pdf_version_id,page_count,created_by) VALUES($1,$2,$3,1,$4,$5::jsonb,$4,$6,$7,$8,2,$9)`, mid, doc.ID, f.org, unhex(cid), doc.HtmlSourceJson, doc.PdfStorageKey.String, doc.PdfSha256, doc.PdfStorageVersionID.String, f.grantor)
 	execOK(t, f.ctx, tx, `UPDATE documents SET html_current_materialization_id=$2,html_current_source_json=html_source_json,html_current_materialization_sequence=1,html_current_page_count=2,html_reviewed_pdf_sha256=pdf_sha256,html_reviewed_materialization_id=$2,html_reviewed_by=$3,html_reviewed_at=clock_timestamp() WHERE id=$1`, doc.ID, mid, f.grantor)
+	// Signing documents need a human reviewer-kind row (M124), as the staff review path records.
+	execOK(t, f.ctx, tx, `INSERT INTO document_review_kinds_v1 (id, org_id, document_id, subject_id, pdf_sha256, reviewer_kind, reviewed_by) SELECT gen_random_uuid(), d.org_id, d.id, d.html_current_materialization_id, d.html_reviewed_pdf_sha256, 'human', d.html_reviewed_by FROM documents d WHERE d.id=$1`, doc.ID)
 	if err = tx.Commit(f.ctx); err != nil {
 		t.Fatal("commit source3 synthetic layout", err)
 	}

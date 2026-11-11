@@ -24,7 +24,7 @@ import (
 // Parent/CAS/member/evidence/privacy and final original credential checks keep
 // their original order, and each successful event uses actual ownedaudit hooks.
 func MutateDocumentPurposeV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, via versions.Via, expected string, checkObservation func(*generated.Document, string) error, purpose documentpurpose.Purpose) (result *ResultV1, failure error) {
-	return mutateDocumentMetadataV1(ctx, d, actor, document, expected, checkObservation, &purpose, "", "")
+	return mutateDocumentMetadataV1(ctx, d, actor, document, expected, checkObservation, &purpose, "", "", nil)
 }
 
 // Metadata merging is serialized under the same original draft/credential gates.
@@ -33,10 +33,16 @@ func AttachDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor Actor
 	if key == "" || documentpurpose.IsReservedKey(key) {
 		return nil, errors.New("metadata key is unavailable")
 	}
-	return mutateDocumentMetadataV1(ctx, d, actor, document, "", func(*generated.Document, string) error { return nil }, nil, key, value)
+	return mutateDocumentMetadataV1(ctx, d, actor, document, "", func(*generated.Document, string) error { return nil }, nil, key, value, nil)
 }
 
-func mutateDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, expected string, checkObservation func(*generated.Document, string) error, purpose *documentpurpose.Purpose, key, value string) (result *ResultV1, failure error) {
+// Expiry uses the same all-source owned draft lifecycle, including the original
+// credential's final check and the measured audit event before commit.
+func SetDocumentExpiryV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, value string) (*ResultV1, error) {
+	return mutateDocumentMetadataV1(ctx, d, actor, document, "", func(*generated.Document, string) error { return nil }, nil, "", "", &value)
+}
+
+func mutateDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor ActorV1, document uuid.UUID, expected string, checkObservation func(*generated.Document, string) error, purpose *documentpurpose.Purpose, key, value string, expiry *string) (result *ResultV1, failure error) {
 	if d.Sessions == nil || d.Audit == nil || document == uuid.Nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || actor.Authorize == nil || checkObservation == nil {
 		return nil, errors.New("native draft mutation dependencies unavailable")
 	}
@@ -139,6 +145,13 @@ func mutateDocumentMetadataV1(ctx context.Context, d DependenciesV1, actor Actor
 				doc, err = state.purposeWriter.ChangeV1(call, *purpose)
 			}
 			payload["purpose"] = string(*purpose)
+		} else if expiry != nil {
+			state.metadataWriter, err = session.NewDocumentMetadataWriterV1(call, state.revisionReader)
+			if err == nil {
+				doc, err = state.metadataWriter.SetExpiryV1(call, *expiry)
+			}
+			auditPurpose = pdfadmission.HTMLAuditDocumentExpiryUpdatedV1
+			payload["expires_at"] = *expiry
 		} else {
 			state.metadataWriter, err = session.NewDocumentMetadataWriterV1(call, state.revisionReader)
 			if err == nil {

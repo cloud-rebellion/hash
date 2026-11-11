@@ -26,6 +26,15 @@ WITH observation AS MATERIALIZED (
   WHERE d.status='finalizing' AND d.deleted_at IS NULL AND d.parent_envelope_id IS NULL
   ORDER BY d.id
   LIMIT 1000
+), pending_objects AS MATERIALIZED (
+  -- Object versions a committed privacy erasure still owes the object store
+  -- (M127). Oldest first, so the oldest observed age is the true oldest while the
+  -- queue is under the cap. Age is time since the erasure committed; a row that
+  -- keeps failing keeps growing it. No key, version, org or error text crosses.
+  SELECT created_at
+  FROM pending_object_deletions_v1
+  ORDER BY created_at, id
+  LIMIT 1000
 )
 SELECT
   (SELECT count(*) FROM mail)::bigint AS mail_count,
@@ -44,4 +53,7 @@ SELECT
   (SELECT count(*) FROM roots WHERE NOT has_intent)::bigint AS finalizing_missing_intent_count,
   (SELECT count(*) FROM roots, observation WHERE has_intent AND (intent_created_at IS NULL OR NOT isfinite(intent_created_at) OR intent_created_at>observed_at))::bigint AS finalizing_unknown_intent_age_count,
   (SELECT COALESCE(max(CASE WHEN has_intent AND isfinite(intent_created_at) AND intent_created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM intent_created_at)) END),0) FROM roots, observation)::bigint AS finalizing_oldest_observed_intent_age_seconds,
-  ((SELECT count(*) FROM roots)=1000)::boolean AS finalizing_limit_reached;
+  ((SELECT count(*) FROM roots)=1000)::boolean AS finalizing_limit_reached,
+  (SELECT count(*) FROM pending_objects)::bigint AS pending_object_count,
+  (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM pending_objects, observation)::bigint AS pending_object_oldest_observed_age_seconds,
+  ((SELECT count(*) FROM pending_objects)=1000)::boolean AS pending_object_limit_reached;

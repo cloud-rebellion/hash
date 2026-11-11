@@ -12,7 +12,7 @@ import (
 func TestReviewedLifecycleEmail720Named119RetainsEight(t *testing.T) {
 	f := reviewedLifecycleFiles709()
 	f["migrations/00119_service_email_templates.sql"] = &fstest.MapFile{Data: []byte("-- revisioned rendered service email\n")}
-	if err := requireReviewedLifecycleTreeV1(f, []int64{115, 116, 117, 118, 119}); err != nil || LifecycleContractVersionV1 != 8 {
+	if err := requireReviewedLifecycleTreeV1(f, []int64{115, 116, 117, 118, 119}); err != nil || LifecycleContractVersionV1 != 9 {
 		t.Fatal("named additive mail tree changed/refused original writer contract", err)
 	}
 	for _, mode := range []fs.FileMode{fs.ModeDir, fs.ModeSymlink} {

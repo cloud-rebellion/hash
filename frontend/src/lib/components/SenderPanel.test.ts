@@ -58,6 +58,15 @@ function bindContractParties(state: ReturnType<typeof fixture>) {
   state.env.recipients = state.env.intendedParties.map((party: any, index: number) => ({ id: party.recipient_id, document_id: 'A', role: party.role,
     name: party.name, email: party.email, locale: 'en', order_index: index }));
 }
+test('signing and acknowledgement recipient email languages inherit the saved document choice and preserve explicit overrides', () => {
+  for (const requiresSignature of [true, false]) {
+    const fresh = fixture(); fresh.env.requiresSignature = requiresSignature; fresh.env.docLocale = 'sv';
+    fresh.actions.openAdd(); expect(fresh.env.fLocale).toBe('sv');
+    const existing = fixture(); existing.env.requiresSignature = requiresSignature; existing.env.docLocale = 'en';
+    existing.env.recipients[0].locale = 'sv'; existing.actions.openEdit(existing.env.recipients[0]);
+    expect(existing.env.fLocale).toBe('sv');
+  }
+});
 test('pre-sign selection and unresolved original request never fall through to ordinary Send', async () => {
   for (const patch of [{ preSignMode: 'presign' }, { preSignRecoveryBlocked: true }, { preSignBusy: true }]) {
     const state = fixture(); bindContractParties(state); state.env.lawfulBasis = 'contract'; Object.assign(state.env, patch);

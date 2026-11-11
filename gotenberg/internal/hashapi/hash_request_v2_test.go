@@ -882,7 +882,7 @@ func TestHashLifecycleMalformedWireBodyDoesNotQuarantineV2(t *testing.T) {
 			if err == nil {
 				_, readErr := io.ReadAll(res.Body)
 				closeErr := res.Body.Close()
-				if (!scenario.truncate && res.StatusCode != 400) || (scenario.truncate && res.StatusCode != 400 && res.StatusCode != 503) || readErr != nil || closeErr != nil {
+				if (!scenario.truncate && res.StatusCode != 400) || (scenario.truncate && res.StatusCode != 400 && res.StatusCode != 503 && res.StatusCode != statusClientClosedRequest) || readErr != nil || closeErr != nil {
 					t.Fatal("malformed body response", res.StatusCode, readErr, closeErr)
 				}
 			} else if !scenario.truncate || !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {

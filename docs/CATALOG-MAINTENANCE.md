@@ -366,3 +366,67 @@ source and organization's reviewed policy. Empty-set success is not coverage of
 retained-rule upgrades; a successful rule preview is not Send acceptance. The
 metadata procedure adds no rule seed, higher-tier activation, BankID feature,
 automatic startup measurement, readiness endpoint or admission-cap change.
+
+## Rebuild one draft's response-size row
+
+Migration 00092 does not backfill `html_creation_response_sizes_v1`, and readers
+never repair it. A draft that predates it, or lost its row to an earlier defect,
+is refused with HTTP 409 "this draft's saved record is incomplete and cannot be
+used for attachments; contact support", and the staff UI shows a translated
+version of it.
+This is the manual repair for exactly one draft that lost only this row. A draft
+that predates these size tables usually lacks the other two rows checked below
+as well (migrations 00091 and 00093 have no backfill either). This procedure
+cannot repair that draft; recreate it instead. Do not script this over a list,
+and do not widen it.
+
+Preconditions, all checked before any write:
+
+- The draft is `status='draft'`, not deleted and has no HTML source. It is either
+  a blocks draft (`source_kind='blocks'`) or a plain PDF draft
+  (`source_kind='pdf'` with `blocks_json IS NULL`). Attachments only work on
+  `source_kind='pdf'` drafts, so the plain PDF draft is the usual case. Designed
+  (HTML-source) drafts are also `source_kind='pdf'` but are out of scope here.
+- The row is really missing: `SELECT count(*) FROM
+  html_creation_response_sizes_v1 WHERE document_id=$1 AND org_id=$2` returns 0.
+- Its other two size rows exist and are current: `document_signing_policy_sizes_v1`
+  and `document_read_report_sizes_v1` each return 1 for the same query with `AND
+  measurement_server_version_num=current_setting('server_version_num')::integer`
+  added. The reader refuses without them, so this repair alone would not make
+  the draft readable. If either returns 0, stop: recreate the draft instead.
+- Record the document and organization IDs, the reviewer and the reason before
+  starting. Use the document's current `updated_at` as the compare-and-swap
+  value; read it in the same session.
+
+Run it in a single transaction. The `FOR UPDATE NOWAIT` lock fails immediately
+instead of waiting if anything else holds the document, and `updated_at` makes
+the insert apply only to the state you inspected. The `0,0` byte columns are
+placeholders, as in the native creators: trigger
+`derive_html_creation_response_sizes_v1` replaces them with the draft's measured
+sizes on insert. Do not type other counts.
+
+```sql
+BEGIN;
+WITH parent AS MATERIALIZED (
+ SELECT id,org_id FROM documents WHERE id=$1 AND org_id=$2 AND updated_at=$3
+ AND status='draft' AND deleted_at IS NULL
+ AND (source_kind='blocks' OR (source_kind='pdf' AND blocks_json IS NULL))
+ AND html_source_json IS NULL AND html_current_source_json IS NULL
+ AND html_current_materialization_id IS NULL FOR UPDATE NOWAIT)
+INSERT INTO html_creation_response_sizes_v1(document_id,org_id,blocks_wire_bytes,metadata_wire_bytes,measurement_server_version_num,measured_at)
+SELECT id,org_id,0,0,current_setting('server_version_num')::integer,clock_timestamp() FROM parent
+ON CONFLICT(document_id) DO NOTHING RETURNING document_id;
+-- Exactly one row must come back. Zero rows: ROLLBACK and re-inspect. Never COMMIT otherwise.
+COMMIT;
+```
+
+`DO NOTHING` is deliberate: an existing row is never overwritten. Afterwards,
+confirm that the row exists, then ask the user to refresh the attachments panel.
+Editing the draft's blocks or metadata afterwards deletes the row again (trigger
+`invalidate_html_creation_response_sizes_v1`), so make the repair last.
+
+Not covered: an HTML-source draft, a non-draft or deleted document, and a
+PostgreSQL major upgrade (every cached row then carries the old server version
+and needs the same kind of repair, one document at a time). This procedure has
+not been run against a database from this repository; rehearse it on a restored
+copy first.

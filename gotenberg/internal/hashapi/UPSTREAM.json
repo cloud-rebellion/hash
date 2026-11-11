@@ -70,5 +70,12 @@
     }
   ],
   "license_sha256": "24b9edd14f44d08af320e1d4fc63535636cb71f7c8e7d3827dc831692f27e1aa",
-  "adaptations": "Hash-owned listener and complete Echo request lifecycle; synchronous HTTP/TLS bind, pre-buffer h2c-upgrade refusal, real worker/context/workspace/admission ownership, gated response and deadline control, two multipart leases, complete encoded entity cap24MiB before parsing under the original processing deadline, checked staging/form/workspace/file/archive cleanup, confined output opens and delivered-byte verification. Failed cleanup quarantines leases/health; ordinary source-bound HTTP1 input-drain errors remain separate from uncertain cleanup. See OWNERSHIP.md for compatibility and pending qualification boundaries. Original upstream file digests above remain provenance, not current modified-file identities. Generated attachments refuse Range requests before output open to avoid the inherited unjoined multi-range producer. Optional downloadFrom remains disabled and its transport retirement is unqualified."
+  "adaptations": "Hash-owned listener and complete Echo request lifecycle; synchronous HTTP/TLS bind, pre-buffer h2c-upgrade refusal, real worker/context/workspace/admission ownership, gated response and deadline control, two multipart leases, complete encoded entity cap24MiB before parsing under the original processing deadline, checked staging/form/workspace/file/archive cleanup, confined output opens and delivered-byte verification. Failed cleanup quarantines leases/health; ordinary source-bound HTTP1 input-drain errors remain separate from uncertain cleanup. See OWNERSHIP.md for compatibility and pending qualification boundaries. Original upstream file digests above remain provenance, not current modified-file identities. Generated attachments refuse Range requests before output open to avoid the inherited unjoined multi-range producer. Optional downloadFrom remains disabled and its transport retirement is unqualified. Hash pins Echo direct-peer IP extraction in Api.Start so forwarded headers cannot alter renderer client identity; the two Echo v4 configuration advisories are reviewed separately in echo-vulnerability-review.json.",
+  "owned_modified_sources": [
+    {
+      "owned_file": "api.go",
+      "bytes": 24370,
+      "sha256": "21918341262e0870e4739b4992270e84e3ba208b81292aa5b79a5546a7c8a88b"
+    }
+  ]
 }

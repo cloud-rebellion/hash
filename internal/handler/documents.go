@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/bright-interaction/hash/internal/documentpurpose"
+	"io"
 	"net/http"
 	"time"
 
@@ -61,6 +62,7 @@ type documentResponse struct {
 	CreatedAt                   string                         `json:"created_at"`
 	UpdatedAt                   string                         `json:"updated_at"`
 	HTMLReviewRequired          bool                           `json:"html_review_required,omitempty"`
+	PDFReviewRequired           bool                           `json:"pdf_review_required,omitempty"`
 	HasHTMLSource               bool                           `json:"has_html_source,omitempty"`
 	HTMLSourceCommitment        string                         `json:"html_source_commitment,omitempty"`
 	HTMLMaterializationRevision int32                          `json:"html_materialization_revision,omitempty"`
@@ -129,6 +131,7 @@ func uuidFromBytes(b [16]byte) uuid.UUID { return uuid.UUID(b) }
 // variables; pdf path expects template_id pointing to a pdf-source template
 // or a fresh upload (multi-step UX, week 2).
 type createDocumentInput struct {
+	DefaultLocale           string                  `json:"default_locale,omitempty"`
 	Purpose                 documentpurpose.Purpose `json:"purpose,omitempty"`
 	Name                    string                  `json:"name"`
 	TemplateID              string                  `json:"template_id,omitempty"`
@@ -158,6 +161,11 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	in.DefaultLocale, err = normalizeNewDocumentLocaleV1(in.DefaultLocale)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "default_locale is not supported")
 		return
 	}
 	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
@@ -208,7 +216,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.SourceKind == "blocks" {
 		result, err := blockauthoring.CreateV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
-			blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, blockauthoring.CreateInputV1{Purpose: in.Purpose, Name: in.Name, TemplateID: templateID, BlocksJSON: in.BlocksJSON, VariablesJSON: in.VariablesJSON, ExpiresAt: expiresAt})
+			blockauthoring.ActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, blockauthoring.CreateInputV1{DefaultLocale: in.DefaultLocale, Purpose: in.Purpose, Name: in.Name, TemplateID: templateID, BlocksJSON: in.BlocksJSON, VariablesJSON: in.VariablesJSON, ExpiresAt: expiresAt})
 		if result != nil {
 			defer result.CloseConsumerV1()
 		}
@@ -228,7 +236,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := pdftemplateauthoring.CreateV1(r.Context(), pdftemplateauthoring.CreateDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit},
-		pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, pdftemplateauthoring.CreateInputV1{TemplateID: templateID, Source: pdfadmission.PDFTemplateDocumentInputV1{Purpose: in.Purpose, Name: in.Name, TemplateText: in.TemplateID, Variables: in.VariablesJSON, ExpiresAt: expiresAt, ExpectedTemplateVersion: in.ExpectedTemplateVersion, Parties: in.Parties}})
+		pdftemplateauthoring.CreateActorV1{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize, Via: "rest"}, pdftemplateauthoring.CreateInputV1{TemplateID: templateID, Source: pdfadmission.PDFTemplateDocumentInputV1{DefaultLocale: in.DefaultLocale, Purpose: in.Purpose, Name: in.Name, TemplateText: in.TemplateID, Variables: in.VariablesJSON, ExpiresAt: expiresAt, ExpectedTemplateVersion: in.ExpectedTemplateVersion, Parties: in.Parties}})
 	if result != nil {
 		defer result.CloseConsumerV1()
 	}
@@ -293,7 +301,7 @@ func (s *Server) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get document failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, toDocumentResponse(d))
+	writeJSON(w, http.StatusOK, s.documentResponseWithPDFReviewV1(r.Context(), d))
 }
 
 // GET /api/v1/documents/{id}/pdf
@@ -978,6 +986,10 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	confirmed, ok := decodeErasureConfirmation(w, r)
+	if !ok {
+		return
+	}
 	if s.Pool == nil || s.Queries == nil || s.Audit == nil {
 		writeInternalErrorMsg(w, "delete document unavailable", errors.New("atomic document deletion dependencies unavailable"))
 		return
@@ -1025,6 +1037,15 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	if retainedEvidence {
 		writeError(w, http.StatusConflict, "draft evidence or sealing state requires review before deletion")
+		return
+	}
+	revisions, err := q.CountDocumentPDFRevisions(ctx, generated.CountDocumentPDFRevisionsParams{DocumentID: id, OrgID: u.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if revisions > 0 && !confirmed {
+		writeErasureConfirmationRequired(w, "deleting this document permanently erases it and its retained PDF revision history after the 90-day grace period", revisions)
 		return
 	}
 	privacyFence, err := q.TryCollabArchivePrivacyFence(ctx, u.OrgID)
@@ -1105,4 +1126,29 @@ func nullableString(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// decodeErasureConfirmation reads the optional {"confirm": true} body of a
+// destructive request. An empty body means not confirmed.
+func decodeErasureConfirmation(w http.ResponseWriter, r *http.Request) (bool, bool) {
+	var in struct {
+		Confirm bool `json:"confirm"`
+	}
+	if r.Body == nil {
+		return false, true
+	}
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body is not valid JSON; send {\"confirm\": true} to confirm", "code": "confirmation_invalid_body"})
+		return false, false
+	}
+	return in.Confirm, true
+}
+
+// writeErasureConfirmationRequired is the shared 409 for an irreversible
+// erasure that needs {"confirm": true}.
+func writeErasureConfirmationRequired(w http.ResponseWriter, message string, revisions int64) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": message + "; repeat the request with {\"confirm\": true}", "code": "confirmation_required",
+		"will_erase": map[string]any{"pdf_revisions": revisions},
+	})
 }

@@ -160,6 +160,8 @@ func runWorkerMain() (exitCode int) {
 				slog.Warn("process work cleanup remains unresolved")
 			}
 		}()
+		stopWorkCleanup := workRuntime.StartCleanupV1()
+		defer stopWorkCleanup() // Join before the earlier runtime/pool closes.
 	}
 	queries := generated.New(pool)
 	webhookKeys, err := webhooksecret.NewKeyringHex(
@@ -412,6 +414,7 @@ func runWorkerMain() (exitCode int) {
 	}
 	go runWorker(ctx, "quota_warnings", func() { w.loopQuotaWarnings(ctx) })
 	go runWorker(ctx, "soft_delete_purge", func() { w.loopSoftDeletePurge(ctx) })
+	go runWorker(ctx, "pending_object_deletions", func() { w.loopPendingObjectDeletions(ctx) })
 	go runWorker(ctx, "collab_archive_purge", func() { w.loopCollabArchivePurge(ctx) })
 	go runWorker(ctx, "finalize_retry", func() { w.loopFinalizeRetry(ctx) })
 	go runWorker(ctx, "send_sealing", func() { w.loopSendSealing(ctx) })

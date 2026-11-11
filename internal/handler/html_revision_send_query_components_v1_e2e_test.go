@@ -51,7 +51,7 @@ func newHTMLQueryFoundationFixtureV1(t *testing.T) (context.Context, lifecycleAu
 			t.Error("refusing cleanup outside exact synthetic database")
 			return
 		}
-		if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil {
+		if err := disposeSyntheticEstateV1(f.pool); err != nil {
 			t.Error(err)
 		}
 	})

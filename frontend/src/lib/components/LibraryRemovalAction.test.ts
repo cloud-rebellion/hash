@@ -11,11 +11,11 @@ const source = readFileSync(new URL('./LibraryRemovalAction.svelte', import.meta
 const ast: any = parse(source, { modern: true }), transpiler = new Bun.Transpiler({ loader: 'ts' });
 const functions = ast.instance.content.body.filter((node: any) => node.type === 'FunctionDeclaration').map((node: any) => source.slice(node.start, node.end)).join('\n');
 const lifecycle = ast.instance.content.body.find((node: any) => node.type === 'ExpressionStatement' && node.expression?.callee?.name === 'onDestroy').expression.arguments[0];
-const bind = new Function('env', `with(env){${transpiler.transformSync(functions)};return{openConfirmation,cancelConfirmation,remove,destroy:(${source.slice(lifecycle.start, lifecycle.end)})};}`);
+const bind = new Function('env', `with(env){${transpiler.transformSync(functions)};return{openConfirmation,cancelConfirmation,dialogClosed,remove,destroy:(${source.slice(lifecycle.start, lifecycle.end)})};}`);
 function fixture() {
   const calls: string[] = [], timers: Array<() => void> = [];
   const env: any = { kind: 'document', item: { id: 'doc', org_id: 'org', name: 'Draft', status: 'draft', updated_at: 'stamp' }, canWrite: true, disabled: false, confirming: false, busy: false, uncertain: false, done: false, error: null, disposed: false, revision: 0, controller: null, deadline: undefined, rejectPending: undefined,
-    LibraryRemovalError, AbortController, Promise, JSON, tick: async () => {}, trigger: { focus() { calls.push('trigger-focus'); } }, cancelButton: { focus() { calls.push('cancel-focus'); } },
+    LibraryRemovalError, AbortController, Promise, JSON, tick: async () => {}, trigger: { focus() { calls.push('trigger-focus'); } }, cancelButton: { focus() { calls.push('cancel-focus'); } }, dialog: { open: false, showModal() { this.open = true; calls.push('modal-open'); }, close() { this.open = false; calls.push('modal-close'); } },
     setTimeout(callback: () => void, ms: number) { expect(ms).toBe(25000); timers.push(callback); return timers.length; }, clearTimeout() { calls.push('timer-cleared'); },
     beforeRemove: undefined, removeLibraryItem: async (kind: string, id: string, signal: AbortSignal) => { calls.push(`REMOVE:${kind}:${id}`); expect(signal).toBe(env.controller.signal); },
     onbusy: (busy: boolean) => calls.push(`BUSY:${busy}`), onremoved: async () => { calls.push('REFRESH'); },
@@ -28,7 +28,7 @@ test('actual handlers require a writable draft or reusable template and explicit
     const f = fixture(); if (barrier === 'viewer') f.env.canWrite = false; if (barrier === 'sent' || barrier === 'completed') f.env.item.status = barrier; if (barrier === 'disabled') f.env.disabled = true;
     if (barrier !== 'not-confirmed') await f.openConfirmation(); await f.remove(); expect(f.calls.filter(call => call.startsWith('REMOVE:'))).toEqual([]);
   }
-  const f = fixture(); await f.openConfirmation(); expect(f.env.confirming).toBe(true); expect(f.calls).toContain('cancel-focus'); await f.cancelConfirmation(); expect(f.calls).toContain('trigger-focus'); expect(f.env.confirming).toBe(false);
+  const f = fixture(); await f.openConfirmation(); expect(f.env.confirming).toBe(true); expect(f.calls).toEqual(['modal-open', 'cancel-focus']); await f.cancelConfirmation(); expect(f.calls).toContain('modal-close'); expect(f.calls).toContain('trigger-focus'); expect(f.env.confirming).toBe(false);
 });
 test('confirmed action calls the real transport once, acknowledges204, then refreshes the current library', async () => {
   for (const kind of ['document', 'template']) { const f = fixture(); f.env.kind = kind; await f.openConfirmation(); await f.remove(); expect(f.calls.filter(call => call.startsWith('REMOVE:'))).toEqual([`REMOVE:${kind}:doc`]); expect(f.calls).toContain('REFRESH'); expect(f.env.done).toBe(true); expect(f.env.confirming).toBe(false); expect(f.env.busy).toBe(false); expect(f.env.error).toBeNull(); }
@@ -58,6 +58,30 @@ test('failed preview retirement prevents archive before any network mutation', a
 });
 test('a completed delete remains acknowledged when only the subsequent library refresh fails', async () => {
   const f = fixture(); f.env.onremoved = async () => { throw new Error('list unavailable'); }; await f.openConfirmation(); await f.remove(); expect(f.env.done).toBe(true); expect(f.env.error).toBe('The item was removed. Reload the library to update this view.'); await f.remove(); expect(f.calls.filter(call => call.startsWith('REMOVE:'))).toHaveLength(1);
+});
+test('a browser-forced close keeps the dialog while a delete is pending or unconfirmed, and syncs state otherwise', async () => {
+  const f = fixture(); await f.openConfirmation(); f.env.dialog.open = false; f.env.uncertain = true; await f.dialogClosed();
+  expect(f.env.dialog.open).toBe(true); expect(f.env.confirming).toBe(true);
+  f.env.dialog.open = false; f.env.uncertain = false; f.env.busy = true; await f.dialogClosed(); expect(f.env.dialog.open).toBe(true);
+  f.env.dialog.open = false; f.env.busy = false; f.calls.length = 0; await f.dialogClosed(); expect(f.env.confirming).toBe(false); expect(f.calls).toEqual(['trigger-focus']);
+});
+test('a hung beforeRemove hits the same deadline: nothing is sent, the modal is released and can be cancelled', async () => {
+  const f = fixture(); f.env.beforeRemove = () => new Promise<boolean>(() => {}); await f.openConfirmation();
+  const pending = f.remove(); await Promise.resolve(); expect(f.env.busy).toBe(true); expect(f.timers).toHaveLength(1);
+  const signal = f.env.controller.signal; f.timers[0](); await pending;
+  expect(signal.aborted).toBe(true); expect(f.env.busy).toBe(false); expect(f.env.uncertain).toBe(false); expect(f.env.error).toContain('Close the preview');
+  expect(f.calls.some(call => call.startsWith('REMOVE:'))).toBe(false); expect(f.calls.at(-1)).toBe('BUSY:false');
+  await f.cancelConfirmation(); expect(f.env.confirming).toBe(false);
+});
+test('a refusal that lands before a browser-forced close keeps its message and the dialog', async () => {
+  const f = fixture(); f.env.removeLibraryItem = async () => { throw new LibraryRemovalError('refused', 'Retained evidence', 409); };
+  await f.openConfirmation(); await f.remove(); f.env.dialog.open = false; await f.dialogClosed();
+  expect(f.env.dialog.open).toBe(true); expect(f.env.confirming).toBe(true); expect(f.env.error).toBe('Retained evidence');
+  await f.cancelConfirmation(); expect(f.env.confirming).toBe(false); expect(f.env.error).toBeNull();
+});
+test('confirmation is a native modal dialog: Escape routes through cancel, never inline in the card', () => {
+  expect(source).toContain('<dialog'); expect(source).toContain('oncancel={(event) => { event.preventDefault(); void cancelConfirmation(); }}'); expect(source).toContain('onclose={dialogClosed}'); expect(source).not.toContain('role="group"');
+  expect(source).toContain('aria-haspopup="dialog"');
 });
 test('staff copy clearly distinguishes removal from retained documents and localizes destructive confirmations', () => {
   for (const key of ['Delete draft', 'Archive template', 'Confirm draft deletion', 'Confirm template archive', 'The result could not be confirmed. Reload the library before trying again.']) expect(translateStaffText('sv', key)).not.toBe(key);

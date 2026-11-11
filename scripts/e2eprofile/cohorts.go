@@ -24,7 +24,9 @@ import (
 	"unicode"
 )
 
-const handlerCohortRoots = 16
+// Keep several independent adversarial suites from consuming the same 180s
+// invocation deadline. Every discovered root still executes exactly once.
+const handlerCohortRoots = 4
 const handlerPackage = hashModule + "internal/handler"
 
 type handlerCohort struct {

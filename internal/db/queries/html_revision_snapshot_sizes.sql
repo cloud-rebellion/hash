@@ -168,7 +168,7 @@ SELECT f.n AS locked_field_cache_count,e.n AS locked_event_cache_count,h.n AS lo
 FROM parent d CROSS JOIN field_done f CROSS JOIN event_done e CROSS JOIN history_done h;
 
 -- name: MeasureHTMLSnapshotEventPayloadV1 :one
--- Genuine owned event producer ONLY; no borrowed Audit.LogTx measurement.
+-- Event producer: the owned writer, or a borrowed Audit.LogTx writer measuring in the same tx.
 -- The intrinsic trigger locks the SAME org chain, validates actual event
 -- scope, and measures actual JSONB. This statement acquires no document lock.
 INSERT INTO html_snapshot_event_payload_sizes_v1(event_id,document_id,org_id,payload_wire_bytes,measurement_server_version_num,measured_at)

@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"time"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/documentpurpose"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // This narrow handle exposes only a metadata merge. It borrows the SAME genuine
@@ -78,4 +80,48 @@ func (w *ApplicationDocumentMetadataWriterV1) CloseConsumerV1() {
 	if w != nil {
 		(&ApplicationBlocksMutationWriterV1{state: w.state}).CloseConsumerV1()
 	}
+}
+
+// SetExpiryV1 changes only the details tuple. Clearing remains an explicit
+// empty string, and existing source/metadata measurement caches stay intact.
+func (w *ApplicationDocumentMetadataWriterV1) SetExpiryV1(ctx context.Context, value string) (*generated.Document, error) {
+	if w == nil || w.state == nil || len(value) > 40 {
+		return nil, ErrBlocksWriterV1
+	}
+	s := w.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.validV1(ctx) || s.attempted {
+		return nil, ErrBlocksWriterV1
+	}
+	s.attempted = true
+	expires := pgtype.Timestamptz{}
+	if value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil || !parsed.After(time.Now()) {
+			return nil, errors.New("expires_at must be a future RFC3339 timestamp")
+		}
+		expires = pgtype.Timestamptz{Time: parsed, Valid: true}
+	}
+	old := s.snapshot.document
+	if err := s.fundPlainReturnV1(ctx, old, 0); err != nil {
+		return nil, err
+	}
+	row, err := s.sourceWork.queries.UpdateDraftDocumentDetailsV1(ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: old.ID, OrgID: old.OrgID, Name: old.Name, ExpiresAt: expires})
+	if err != nil {
+		return nil, err
+	}
+	if row == nil || !applicationStampV1(row.UpdatedAt) || !plainDraftExpiryEqualV1(expires, row.ExpiresAt) {
+		return nil, ErrBlocksWriterV1
+	}
+	expected := *old
+	expected.UpdatedAt, expected.ExpiresAt = row.UpdatedAt, row.ExpiresAt
+	if !htmlSendDocumentExactTupleEqualV1(&expected, row) {
+		return nil, ErrBlocksWriterV1
+	}
+	if err = s.retainPlainRowV1(row); err != nil {
+		return nil, err
+	}
+	s.measured = true
+	return row, nil
 }

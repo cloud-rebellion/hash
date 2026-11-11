@@ -448,6 +448,10 @@ func (w *ApplicationHTMLSendWorkV1) AdmitResponseReportV1(call context.Context, 
 		cutoff = doc.UpdatedAt
 	}
 	projection := &applicationHistoricalCertificateReadV1{}
+	if err = w.measureLegacyExpiryEventsLockedV1(call, cutoff); err != nil {
+		w.mu.Unlock()
+		return err
+	}
 	// Legacy source-VersionId pinning can later advance root.updated_at even
 	// though this genuine family freeze has closed native interaction writes.
 	// Reserve its encoding on every sizing projection, while selecting all rows

@@ -36,6 +36,7 @@ import (
 )
 
 type htmlDocumentInput struct {
+	DefaultLocale                 string                      `json:"default_locale,omitempty"`
 	Purpose                       documentpurpose.Purpose     `json:"purpose,omitempty"`
 	Name                          string                      `json:"name"`
 	ExpectedTemplateVersion       int32                       `json:"expected_template_version"`
@@ -107,6 +108,12 @@ func (s *Server) handleInstantiateHTMLTemplate(w http.ResponseWriter, r *http.Re
 		writeError(w, 400, err.Error())
 		return
 	}
+	locale, localeErr := normalizeNewDocumentLocaleV1(in.DefaultLocale)
+	if localeErr != nil {
+		writeError(w, 400, "default_locale is not supported")
+		return
+	}
+	in.DefaultLocale = locale
 	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
 		writeError(w, 400, "purpose must be document, presentation or signing")
 		return
@@ -430,6 +437,11 @@ func (s *Server) instantiateHTMLDocument(ctx context.Context, actor authoring.Ac
 }
 
 func (s *Server) instantiateHTMLDocumentPopulationV1(ctx context.Context, actor authoring.Actor, templateID uuid.UUID, in htmlDocumentInput, digest []byte, expires pgtype.Timestamptz, crm htmlPopulationV1, inputDigest string) (result *htmlCreationOutcome, failure error) {
+	locale, localeErr := normalizeNewDocumentLocaleV1(in.DefaultLocale)
+	if localeErr != nil {
+		return nil, errCRMTemplateInput
+	}
+	in.DefaultLocale = locale
 	phase := "html_prepare"
 	defer func() { failure = preSignAPIHTMLCreationFailureV1(ctx, phase, failure) }()
 	crm = normalizeHTMLPopulationV1(crm)
@@ -616,6 +628,10 @@ func (s *Server) instantiateHTMLDocumentPopulationV1(ctx context.Context, actor 
 		if err != nil {
 			return err
 		}
+		doc, err = writer.RecordDefaultLocaleV1(finalCtx, in.DefaultLocale)
+		if err != nil {
+			return err
+		}
 		doc, err = writer.RecordPurposeV1(finalCtx, in.Purpose)
 		if err != nil {
 			return err
@@ -759,6 +775,8 @@ type htmlDocumentReviewInput struct {
 	ExpectedUpdatedAt            string `json:"expected_updated_at"`
 	ExpectedPDFSHA256            string `json:"expected_pdf_sha256"`
 	ExpectedHTMLSourceCommitment string `json:"expected_html_source_commitment,omitempty"`
+	// ReviewerKind is set by the transport, never decoded from a request body.
+	ReviewerKind string `json:"-"`
 }
 
 func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +808,7 @@ func (s *Server) handleReviewHTMLDocument(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusServiceUnavailable, "document review unavailable")
 		return
 	}
+	in.ReviewerKind = reviewerKindHumanV1 // session endpoint: a staff session
 	document, release, err := s.reviewHTMLDocumentOwnedV1(r.Context(), authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, id, in, expected, digest)
 	if err != nil {
 		s.writeOwnedHTMLReviewErrorV1(w, err)

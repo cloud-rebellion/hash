@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { ui } from '$lib/staffPreferences';
+  import { clearThumbnailCache } from '$lib/documentThumbnail';
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -37,6 +38,7 @@
         signal: controller.signal
       });
       if (!response.ok || controller.signal.aborted) throw new Error('Logout was not confirmed');
+      clearThumbnailCache();
       if (!disposed) window.location.assign('/');
     } catch {
       if (!disposed) {

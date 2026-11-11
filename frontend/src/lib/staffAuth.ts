@@ -1,8 +1,6 @@
 export type StaffAuthMode = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
 
-export function isStaffAuthPath(path: string): boolean {
-  return ['/login', '/register', '/verify-email', '/forgot-password', '/reset-password'].includes(path.replace(/\/+$/, ''));
-}
+export { isStaffAuthPath } from './routeSurface';
 
 // The fragment never enters a request URL, DOM field, storage or history state.
 // Strip it even when malformed, before the caller starts any asynchronous work.

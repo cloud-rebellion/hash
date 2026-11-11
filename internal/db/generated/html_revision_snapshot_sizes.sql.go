@@ -503,7 +503,7 @@ type MeasureHTMLSnapshotEventPayloadV1Params struct {
 	OrgID      uuid.UUID `json:"org_id"`
 }
 
-// Genuine owned event producer ONLY; no borrowed Audit.LogTx measurement.
+// Event producer: the owned writer, or a borrowed Audit.LogTx writer measuring in the same tx.
 // The intrinsic trigger locks the SAME org chain, validates actual event
 // scope, and measures actual JSONB. This statement acquires no document lock.
 func (q *Queries) MeasureHTMLSnapshotEventPayloadV1(ctx context.Context, arg MeasureHTMLSnapshotEventPayloadV1Params) (*HtmlSnapshotEventPayloadSizesV1, error) {

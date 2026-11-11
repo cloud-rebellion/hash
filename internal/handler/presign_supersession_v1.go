@@ -175,6 +175,9 @@ func (s *Server) handlePreSignSupersessionV1(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			return err
 		}
+		if err = measureBorrowedAuditEventV1(call, generated.New(tx), actor.OrgID, facts.DocumentID, event.ID); err != nil {
+			return err
+		}
 		if err = reader.SealPreSignSupersessionBirthV1(call, actor.UserID, in.Source.RequestID, event.ID, digest, in.Prior, in.TemplateID); err != nil {
 			return err
 		}

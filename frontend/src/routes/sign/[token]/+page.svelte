@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { postWithLookupRetry, isLookupRefusalBody } from '$lib/signerLookupRetry';
   import { createCommentHistory, commentQuery, latestComments, type CommentSelection } from '$lib/commentHistory';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { page } from '$app/stores';
@@ -104,6 +105,8 @@
   let typedName = $state('');
   let chosenFont = $state('Caveat');
   let showAdoptModal = $state(false);
+  // Bumped by Cancel. A sign attempt keeps retrying only while this is unchanged.
+  let signAttempt = 0;
   let signing = $state(false);
   let signError = $state<string | null>(null);
   let completed = $state<{ terminal: boolean; links: CompletionArtifactLinks | null } | null>(null);
@@ -253,7 +256,7 @@
     requestingChanges = true;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/request-changes`, {
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/request-changes`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({
@@ -455,7 +458,7 @@
   async function load(token: string, signal: AbortSignal) {
     let currentLoad = () => !signal.aborted && !routeDisposed && token === $page.params.token;
     try {
-      const res = await fetch(`/sign/${token}`, { signal, cache: 'no-store' });
+      const res = await fetch(`/sign/${encodeURIComponent(token)}`, { signal, cache: 'no-store' });
       if (signal.aborted) return;
       if (!res.ok) {
         loadError = 'This link is invalid or has expired.';
@@ -525,7 +528,7 @@
       // render via pdf.js in PdfSignerView, so skip the HTML endpoint (it
       // refuses pdf-source).
       if (loaded.source_kind === 'blocks') {
-        const docRes = await fetch(`/sign/${token}/document`, { signal, cache: 'no-store' });
+        const docRes = await fetch(`/sign/${encodeURIComponent(token)}/document`, { signal, cache: 'no-store' });
         if (!currentLoad()) return;
         if (!docRes.ok) throw new Error('The document could not be loaded. Please reopen your signing link.');
         const html = await docRes.text();
@@ -587,6 +590,15 @@
     noticeAcknowledged = true;
   }
 
+  function signerErrorMessage(text: string): string {
+    return isLookupRefusalBody(text) ? $t('adopt.lookupUnavailable') : text;
+  }
+
+  function cancelAdopt() {
+    signAttempt++;
+    showAdoptModal = false;
+  }
+
   async function confirmSign() {
     if (!ctx || changesRequested || requestingChanges) return;
     if (signing || accepting || declining || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || completed || accepted || declined || !typedName.trim()) return;
@@ -594,23 +606,25 @@
     const recipientID = ctx.recipient.id;
     const noticeDigest = ctx.privacy.notice_digest;
     const ceremonyKey = currentCeremonyKey();
+    const attempt = signAttempt;
     const packageResponse = packageReview.response ? { ...packageReview.response } : undefined;
     const requiresPackagePortal = packageResponse !== undefined;
     if (!token) return;
+    const requestBody = JSON.stringify({ typed_name: typedName, font: chosenFont, ...(packageResponse ? { package_response: packageResponse } : {}) });
     signing = true;
     signError = null;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/sign`, {
+      const res = await postWithLookupRetry(() => fetch(`/sign/${encodeURIComponent(token)}/sign`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
-        body: JSON.stringify({ typed_name: typedName, font: chosenFont, ...(packageResponse ? { package_response: packageResponse } : {}) })
-      });
+        body: requestBody
+      }), { current: () => ceremonyKey === currentCeremonyKey() && attempt === signAttempt });
       if (ceremonyKey !== currentCeremonyKey()) return;
       if (!res.ok) {
         const message = await res.text();
-        if (ceremonyKey === currentCeremonyKey()) {
-          signError = message;
+        if (ceremonyKey === currentCeremonyKey() && attempt === signAttempt) {
+          signError = signerErrorMessage(message);
         }
         return;
       }
@@ -652,7 +666,7 @@
     signError = null;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/accept`, {
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/accept`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify(packageResponse ? { package_response: packageResponse } : {})
@@ -689,7 +703,7 @@
     signError = null;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/decline`, {
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/decline`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ reason: declineReason })
@@ -729,7 +743,7 @@
     requestingChanges = true;
     try {
       if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
-      const res = await fetch(`/sign/${token}/request-changes`, {
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/request-changes`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ message: changesMessage })
@@ -1023,7 +1037,7 @@
       </div>
 
       <div class="modal-actions">
-        <button class="btn btn-secondary" onclick={() => (showAdoptModal = false)}>{$t('common.cancel')}</button>
+        <button class="btn btn-secondary" onclick={cancelAdopt}>{$t('common.cancel')}</button>
         <button class="btn btn-primary" disabled={signing || accepting || declining || requestingChanges || !viewerReady() || !packageReady() || !fieldsFilled || !noticeAcknowledged || !typedName.trim()} onclick={confirmSign}>
           {signing ? $t('adopt.signing') : $t('adopt.confirm')}
         </button>

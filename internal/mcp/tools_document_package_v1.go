@@ -50,18 +50,18 @@ func registerDocumentPackageToolsV1(s *Server, d Deps) {
 			}
 			input, e := d.PDFCreationSessions.NewDocumentPackageArgumentsV1(ctx, u.OrgID, args)
 			if e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			defer func() { result = &ownedPackageSelectionResultV1{value: result, input: input} }()
 			if e = input.ReadArgumentsV1(ctx); e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			out, e := packageauthoring.SelectV1(ctx, packageauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Storage: d.Storage, Audit: d.Audit},
 				authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, input, "", "")
 			if e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			if out.Cause != nil {
@@ -94,17 +94,17 @@ func registerDocumentPackageToolsV1(s *Server, d Deps) {
 			}
 			input, e := d.PDFCreationSessions.NewDocumentPackageLayoutArgumentsV1(ctx, u.OrgID, args)
 			if e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			defer func() { result = &ownedPackageSelectionResultV1{value: result, input: input} }()
 			if e = input.ReadLayoutArgumentsV1(ctx); e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			out, e := packageauthoring.SaveLayoutV1(ctx, packageauthoring.DependenciesV1{Sessions: d.PDFCreationSessions, Audit: d.Audit}, authoring.Actor{OrgID: u.OrgID, UserID: u.UserID, Authorize: authorize}, input, "", "")
 			if e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			if out.Cause != nil {
@@ -129,12 +129,12 @@ func registerDocumentPackageToolsV1(s *Server, d Deps) {
 			defer cancel()
 			input, e := d.PDFCreationSessions.NewDocumentPackageInventoryArgumentsV1(ctx, u.OrgID, args)
 			if e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			defer func() { result = &ownedPackageSelectionResultV1{value: result, input: input} }()
 			if e = input.ReadArgumentsV1(ctx); e != nil {
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			var owned *packageauthoring.InventoryResultV1
@@ -151,7 +151,7 @@ func registerDocumentPackageToolsV1(s *Server, d Deps) {
 				if owned != nil {
 					owned.CloseConsumerV1()
 				}
-				_, message := packageauthoring.PublicErrorV1(e)
+				_, message := packageauthoring.PublicErrorLoggedV1(ctx, e, u.OrgID, uuid.Nil)
 				return nil, errors.New(message)
 			}
 			return owned, nil

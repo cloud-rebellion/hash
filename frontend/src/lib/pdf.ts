@@ -25,11 +25,17 @@ function ownPdf(create: () => ReturnType<typeof pdfjsLib.getDocument>): PdfLoad<
   void task.promise.then(doc => { canvasOwners.set(doc, generation); }, () => {});
   return load;
 }
+// Everything pdf.js loads on demand is served same-origin from /pdfjs/ (copied from pdfjs-dist at build time by
+// scripts/sync-pdfjs-assets.mjs): the JBIG2/JPX/ICC decoders (wasm, with a JS fallback because the CSP has no
+// wasm-unsafe-eval), the predefined CMaps (CJK text) and the standard font substitutes (Zapf, Symbol, Helvetica...).
+// Without them pdf.js silently drops that text or image. useWorkerFetch is left off: wasmUrl alone loads the same
+// decoders and the worker-fetch path requests `null<file>` in this build.
+const decoderOptions = { wasmUrl: '/pdfjs/wasm/', cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/' };
 export function startPdf(url: string): PdfLoad<PdfDoc> {
-  return ownPdf(() => pdfjsLib.getDocument({ url, withCredentials: true }));
+  return ownPdf(() => pdfjsLib.getDocument({ url, withCredentials: true, ...decoderOptions }));
 }
 export function startPdfData(data: Uint8Array): PdfLoad<PdfDoc> {
-  return ownPdf(() => pdfjsLib.getDocument({ data }));
+  return ownPdf(() => pdfjsLib.getDocument({ data, ...decoderOptions }));
 }
 function canvasOwner(doc: PdfDoc): CanvasGeneration {
   const generation = canvasOwners.get(doc);

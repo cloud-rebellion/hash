@@ -317,6 +317,9 @@ func (h *Hub) LeaveRoom(ctx context.Context, room *Room, peerID string) {
 }
 
 func (h *Hub) leaveRoom(ctx context.Context, documentID uuid.UUID, expected *Room, peerID string) {
+	// A socket handler's context is already cancelled when it leaves. Teardown
+	// must still persist and retire the room; persist and Send set own timeouts.
+	ctx = context.WithoutCancel(ctx)
 	for {
 		replacement := h.leavePeerFromRoom(ctx, documentID, expected, peerID)
 		if replacement == nil {
@@ -329,10 +332,6 @@ func (h *Hub) leaveRoom(ctx context.Context, documentID uuid.UUID, expected *Roo
 		// and elect the next peer without recursive teardown or locked sends.
 		peerID = replacement.ID()
 	}
-}
-
-func (h *Hub) leavePeer(ctx context.Context, documentID uuid.UUID, peerID string) Peer {
-	return h.leavePeerFromRoom(ctx, documentID, nil, peerID)
 }
 
 func (h *Hub) leavePeerFromRoom(ctx context.Context, documentID uuid.UUID, expected *Room, peerID string) Peer {

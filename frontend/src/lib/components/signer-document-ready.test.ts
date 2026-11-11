@@ -3,6 +3,7 @@ import { signerCeremonyKey, signerPDFScopeKey, validateSignerPDFObservation } fr
 import { createSignerViewRecorder } from '../signerView';
 import { completionArtifactLinks } from '../completionArtifacts';
 import { checkedSignerPackage, signerPackageResponse } from '../signerPackage';
+import { postWithLookupRetry, isLookupRefusalBody } from '../signerLookupRetry';
 
 const source = await Bun.file(new URL('../../routes/sign/[token]/+page.svelte', import.meta.url)).text();
 const transpiler = new Bun.Transpiler({ loader: 'ts' });
@@ -27,7 +28,7 @@ function fixture(kind = 'pdf', packageObserved = true) {
     signing: false, accepting: false, declining: false, requestingChanges: false, changesRequested: false,
     completed: null, accepted: false, declined: false, typedName: 'Current signer', chosenFont: 'Caveat', showAdoptModal: false,
     signError: null, loadError: null, documentHTML: '',
-    signerCeremonyKey, signerPDFScopeKey, validateSignerPDFObservation, completionArtifactLinks,
+    signerCeremonyKey, signerPDFScopeKey, validateSignerPDFObservation, completionArtifactLinks, postWithLookupRetry, isLookupRefusalBody, signAttempt: 0, $t: (k: string) => 'T:' + k,
     signerNoticeHeaders: (digest: string, acknowledged: boolean) => ({ digest, acknowledged }),
     setLocale() {}, loadComments() {}, synchronizeCommentScope() {}, tick: async () => {},
     fetch: (url: string, options: unknown) => new Promise((resolve, reject) => calls.push({ url, options, resolve, reject }))
@@ -51,10 +52,12 @@ function fixture(kind = 'pdf', packageObserved = true) {
   if (packageObserved) observeNoPackage();
   const adopt = bind('  async function adopt()', '  function acknowledgeCurrentNotice()', 'adopt', env);
   env.adopt = adopt;
+  env.cancelAdopt = bind('  function cancelAdopt()', '  async function confirmSign()', 'cancelAdopt', env);
+  env.signerErrorMessage = bind('  function signerErrorMessage(', '  function cancelAdopt()', 'signerErrorMessage', env);
   const sign = bind('  async function confirmSign()', '  async function decline()', 'confirmSign', env);
   const accept = bind('  async function accept()', '  async function confirmDecline()', 'accept', env);
   const load = bind('  async function load(', '  onMount(', 'load', env);
-  return { env, calls, adopt, sign, accept, load, observeNoPackage };
+  return { env, calls, adopt, sign, accept, load, observeNoPackage, cancel: () => env.cancelAdopt() };
 }
 
 test('ordinary no-package ceremonies wait for the actual current metadata review callback', async () => {
@@ -570,4 +573,40 @@ test('actual stale or disposed descriptor completion cannot publish settled read
     f.calls[0].resolve(null); await pending; f.publish(); expect(f.frames.at(-1)).toMatchObject({ settled: false, ready: false });
     expect(f.env.loaded).toBe(false);
   }
+});
+
+const lookupRefusalResponse = () => ({ ok: false, status: 503, headers: new Headers({ 'Retry-After': '1' }),
+  text: async () => '{"error":"signer access is temporarily unavailable"}\n',
+  clone() { return { json: async () => ({ error: 'signer access is temporarily unavailable' }) }; } });
+
+test('Cancel during the retry delay sends no further sign POST', async () => {
+  const f = fixture('blocks');
+  await f.adopt();
+  expect(f.env.showAdoptModal).toBe(true);
+  const pending = f.sign();
+  expect(f.calls).toHaveLength(1);
+  f.cancel();
+  expect(f.env.showAdoptModal).toBe(false);
+  f.calls[0].resolve(lookupRefusalResponse());
+  await pending;
+  await new Promise(r => setTimeout(r, 1300));
+  expect(f.calls).toHaveLength(1);
+  expect(f.env.signing).toBe(false);
+  expect(f.env.signError).toBeNull();
+});
+
+test('a refused signer lookup shows translated text, not raw JSON, and keeps the confirmed body on retry', async () => {
+  const f = fixture('blocks');
+  await f.adopt();
+  const pending = f.sign();
+  const first = f.calls[0].options.body;
+  f.env.chosenFont = 'Other';
+  f.calls[0].resolve(lookupRefusalResponse());
+  while (f.calls.length < 2) await new Promise(r => setTimeout(r, 50));
+  expect(f.calls[1].options.body).toBe(first);
+  f.calls[1].resolve(lookupRefusalResponse());
+  while (f.calls.length < 3) await new Promise(r => setTimeout(r, 50));
+  f.calls[2].resolve(lookupRefusalResponse());
+  await pending;
+  expect(f.env.signError).toBe('T:adopt.lookupUnavailable');
 });

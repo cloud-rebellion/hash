@@ -5,6 +5,7 @@ package packageauthoring
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
@@ -13,10 +14,13 @@ import (
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/ownedaudit"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/reviewgate"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/workguard"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -98,6 +102,9 @@ func SelectV1(ctx context.Context, d DependenciesV1, actor authoring.Actor, inpu
 	return out, failure
 }
 func PublicErrorV1(err error) (int, string) {
+	if message, ok := reviewgate.Message(err); ok {
+		return http.StatusConflict, message
+	}
 	switch {
 	case errors.Is(err, pdfadmission.ErrDocumentPackageInputTooLargeV1), errors.Is(err, pdfadmission.ErrDocumentPackageLayoutInputTooLargeV1):
 		return http.StatusRequestEntityTooLarge, "attachment selection request is too large"
@@ -119,9 +126,60 @@ func PublicErrorV1(err error) (int, string) {
 		return http.StatusConflict, "document changes await privacy review"
 	case errors.Is(err, htmlsource.ErrReviewRequired), errors.Is(err, htmlsource.ErrInvalid), errors.Is(err, htmlmaterialization.ErrInvalid), errors.Is(err, pdfadmission.ErrDocumentPackageWriteV1), errors.Is(err, pdfadmission.ErrDocumentPackageDraftV1):
 		return http.StatusConflict, "attachment is not eligible or its position is occupied; reload and review"
+	case errors.Is(err, pdfadmission.ErrHTMLResponseMeasurementMissingV1):
+		return http.StatusConflict, "this draft's saved record is incomplete and cannot be used for attachments; contact support"
 	case errors.Is(err, pdfadmission.ErrDocumentPackageMeasurementV1):
 		return http.StatusUnprocessableEntity, "the exact attachment package could not be verified"
 	default:
 		return http.StatusServiceUnavailable, "attachment selection could not be completed"
 	}
+}
+
+// PublicErrorLoggedV1 maps like PublicErrorV1 and, for the catch-all 503 and the
+// missing-measurement 409, logs the error chain once with the document and org
+// IDs. Only type names, SQLSTATE codes and static sentinel text are logged: error
+// strings may carry document content or personal data.
+func PublicErrorLoggedV1(ctx context.Context, err error, org, document uuid.UUID) (int, string) {
+	status, message := PublicErrorV1(err)
+	if errors.Is(err, context.Canceled) {
+		return status, message
+	}
+	if status == http.StatusServiceUnavailable && message == "attachment selection could not be completed" || errors.Is(err, pdfadmission.ErrHTMLResponseMeasurementMissingV1) {
+		slog.ErrorContext(ctx, "Hash attachment request failed", "status", status, "org_id", org, "document_id", document, "error_chain", safeChainV1(err))
+	}
+	return status, message
+}
+
+// Only these exact static sentinels log their text. Any other error, including a
+// dynamic *errors.errorString built with fmt.Errorf, logs its type only.
+func isLoggableSentinelV1(e error) bool {
+	return e == pdfadmission.ErrHTMLRevisionReadV1 || e == pdfadmission.ErrHTMLResponseMeasurementMissingV1
+}
+func safeChainV1(err error) []string {
+	var out []string
+	var walk func(error)
+	walk = func(e error) {
+		if e == nil || len(out) >= 16 {
+			return
+		}
+		var pg *pgconn.PgError
+		switch {
+		case errors.As(e, &pg) && errors.Unwrap(e) == nil && e == error(pg):
+			out = append(out, fmt.Sprintf("%T sqlstate=%s", e, pg.Code))
+		case isLoggableSentinelV1(e):
+			out = append(out, e.Error())
+		default:
+			out = append(out, fmt.Sprintf("%T", e))
+		}
+		switch u := e.(type) {
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, c := range u.Unwrap() {
+				walk(c)
+			}
+		}
+	}
+	walk(err)
+	return out
 }

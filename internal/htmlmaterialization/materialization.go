@@ -29,12 +29,21 @@ type Queries interface {
 	ClearUnsignedHTMLMaterializationFields(context.Context, generated.ClearUnsignedHTMLMaterializationFieldsParams) (int64, error)
 }
 
+// SizedSnapshotQueries captures the replaced state with the owned statement
+// and records its size row, which later revisions and ceremony reopens need.
+type SizedSnapshotQueries interface {
+	CaptureHTMLRevisionSnapshotIDV1(context.Context, generated.CaptureHTMLRevisionSnapshotIDV1Params) (uuid.UUID, error)
+	MeasureHTMLRevisionSnapshotWireV1(context.Context, generated.MeasureHTMLRevisionSnapshotWireV1Params) (*generated.HtmlRevisionSnapshotSizesV1, error)
+}
+
 type AppendInput struct {
-	SourceJSON        json.RawMessage
-	PageCount         int32
-	PreviousPageCount int32 // exact inspected old PDF pages, required for a legacy origin
-	ActorID           uuid.UUID
-	Summary           string
+	// MeasureSnapshotSize makes the replaced-state capture write its size row.
+	MeasureSnapshotSize bool
+	SourceJSON          json.RawMessage
+	PageCount           int32
+	PreviousPageCount   int32 // exact inspected old PDF pages, required for a legacy origin
+	ActorID             uuid.UUID
+	Summary             string
 	// A nil report records unknown legacy provenance. It never inherits the
 	// previous PDF's report when selecting a new materialization.
 	MetadataRedactionReport json.RawMessage
@@ -161,7 +170,11 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 	if err != nil {
 		return nil, nil, ErrInvalid
 	}
-	if beforeDigest == afterDigest {
+	forward, err := movesToNewerTemplateVersion(previous, check)
+	if err != nil {
+		return nil, nil, err
+	}
+	if beforeDigest == afterDigest && !forward {
 		// Even identical rendered bytes require a fresh immutable intake tuple;
 		// input presence is never permission to reuse the old reviewed artifact.
 		if candidate.PdfStorageKey.String == previous.PdfStorageKey.String && candidate.PdfStorageVersionID.String == previous.PdfStorageVersionID.String {
@@ -202,10 +215,29 @@ func Append(ctx context.Context, q Queries, previous, candidate *generated.Docum
 		return nil, nil, err
 	}
 	oldDigest, _ := hex.DecodeString(oldCommitment)
-	if _, err := q.CaptureHTMLMaterializationSnapshot(ctx, generated.CaptureHTMLMaterializationSnapshotParams{
+	capture := generated.CaptureHTMLMaterializationSnapshotParams{
 		DocumentID: current.ID, OrgID: current.OrgID, ExpectedUpdatedAt: current.UpdatedAt, Kind: "draft_superseded", SourceCommitment: oldDigest,
 		CreatedBy: pgtype.UUID{Bytes: in.ActorID, Valid: true},
-	}); err != nil {
+	}
+	if in.MeasureSnapshotSize {
+		sized, ok := q.(SizedSnapshotQueries)
+		if !ok {
+			return nil, nil, ErrInvalid
+		}
+		snapshotID, err := sized.CaptureHTMLRevisionSnapshotIDV1(ctx, generated.CaptureHTMLRevisionSnapshotIDV1Params{
+			DocumentID: capture.DocumentID, OrgID: capture.OrgID, ExpectedUpdatedAt: capture.ExpectedUpdatedAt, Kind: capture.Kind,
+			SourceCommitment: capture.SourceCommitment, CreatedBy: capture.CreatedBy})
+		if err != nil {
+			return nil, nil, err
+		}
+		measured, err := sized.MeasureHTMLRevisionSnapshotWireV1(ctx, generated.MeasureHTMLRevisionSnapshotWireV1Params{DocumentID: current.ID, OrgID: current.OrgID, SnapshotID: snapshotID})
+		if err != nil {
+			return nil, nil, err
+		}
+		if snapshotID == uuid.Nil || measured == nil || measured.SnapshotID != snapshotID {
+			return nil, nil, ErrInvalid
+		}
+	} else if _, err := q.CaptureHTMLMaterializationSnapshot(ctx, capture); err != nil {
 		return nil, nil, err
 	}
 	origin, _ := htmlsource.OriginCommitment(current)
@@ -265,4 +297,29 @@ func CaptureRetiredCeremony(ctx context.Context, q Queries, doc *generated.Docum
 		DocumentID: doc.ID, OrgID: doc.OrgID, ExpectedUpdatedAt: doc.UpdatedAt, Kind: "ceremony_retired", SourceCommitment: digest, CreatedBy: creator,
 	})
 	return err
+}
+
+// movesToNewerTemplateVersion reports a strictly newer approved version of the
+// same template. Identical rendered content is then still a real revision: the
+// frozen design and approval change, and a fresh PDF intake is required.
+func movesToNewerTemplateVersion(previous, check *generated.Document) (bool, error) {
+	before, err := htmlsource.InputForCurrent(previous)
+	if err != nil {
+		return false, err
+	}
+	after, err := htmlsource.InputForCurrent(check)
+	if err != nil {
+		return false, err
+	}
+	if after.TemplateID != before.TemplateID || after.TemplateVersion < before.TemplateVersion {
+		return false, ErrInvalid
+	}
+	if after.TemplateVersion == before.TemplateVersion {
+		return false, nil
+	}
+	// A moved design must not also reuse the previous artifact.
+	if check.PdfStorageKey.String == previous.PdfStorageKey.String && check.PdfStorageVersionID.String == previous.PdfStorageVersionID.String {
+		return false, ErrInvalid
+	}
+	return true, nil
 }

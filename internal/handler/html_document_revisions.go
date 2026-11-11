@@ -399,6 +399,9 @@ func (s *Server) reviseHTMLDocumentWithCRM(ctx context.Context, actor authoring.
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	if err := measureBorrowedAuditEventV1(commitCtx, q, actor.OrgID, id, pending.ID); err != nil {
+		return nil, 0, 0, err
+	}
 	if err := guard.Recheck(commitCtx); err != nil {
 		return nil, 0, 0, err
 	}

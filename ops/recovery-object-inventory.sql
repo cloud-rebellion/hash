@@ -136,6 +136,16 @@ object_references(reference_class, owner_type, owner_id, org_id, object_key, exp
 	       a.pdf_key, encode(a.pdf_sha256, 'hex'), a.pdf_version_id, true, false, false, NULL::timestamptz
 	  FROM document_attachment_drafts_v1 a
 	UNION ALL
+	-- Replaced imported-PDF drafts: every revision PDF, plus the original that only
+	-- the first revision still names. They are draft history, never sent evidence.
+	SELECT 'draft_pdf_revision_pdf', 'document_pdf_revision', r.id::text, r.org_id,
+	       r.pdf_key, encode(r.pdf_sha256, 'hex'), r.pdf_version_id, true, false, false, NULL::timestamptz
+	  FROM document_pdf_revisions_v1 r
+	UNION ALL
+	SELECT 'draft_pdf_revision_original_pdf', 'document_pdf_revision', r.id::text, r.org_id,
+	       r.previous_pdf_key, encode(r.previous_pdf_sha256, 'hex'), r.previous_pdf_version_id, true, false, false, NULL::timestamptz
+	  FROM document_pdf_revisions_v1 r WHERE r.sequence = 1
+	UNION ALL
 	SELECT 'html_materialization_pdf', 'html_materialization', m.id::text, m.org_id,
 	       m.pdf_key, encode(m.pdf_sha256, 'hex'), m.pdf_version_id, true, false,
 	       (history.retain_until IS NOT NULL OR (d.html_current_materialization_id = m.id AND retention.legal_evidence)),

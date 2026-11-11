@@ -43,10 +43,21 @@ func (s *Server) transactionSession(w http.ResponseWriter, r *http.Request, u au
 }
 
 func (s *Server) authorizeTransactionSession(w http.ResponseWriter, r *http.Request, tx pgx.Tx, u auth.SessionUser, session auth.SessionPayload, cookie string, minimum auth.Role) bool {
+	return s.authorizeTransactionSessionClassified(w, r, tx, u, session, cookie, minimum, nil)
+}
+
+// authorizeTransactionSessionClassified is authorizeTransactionSession with a
+// hook for the caller's own mapping of a database error on the role lock (for
+// example a deadline while a concurrent role change holds the row). The hook
+// reports whether it wrote the response; otherwise the error is a 500.
+func (s *Server) authorizeTransactionSessionClassified(w http.ResponseWriter, r *http.Request, tx pgx.Tx, u auth.SessionUser, session auth.SessionPayload, cookie string, minimum auth.Role, classify func(http.ResponseWriter, error) bool) bool {
 	var role string
 	var generation int64
 	err := tx.QueryRow(r.Context(), `SELECT role,session_generation FROM users WHERE id=$1 AND org_id=$2 FOR SHARE`, u.UserID, u.OrgID).Scan(&role, &generation)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if classify != nil && classify(w, err) {
+			return false
+		}
 		writeInternalErrorMsg(w, "load transaction authorization", err)
 		return false
 	}

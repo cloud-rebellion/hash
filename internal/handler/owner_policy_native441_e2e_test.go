@@ -105,7 +105,7 @@ func setupOwnerPolicyNative441E2E(t *testing.T, sharedDatabase ...string) ownerO
 			t.Error("refuse non-owned owner-policy disposal", err)
 			return
 		}
-		if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil { //nolint:rawsql -- whole uniquely owned synthetic estate only
+		if err := disposeSyntheticEstateV1(f.pool); err != nil {
 			t.Error("owner-policy owned-estate disposal", err)
 		}
 	})

@@ -33,7 +33,7 @@ type operationalMetricValueV1 struct {
 
 // This projection is closed over the existing backlog schema. No caller names,
 // maps, private rows, free text, callbacks or reflection enter the metric wire.
-func operationalMetricValuesV1(s OperationalBacklogSnapshotV1) [23]operationalMetricValueV1 {
+func operationalMetricValuesV1(s OperationalBacklogSnapshotV1) [26]operationalMetricValueV1 {
 	bit := func(v bool) int64 {
 		if v {
 			return 1
@@ -41,7 +41,7 @@ func operationalMetricValuesV1(s OperationalBacklogSnapshotV1) [23]operationalMe
 		return 0
 	}
 	d := s.Data
-	return [23]operationalMetricValueV1{
+	return [26]operationalMetricValueV1{
 		{"hash.operational_backlog.has_sample", bit(s.HasSample)},
 		{"hash.operational_backlog.read_unavailable", bit(s.ReadUnavailable)},
 		{"hash.operational_backlog.sample_age_seconds", s.SampleAgeSeconds},
@@ -65,6 +65,9 @@ func operationalMetricValuesV1(s OperationalBacklogSnapshotV1) [23]operationalMe
 		{"hash.operational_backlog.finalizing_unknown_intent_age_count", d.FinalizingUnknownIntentAgeCount},
 		{"hash.operational_backlog.finalizing_oldest_observed_intent_age_seconds", d.FinalizingOldestObservedIntentAgeSeconds},
 		{"hash.operational_backlog.finalizing_limit_reached", bit(d.FinalizingLimitReached)},
+		{"hash.operational_backlog.pending_object_count", d.PendingObjectCount},
+		{"hash.operational_backlog.pending_object_oldest_observed_age_seconds", d.PendingObjectOldestObservedAgeSeconds},
+		{"hash.operational_backlog.pending_object_limit_reached", bit(d.PendingObjectLimitReached)},
 	}
 }
 

@@ -67,7 +67,7 @@
     if (!design) throw new Error('Load an approved design first.');
     if (profile && purpose !== 'signing') throw new Error('This reviewed contract design requires Signing. Choose another design for a document or presentation.');
     const submittedSections = htmlProfileSectionValues(design.html_master_json!, sections, true);
-    return { name: name.trim(), purpose: requireDocumentPurpose(purpose), values: htmlValuesForSubmission(fields, values, true), ...(submittedSections === undefined ? {} : { sections: submittedSections }) };
+    return { name: name.trim(), default_locale: $staffLocale, purpose: requireDocumentPurpose(purpose), values: htmlValuesForSubmission(fields, values, true), ...(submittedSections === undefined ? {} : { sections: submittedSections }) };
   }
   function inputChanged() { controller.inputChanged(); error = null; }
   function mappedRequiredFilled(field: HTMLFormField) {

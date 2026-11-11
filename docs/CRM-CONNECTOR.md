@@ -9,7 +9,7 @@ accounts or revisions cannot authenticate them. Reads never return credentials.
 The development Compose server passes these optional variables with empty
 defaults; the production service receives its approved environment file.
 
-An organization owner opens **Settings → Integrations → BrightCRM**, submits a
+An organization owner opens `/settings/integrations/brightcrm`, submits a
 canonical BrightCRM v1 key (64 lowercase hex characters), reviews the account
 returned by `/api/v1/auth/me`, then explicitly enables that account. Saving a new
 key creates a disabled candidate; replacing an active key disables the old

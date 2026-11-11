@@ -8,7 +8,7 @@ import { CRM_KINDS, checkedCRMDocumentActor, crmMappings, crmMappingKey, validCR
 
 export { CRM_KINDS, validCRMSearch };
 export type { CRMKind, CRMMapping, CRMChoice };
-export interface CRMTemplateCandidate { name: string; values: Record<string, string>; sections?: Record<string, string>; expires_at?: string; purpose?: DocumentPurpose }
+export interface CRMTemplateCandidate { name: string; values: Record<string, string>; sections?: Record<string, string>; expires_at?: string; purpose?: DocumentPurpose; default_locale?: string }
 export interface CRMTemplateWitness {
   org_id: string; user_id: string; template_id: string; template_version: number; template_content_sha256: string;
   template_approved_by: string; template_approved_at: string; connection: CRMDocumentConnection | null;
@@ -48,15 +48,16 @@ function strings(v: unknown): Record<string, string> {
   return { ...v } as Record<string, string>;
 }
 export function checkedTemplateCandidate(v: unknown): CRMTemplateCandidate {
-  const c = record(v, ['name', 'values'], ['sections', 'expires_at', 'purpose']);
+  const c = record(v, ['name', 'values'], ['sections', 'expires_at', 'purpose', 'default_locale']);
   if (Object.hasOwn(c, 'purpose') && !isDocumentPurpose(c.purpose)) throw new Error(invalid);
+  if (Object.hasOwn(c, 'default_locale') && c.default_locale !== 'en' && c.default_locale !== 'sv') throw new Error(invalid);
   if (!text(c.name, 800) || !c.name.trim() || Array.from(c.name).length > 200 || c.name.includes('\0') || (Object.hasOwn(c, 'expires_at') && (!text(c.expires_at, 40) || !Number.isFinite(Date.parse(c.expires_at))))) throw new Error(invalid);
-  return { name: c.name, values: strings(c.values), ...(Object.hasOwn(c, 'sections') ? { sections: strings(c.sections) } : {}), ...(Object.hasOwn(c, 'expires_at') ? { expires_at: c.expires_at as string } : {}), ...(Object.hasOwn(c, 'purpose') ? { purpose: c.purpose as DocumentPurpose } : {}) };
+  return { name: c.name, values: strings(c.values), ...(Object.hasOwn(c, 'sections') ? { sections: strings(c.sections) } : {}), ...(Object.hasOwn(c, 'expires_at') ? { expires_at: c.expires_at as string } : {}), ...(Object.hasOwn(c, 'purpose') ? { purpose: c.purpose as DocumentPurpose } : {}), ...(Object.hasOwn(c, 'default_locale') ? { default_locale: c.default_locale as string } : {}) };
 }
 export function templateCandidateKey(v: CRMTemplateCandidate): string {
   const c = checkedTemplateCandidate(v);
   return JSON.stringify([c.name, Object.entries(c.values).sort(([a], [b]) => a.localeCompare(b)),
-    c.sections === undefined ? null : Object.entries(c.sections).sort(([a], [b]) => a.localeCompare(b)), c.expires_at ?? null, ...(c.purpose === undefined ? [] : [c.purpose])]);
+    c.sections === undefined ? null : Object.entries(c.sections).sort(([a], [b]) => a.localeCompare(b)), c.expires_at ?? null, ...(c.purpose === undefined ? [] : [c.purpose]), ...(c.default_locale === undefined ? [] : [{ default_locale: c.default_locale }])]);
 }
 const witnessKeys = ['org_id', 'user_id', 'template_id', 'template_version', 'template_content_sha256', 'template_approved_by', 'template_approved_at', 'connection'];
 function witness(r: Record<string, unknown>): CRMTemplateWitness {
@@ -341,7 +342,7 @@ export class CRMTemplatePopulationController {
       if (!this.current(op.epoch)) return;
       const expected = this.submittedValues!;
       const master = this.template!.html_master_json!, printedExpected = Object.fromEntries((master.values ?? []).map(f => [f.name, expected[f.name] ?? '']));
-      if (d.name !== command.name || (command.purpose !== undefined && d.purpose !== command.purpose) || (command.expires_at !== undefined && Date.parse(d.expires_at ?? '') !== Date.parse(command.expires_at))
+      if (d.name !== command.name || (command.default_locale !== undefined && d.default_locale !== command.default_locale) || (command.purpose !== undefined && d.purpose !== command.purpose) || (command.expires_at !== undefined && Date.parse(d.expires_at ?? '') !== Date.parse(command.expires_at))
         || !sameValues(d.variables_json, expected) || !sameValues(Object.fromEntries(source.values.map(v => [v.name, v.text])), printedExpected) || source.template_id !== marker.template_id || source.template_version !== command.expected_template_version || source.template_content_sha256 !== command.expected_template_content_sha256
         || source.source_schema_version !== master.schema_version || structuralKey(source.contract_profile ?? null) !== structuralKey(master.contract_profile ?? null)
         || structuralKey(source.signing_page ?? null) !== structuralKey(master.signing_page ?? null)

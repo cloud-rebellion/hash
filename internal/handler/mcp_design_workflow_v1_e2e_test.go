@@ -150,15 +150,24 @@ func TestMCPDesign783NativeVersionedDraftWorkflowE2E(t *testing.T) {
 		t.Fatal("design was not a new unapproved native revision")
 	}
 	var preview struct {
-		PDF     string `json:"pdf_base64"`
-		SHA     string `json:"pdf_sha256"`
-		Pages   int    `json:"page_count"`
-		Receipt string `json:"preview_receipt"`
-		Review  string `json:"visual_review"`
+		TemplateID uuid.UUID `json:"template_id"`
+		Version    int32     `json:"version"`
+		Content    string    `json:"content_sha256"`
+		Material   string    `json:"materialization_sha256"`
+		PDF        string    `json:"pdf_base64"`
+		SHA        string    `json:"pdf_sha256"`
+		Pages      int       `json:"page_count"`
+		Review     string    `json:"visual_review"`
+		// The API-key receipt existed only for MCP approval, which is gone.
+		Receipt *string `json:"preview_receipt"`
+		Expiry  *string `json:"preview_expires_at"`
 	}
 	callDesign783(t, f, key, "preview_design_template", map[string]any{"template_id": design.TemplateID, "input": map[string]any{"expected_version": design.Version, "expected_content_sha256": design.SHA}}, &preview, false)
-	if preview.Pages < 1 || preview.Review != "pending" || preview.Receipt == "" {
+	if preview.Pages < 1 || preview.Review != "pending" || preview.Receipt != nil || preview.Expiry != nil {
 		t.Fatal("preview silently approved or omitted exact PDF metadata")
+	}
+	if preview.TemplateID != design.TemplateID || preview.Version != design.Version || preview.Content != design.SHA || !htmlPreviewSHA256(preview.Material) {
+		t.Fatal("preview pins differ from the saved design", preview.TemplateID, preview.Version, preview.Content, preview.Material)
 	}
 	bytes, err := base64.StdEncoding.DecodeString(preview.PDF)
 	if err != nil {
@@ -168,16 +177,25 @@ func TestMCPDesign783NativeVersionedDraftWorkflowE2E(t *testing.T) {
 	if hex.EncodeToString(digest[:]) != preview.SHA {
 		t.Fatal("preview bytes differ from commitment")
 	}
+	// Template approval is human-only. Send the complete argument shape the
+	// removed tool accepted, so this fails on code that still has the tool:
+	// the refusal must be "unknown tool" and the revision must stay unapproved.
 	pages := make([]int, preview.Pages)
 	for i := range pages {
 		pages[i] = i + 1
 	}
-	approve := map[string]any{"template_id": design.TemplateID, "visually_reviewed": false, "reviewed_pages": pages, "input": map[string]any{"expected_version": design.Version, "expected_content_sha256": design.SHA, "expected_preview_pdf_sha256": preview.SHA, "preview_receipt": preview.Receipt}}
-	callDesign783(t, f, key, "approve_design_template", approve, nil, true)
-	approve["visually_reviewed"] = true
-	other, _ := automationDocumentKeyE2E(t, q, "read", "write:authoring")
-	callDesign783(t, f, other, "approve_design_template", approve, nil, true)
-	callDesign783(t, f, key, "approve_design_template", approve, nil, false)
+	agentApproval := map[string]any{"template_id": design.TemplateID, "visually_reviewed": true, "reviewed_pages": pages, "input": map[string]any{"expected_version": design.Version, "expected_content_sha256": design.SHA, "expected_preview_pdf_sha256": preview.SHA, "preview_receipt": "x"}}
+	if w := submitRecipientMCPE2E(f, "approve_design_template", key, agentApproval); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `unknown tool: approve_design_template`) {
+		t.Fatal("agent approval tool still reachable", w.Code, w.Body.String())
+	}
+	if revision, err := f.q.GetHTMLTemplateRevision(f.ctx, generated.GetHTMLTemplateRevisionParams{TemplateID: design.TemplateID, OrgID: f.org, Version: design.Version}); err != nil || revision.ApprovedBy.Valid || revision.ApprovedAt.Valid {
+		t.Fatal("template revision approved without a human", err)
+	}
+	template, err := f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: design.TemplateID, OrgID: f.org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveHTMLCreationTemplateE2E(t, f, template)
 	creation := map[string]any{"purpose": "document", "template_id": design.TemplateID, "input": map[string]any{"name": "Internal example proposal", "request_id": uuid.New(), "expected_template_version": design.Version, "expected_template_content_sha256": design.SHA, "values": map[string]string{"customer": "Exact populated customer"}}}
 	var created struct {
 		Document struct {

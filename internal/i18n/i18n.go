@@ -44,6 +44,11 @@ func T(locale, key string, params map[string]string) string {
 }
 
 func lookup(locale, key string) string {
+	if locale == "sv" {
+		if value, ok := swedishEmailSupplementV1[key]; ok {
+			return value
+		}
+	}
 	if m, ok := messages[locale]; ok {
 		if v, ok := m[key]; ok {
 			return v

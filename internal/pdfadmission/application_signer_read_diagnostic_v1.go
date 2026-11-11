@@ -21,6 +21,9 @@ const (
 	SignerReadDiagnosticCommentsV1
 	SignerReadDiagnosticViewV1
 	SignerReadDiagnosticPackageV1
+	// Action labels the token lookup of the signer sign, accept, decline and
+	// request-changes POSTs. Other stays unloggable so unknown callers cannot log.
+	SignerReadDiagnosticActionV1
 )
 
 type SignerReadDiagnosticOperationV1 uint8
@@ -149,7 +152,7 @@ func (r *ApplicationSignerReaderV1) recordSQLDenialV1(s *applicationOwnedSession
 // The view mutation label describes only the actual handler branch. It does
 // not make an earlier successful reader's zero facts a mutation admission proof.
 func validSignerReadDiagnosticLabelsV1(route SignerReadDiagnosticRouteV1, operation SignerReadDiagnosticOperationV1, phase SignerReadDiagnosticPhaseV1) bool {
-	if route != SignerReadDiagnosticFieldsV1 && route != SignerReadDiagnosticPDFV1 && route != SignerReadDiagnosticCommentsV1 && route != SignerReadDiagnosticViewV1 && route != SignerReadDiagnosticPackageV1 {
+	if route != SignerReadDiagnosticFieldsV1 && route != SignerReadDiagnosticPDFV1 && route != SignerReadDiagnosticCommentsV1 && route != SignerReadDiagnosticViewV1 && route != SignerReadDiagnosticPackageV1 && route != SignerReadDiagnosticActionV1 {
 		return false
 	}
 	if operation == SignerReadDiagnosticViewMutationV1 || phase == SignerReadDiagnosticViewMutationPhaseV1 {

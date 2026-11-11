@@ -17,8 +17,11 @@ the supplied certificate or evidence bundle; it is not an offline verifier.
 - PostgreSQL 16+
 - An S3-compatible object store that implements the versioning, version-specific access, Object Lock
   retention, and legal-hold APIs Hash requires in non-local deployments
-- An SMTP submission server that supports STARTTLS on a plain SMTP connection (implicit-TLS-only
-  endpoints are not supported)
+- An SMTP submission server for installation email (account authentication and recovery) that
+  supports STARTTLS on a plain SMTP connection. Implicit-TLS-only endpoints are not supported for
+  this route. Each workspace's document email has its own separate
+  [workspace SMTP](docs/WORKSPACE-SMTP.md) settings, which support verified TLS on port 465 and
+  STARTTLS on port 587
 - Email/password staff accounts, using the existing secure session cookie
 - An optional OIDC provider for staff SSO
 - Gotenberg for HTML→PDF rendering
@@ -42,7 +45,7 @@ retention schedules for your deployment.
 See [the workspace guide](docs/INTERFACE.md) for document and template previews,
 profile settings, Swedish/English, appearance and HTTP MCP setup.
 Workspace owners can edit [service email content](docs/EMAIL-TEMPLATES.md) from
-Settings → Email content and preview it with synthetic example data.
+Settings → Email design and preview it with synthetic example data.
 
 ## Reusable HTML designs
 
@@ -74,7 +77,8 @@ configured through scoped APIs; see [API contracts](docs/API.md). Verify a conne
 workflow's configuration before using that integration.
 
 For the optional direct BrightCRM connector, organisation owners enroll and
-explicitly confirm their own account in Settings → Integrations. Credentials are
+explicitly confirm their own account at `/settings/integrations/brightcrm`; the main
+Settings page has no card for it. Credentials are
 encrypted with a dedicated operator key; fresh reads verify the remote account
 and selected records. Changed CRM values require document review before sending.
 See [CRM connector](docs/CRM-CONNECTOR.md) for setup, supported fields, migration

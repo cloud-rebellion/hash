@@ -86,8 +86,31 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	if signer {
 		template.SenderName = w.sourceActor.Name
 		template.SenderEmail = w.sourceActor.Email
+		template.Locale = w.sourceDocument.DefaultLocale
 	}
-	s, h, t, err := applicationServiceEmailComponentsV1(dispatch.KindNewComment, template, selectedTemplate)
+	// Recipient comments retain each recipient's explicit ceremony language.
+	// Quote the actual native variants before any output is rendered. The
+	// authored edition does not interpolate Locale, so its source is priced once
+	// against these component maxima, preserving its existing source allowance.
+	s, h, t, err := dispatch.CommentNotificationComponentsV1(template)
+	if err != nil {
+		return err
+	}
+	if !signer {
+		for _, r := range w.sourceRecipients {
+			if recipients.CanRespond(r.Role) && r.Locale == "sv" {
+				localized := template
+				localized.Locale = r.Locale
+				ls, lh, lt, e := dispatch.CommentNotificationComponentsV1(localized)
+				if e != nil {
+					return e
+				}
+				s, h, t = max(s, ls), max(h, lh), max(t, lt)
+				break
+			}
+		}
+	}
+	s, h, t, err = dispatch.ServiceEmailTemplateComponentsV1(dispatch.KindNewComment, template, selectedTemplate, s, h, t)
 	if err != nil {
 		return err
 	}
@@ -116,8 +139,10 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 	w.closes = append(w.closes, closeOutput)
 	out.messages = make([]dispatch.Message, 0, int(count))
 	out.views = make([]dispatch.Message, 0, int(count))
-	render := func(to string) error {
-		subject, html, text, e := dispatch.RenderServiceEmailV1(dispatch.KindNewComment, template, selectedTemplate)
+	render := func(to, locale string) error {
+		localized := template
+		localized.Locale = locale
+		subject, html, text, e := dispatch.RenderServiceEmailV1(dispatch.KindNewComment, localized, selectedTemplate)
 		if e != nil {
 			return e
 		}
@@ -131,13 +156,13 @@ func (w *ApplicationHTMLSendWorkV1) RenderCommentNotificationsV1(call context.Co
 		return nil
 	}
 	if signer {
-		if err = render(w.sourceActor.Email); err != nil {
+		if err = render(w.sourceActor.Email, w.sourceDocument.DefaultLocale); err != nil {
 			return err
 		}
 	} else {
 		for _, r := range w.sourceRecipients {
 			if recipients.CanRespond(r.Role) {
-				if err = render(r.Email); err != nil {
+				if err = render(r.Email, r.Locale); err != nil {
 					return err
 				}
 			}

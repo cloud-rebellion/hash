@@ -121,6 +121,7 @@
   let templateFlashTimer: ReturnType<typeof setTimeout> | null = null;
   const routeDocumentID = $derived($page.params.id);
   const crmEditable = $derived(savedPurpose !== null && !purposeUnconfirmed && !changingPurpose && !amendmentReadOnly && !!doc && doc.status === 'draft' && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id)));
+  const pdfReviewGate = $derived(doc?.status === 'draft' && doc.source_kind === 'pdf' && doc.has_html_source === true && doc.html_review_required === true);
   const crmEditorClean = $derived(doc?.has_html_source ? htmlEditorClean : doc?.source_kind === 'blocks' ? blocksEditorClean : false);
   const htmlSiblingMutationBusy=$derived(changingPurpose || purposeUnconfirmed || crmBusy || attachmentBusy || senderMutationBusy || savingMode || savingTemplate || revising || !!resolvingId || savingApprovalMode || pdfLayoutBusy);
   const attachmentBarrier=$derived(attachmentBusy || attachmentDirty);
@@ -654,7 +655,7 @@
         <h1 class="page-title min-w-0 w-full break-words sm:flex-1">{doc.name}</h1>
         <div class="flex max-w-full flex-wrap items-start gap-2">
           <DocumentDownload document={doc} blocked={changingPurpose || purposeUnconfirmed || (doc.status === 'draft' && ((savedPurpose !== null && doc.source_kind === 'blocks' && !blocksEditorClean) || (savedPurpose !== null && doc.has_html_source && !htmlEditorClean) || senderMutationBusy || pdfLayoutBusy || pdfLayoutDirty || crmBusy || attachmentBusy || revising || supersessionBusy))} />
-          <button class="btn btn-secondary" onclick={() => (showPreview = !showPreview)}>
+          <button class="btn btn-secondary" disabled={pdfReviewGate} onclick={() => (showPreview = !showPreview)}>
             <Eye class="size-4" /> {$ui(showPreview ? (doc.status !== 'draft' && doc.source_kind === 'pdf' ? 'Signature locations' : 'Edit') : 'Preview')}
           </button>
           {#if doc.source_kind === 'blocks'}
@@ -745,13 +746,15 @@
           onSourceChange={(source) => receiveHTMLSource(source, documentScope)} />
       {/key}
       {/if}
-      {#if doc.status === 'draft'}
+      {#if doc.status === 'draft' && doc.html_review_required}
       {#key `${doc.id}:${doc.updated_at}:${doc.pdf_sha256}:${doc.html_source_commitment}`}
         <HtmlPDFReview document={doc} revisionBlocked={htmlRevisionBlocked || attachmentBarrier}
           expectedPages={htmlSource?.page_count} hasSigningPage={htmlSource?.source_schema_version === 3}
           canReview={!amendmentReadOnly && (viewerRole === 'owner' || (viewerRole === 'sender' && viewerUserID === doc.sender_id))}
           onReviewed={(updated) => { if(!receiveHTMLDocument(updated, documentScope)) throw new Error('The displayed agreement changed. Refresh and reconcile the saved review.'); }} onRefresh={refreshHTMLDocument} />
       {/key}
+      {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
+        <p class="text-sm text-success mb-4" role="status">{$ui("This exact PDF has been reviewed.")} {$ui(htmlSource?.source_schema_version === 3 ? 'Verify both generated signature locations below before sending.' : 'Add recipients and any required signature fields below before sending.')}</p>
       {/if}
     {/if}
     {#if doc.has_html_source}{#key doc.id}<HtmlDocumentHistory document={doc} />{/key}{/if}
@@ -866,6 +869,8 @@
         <p class="text-sm text-text-muted mb-3" role="note">{$ui("Preview shows the saved document. Unsaved edits remain available when you return to editing.")}</p>
         <iframe title={$ui("preview")} src={previewURL(doc.id)} sandbox="" class="w-full h-[80vh] card"></iframe>
       {/if}
+    {:else if pdfReviewGate}
+      <!-- Review is the only view until the exact PDF is approved; the designer and preview mount afterwards. -->
     {:else if doc.status === 'draft' && doc.source_kind === 'pdf'}
       <div hidden={showPreview}>
         {#if doc.has_html_source && (htmlRevisionBlocked || !htmlSource)}<p role="note" class="text-sm text-text-secondary">{$ui("Load and reconcile the retained document values before viewing or changing signature locations.")}</p>

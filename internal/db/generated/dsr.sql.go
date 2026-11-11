@@ -93,6 +93,23 @@ func (q *Queries) AnonymizeSignaturesByRecipient(ctx context.Context, arg Anonym
 	return result.RowsAffected(), nil
 }
 
+const countDocumentPDFReviewsForDSR = `-- name: CountDocumentPDFReviewsForDSR :one
+SELECT count(*) FROM document_pdf_reviews_v1
+WHERE document_id = $1::uuid AND org_id = $2::uuid
+`
+
+type CountDocumentPDFReviewsForDSRParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) CountDocumentPDFReviewsForDSR(ctx context.Context, arg CountDocumentPDFReviewsForDSRParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countDocumentPDFReviewsForDSR, arg.DocumentID, arg.OrgID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createDataSubjectRequest = `-- name: CreateDataSubjectRequest :one
 INSERT INTO data_subject_requests (
     org_id, document_id, recipient_id, subject_email, subject_name,
@@ -489,6 +506,27 @@ func (q *Queries) HasHTMLAuthoringDataForDSR(ctx context.Context, orgID uuid.UUI
 	return present, err
 }
 
+const hasPDFRevisionsMentioningSubject = `-- name: HasPDFRevisionsMentioningSubject :one
+SELECT EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v,
+                      jsonb_array_elements(CASE WHEN jsonb_typeof(v.recipients_json) = 'array'
+                                                THEN v.recipients_json ELSE '[]'::jsonb END) e
+  WHERE v.org_id = $1::uuid
+    AND lower(btrim(e->>'email')) = lower(btrim($2::text))) AS present
+`
+
+type HasPDFRevisionsMentioningSubjectParams struct {
+	OrgID uuid.UUID `json:"org_id"`
+	Email string    `json:"email"`
+}
+
+// Exact, case-insensitive match on a retained revision's recipient snapshot.
+func (q *Queries) HasPDFRevisionsMentioningSubject(ctx context.Context, arg HasPDFRevisionsMentioningSubjectParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPDFRevisionsMentioningSubject, arg.OrgID, arg.Email)
+	var present bool
+	err := row.Scan(&present)
+	return present, err
+}
+
 const listDataSubjectRequestsByOrg = `-- name: ListDataSubjectRequestsByOrg :many
 SELECT id, org_id, document_id, recipient_id, subject_email, subject_name, kind, status, requested_via, requested_note, resolution_note, fulfilled_by, requested_at, fulfilled_at, due_at, payload_json FROM data_subject_requests
 WHERE org_id = $1
@@ -533,6 +571,56 @@ func (q *Queries) ListDataSubjectRequestsByOrg(ctx context.Context, arg ListData
 			return nil, err
 		}
 		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPDFRevisionDocumentsForSubject = `-- name: ListPDFRevisionDocumentsForSubject :many
+SELECT d.id FROM documents d
+WHERE d.org_id = $1::uuid
+  AND EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v
+              WHERE v.document_id = d.id AND v.org_id = d.org_id)
+  AND (d.id = $2::uuid
+       OR EXISTS (SELECT 1 FROM recipients r
+                  WHERE r.document_id = d.id
+                    AND lower(btrim(r.email)) = lower(btrim($3::text)))
+       OR EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v,
+                         jsonb_array_elements(CASE WHEN jsonb_typeof(v.recipients_json) = 'array'
+                                                   THEN v.recipients_json ELSE '[]'::jsonb END) e
+                  WHERE v.document_id = d.id AND v.org_id = d.org_id
+                    AND lower(btrim(e->>'email')) = lower(btrim($3::text))))
+ORDER BY d.id
+`
+
+type ListPDFRevisionDocumentsForSubjectParams struct {
+	OrgID      uuid.UUID `json:"org_id"`
+	DocumentID uuid.UUID `json:"document_id"`
+	Email      string    `json:"email"`
+}
+
+// Documents of this tenant whose PDF revision history a subject's erasure would
+// remove: the request's linked document, or a document on which the subject is
+// a recipient. A recipient matches by exact, case-insensitive email, on its live
+// row or in a retained revision's recipient snapshot (a recipient removed after
+// a revision is still named by it). Never a substring: ann@ must not match
+// joann@. Only documents that have revisions are returned; ordered by id so the
+// caller locks them in a stable order.
+func (q *Queries) ListPDFRevisionDocumentsForSubject(ctx context.Context, arg ListPDFRevisionDocumentsForSubjectParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPDFRevisionDocumentsForSubject, arg.OrgID, arg.DocumentID, arg.Email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

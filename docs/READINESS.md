@@ -43,7 +43,10 @@ references and the unsupported `initial_field`, `text_field`, `date_field` and
 `checkbox` block types. These are block-editor limitations; the supported
 signature-field and HTML/PDF-master paths are separate. Production organisation
 logo upload and nonempty `logo_url` branding updates are also disabled until
-exact-version evidence binding is implemented. Color/font branding is frozen
+exact-version evidence binding is implemented. That limit covers the legacy
+single-logo fields only; the versioned brand-asset library in organisation brand
+profiles is separate, see [designed documents](MCP-DESIGNED-DOCUMENTS.md).
+Color/font branding is frozen
 per document. See [production evidence limits](../DEPLOY.md#block-evidence-production-limitations)
 and [branding limits](../DEPLOY.md#branding-evidence-limitation).
 

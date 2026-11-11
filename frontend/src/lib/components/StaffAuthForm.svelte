@@ -2,6 +2,7 @@
   import { ui, staffLocale } from '$lib/staffPreferences';
   import { onMount, onDestroy } from 'svelte';
   import { FileSignature } from 'lucide-svelte';
+  import { safeReturnPath } from '$lib/sessionExpiry';
   import { consumeStaffAuthToken, staffPasswordError, type StaffAuthMode } from '$lib/staffAuth';
   import { getStaffAuthStatus, loginWithPassword, registerWorkspace, verifyStaffEmail, forgotStaffPassword, resetStaffPassword, staffAuthErrorMessage } from '$lib/api/staffAuth';
 
@@ -86,7 +87,7 @@
       if (disposed || controller.signal.aborted) return;
       clearSecrets();
       complete = true;
-      if (mode === 'login' || mode === 'verify') window.location.assign('/dashboard');
+      if (mode === 'login' || mode === 'verify') window.location.assign(mode === 'login' ? (safeReturnPath(new URLSearchParams(window.location.search).get('next')) ?? '/dashboard') : '/dashboard');
       else if (mode === 'reset') window.location.assign('/login');
     } catch (failure) {
       if (!disposed) { error = staffAuthErrorMessage(failure); complete = false; }

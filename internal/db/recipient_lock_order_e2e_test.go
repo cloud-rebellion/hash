@@ -253,7 +253,9 @@ func TestRecipientUpdatesAcquireParentBeforeChildE2E(t *testing.T) {
 				default:
 				}
 				var waiting bool
-				if err := held.QueryRow(waitCtx, "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND datname=current_database() AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid)) AND position($3 in query)>0)", contenderPID, holderPID, "-- name: "+tc.name).Scan(&waiting); err != nil {
+				// Activity snapshots persist within a transaction. Observe in a fresh
+				// autocommit statement so an early sample cannot hide the later wait.
+				if err := pool.QueryRow(waitCtx, "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND datname=current_database() AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid)) AND position($3 in query)>0)", contenderPID, holderPID, "-- name: "+tc.name).Scan(&waiting); err != nil {
 					t.Fatal("observe contender", err)
 				} //nolint:rawsql -- authoritative wait on this exact query/session
 				if waiting {

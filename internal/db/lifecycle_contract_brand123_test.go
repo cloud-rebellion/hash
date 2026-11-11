@@ -16,11 +16,11 @@ func brand123LifecycleFiles() fstest.MapFS {
 
 func TestEmbeddedBrand123RetainsWriterEightAndActualMigrationIdentity(t *testing.T) {
 	want, versions, err := EmbeddedMigrationsIdentity()
-	if err != nil || len(versions) != 123 || versions[len(versions)-1] != 123 {
+	if err != nil || len(versions) != 127 || versions[len(versions)-1] != 127 {
 		t.Fatal("actual embedded brand migration tree differs", versions, err)
 	}
 	version, digest, err := EmbeddedLifecycleIdentityV1()
-	if err != nil || version != 8 || digest != want {
+	if err != nil || version != 9 || digest != want {
 		t.Fatal("named actual brand sidecars changed/refused the existing writer contract", version, digest, err)
 	}
 }
@@ -31,7 +31,7 @@ func TestReviewedBrand123KeepsNamedFloorsAndFutureRefusals(t *testing.T) {
 		t.Fatal("reviewed named brand tail refused", err)
 	}
 	for name, versions := range map[string][]int64{
-		"future":        {115, 116, 117, 118, 119, 120, 121, 122, 123, 124},
+		"future":        {115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128},
 		"missing-floor": {115, 116, 117, 118, 119, 120, 121, 123},
 		"duplicate":     {115, 116, 117, 118, 119, 120, 121, 122, 123, 123},
 		"unordered":     {115, 116, 117, 118, 119, 120, 121, 123, 122},

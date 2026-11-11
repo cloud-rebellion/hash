@@ -65,7 +65,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 		}
 	}
 	inputs, err := htmlAuthoringSumV1(int64(unsafe.Sizeof("")), int64(len(orgName)), int64(len(companyName)), base, int64(len(actionSecret)), urls, 2*payloadUpper,
-		int64(len(document.Name)), int64(len(recipient.Name)), int64(len(sender.Name)), int64(len(sender.Email)),
+		int64(len(document.Name)), int64(len(document.DefaultLocale)), int64(len(recipient.Name)), int64(len(sender.Name)), int64(len(sender.Email)),
 		int64(len(input.Message)), int64(len(input.Quote)), int64(len(input.Context)), int64(len(input.Proposed)))
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func (w *ApplicationHTMLCeremonyWorkflowV1) NewChangeNotificationV1(call context
 		approveURL = root + "/a/cr?t=" + actiontoken.Mint(actionSecret, approve, approveAt, 14*24*time.Hour)
 		denyURL = root + "/a/cr?t=" + actiontoken.Mint(actionSecret, deny, denyAt, 14*24*time.Hour)
 	}
-	context := dispatch.TemplateContext{DocumentName: document.Name, SenderName: sender.Name, SenderEmail: sender.Email, RecipientName: recipient.Name,
+	context := dispatch.TemplateContext{DocumentName: document.Name, SenderName: sender.Name, SenderEmail: sender.Email, RecipientName: recipient.Name, Locale: document.DefaultLocale,
 		OrgName: strings.Clone(companyName), DeclineReason: input.Message, ChangeQuote: input.Quote, ChangeContext: input.Context, ChangeProposed: input.Proposed,
 		OpenURL: root + "/documents/" + document.ID.String(), ApproveURL: approveURL, DenyURL: denyURL}
 	selectedTemplate, err := w.changeServiceEmailTemplateV1(call)

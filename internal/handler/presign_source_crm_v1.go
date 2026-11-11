@@ -104,6 +104,9 @@ func (p *preSignCRMSourcePopulationV1) persist(ctx context.Context, s *Server, t
 	if err != nil {
 		return audit.PendingEvent{}, err
 	}
+	if err = measureBorrowedAuditEventV1(ctx, generated.New(tx), actor.OrgID, doc.ID, event.ID); err != nil {
+		return audit.PendingEvent{}, err
+	}
 	if err = p.checkLocked(ctx, s, tx, actor); err != nil {
 		return audit.PendingEvent{}, err
 	}

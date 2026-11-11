@@ -356,6 +356,8 @@ SELECT EXISTS(
   UNION ALL
   SELECT 1 FROM html_document_materializations m WHERE m.pdf_key = sqlc.arg(object_key)::text
   UNION ALL
+  SELECT 1 FROM document_pdf_revisions_v1 r WHERE sqlc.arg(object_key)::text IN (r.pdf_key, r.previous_pdf_key)
+  UNION ALL
   SELECT 1 FROM html_document_materialization_snapshots h
     WHERE sqlc.arg(object_key)::text IN (h.pdf_key, h.rendered_pdf_key)
 ) AS shared;
@@ -518,3 +520,21 @@ VALUES (sqlc.arg(id),sqlc.arg(org_id),sqlc.arg(template_id),sqlc.arg(name),
  'pdf','{}'::jsonb,sqlc.arg(pdf_storage_key),sqlc.arg(pdf_sha256),sqlc.arg(pdf_storage_version_id),
  sqlc.arg(evidence_version_pins_required),sqlc.arg(sender_id),sqlc.arg(expires_at))
 RETURNING *;
+
+-- name: ListDocumentPDFRevisionObjects :many
+-- Every stored PDF a document's revision history names: each revision PDF and
+-- the original that only revision 1 still names. Read before the history is erased.
+SELECT pdf_key AS object_key, pdf_version_id AS version_id, pdf_sha256 AS sha256
+FROM document_pdf_revisions_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid
+UNION
+SELECT previous_pdf_key, previous_pdf_version_id, previous_pdf_sha256
+FROM document_pdf_revisions_v1 WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid AND sequence = 1;
+
+-- name: EraseDocumentPDFHistory :one
+-- Caller holds the parent lock. purge = true is the hard delete of a
+-- soft-deleted draft; false is DSR erasure of a live document.
+SELECT hash_erase_document_pdf_history_v1(sqlc.arg(document_id)::uuid, sqlc.arg(purge)::boolean)::bigint AS erased;
+
+-- name: CountDocumentPDFRevisions :one
+SELECT count(*) FROM document_pdf_revisions_v1
+WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid;

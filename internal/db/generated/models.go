@@ -990,6 +990,46 @@ type DocumentParticipantReportsV1 struct {
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 }
 
+type DocumentPdfHistoryErasuresV1 struct {
+	DocumentID uuid.UUID          `json:"document_id"`
+	OrgID      uuid.UUID          `json:"org_id"`
+	ErasedAt   pgtype.Timestamptz `json:"erased_at"`
+}
+
+type DocumentPdfReviewsV1 struct {
+	ID               uuid.UUID          `json:"id"`
+	OrgID            uuid.UUID          `json:"org_id"`
+	DocumentID       uuid.UUID          `json:"document_id"`
+	RevisionID       uuid.UUID          `json:"revision_id"`
+	PdfSha256        []byte             `json:"pdf_sha256"`
+	ReviewerKind     string             `json:"reviewer_kind"`
+	ReviewedBy       uuid.UUID          `json:"reviewed_by"`
+	VisuallyReviewed bool               `json:"visually_reviewed"`
+	ReviewedPages    int32              `json:"reviewed_pages"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type DocumentPdfRevisionsV1 struct {
+	ID                      uuid.UUID          `json:"id"`
+	OrgID                   uuid.UUID          `json:"org_id"`
+	DocumentID              uuid.UUID          `json:"document_id"`
+	Sequence                int32              `json:"sequence"`
+	ParentID                pgtype.UUID        `json:"parent_id"`
+	PreviousPdfKey          string             `json:"previous_pdf_key"`
+	PreviousPdfSha256       []byte             `json:"previous_pdf_sha256"`
+	PreviousPdfVersionID    string             `json:"previous_pdf_version_id"`
+	PdfKey                  string             `json:"pdf_key"`
+	PdfSha256               []byte             `json:"pdf_sha256"`
+	PdfVersionID            string             `json:"pdf_version_id"`
+	PageCount               int32              `json:"page_count"`
+	MetadataRedactionReport json.RawMessage    `json:"metadata_redaction_report"`
+	FieldsJson              json.RawMessage    `json:"fields_json"`
+	RecipientsJson          json.RawMessage    `json:"recipients_json"`
+	Summary                 string             `json:"summary"`
+	CreatedBy               uuid.UUID          `json:"created_by"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+}
+
 type DocumentProposal struct {
 	ID           uuid.UUID          `json:"id"`
 	DocumentID   uuid.UUID          `json:"document_id"`
@@ -1025,6 +1065,17 @@ type DocumentReminderPoliciesV1 struct {
 	IntervalDays int32              `json:"interval_days"`
 	MaxFires     int32              `json:"max_fires"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DocumentReviewKindsV1 struct {
+	ID           uuid.UUID          `json:"id"`
+	OrgID        uuid.UUID          `json:"org_id"`
+	DocumentID   uuid.UUID          `json:"document_id"`
+	SubjectID    uuid.UUID          `json:"subject_id"`
+	PdfSha256    []byte             `json:"pdf_sha256"`
+	ReviewerKind string             `json:"reviewer_kind"`
+	ReviewedBy   uuid.UUID          `json:"reviewed_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type DocumentSigningAdmission struct {
@@ -1494,6 +1545,20 @@ type PdfTemplateSourceSizesV1 struct {
 	SanitizationWireBytes       int64              `json:"sanitization_wire_bytes"`
 	MeasurementServerVersionNum int32              `json:"measurement_server_version_num"`
 	MeasuredAt                  pgtype.Timestamptz `json:"measured_at"`
+}
+
+type PendingObjectDeletionsV1 struct {
+	ID            uuid.UUID          `json:"id"`
+	OrgID         uuid.UUID          `json:"org_id"`
+	DocumentID    uuid.UUID          `json:"document_id"`
+	DsrID         pgtype.UUID        `json:"dsr_id"`
+	StorageKey    string             `json:"storage_key"`
+	VersionID     string             `json:"version_id"`
+	Sha256        []byte             `json:"sha256"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	Attempts      int32              `json:"attempts"`
+	LastError     string             `json:"last_error"`
 }
 
 type PresignDispatcherExecution struct {

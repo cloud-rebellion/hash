@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const fullMetricAck498 = `{"accepted":23,"rejected":0,"dropped":0,"receipt_id":"receipt498"}`
+const fullMetricAck498 = `{"accepted":26,"rejected":0,"dropped":0,"receipt_id":"receipt498"}`
 
 type metricTransport498 func(*http.Request) (*http.Response, error)
 
@@ -107,7 +107,7 @@ func TestOperationalMetrics498ActualReadyWirePrivacyAndLogAdmissionIndependence(
 	sh.ch <- nativeLogLine{Body: "PRIVATE_ORIGINAL_LOG498"}
 	type privateContext498 struct{}
 	caller := context.WithValue(budget, privateContext498{}, "PRIVATE_CONTRACT498")
-	l.RecordOperationalBacklogV1(caller, OperationalBacklogSnapshotV1{HasSample: true, SampleAgeSeconds: 299, ReadDurationMilliseconds: 12, Data: OperationalBacklogDataV1{MailCount: 3, MailDueCount: 2, MailFailedCount: 1, MailFailedOldestObservedCreationAgeSeconds: 9, FinalizingRootCount: 2, FinalizingIntentCount: 1, FinalizingMissingIntentCount: 1}})
+	l.RecordOperationalBacklogV1(caller, OperationalBacklogSnapshotV1{HasSample: true, SampleAgeSeconds: 299, ReadDurationMilliseconds: 12, Data: OperationalBacklogDataV1{MailCount: 3, MailDueCount: 2, MailFailedCount: 1, MailFailedOldestObservedCreationAgeSeconds: 9, FinalizingRootCount: 2, FinalizingIntentCount: 1, FinalizingMissingIntentCount: 1, PendingObjectCount: 4, PendingObjectOldestObservedAgeSeconds: 777}})
 	stored := l.operationalMetrics.Load()
 	if stored == nil {
 		t.Fatal("valid observation lost behind full native log admission")
@@ -137,10 +137,10 @@ func TestOperationalMetrics498ActualReadyWirePrivacyAndLogAdmissionIndependence(
 		}
 	}
 	var rows []map[string]json.RawMessage
-	if err := json.Unmarshal(got.body, &rows); err != nil || len(rows) != 23 {
+	if err := json.Unmarshal(got.body, &rows); err != nil || len(rows) != 26 {
 		t.Fatal("fixed wire size/shape changed", err)
 	}
-	wantSuffixes := strings.Fields("has_sample read_unavailable sample_age_seconds stale read_duration_ms observed_row_limit mail_count mail_due_count mail_unknown_created_count mail_unknown_due_count mail_oldest_observed_age_seconds mail_oldest_observed_overdue_seconds mail_limit_reached mail_failed_count mail_failed_unknown_created_count mail_failed_oldest_observed_creation_age_seconds mail_failed_limit_reached finalizing_root_count finalizing_intent_count finalizing_missing_intent_count finalizing_unknown_intent_age_count finalizing_oldest_observed_intent_age_seconds finalizing_limit_reached")
+	wantSuffixes := strings.Fields("has_sample read_unavailable sample_age_seconds stale read_duration_ms observed_row_limit mail_count mail_due_count mail_unknown_created_count mail_unknown_due_count mail_oldest_observed_age_seconds mail_oldest_observed_overdue_seconds mail_limit_reached mail_failed_count mail_failed_unknown_created_count mail_failed_oldest_observed_creation_age_seconds mail_failed_limit_reached finalizing_root_count finalizing_intent_count finalizing_missing_intent_count finalizing_unknown_intent_age_count finalizing_oldest_observed_intent_age_seconds finalizing_limit_reached pending_object_count pending_object_oldest_observed_age_seconds pending_object_limit_reached")
 	want := make(map[string]bool, len(wantSuffixes))
 	for _, suffix := range wantSuffixes {
 		want["hash.operational_backlog."+suffix] = true
@@ -175,7 +175,7 @@ func TestOperationalMetrics498ActualReadyWirePrivacyAndLogAdmissionIndependence(
 			t.Fatal("metric labels escaped the fixed process identity")
 		}
 	}
-	if len(want) != 0 || values["hash.operational_backlog.has_sample"] != 1 || values["hash.operational_backlog.stale"] != 1 || values["hash.operational_backlog.sample_age_seconds"] < 301 || values["hash.operational_backlog.mail_due_count"] != 2 || values["hash.operational_backlog.mail_failed_count"] != 1 || values["hash.operational_backlog.observed_row_limit"] != 1000 {
+	if len(want) != 0 || values["hash.operational_backlog.has_sample"] != 1 || values["hash.operational_backlog.stale"] != 1 || values["hash.operational_backlog.sample_age_seconds"] < 301 || values["hash.operational_backlog.mail_due_count"] != 2 || values["hash.operational_backlog.mail_failed_count"] != 1 || values["hash.operational_backlog.observed_row_limit"] != 1000 || values["hash.operational_backlog.pending_object_count"] != 4 || values["hash.operational_backlog.pending_object_oldest_observed_age_seconds"] != 777 || values["hash.operational_backlog.pending_object_limit_reached"] != 0 {
 		t.Fatal("cached age, explicit booleans or durable values changed", values)
 	}
 	if sh.dropped.Load() != 2 || len(sh.ch) != 1 || (<-sh.ch).Body != "PRIVATE_ORIGINAL_LOG498" || l.Diagnostics().MetricFailures != 0 || l.Diagnostics().CheckinResponses != 0 {
@@ -200,18 +200,18 @@ func TestOperationalMetrics498StrictAcknowledgementReadAndCloseFailures(t *testi
 		readError, closeError, wantAck bool
 	}{
 		{"full", fullMetricAck498, 200, false, false, true},
-		{"partial", `{"accepted":22,"rejected":1,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"dropped", `{"accepted":23,"rejected":0,"dropped":1,"receipt_id":"r"}`, 200, false, false, false},
-		{"too_many", `{"accepted":24,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"missing", `{"accepted":23,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"null_count", `{"accepted":23,"rejected":null,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"fraction", `{"accepted":23.0,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"string", `{"accepted":"23","rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"empty_receipt", `{"accepted":23,"rejected":0,"dropped":0,"receipt_id":""}`, 200, false, false, false},
-		{"duplicate", `{"accepted":22,"accepted":23,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
-		{"unknown", `{"accepted":23,"rejected":0,"dropped":0,"receipt_id":"r","other":0}`, 200, false, false, false},
+		{"partial", `{"accepted":25,"rejected":1,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"dropped", `{"accepted":26,"rejected":0,"dropped":1,"receipt_id":"r"}`, 200, false, false, false},
+		{"too_many", `{"accepted":27,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"missing", `{"accepted":26,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"null_count", `{"accepted":26,"rejected":null,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"fraction", `{"accepted":26.0,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"string", `{"accepted":"26","rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"empty_receipt", `{"accepted":26,"rejected":0,"dropped":0,"receipt_id":""}`, 200, false, false, false},
+		{"duplicate", `{"accepted":25,"accepted":26,"rejected":0,"dropped":0,"receipt_id":"r"}`, 200, false, false, false},
+		{"unknown", `{"accepted":26,"rejected":0,"dropped":0,"receipt_id":"r","other":0}`, 200, false, false, false},
 		{"trailing", fullMetricAck498 + ` {}`, 200, false, false, false},
-		{"malformed", `{"accepted":23`, 200, false, false, false},
+		{"malformed", `{"accepted":26`, 200, false, false, false},
 		{"oversize", fullMetricAck498 + strings.Repeat(" ", 4096), 200, false, false, false},
 		{"read", fullMetricAck498, 200, true, false, false},
 		{"close", fullMetricAck498, 200, false, true, false},

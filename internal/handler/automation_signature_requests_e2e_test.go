@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -443,12 +444,18 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		observed.response = returned.response
 		observed.response.Status = strings.Clone(returned.response.Status)
 		if returned.err != nil {
-			observed.capacity = errors.Is(returned.err, workguard.ErrUnavailableV1) &&
+			// A refused audit loan reports ErrApplicationAdmissionV1 without the
+			// coordinator's cause. HTTP maps both to 503, and the retry below must
+			// still recover the same ceremony.
+			observed.capacity = (errors.Is(returned.err, workguard.ErrUnavailableV1) || errors.Is(returned.err, pdfadmission.ErrApplicationAdmissionV1)) &&
 				!errors.Is(returned.err, context.Canceled) && !errors.Is(returned.err, context.DeadlineExceeded) &&
+				!errors.Is(returned.err, pdfadmission.ErrApplicationCaptureUncertainV1) &&
 				!errors.Is(returned.err, pdfadmission.ErrApplicationSessionUnknownV1) &&
 				!errors.Is(returned.err, pdfadmission.ErrApplicationSessionCommitUnknownV1) && ctx.Err() == nil
 			if !observed.capacity {
-				observed.failure = strings.Clone(returned.err.Error())
+				observed.failure = fmt.Sprintf("concurrent automation Send refused (pre-sign stage %s, cancelled=%t, deadline=%t, original context=%v): %v",
+					send.PreSignFailureStageV1(returned.err), errors.Is(returned.err, context.Canceled),
+					errors.Is(returned.err, context.DeadlineExceeded), ctx.Err(), returned.err)
 			}
 		}
 		lease := returned.lease

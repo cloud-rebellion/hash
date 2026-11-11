@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bright-interaction/hash/internal/reviewgate"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -404,6 +405,9 @@ func envelopeTargetError(err error) error {
 }
 
 func envelopeMutationError(err error) error {
+	if message, ok := reviewgate.Message(err); ok {
+		return fmt.Errorf("%s (code %s)", message, reviewgate.Code)
+	}
 	for _, safe := range []error{auth.ErrMutationCredentialExpired, auth.ErrMutationPermissionRevoked,
 		authoring.ErrDocumentNotFound, authoring.ErrDocumentNotDraft, authoring.ErrDocumentHasEvidence,
 		authoring.ErrPrivacyReviewChanging, authoring.ErrPendingPrivacyReview, errEnvelopeTargetIneligible} {

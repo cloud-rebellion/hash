@@ -190,7 +190,11 @@ func TestPresignRegistrySettingsWithExternalBrowserE2E(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO templates(id,org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256) VALUES($1,$2,$3,'html',$4::jsonb,$5::jsonb,$6,$7)`, templateID, orgID, templateName, canonicalTemplate.MasterJSON, canonicalTemplate.DefaultsJSON, ownerID, templateSHA); err != nil {
 		t.Fatal("seed approved registry design head")
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by,approved_by,approved_at) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6,$6,$7)`, templateID, orgID, canonicalTemplate.MasterJSON, canonicalTemplate.DefaultsJSON, templateSHA, ownerID, approvedAt); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6)`, templateID, orgID, canonicalTemplate.MasterJSON, canonicalTemplate.DefaultsJSON, templateSHA, ownerID); err != nil {
+		t.Fatal("seed selected immutable catalog revision")
+	}
+	// Approval is a separate completed step: an INSERT may not carry it.
+	if _, err := pool.Exec(ctx, `UPDATE html_template_revisions SET approved_by=$3,approved_at=$4 WHERE template_id=$1 AND version=1 AND org_id=$2`, templateID, orgID, ownerID, approvedAt); err != nil {
 		t.Fatal("seed selected immutable catalog approval")
 	}
 	shell, err := os.ReadFile(filepath.Join(frontend, "index.html"))

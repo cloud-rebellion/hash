@@ -17,9 +17,10 @@ import (
 // The companion template-shape test binds the interpolation multiplicities and
 // contexts used here to the actual templates in templates.go.
 func ChangeRequestNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlBytes, textBytes int64, err error) {
-	subjectBytes = int64(len(" requested changes to "))
-	htmlBytes = int64(len(changesRequestedHTML))
-	textBytes = int64(len(changesRequestedText))
+	join, htmlSource, textSource := changesRequestedSourcesV1(ctx.Locale)
+	subjectBytes = int64(len(join))
+	htmlBytes = int64(len(htmlSource))
+	textBytes = int64(len(textSource))
 	for _, value := range [...]string{ctx.RecipientName, ctx.DocumentName} {
 		subjectBytes, err = addChangeRequestNotificationBytesV1(subjectBytes, int64(len(value)), 1)
 		if err != nil {

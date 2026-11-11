@@ -47,9 +47,13 @@ type htmlTemplatePreviewReceipt struct {
 	PDFSHA256             string    `json:"pdf_sha256"`
 	PageCount             int       `json:"page_count"`
 	SessionSHA256         string    `json:"session_sha256"`
-	CredentialID          uuid.UUID `json:"credential_id,omitempty"`
-	IssuedAt              time.Time `json:"issued_at"`
-	ExpiresAt             time.Time `json:"expires_at"`
+	// CredentialID has no producer: the MCP preview no longer builds a receipt
+	// and approval is human-only. mint and validate refuse any receipt that
+	// names an API key. verify refuses an unknown credential_id key on its own
+	// (decodeSignerJSON disallows unknown fields), and also checks this field.
+	CredentialID uuid.UUID `json:"credential_id,omitempty"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 func htmlPreviewSHA256(value string) bool {
@@ -70,8 +74,7 @@ func (p htmlTemplatePreviewReceipt) validate(now time.Time) error {
 		p.TemplateID == uuid.Nil || p.Version <= 0 || p.PageCount <= 0 || p.PageCount > sanitize.MaxPDFPages ||
 		!htmlPreviewSHA256(p.TemplateContentSHA256) || !htmlPreviewSHA256(p.MaterializationSHA256) ||
 		!htmlPreviewSHA256(p.PDFSHA256) ||
-		(p.CredentialID == uuid.Nil && !htmlPreviewSHA256(p.SessionSHA256)) ||
-		(p.CredentialID != uuid.Nil && p.SessionSHA256 != "") ||
+		p.CredentialID != uuid.Nil || !htmlPreviewSHA256(p.SessionSHA256) ||
 		p.IssuedAt.IsZero() || p.ExpiresAt.IsZero() || p.IssuedAt.After(now) ||
 		!p.ExpiresAt.After(p.IssuedAt) || p.ExpiresAt.Sub(p.IssuedAt) > htmlTemplatePreviewTTL || !now.Before(p.ExpiresAt) {
 		return errHTMLTemplatePreviewReceipt

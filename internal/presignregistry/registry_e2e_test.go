@@ -112,7 +112,10 @@ func newRegistryFixtureE2E(t testing.TB, ctx context.Context, pool *pgxpool.Pool
 	if _, err := pool.Exec(ctx, `INSERT INTO templates(id,org_id,name,source_kind,html_master_json,variables_json,created_by,html_content_sha256) VALUES($1,$2,'Synthetic approved source3','html',$3::jsonb,$4::jsonb,$5,$6)`, d.Template.ID, f.org, master, defaults, f.ownerID, unhex(d.Template.ContentSHA256)); err != nil {
 		t.Fatal("seed approved master head")
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by,approved_by,approved_at) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6,$6,$7)`, d.Template.ID, f.org, master, defaults, unhex(d.Template.ContentSHA256), f.ownerID, d.Template.ApprovedAt); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by) VALUES($1,1,$2,$3::jsonb,$4::jsonb,$5,$6)`, d.Template.ID, f.org, master, defaults, unhex(d.Template.ContentSHA256), f.ownerID); err != nil {
+		t.Fatal("seed selected immutable revision")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE html_template_revisions SET approved_by=$3,approved_at=$4 WHERE template_id=$1 AND version=1 AND org_id=$2`, d.Template.ID, f.org, f.ownerID, d.Template.ApprovedAt); err != nil {
 		t.Fatal("seed selected immutable approval")
 	}
 	f.definition = d

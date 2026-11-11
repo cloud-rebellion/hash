@@ -235,10 +235,7 @@ func TestDocumentAttachmentDraftPersistenceAndSendGuardV1E2E(t *testing.T) {
 		if packageSnapshot218(t, f, p.ID) != before {
 			t.Fatal("refused HTML selection changed package")
 		}
-		html, err = f.q.MarkDocumentHTMLReviewed(f.ctx, generated.MarkDocumentHTMLReviewedParams{ID: html.ID, OrgID: f.org, ExpectedUpdatedAt: html.UpdatedAt, ExpectedPdfSha256: html.PdfSha256, ReviewedBy: f.user.ID})
-		if err != nil {
-			t.Fatal(err)
-		}
+		html = markHTMLReviewedHumanE2E(t, f, html)
 		if _, err = f.q.InsertDocumentAttachmentDraftV1(f.ctx, packagePin218(t, p, html, 2)); err != nil {
 			t.Fatal(err)
 		}

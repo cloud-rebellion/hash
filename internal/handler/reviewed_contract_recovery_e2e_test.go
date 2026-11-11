@@ -123,7 +123,7 @@ type reviewedContractRecoveryFixtureE2E struct {
 
 func newReviewedContractRecoveryE2E(t *testing.T, withIntent bool) *reviewedContractRecoveryFixtureE2E {
 	t.Helper()
-	native := newOwnedPublicReadFixtureV1(t)
+	native := newOwnedPublicReadFixtureBaseV1(t, false)
 	f := &reviewedContractRecoveryFixtureE2E{native: native, ctx: native.f.ctx, pool: native.f.pool, q: native.f.q, engine: native.f.s.Sign, orgID: native.f.org}
 	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.storageRequests.Add(1)

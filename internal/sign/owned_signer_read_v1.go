@@ -160,6 +160,12 @@ func signerReadErrorV1(err error) error {
 func (e *Engine) LookupByToken(ctx context.Context, hash []byte) (*RecipientContext, error) {
 	return e.lookupOwnedSignerV1(ctx, hash, pdfadmission.SignerReadActiveV1)
 }
+
+// LookupSignerActionByTokenV1 is LookupByToken with a diagnostic label for the
+// signer POST actions. The label selects no policy, SQL or admission authority.
+func (e *Engine) LookupSignerActionByTokenV1(ctx context.Context, hash []byte) (*RecipientContext, error) {
+	return e.lookupOwnedSignerRouteV1(ctx, hash, pdfadmission.SignerReadActiveV1, pdfadmission.SignerReadDiagnosticActionV1)
+}
 func (e *Engine) LookupCompletedArtifactByToken(ctx context.Context, hash []byte) (*RecipientContext, error) {
 	return e.lookupOwnedSignerV1(ctx, hash, pdfadmission.SignerReadCompletedV1)
 }

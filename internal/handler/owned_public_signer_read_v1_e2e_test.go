@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	"math"
 	"net/http"
@@ -62,6 +63,22 @@ import (
 type ownedA4ProtocolRendererV1 struct {
 	protocol htmlCreationRendererE2E
 	gate     *ownedRendererGate165V1
+}
+
+// disposeSyntheticEstateV1 truncates a unique synthetic test database. CASCADE
+// rewrites every dependent table, and CI saw it outlive the fixture's 5s client and
+// server statement limits. Only the statement limit is raised: the 3s lock_timeout
+// still applies, so a held lock keeps failing fast with its own SQLSTATE.
+func disposeSyntheticEstateV1(pool *pgxpool.Pool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '30s'"); err != nil { //nolint:rawsql -- disposal-only limit in a unique synthetic DB
+			return err
+		}
+		_, err := tx.Exec(ctx, "TRUNCATE orgs CASCADE") //nolint:rawsql -- all rows belong to a unique synthetic DB
+		return err
+	})
 }
 
 func (p *ownedA4ProtocolRendererV1) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -253,10 +270,27 @@ func newOwnedPublicReadFixtureAllocatedPool315V1(t *testing.T, withLifecycleDocu
 			defer stop()
 			_ = conn.Close(closeCtx)
 		}()
-		var count int
-		if err := conn.QueryRow(ctx, "SELECT count(*)::integer FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1", application).Scan(&count); err != nil || count != 0 {
-			t.Errorf("fixture pool/native backends survived joined close: count=%d err=%v", count, err)
-		} //nolint:rawsql -- exact unique test pool/factory backend witness only
+		// A closed client's backend exits asynchronously. Join that exit within this
+		// bounded window; a backend that outlives it still fails the fixture.
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var count int
+			err := conn.QueryRow(ctx, "SELECT count(*)::integer FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1", application).Scan(&count) //nolint:rawsql -- exact unique test pool/factory backend witness only
+			if err == nil && count == 0 {
+				return
+			}
+			if err != nil {
+				t.Errorf("fixture pool/native backends survived joined close: count=%d err=%v", count, err)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Errorf("fixture pool/native backends survived joined close: count=%d err=%v", count, ctx.Err())
+				return
+			case <-ticker.C:
+			}
+		}
 	})
 	var f lifecycleAuthorizationFixture
 	if withLifecycleDocument {
@@ -284,9 +318,9 @@ func newOwnedPublicReadFixtureAllocatedPool315V1(t *testing.T, withLifecycleDocu
 			return
 		}
 		if withLifecycleDocument {
-			if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil {
+			if err := disposeSyntheticEstateV1(f.pool); err != nil {
 				t.Error(err)
-			} //nolint:rawsql -- all rows in this unique synthetic DB
+			}
 			return // This branch still has original lifecycle cleanup using the pool.
 		}
 		// No legacy lifecycle DELETE cleanup was registered for this branch.

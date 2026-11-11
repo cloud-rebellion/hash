@@ -43,9 +43,9 @@ const signatureCopy: CeremonyCopy = {
 const acknowledgementCopy: CeremonyCopy = {
   sectionTitle: 'Recipients & acknowledgement',
   defaultLanguageHelp:
-    'Acknowledgement emails and the legal acknowledgement page are currently English pending reviewed localization.',
+    'New recipients’ lifecycle emails use this language. The legal acknowledgement page is currently English pending reviewed localization.',
   recipientLanguageHelp:
-    'Acknowledgement emails and the legal acknowledgement page are currently English pending reviewed localization.',
+    'Lifecycle email language. The legal acknowledgement page is currently English pending reviewed localization.',
   editableDescription:
     'Add the people who must review and acknowledge this document, then send it for acknowledgement. Each required recipient gets a single-use magic link by email; no signature will be requested.',
   liveDescription:

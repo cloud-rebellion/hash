@@ -223,6 +223,13 @@ CHROMEDP_ADDITIONS = {
   }
 }
 MIXED_FILE = "gotenberg/internal/chromium/hash_supervisor_test.go"
+OWNED_HASHAPI_MODIFICATIONS = {
+  "api.go": {
+    "owned_file": "api.go",
+    "bytes": 24370,
+    "sha256": "21918341262e0870e4739b4992270e84e3ba208b81292aa5b79a5546a7c8a88b"
+  }
+}
 
 
 def require(condition, message):
@@ -272,6 +279,23 @@ try:
         for name, original in expected.items():
             same_record(actual[name], original, package + "/" + name)
             mit_files.add("gotenberg/internal/" + package + "/" + name)
+        # Original upstream provenance remains immutable above. Separately bind
+        # the reviewed Hash adaptation without relabelling its upstream license.
+        modified = metadata.get("owned_modified_sources", [])
+        expected_modified = OWNED_HASHAPI_MODIFICATIONS if package == "hashapi" else {}
+        require(isinstance(modified, list), "invalid owned-modification inventory")
+        indexed_modified = {}
+        for row in modified:
+            require(isinstance(row, dict) and isinstance(row.get("owned_file"), str), "invalid owned-modification record")
+            name = row["owned_file"]
+            require(name not in indexed_modified, "duplicate owned-modification record")
+            indexed_modified[name] = row
+        require(set(indexed_modified) == set(expected_modified), "reviewed owned-modification inventory differs")
+        for name, record in expected_modified.items():
+            same_record(indexed_modified[name], record, package + "/" + name)
+            body = regular_bytes(directory / name)
+            require(len(body) == record["bytes"] and hashlib.sha256(body).hexdigest() == record["sha256"],
+                    "reviewed modified source differs: " + package + "/" + name)
         additions = metadata.get("additional_owned_sources", [])
         expected_additions = GOTENBERG_ADDITIONS if package == "chromium" else {}
         require(isinstance(additions, list), "invalid additional upstream inventory: " + package)

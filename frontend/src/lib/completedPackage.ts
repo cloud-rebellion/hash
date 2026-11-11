@@ -10,7 +10,7 @@ function active(signal:AbortSignal){if(signal.aborted)throw new DOMException('Th
 function identity(value:string|null):value is string{return !!value&&ID.test(value)&&value!=='00000000-0000-0000-0000-000000000000';}
 export async function fetchCompletedPackage(token:string,signal:AbortSignal,fetcher:typeof fetch=fetch):Promise<CompletedPackage>{
  active(signal);if(!TOKEN.test(token))throw new Error(unavailable);
- const response=await fetcher(`/sign/${token}/completed-package`,{signal,cache:'no-store',credentials:'same-origin',headers:{Accept:'application/json'}});
+ const response=await fetcher(`/sign/${encodeURIComponent(token)}/completed-package`,{signal,cache:'no-store',credentials:'same-origin',headers:{Accept:'application/json'}});
  try{
   active(signal);
   const documentID=response.headers.get('X-Hash-Document-Id'),recipientID=response.headers.get('X-Hash-Recipient-Id');
@@ -29,7 +29,7 @@ export async function fetchCompletedPackagePDF(packet:CompletedPackage,position:
  if(!TOKEN.test(packet.token)||!value||!Number.isInteger(position)||position<0||position>value.annexes.length)throw new Error(unavailable);
  const selected=position===0?value.main:value.annexes[position-1];
  const etag=`"${value.manifest_sha256}.${value.legal_commitment_sha256}"`;
- const response=await fetcher(`/sign/${packet.token}/completed-package/members/${position}/pdf`,{signal,cache:'no-store',credentials:'same-origin',headers:{Accept:'application/pdf','If-Match':etag}});
+ const response=await fetcher(`/sign/${encodeURIComponent(packet.token)}/completed-package/members/${position}/pdf`,{signal,cache:'no-store',credentials:'same-origin',headers:{Accept:'application/pdf','If-Match':etag}});
  try{
   active(signal);
   if(!response.ok||response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase()!=='application/pdf')throw new Error(unavailable);

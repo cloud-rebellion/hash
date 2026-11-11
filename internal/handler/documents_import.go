@@ -30,10 +30,11 @@ const maxProposalHTML = 20 << 20 // 20 MB
 // importProposalInput is the JSON body for POST /documents/import when the
 // caller supplies a designed HTML page to render into a signable PDF.
 type importProposalInput struct {
-	Purpose   documentpurpose.Purpose `json:"purpose,omitempty"`
-	Name      string                  `json:"name"`
-	HTML      string                  `json:"html"`
-	Landscape bool                    `json:"landscape,omitempty"`
+	DefaultLocale string                  `json:"default_locale,omitempty"`
+	Purpose       documentpurpose.Purpose `json:"purpose,omitempty"`
+	Name          string                  `json:"name"`
+	HTML          string                  `json:"html"`
+	Landscape     bool                    `json:"landscape,omitempty"`
 }
 
 // handleImportDocument creates a pdf-source document in ONE step, skipping the
@@ -73,6 +74,12 @@ func (s *Server) importDocumentFromPDF(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	name := r.FormValue("name")
+	locale, localeErr := normalizeNewDocumentLocaleV1(r.FormValue("default_locale"))
+	if localeErr != nil {
+		writeError(w, 400, "default_locale is not supported")
+		return
+	}
+
 	purpose := documentpurpose.Purpose(r.FormValue("purpose"))
 	if purpose != "" && documentpurpose.Validate(purpose) != nil {
 		writeError(w, http.StatusBadRequest, "purpose must be document, presentation or signing")
@@ -97,7 +104,7 @@ func (s *Server) importDocumentFromPDF(w http.ResponseWriter, r *http.Request, u
 		writeError(w, http.StatusBadRequest, "uploaded file is not a PDF (magic bytes mismatch)")
 		return
 	}
-	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, name, data, purpose)
+	s.finishPDFDocumentWithLocaleV1(w, r, userID, orgID, name, data, purpose, locale)
 }
 
 func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) {
@@ -129,6 +136,11 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	locale, localeErr := normalizeNewDocumentLocaleV1(in.DefaultLocale)
+	if localeErr != nil {
+		writeError(w, 400, "default_locale is not supported")
 		return
 	}
 	if in.Purpose != "" && documentpurpose.Validate(in.Purpose) != nil {
@@ -170,7 +182,7 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 		writeInternalErrorMsg(w, "render html to pdf failed", err)
 		return
 	}
-	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, in.Name, pdfBytes, in.Purpose)
+	s.finishPDFDocumentWithLocaleV1(w, r, userID, orgID, in.Name, pdfBytes, in.Purpose, locale)
 }
 
 // finishPDFDocument runs the shared clean+store+create intake, then does the
@@ -179,6 +191,10 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 	s.finishPDFDocumentWithPurposeV1(w, r, userID, orgID, name, data, "")
 }
 func (s *Server) finishPDFDocumentWithPurposeV1(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte, purpose documentpurpose.Purpose) {
+	s.finishPDFDocumentWithLocaleV1(w, r, userID, orgID, name, data, purpose, "")
+}
+
+func (s *Server) finishPDFDocumentWithLocaleV1(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte, purpose documentpurpose.Purpose, locale string) {
 	authorize, err := s.sessionDraftAuthorization(r, orgID, userID)
 	if err != nil {
 		s.writeDraftAuthoringError(w, "authorize document import", err)
@@ -186,7 +202,7 @@ func (s *Server) finishPDFDocumentWithPurposeV1(w http.ResponseWriter, r *http.R
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), authoring.MutationTimeout)
 	defer cancel()
-	result, err := docintake.CreateOwnedPDFSourceDocumentWithPurposeV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit, Store: s.Storage}, docintake.OwnedPDFActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest"}, name, data, nil, purpose)
+	result, err := docintake.CreateOwnedPDFSourceDocumentWithLocaleV1(ctx, docintake.OwnedPDFDependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit, Store: s.Storage}, docintake.OwnedPDFActorV1{OrgID: orgID, UserID: userID, Authorize: authorize, Via: "rest"}, name, data, nil, purpose, locale)
 	if result != nil {
 		defer result.CloseConsumerV1()
 	}

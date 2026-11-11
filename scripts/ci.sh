@@ -538,7 +538,7 @@ dependency_image_policy() {
   local compose="docker-compose.yml" minio_compose="docker-compose.local-minio.yml"
   local minio_dockerfile="docker/minio/Dockerfile" required
   local drill="scripts/backup-restore-drill.sh"
-  local root_workflow="../.github/workflows/hash-ci.yml" ref
+  local root_workflow="../.github/workflows/hash-ci.yml" ref workflow
   local postgres_ref="postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
   local minio_ref="minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
   local mailhog_ref="mailhog/mailhog:v1.0.1@sha256:8d76a3d4ffa32a3661311944007a415332c4bb855657f4f6c57996405c009bea"
@@ -584,10 +584,31 @@ dependency_image_policy() {
       echo "$drill must default to dependency image $ref" >&2
       return 1
     }
-    if [ -f "$root_workflow" ] && ! grep -Fq "$ref" "$root_workflow"; then
-      echo "$root_workflow must pin release E2E dependency image $ref" >&2
-      return 1
-    fi
+  done
+  if [ -f "$root_workflow" ] && ! grep -Fq "$postgres_ref" "$root_workflow"; then
+    echo "$root_workflow must pin release E2E PostgreSQL image $postgres_ref" >&2
+    return 1
+  fi
+  # Canonical E2E uses the reviewed owned MinIO recipe, not the retired
+  # upstream registry image retained by the separate legacy restore drill.
+  # Follow the build's exact image ID through validation, export and startup;
+  # a mutable tag or an unrelated Dockerfile cannot satisfy this source gate.
+  for workflow in .github/workflows/ci.yml "$root_workflow"; do
+    [ -f "$workflow" ] || continue
+    for required in \
+      'docker build --iidfile "$image_file" --file docker/minio/Dockerfile docker/minio' \
+      'minio_image="$(cat "$image_file")"' \
+      'sha256:*) image_hex=${minio_image#sha256:} ;;' \
+      '""|*[!a-f0-9]*)' \
+      'test "${#image_hex}" -eq 64' \
+      "printf 'HASH_E2E_MINIO_IMAGE=%s\\n' \"\$minio_image\" >> \"\$GITHUB_ENV\"" \
+      '"$HASH_E2E_MINIO_IMAGE" server /data' \
+      'docker compose build hash gotenberg minio'; do
+      grep -Fq -- "$required" "$workflow" || {
+        echo "$workflow must build and run the exact owned MinIO image: missing $required" >&2
+        return 1
+      }
+    done
   done
   if [ -f "$root_workflow" ]; then
     for required in \
@@ -1249,9 +1270,10 @@ scan() {
 }
 
 renderer_vulnerability_scan() {
-  local review="gotenberg/vulnerability-review.json" report rc
+  local review="gotenberg/vulnerability-review.json" echo_review="gotenberg/echo-vulnerability-review.json" report rc
   local actual_version actual_h1 actual_revision expires reviewed today
   local detected approved unknown expected_review actual_review
+  local echo_version echo_h1 expected_echo_review actual_echo_review
   resolve_scanner govulncheck golang.org/x/vuln/cmd/govulncheck@v1.7.0 || return $?
   command -v jq >/dev/null 2>&1 || {
     echo "jq is required to reconcile renderer vulnerability results" >&2
@@ -1272,8 +1294,8 @@ renderer_vulnerability_scan() {
     --arg revision "$actual_revision" '
       .schema == 1 and .module == $module and .version == $version and
       .module_h1 == $h1 and .upstream_revision == $revision and
-      .reviewed_on == "2026-10-09" and
-      .review_expires_on == "2026-11-08" and
+      .reviewed_on == "2026-11-07" and
+      .review_expires_on == "2026-12-07" and
       (.basis | type == "string" and length > 0) and
       (.reviewed_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
       (.review_expires_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
@@ -1317,6 +1339,42 @@ renderer_vulnerability_scan() {
     return 1
   fi
 
+  # Echo v4.16.3 fixes these two findings and sits outside the upstream range,
+  # but the Go database models v4 with no fixed version, so the scanner keeps
+  # reporting them. Bind only that exact release and keep the direct-peer
+  # extractor as defense in depth: the normal nested-module test step executes
+  # its spoofed-header regression and refuses Echo Proxy/RateLimiter wiring.
+  echo_version="$(cd gotenberg && GOWORK=off go list -m -f '{{.Version}}' github.com/labstack/echo/v4)" || return 1
+  echo_h1="$(awk '$1 == "github.com/labstack/echo/v4" && $2 == "v4.16.3" { print $3 }' gotenberg/go.sum)"
+  jq -e --arg version "$echo_version" --arg h1 "$echo_h1" --arg today "$today" --arg expires "$expires" '
+    .schema == 1 and .module == "github.com/labstack/echo/v4" and
+    .version == "v4.16.3" and .version == $version and .module_h1 == $h1 and
+    .module_h1 == "h1:wAzM49wiBxHpZJQ621lminvdxbwfd1Cn6KwRThKV6nA=" and
+    .reviewed_on == "2026-11-07" and .reviewed_on <= $today and
+    .review_expires_on == $expires and .review_expires_on >= $today and
+    (.basis | type == "string" and length > 0) and
+    .ip_extractor == "echo.ExtractIPDirect()" and
+    .regression == "TestHashAPIUsesDirectPeerIPDespiteForwardedHeaders" and
+    .wiring_guard == "TestHashRendererDoesNotWireEchoProxyOrRateLimiter" and
+    (.advisories | length == 2) and
+    ([.advisories[].go_id] | length == (unique | length)) and
+    all(.advisories[];
+      .reviewed_url == ("https://github.com/advisories/" + .ghsa_id) and
+      .official_affected_range == ">= 4.0.0, <= 4.16.2" and
+      .status == "not_affected" and (.justification | type == "string" and length > 0))
+  ' "$echo_review" >/dev/null || {
+    echo "$echo_review does not match the exact tested Echo mitigation or review interval" >&2
+    return 1
+  }
+  expected_echo_review="$(printf '%s\n' \
+    'GO-2026-6872|GHSA-246p-cpwv-v3jq|2026-10-28T19:53:50Z' \
+    'GO-2026-6875|GHSA-99jh-6h7p-pp36|2026-10-28T19:53:25Z' | LC_ALL=C sort)"
+  actual_echo_review="$(jq -r '.advisories[] | [.go_id, .ghsa_id, .official_updated_at] | join("|")' "$echo_review" | LC_ALL=C sort)"
+  [ "$actual_echo_review" = "$expected_echo_review" ] || {
+    echo "$echo_review has unreviewed advisory identities or update timestamps" >&2
+    return 1
+  }
+
   report="$(mktemp)" || return 1
   # Match the production Docker build and avoid auditing platform-only CGO
   # branches that cannot be linked into the renderer image. OpenVEX makes the
@@ -1335,7 +1393,7 @@ renderer_vulnerability_scan() {
       return 1
       ;;
   esac
-  jq -e --arg product 'pkg:golang/github.com%2Fgotenberg%2Fgotenberg%2Fv8@v8.36.0' '
+  jq -e '
     .["@context"] == "https://openvex.dev/ns/v0.2.0" and
     (.["@id"] | startswith("govulncheck/vex:")) and
     .version == 1 and
@@ -1343,19 +1401,21 @@ renderer_vulnerability_scan() {
     (.statements | type == "array") and
     all(.statements[];
       (.status == "affected" or .status == "not_affected") and
-      (.vulnerability.name | test("^GO-[0-9]{4}-[0-9]{4}$"))) and
-    all(.statements[] | select(.status == "affected");
-      any(.products[]?.subcomponents[]?; .["@id"] == $product))
+      (.vulnerability.name | test("^GO-[0-9]{4}-[0-9]{4}$")) and
+      (.products | type == "array" and length > 0) and
+      all(.products[];
+        (.subcomponents | type == "array" and length > 0) and
+        all(.subcomponents[]; (.["@id"] | type == "string" and length > 0))))
   ' "$report" >/dev/null || {
     rm -f "$report"
     echo "renderer govulncheck did not emit valid OpenVEX" >&2
     return 1
   }
   detected="$(jq -r '.statements[] | select(.status == "affected") | .vulnerability.name' "$report" | LC_ALL=C sort -u)"
-  approved="$(jq -r '.advisories[].go_id' "$review" | LC_ALL=C sort -u)"
+  approved="$(jq -r '.advisories[].go_id' "$review" "$echo_review" | LC_ALL=C sort -u)"
   unknown="$(comm -23 <(printf '%s\n' "$detected") <(printf '%s\n' "$approved"))"
-  rm -f "$report"
   if [ -z "$detected" ]; then
+    rm -f "$report"
     if [ "$rc" -eq 3 ]; then
       echo "renderer govulncheck exit 3 contained no affected advisory" >&2
       return 1
@@ -1364,10 +1424,27 @@ renderer_vulnerability_scan() {
     return 0
   fi
   if [ -n "$unknown" ]; then
+    rm -f "$report"
     echo "renderer govulncheck found unreviewed affected advisories:" >&2
     echo "$unknown" >&2
     return 1
   fi
+  # A known advisory ID does not authorize findings in another dependency or
+  # version. Keep the original Gotenberg review and the two Echo reviews
+  # separate, after reporting any valid-but-unreviewed advisory explicitly.
+  jq -e \
+    --arg gotenberg 'pkg:golang/github.com%2Fgotenberg%2Fgotenberg%2Fv8@v8.36.0' \
+    --arg echo 'pkg:golang/github.com%2Flabstack%2Fecho%2Fv4@v4.16.3' '
+      all(.statements[] | select(.status == "affected");
+        (if .vulnerability.name == "GO-2026-6872" or .vulnerability.name == "GO-2026-6875"
+         then $echo else $gotenberg end) as $expected |
+        all(.products[].subcomponents[]; .["@id"] == $expected))
+    ' "$report" >/dev/null || {
+    rm -f "$report"
+    echo "renderer govulncheck affected component does not match its exact reviewed module/version" >&2
+    return 1
+  }
+  rm -f "$report"
   printf 'renderer govulncheck findings are covered by the unexpired exact-version review (%s):\n%s\n' "$expires" "$detected"
 }
 
@@ -1418,7 +1495,9 @@ step "HTTP route inventory freshness"           go run ./cmd/apidocgen -check
 step "OpenAPI contract + request boundaries"    bash scripts/check-automation-openapi.sh
 step "build"                                   go build ./...
 step "vet"                                     vet_all
-step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=180s
+# Race instrumentation makes the full adversarial PDF-layout package costly.
+# Keep one bounded whole-suite run with margin for hosted-runner variation.
+step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=300s
 step "PDF worker Linux syscall/resource checks" pdf_worker_sandbox_checks
 step "nested renderer module verify + test"    renderer_module_checks
 step "renderer pinned-source/module policy"    renderer_source_policy

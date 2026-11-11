@@ -497,6 +497,10 @@ func (a *Api) Validate() error {
 // Start starts the HTTP server.
 func (a *Api) Start() error {
 	a.srv = echo.New()
+	// The private renderer receives direct calls from Hash, never a trusted
+	// forwarding proxy. Ignore caller-supplied IP headers for logging and any
+	// middleware that derives client identity (GHSA-246p-cpwv-v3jq/99jh-6h7p-pp36).
+	a.srv.IPExtractor = echo.ExtractIPDirect()
 	a.srv.HideBanner = true
 	a.srv.HidePort = true
 	a.srv.Server.ReadTimeout = a.timeout

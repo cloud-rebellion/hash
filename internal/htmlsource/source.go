@@ -195,7 +195,7 @@ func validatedSource(doc *generated.Document, requireReview bool) (source, error
 		if err != nil {
 			return source{}, err
 		}
-		if !sameApprovedOrigin(origin, current) ||
+		if !approvedLineage(origin, current) ||
 			(doc.HtmlCurrentMaterializationSequence.Int32 == 1 && current.Commitment != origin.Commitment) {
 			return source{}, invalid("current materialization changed its immutable approved origin")
 		}
@@ -319,6 +319,24 @@ func validatedOrigin(doc *generated.Document) (source, error) {
 	origin.PdfStorageVersionID = pgtype.Text{String: s.PDFVersionID, Valid: true}
 	origin.VariablesJson = variables
 	return validatedRecord(&origin, doc.HtmlSourceJson, false)
+}
+
+// approvedLineage lets a draft's current source stay on the approved origin's
+// design or move forward to a higher approved version of the same template.
+// Schema, identity and party slots can never change. This function does not
+// look at html_template_revisions. The M124 insert guard checks the template
+// id, a strictly higher version, the approver, the approval time and the
+// claimed template_content_sha256 against an approved revision row. It does
+// not hash the master and default_values embedded in the inserted source, so
+// that binding between embedded bytes and the claimed SHA rests on Go:
+// materialize recomputes the canonical SHA from them on every read and
+// rejects a source whose claimed SHA differs.
+func approvedLineage(origin, current source) bool {
+	if current.TemplateVersion > origin.TemplateVersion {
+		return origin.SchemaVersion == current.SchemaVersion && origin.DocumentID == current.DocumentID && origin.OrgID == current.OrgID &&
+			origin.TemplateID == current.TemplateID && slices.Equal(origin.PartyBindings, current.PartyBindings)
+	}
+	return sameApprovedOrigin(origin, current)
 }
 
 func sameApprovedOrigin(a, b source) bool {

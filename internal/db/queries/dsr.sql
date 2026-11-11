@@ -179,3 +179,38 @@ UPDATE data_subject_requests
 SET subject_email = $3,
     subject_name = $4
 WHERE id = $1 AND org_id = $2;
+
+-- name: ListPDFRevisionDocumentsForSubject :many
+-- Documents of this tenant whose PDF revision history a subject's erasure would
+-- remove: the request's linked document, or a document on which the subject is
+-- a recipient. A recipient matches by exact, case-insensitive email, on its live
+-- row or in a retained revision's recipient snapshot (a recipient removed after
+-- a revision is still named by it). Never a substring: ann@ must not match
+-- joann@. Only documents that have revisions are returned; ordered by id so the
+-- caller locks them in a stable order.
+SELECT d.id FROM documents d
+WHERE d.org_id = sqlc.arg(org_id)::uuid
+  AND EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v
+              WHERE v.document_id = d.id AND v.org_id = d.org_id)
+  AND (d.id = sqlc.arg(document_id)::uuid
+       OR EXISTS (SELECT 1 FROM recipients r
+                  WHERE r.document_id = d.id
+                    AND lower(btrim(r.email)) = lower(btrim(sqlc.arg(email)::text)))
+       OR EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v,
+                         jsonb_array_elements(CASE WHEN jsonb_typeof(v.recipients_json) = 'array'
+                                                   THEN v.recipients_json ELSE '[]'::jsonb END) e
+                  WHERE v.document_id = d.id AND v.org_id = d.org_id
+                    AND lower(btrim(e->>'email')) = lower(btrim(sqlc.arg(email)::text))))
+ORDER BY d.id;
+
+-- name: HasPDFRevisionsMentioningSubject :one
+-- Exact, case-insensitive match on a retained revision's recipient snapshot.
+SELECT EXISTS (SELECT 1 FROM document_pdf_revisions_v1 v,
+                      jsonb_array_elements(CASE WHEN jsonb_typeof(v.recipients_json) = 'array'
+                                                THEN v.recipients_json ELSE '[]'::jsonb END) e
+  WHERE v.org_id = sqlc.arg(org_id)::uuid
+    AND lower(btrim(e->>'email')) = lower(btrim(sqlc.arg(email)::text))) AS present;
+
+-- name: CountDocumentPDFReviewsForDSR :one
+SELECT count(*) FROM document_pdf_reviews_v1
+WHERE document_id = sqlc.arg(document_id)::uuid AND org_id = sqlc.arg(org_id)::uuid;

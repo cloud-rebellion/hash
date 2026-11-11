@@ -39,6 +39,12 @@ func SenderEventNoticeOutputBoundV1(documentBytes, recipientBytes, urlBytes int6
 // recipient magic link, tracking pixel or custom HTML is included. The native
 // producer supplies the locked document's sender and actual audited event.
 func SenderEventNoticeMessageV1(kind, publicURL, to string, document uuid.UUID, documentName, recipientName string) (Message, error) {
+	return SenderEventNoticeMessageLocaleV1(kind, publicURL, to, document, documentName, recipientName, "en")
+}
+
+// Locale controls only owner-facing presentation; source IDs, URLs and notice
+// receipts remain the existing native producer's responsibility.
+func SenderEventNoticeMessageLocaleV1(kind, publicURL, to string, document uuid.UUID, documentName, recipientName, locale string) (Message, error) {
 	if document == uuid.Nil || len(to) < 3 || len(to) > 254 || len(publicURL) < 1 || len(publicURL) > 1024 || !utf8.ValidString(documentName) || !utf8.ValidString(recipientName) {
 		return Message{}, ErrSenderEventNoticeV1
 	}
@@ -58,9 +64,25 @@ func SenderEventNoticeMessageV1(kind, publicURL, to string, document uuid.UUID, 
 	}
 	if recipientName == "" {
 		recipientName = "A recipient"
+		if locale == "sv" {
+			recipientName = "En mottagare"
+		}
+	}
+	if locale == "sv" {
+		if kind == "document.viewed" {
+			subject, action = "Hash: dokument öppnat", "har öppnat"
+		} else {
+			subject, action = "Hash: mottagaren har signerat", "har signerat"
+		}
 	}
 	link := strings.TrimRight(publicURL, "/") + "/documents/" + document.String()
 	body := recipientName + " " + action + " your document: " + documentName + "."
 	ending := "Open Hash to review the current document status and its evidence. Sign in is required."
-	return Message{To: to, Subject: subject, Text: body + "\n\n" + ending + "\n" + link + "\n", HTML: "<p>" + html.EscapeString(body) + "</p><p>" + html.EscapeString(ending) + "</p><p><a href=\"" + html.EscapeString(link) + "\">Open Hash</a></p>", FromName: "Hash"}, nil
+	cta := "Open Hash"
+	if locale == "sv" {
+		body = recipientName + " " + action + " ditt dokument: " + documentName + "."
+		ending = "Öppna Hash för att granska dokumentets aktuella status och bevisunderlag. Inloggning krävs."
+		cta = "Öppna Hash"
+	}
+	return Message{To: to, Subject: subject, Text: body + "\n\n" + ending + "\n" + link + "\n", HTML: "<p>" + html.EscapeString(body) + "</p><p>" + html.EscapeString(ending) + "</p><p><a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(cta) + "</a></p>", FromName: "Hash"}, nil
 }

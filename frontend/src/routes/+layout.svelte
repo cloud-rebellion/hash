@@ -6,7 +6,10 @@
   import { installRuntimeFlareBrowserCapture } from '$lib/flare-client';
   import ProfileMenu from '$lib/components/ProfileMenu.svelte';
   import ThemeToggle from '$lib/components/ThemeToggle.svelte';
-  import { isStaffAuthPath } from '$lib/staffAuth';
+  import { showsStaffChrome, isStaffAuthPath, routeCategory } from '$lib/routeSurface';
+  import SessionExpiredNotice from '$lib/components/SessionExpiredNotice.svelte';
+  import { installSessionExpiryGuard, browserSessionExpiryEnv } from '$lib/sessionExpiry';
+  import { clearThumbnailCache } from '$lib/documentThumbnail';
   import { ui, staffLocale, initializeStaffPreferences } from '$lib/staffPreferences';
 
   let { children } = $props();
@@ -17,9 +20,7 @@
   // The public signer ceremony (/sign), completed files (/completed), legal pages, the auth screens, and the
   // marketing/login root render standalone with no nav.
   const path = $derived($page.url.pathname);
-  const showChrome = $derived(
-    !(path === '/' || isStaffAuthPath(path) || path.startsWith('/sign') || path.startsWith('/completed/') || path.startsWith('/notice/') || path.startsWith('/legal') || path.startsWith('/auth'))
-  );
+  const showChrome = $derived(showsStaffChrome(path));
 
   const navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -35,7 +36,8 @@
   onMount(() => {
     const stopPreferences = initializeStaffPreferences();
     const stopFlareCapture = installRuntimeFlareBrowserCapture();
-    return () => { stopFlareCapture(); stopPreferences(); };
+    const stopExpiryGuard = installSessionExpiryGuard(browserSessionExpiryEnv(clearThumbnailCache));
+    return () => { stopExpiryGuard(); stopFlareCapture(); stopPreferences(); };
   });
 
   $effect(() => {
@@ -65,7 +67,7 @@
 </script>
 
 <svelte:head>
-  <title>{showChrome || path === '/' || isStaffAuthPath(path) || path.startsWith('/auth') ? 'Hash' : 'Document'}</title>
+  <title>{showChrome || path === '/' || isStaffAuthPath(path) || routeCategory(path) === 'auth' ? 'Hash' : 'Document'}</title>
 </svelte:head>
 
 {#if showChrome}
@@ -103,3 +105,5 @@
 {:else}
   {@render children()}
 {/if}
+
+<SessionExpiredNotice />

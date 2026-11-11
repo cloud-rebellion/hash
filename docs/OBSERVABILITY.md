@@ -46,7 +46,7 @@ from flush completion.
 
 The worker retains a scalar copy of each valid existing durable backlog
 observation independently of native log rate/queue admission. After readiness,
-the existing two-minute heartbeat owner projects 23 fixed gauges under
+the existing two-minute heartbeat owner projects 26 fixed gauges under
 `hash.operational_backlog.*` to the DSN-derived native `/metrics` endpoint.
 It uses the existing public ingest key and validated service, release and
 environment labels. No document or recipient data, new sampler, SQL reader,

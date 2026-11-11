@@ -1,5 +1,7 @@
 // Staff interface translations only; document content and signer ceremony are unchanged.
 export const swedishAdvancedStaffMessages: Record<string, string> = {
+  "New recipients’ lifecycle emails use this language. The legal acknowledgement page is currently English pending reviewed localization.": "Nya mottagares e-post använder detta språk. Den juridiska bekräftelsesidan visas för närvarande på engelska i väntan på granskad översättning.",
+  "Lifecycle email language. The legal acknowledgement page is currently English pending reviewed localization.": "Språk för e-postmeddelanden. Den juridiska bekräftelsesidan visas för närvarande på engelska i väntan på granskad översättning.",
   "(required)": "(obligatoriskt)",
   "· Unsaved changes": "· Osparade ändringar",
   "· unavailable": "· inte tillgängligt",

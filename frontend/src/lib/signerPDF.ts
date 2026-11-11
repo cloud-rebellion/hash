@@ -153,7 +153,7 @@ export async function signerResponseError(response: Response, signal: AbortSigna
 }
 
 export async function fetchSignerPDF(scope: SignerPDFScope, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<Uint8Array<ArrayBuffer>> {
-  const response = await fetcher(`/sign/${scope.token}/pdf`, { signal, cache: 'no-store', credentials: 'same-origin' });
+  const response = await fetcher(`/sign/${encodeURIComponent(scope.token)}/pdf`, { signal, cache: 'no-store', credentials: 'same-origin' });
   assertActive(signal);
   if (!response.ok) throw new Error(await signerResponseError(response, signal));
   try { verifySignerPDFHeaders(response.headers, scope.observation); }

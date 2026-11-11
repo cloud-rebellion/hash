@@ -78,7 +78,7 @@ func (s *Server) handleDocumentAttachmentPreviewV1(w http.ResponseWriter, r *htt
 	r = r.WithContext(ctx)
 	authorize, e := s.sessionDraftAuthorization(r, sess.OrgID, sess.UserID)
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -93,7 +93,7 @@ func (s *Server) handleDocumentAttachmentPreviewV1(w http.ResponseWriter, r *htt
 		}()
 	}
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -121,7 +121,7 @@ func (s *Server) handleDocumentAttachmentPreviewV1(w http.ResponseWriter, r *htt
 		return e
 	})
 	if e != nil && !wrote {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 	}
 }

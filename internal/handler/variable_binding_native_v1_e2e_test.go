@@ -28,8 +28,11 @@ import (
 	"time"
 )
 
-func nativeBindingDocument259(t *testing.T, pdf bool) (*ownedPublicReadFixtureV1, *generated.Document) {
+func nativeBindingDocument259(t *testing.T, pdf bool, birthLocale ...string) (*ownedPublicReadFixtureV1, *generated.Document) {
 	t.Helper()
+	if len(birthLocale) > 1 || len(birthLocale) == 1 && (pdf || birthLocale[0] != "en" && birthLocale[0] != "sv") {
+		t.Fatal("optional native block birth locale must be en or sv")
+	}
 	q := newOwnedAutomationAuthorizationFixtureV1(t)
 	ownedCreationPrepareProPlanV1(t, q)
 	f := q.f
@@ -51,7 +54,20 @@ func nativeBindingDocument259(t *testing.T, pdf bool) (*ownedPublicReadFixtureV1
 		})
 		id = packageImported220(t, q, "Original native binding PDF").ID
 	} else {
-		created := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents", `{"name":"Native binding source","source_kind":"blocks","blocks_json":{"version":1,"blocks":[{"id":"body","type":"paragraph","text":"Agreed terms for {{customer}}"},{"id":"sign","type":"signature_field","attrs":{"recipient_role":"signer"}}]},"variables_json":{}}`, q.cookie)
+		body := `{"name":"Native binding source","source_kind":"blocks","blocks_json":{"version":1,"blocks":[{"id":"body","type":"paragraph","text":"Agreed terms for {{customer}}"},{"id":"sign","type":"signature_field","attrs":{"recipient_role":"signer"}}]},"variables_json":{}}`
+		if len(birthLocale) == 1 {
+			var input map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(body), &input); err != nil {
+				t.Fatal(err)
+			}
+			input["default_locale"], _ = json.Marshal(birthLocale[0])
+			raw, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = string(raw)
+		}
+		created := submitSessionOperationE2E(f.s, http.MethodPost, "/api/v1/documents", body, q.cookie)
 		var out struct{ ID uuid.UUID }
 		if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &out) != nil || out.ID == uuid.Nil {
 			t.Fatal("genuine binding document birth", created.Code, created.Body.String())

@@ -57,14 +57,14 @@ func TestRender_UnknownLocaleFallsBack(t *testing.T) {
 	}
 }
 
-// Sender-facing emails are unaffected by Locale (stay English).
-func TestRender_SenderFacingIgnoresLocale(t *testing.T) {
+// Sender-facing emails use their explicitly supplied owner notification locale.
+func TestRender_SenderFacingUsesLocale(t *testing.T) {
 	ctx := TemplateContext{DocumentName: "NDA", SenderName: "Jane", OrgName: "Acme", Locale: "sv"}
 	subj, _, _, err := Render(KindCompletedSender, ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(subj, "signing ceremony complete") {
-		t.Errorf("sender-facing subject should stay English: %q", subj)
+	if !strings.Contains(subj, "signeringen är klar") {
+		t.Errorf("sender-facing subject should use Swedish: %q", subj)
 	}
 }

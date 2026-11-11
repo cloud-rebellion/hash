@@ -82,7 +82,7 @@ func TestBacklogMonitor450ActualReadySenderFailureAndFreshRemediationPrivacy(t *
 			json.NewEncoder(w).Encode(map[string]int{"accepted": len(lines)})
 		} else if r.URL.Path == "/prefix/api/1/metrics" {
 			var points []nativeOperationalMetricV1
-			if err := json.Unmarshal(raw, &points); err != nil || len(points) != 23 {
+			if err := json.Unmarshal(raw, &points); err != nil || len(points) != 26 {
 				t.Error("invalid fixed operational metric projection", err)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"accepted": len(points), "rejected": 0, "dropped": 0, "receipt_id": "fixture-metrics450"})

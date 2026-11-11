@@ -4,12 +4,14 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 )
@@ -65,5 +67,13 @@ func TestWriteSendErrorReportsUnverifiedSourceWithoutUpstreamDetails(t *testing.
 	body := recorder.Body.String()
 	if !strings.Contains(body, "retry sending") || strings.Contains(body, "synthetic-private-marker") {
 		t.Fatalf("response must offer a safe retry without upstream details: %s", body)
+	}
+}
+
+func TestWriteSendErrorMapsRefusedAuditLoanToUnavailable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).writeSendError(recorder, fmt.Errorf("complete send sealing: audit send: %w", errors.Join(pdfadmission.ErrHTMLAuditEventV1, pdfadmission.ErrApplicationAdmissionV1)))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("refused audit loan status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
 	}
 }

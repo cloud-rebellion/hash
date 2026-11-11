@@ -13,7 +13,7 @@ export async function createSupersession(context: SupersessionReady, name: strin
   if (result.source_commitment === context.prior.source_commitment) throw new Error('The linked draft reused the original source. Keep this request for inspection.');
   return result;
 }
-const originalPath = (m: SupersessionMarker) => `/api/v1/templates/${m.template_id}/html/document-requests/${m.request_id}`;
+const originalPath = (m: SupersessionMarker) => `/api/v1/templates/${encodeURIComponent(m.template_id)}/html/document-requests/${encodeURIComponent(m.request_id)}`;
 export async function inspectSupersession(marker: SupersessionMarker, signal: AbortSignal): Promise<SupersessionOutcome> {
   const m = checkedSupersessionMarker(marker);
   try { return checkedSupersessionResult(await signingAuthorityRequest(`${base}/requests/${m.request_id}`, signal, undefined, 16384), m); }

@@ -432,3 +432,11 @@ func TestPurgeOwnedSourceVersionPreservesSharedAndEvidenceObjects(t *testing.T) 
 		t.Fatalf("unpinned source cleanup = %#v, %v; want fail-closed refusal", got, err)
 	}
 }
+
+func (s *protectedPurgeQueriesStub) ListDocumentPDFRevisionObjects(context.Context, generated.ListDocumentPDFRevisionObjectsParams) ([]*generated.ListDocumentPDFRevisionObjectsRow, error) {
+	return nil, nil
+}
+
+func (s *protectedPurgeQueriesStub) EraseDocumentPDFHistory(context.Context, generated.EraseDocumentPDFHistoryParams) (int64, error) {
+	return 0, nil
+}

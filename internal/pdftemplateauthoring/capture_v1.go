@@ -164,6 +164,10 @@ func CaptureV1(parent context.Context, d CaptureDependenciesV1, actor CaptureAct
 		if privacy {
 			return authoring.ErrPendingPrivacyReview
 		}
+		// A replaced PDF is captured as a template only after its review (M124).
+		if err = queries.RequirePDFBytesReviewedV1(call, document); err != nil {
+			return fmt.Errorf("template capture requires a reviewed PDF: %w", err)
+		}
 		if err = call.Err(); err != nil {
 			return err
 		}

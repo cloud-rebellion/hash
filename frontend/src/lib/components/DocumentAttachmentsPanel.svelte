@@ -76,8 +76,8 @@
  <div class="flex flex-wrap justify-between items-center gap-3"><h2 class="font-display text-lg">{$ui("Attachments")}</h2>
   <button type="button" class="btn btn-secondary" disabled={!!attachmentState.busy || externalBusy} onclick={refresh}>{$ui("Refresh attachments")}</button></div>
  <p class="text-sm text-text-secondary">{$ui("Add supporting PDFs such as an NDA, DPA, policy or specification alongside the main document. Each attachment keeps the exact saved version selected for the package.")}</p>
- {#if attachmentState.error}<p role="alert" class="text-sm text-danger">{attachmentState.error}</p>{/if}
- {#if attachmentState.notice}<p role="status" class="text-sm">{attachmentState.notice}</p>{/if}
+ {#if attachmentState.error}<p role="alert" class="text-sm text-danger">{$ui(attachmentState.error)}</p>{/if}
+ {#if attachmentState.notice}<p role="status" class="text-sm">{$ui(attachmentState.notice)}</p>{/if}
  {#if attachmentState.busy}<p role="status" class="text-sm">{$ui(controller.mutating() ? 'Saving attachments and checking the saved result…' : 'Checking saved documents…')}</p>{/if}
  {#if !mainEditorClean || externalBusy}<p role="note" class="text-sm text-warning">{$ui("Finish or undo changes in the document, CRM information, recipients or signature locations before editing attachments. Your drafts stay in place.")}</p>{/if}
  {#if attachmentState.needsReadback}<div class="border border-warning rounded-md p-4 space-y-3 text-sm">
@@ -132,7 +132,7 @@
    <button type="button" class="btn btn-secondary" disabled={!!attachmentState.busy} onclick={() => controller.clearCandidate()}>{$ui("Cancel document selection")}</button>
   </div>{/if}
  </details>
- {#if preview.error}<p role="alert" class="text-sm text-danger">{preview.error}</p>{/if}
+ {#if preview.error}<p role="alert" class="text-sm text-danger">{$ui(preview.error)}</p>{/if}
  {#if preview.opening || preview.closing}<p role="status" class="text-sm">{$ui(preview.closing ? 'Closing the selected PDF…' : 'Verifying the selected PDF…')}</p>{/if}
  {#if preview.selection}<div class="space-y-3 border-t border-border-light pt-4" hidden={preview.opening || preview.closing}>
   <div class="flex flex-wrap justify-between items-center gap-3"><h3 class="font-medium">{$ui("Selected attachment:")} {preview.selection.title}</h3><button type="button" class="btn btn-secondary" onclick={() => previewController.close()}>{$ui("Close attachment preview")}</button></div>

@@ -104,6 +104,9 @@ func readHTMLReviewOwnedV1(call context.Context, db generated.DBTX, work *pdfadm
 	return models.Document, guard, nil
 }
 func (s *Server) reviewHTMLDocumentOwnedV1(parent context.Context, actor authoring.Actor, id uuid.UUID, in htmlDocumentReviewInput, expected time.Time, pdf []byte) (document *generated.Document, release func(), failure error) {
+	if in.ReviewerKind != reviewerKindHumanV1 && in.ReviewerKind != reviewerKindAgentV1 {
+		return nil, nil, errors.New("review requires a recorded reviewer kind")
+	}
 	if s.HTMLCreationSessions == nil {
 		return nil, nil, pdfadmission.ErrHTMLCeremonyWorkflowV1
 	}
@@ -159,6 +162,10 @@ func (s *Server) reviewHTMLDocumentOwnedV1(parent context.Context, actor authori
 			return &htmlReviewBusinessV1{http.StatusForbidden, "only the document sender or an owner can review this PDF"}
 		}
 		if e != nil {
+			return e
+		}
+		// Same transaction: the kind row and the review commit or fail together.
+		if _, e = generated.New(db).InsertDocumentReviewKindV1(call, generated.InsertDocumentReviewKindV1Params{ID: uuid.New(), ReviewerKind: in.ReviewerKind, DocumentID: id, OrgID: actor.OrgID}); e != nil {
 			return e
 		}
 		session, e := work.AuditSessionV1(call)
@@ -230,3 +237,10 @@ func htmlReviewSourceErrorV1(err error, current bool) error {
 	}
 	return err
 }
+
+// Who performed a review. Humans review through a staff session; agents come
+// in over MCP. The transport sets this, never the request body.
+const (
+	reviewerKindHumanV1 = "human"
+	reviewerKindAgentV1 = "agent"
+)

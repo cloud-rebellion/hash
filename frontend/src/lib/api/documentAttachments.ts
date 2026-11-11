@@ -1,5 +1,5 @@
 import { APIError, type DocumentResponse } from './client';
-import { attachmentExpected, attachmentMemberKey, attachmentInvalid, attachmentUUID, checkedAttachmentActor, checkedAttachmentDocument, checkedAttachmentInventory, checkedAttachmentLayout, checkedAttachmentOutcome, checkedAttachmentSelection,
+import { attachmentIncomplete, attachmentIncompleteServer, attachmentExpected, attachmentMemberKey, attachmentInvalid, attachmentUUID, checkedAttachmentActor, checkedAttachmentDocument, checkedAttachmentInventory, checkedAttachmentLayout, checkedAttachmentOutcome, checkedAttachmentSelection,
  type AttachmentInventory, type AttachmentMember, type AttachmentSelection, type AttachmentLayout, type AttachmentPage } from '../documentAttachments';
 
 async function jsonBody(response: Response, signal: AbortSignal, cap: number): Promise<unknown> {
@@ -11,11 +11,14 @@ async function jsonBody(response: Response, signal: AbortSignal, cap: number): P
   const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; } return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
+async function incompleteBody(response: Response): Promise<boolean> {
+ try { const text = await response.clone().text(); return text.length <= 1024 && JSON.parse(text)?.error === attachmentIncompleteServer; } catch { return false; }
+}
 async function request(path: string, signal: AbortSignal, method = 'GET', input?: unknown, cap = 8 * 1024 * 1024): Promise<unknown> {
  if (signal.aborted) throw new Error(attachmentInvalid);
  const body = input === undefined ? undefined : JSON.stringify(input); if (body && new TextEncoder().encode(body).length > (method === 'PATCH' ? 16384 : 4096)) throw new Error('Attachment labels exceed the request size limit. Shorten them before saving.');
  const response = await fetch(path, { method, credentials: 'include', cache: 'no-store', signal, headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body }) });
- if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new APIError(response.status, response.status === 409 ? 'The agreement or attachment source changed. Inspect saved attachments and review the source before another save.' : response.status === 401 ? 'Your session expired. Sign in again.' : response.status === 403 ? 'You no longer have permission to manage these attachments.' : response.status === 422 ? 'The exact PDF could not be verified. Review the source document.' : response.status === 429 ? 'Too many attachment requests. Wait before refreshing.' : 'The attachment request was refused. Refresh and inspect the saved state.'); }
+ if (!response.ok) { const incomplete = response.status === 409 && await incompleteBody(response); await response.body?.cancel().catch(() => {}); if (incomplete) throw new APIError(409, attachmentIncomplete); throw new APIError(response.status, response.status === 409 ? 'The agreement or attachment source changed. Inspect saved attachments and review the source before another save.' : response.status === 401 ? 'Your session expired. Sign in again.' : response.status === 403 ? 'You no longer have permission to manage these attachments.' : response.status === 422 ? 'The exact PDF could not be verified. Review the source document.' : response.status === 429 ? 'Too many attachment requests. Wait before refreshing.' : 'The attachment request was refused. Refresh and inspect the saved state.'); }
  return jsonBody(response, signal, cap);
 }
 function route(id: string): string { if (!attachmentUUID(id)) throw new Error(attachmentInvalid); return '/api/v1/documents/' + id; }
@@ -35,7 +38,7 @@ export async function fetchSelectedAttachmentPDF(value: AttachmentInventory, mem
  if (!m || attachmentMemberKey(m) !== attachmentMemberKey(member) || !v.package_id || signal.aborted) throw new Error(attachmentInvalid);
  const query = new URLSearchParams(attachmentExpected(v));
  const response = await fetch(route(v.document_id) + '/attachments/' + m.document_id + '/pdf?' + query, { credentials: 'include', cache: 'no-store', signal, headers: { Accept: 'application/pdf' } });
- if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new APIError(response.status, 'The selected PDF preview was refused. Refresh and inspect the saved attachments.'); }
+ if (!response.ok) { const incomplete = response.status === 409 && await incompleteBody(response); await response.body?.cancel().catch(() => {}); throw new APIError(response.status, incomplete ? attachmentIncomplete : 'The selected PDF preview was refused. Refresh and inspect the saved attachments.'); }
  const headers: Record<string, string> = { 'X-Hash-Document-Id': v.document_id, 'X-Hash-Document-Updated-At': v.updated_at, 'X-Hash-Package-Id': v.package_id, 'X-Hash-Package-Generation': v.generation, 'X-Hash-Member-Document-Id': m.document_id, 'X-Hash-PDF-Version': versionHeader(m.pdf_version_id), 'X-Hash-PDF-SHA256': m.pdf_sha256, 'X-Hash-PDF-Bytes': String(m.pdf_bytes), 'X-Hash-PDF-Pages': String(m.pdf_pages), 'Content-Length': String(m.pdf_bytes) };
  if (response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/pdf' || Object.entries(headers).some(([k, expected]) => response.headers.get(k) !== expected)) { await response.body?.cancel().catch(() => {}); throw new Error(attachmentInvalid); }
  const reader = response.body?.getReader(); if (!reader) throw new Error(attachmentInvalid);

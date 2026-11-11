@@ -101,7 +101,7 @@ func (w *ApplicationHTMLSendWorkV1) PrepareSenderEventNoticeV1(call context.Cont
 		return nil, err
 	}
 	w.closes = append(w.closes, closeOutput)
-	p.message, err = dispatch.SenderEventNoticeMessageV1(kind, publicURL, sender.Email, doc.ID, doc.Name, recipient.Name)
+	p.message, err = dispatch.SenderEventNoticeMessageLocaleV1(kind, publicURL, sender.Email, doc.ID, doc.Name, recipient.Name, doc.DefaultLocale)
 	if err != nil {
 		return nil, err
 	}

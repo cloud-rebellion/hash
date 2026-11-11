@@ -53,4 +53,4 @@ export async function startWorkspaceSMTPTest(expected_revision: number, signal: 
   if (!revision(expected_revision)) throw new Error('Invalid delivery revision'); const value = checkedSMTPTest(await jsonResponse('POST', '/api/v1/workspace-smtp/test', signal, 202, { expected_revision }));
   if (value.status !== 'pending') throw new Error('New delivery test is not pending'); return value;
 }
-export async function readWorkspaceSMTPTest(deliveryID: string, signal: AbortSignal) { if (!id(deliveryID)) throw new Error('Invalid delivery test identity'); return checkedSMTPTest(await jsonResponse('GET', `/api/v1/workspace-smtp/test/${deliveryID}`, signal, 200), deliveryID); }
+export async function readWorkspaceSMTPTest(deliveryID: string, signal: AbortSignal) { if (!id(deliveryID)) throw new Error('Invalid delivery test identity'); return checkedSMTPTest(await jsonResponse('GET', `/api/v1/workspace-smtp/test/${encodeURIComponent(deliveryID)}`, signal, 200), deliveryID); }

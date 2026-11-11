@@ -18,7 +18,7 @@ function between(source: string, start: string, end: string) {
 }
 const head = (source: string) => between(source, '<svelte:head>', '</svelte:head>');
 const shells = {
-  layout: `<script lang="ts">import { isStaffAuthPath } from ${JSON.stringify(join(lib, 'staffAuth.ts'))}; let { showChrome = false, path = '/sign/example' } = $props();</script>${head(layout)}`,
+  layout: `<script lang="ts">import { isStaffAuthPath, routeCategory } from ${JSON.stringify(join(lib, 'routeSurface.ts'))}; let { showChrome = false, path = '/sign/example' } = $props();</script>${head(layout)}`,
   signer: `<script lang="ts">import { FileSignature } from 'lucide-svelte'; import { t } from ${JSON.stringify(join(lib, 'i18n.ts'))}; let { ctx = null } = $props();</script>${head(signer)}${between(signer, '<header class="signer-bar">', '</header>')}`,
   completed: head(completed),
   notice: `${head(notice)}${between(notice, '<p class="font-display text-xl">', '</p>')}`

@@ -1,6 +1,16 @@
 import { expect, test } from 'bun:test';
 import { documentDownloadURL, documentDownloadName, fetchDocumentDownload, type DownloadDocument } from './documentDownload';
 const document: DownloadDocument = { id: '10101010-1010-4010-8010-101010101010', name: 'Presentation', source_kind: 'pdf', status: 'draft', updated_at: '2026-11-03T12:00:00.000001Z', pdf_sha256: 'a'.repeat(64) };
+test('N3: the document id is encoded exactly once', () => {
+  const odd = { ...document, id: 'a b/c', status: 'completed' };
+  for (const kind of ['pdf', 'evidence'] as const) {
+    const url = documentDownloadURL(odd, kind);
+    expect(url).toContain('/api/v1/documents/a%20b%2Fc/');
+    expect(url).not.toContain('%25');
+  }
+  expect(documentDownloadURL({ ...odd, status: 'draft' })).toContain('/api/v1/documents/a%20b%2Fc/pdf?');
+});
+
 test('visual download pins the saved PDF without a recipient or signature request', () => {
   const url = new URL(documentDownloadURL(document), 'https://hash.example');
   expect(url.pathname).toBe(`/api/v1/documents/${document.id}/pdf`);

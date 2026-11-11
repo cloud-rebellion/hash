@@ -139,7 +139,7 @@ func TestParticipantReportMandatoryWithoutOptionalExportV1E2E(t *testing.T) {
 // above. The SQL helper consumes the native owner's actually issued credential
 // effect; it does not independently derive the required signature role set.
 func TestParticipantReportCompletionIssuedCredentialPredicateV1E2E(t *testing.T) {
-	q := newOwnedPublicReadFixtureV1(t)
+	q := newOwnedPublicReadFixtureBaseV1(t, false)
 	cases := []struct {
 		name, role, status string
 		requiresSignature  bool

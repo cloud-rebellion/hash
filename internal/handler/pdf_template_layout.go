@@ -82,7 +82,10 @@ func (s *Server) handleSavePDFTemplate(w http.ResponseWriter, r *http.Request) {
 		defer result.CloseConsumerV1()
 	}
 	if err != nil {
+		message, gate := sendReviewGateMessageV1(err)
 		switch {
+		case gate:
+			writeJSON(w, http.StatusConflict, map[string]string{"error": message, "code": "pdf_review_required"})
 		case errors.Is(err, pdflayout.ErrPrecondition), errors.Is(err, pdfadmission.ErrPDFLayoutSourceChangedV1), errors.Is(err, pdfadmission.ErrPDFLayoutInspectionChangedV1):
 			writeError(w, http.StatusPreconditionFailed, err.Error())
 		case errors.Is(err, pdflayout.ErrInvalid):

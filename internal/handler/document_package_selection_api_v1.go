@@ -38,7 +38,7 @@ func (s *Server) handleSelectDocumentAttachmentV1(w http.ResponseWriter, r *http
 	r = r.WithContext(ctx)
 	authorize, e := s.sessionDraftAuthorization(r, sess.OrgID, sess.UserID)
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -49,14 +49,14 @@ func (s *Server) handleSelectDocumentAttachmentV1(w http.ResponseWriter, r *http
 	}
 	defer input.CloseConsumerV1()
 	if e = input.ReadHTTPV1(ctx, root, r.Body); e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
 	out, e := packageauthoring.SelectV1(ctx, packageauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Storage: s.Storage, Audit: s.Audit},
 		authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, input, firstIPFromHeader(r), r.UserAgent())
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -90,7 +90,7 @@ func (s *Server) handleDocumentAttachmentsV1(w http.ResponseWriter, r *http.Requ
 	r = r.WithContext(ctx)
 	authorize, e := s.sessionDraftAuthorization(r, sess.OrgID, sess.UserID)
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) handleDocumentAttachmentsV1(w http.ResponseWriter, r *http.Requ
 		defer result.CloseConsumerV1()
 	}
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -132,7 +132,7 @@ func (s *Server) handleSaveDocumentAttachmentLayoutV1(w http.ResponseWriter, r *
 	r = r.WithContext(ctx)
 	authorize, e := s.sessionDraftAuthorization(r, sess.OrgID, sess.UserID)
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
@@ -143,14 +143,14 @@ func (s *Server) handleSaveDocumentAttachmentLayoutV1(w http.ResponseWriter, r *
 	}
 	defer input.CloseConsumerV1()
 	if e = input.ReadLayoutHTTPV1(ctx, root, r.Body); e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}
 	out, e := packageauthoring.SaveLayoutV1(ctx, packageauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Storage: s.Storage, Audit: s.Audit},
 		authoring.Actor{OrgID: sess.OrgID, UserID: sess.UserID, Authorize: authorize}, input, firstIPFromHeader(r), r.UserAgent())
 	if e != nil {
-		status, message := packageauthoring.PublicErrorV1(e)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), e, sess.OrgID, root)
 		writeError(w, status, message)
 		return
 	}

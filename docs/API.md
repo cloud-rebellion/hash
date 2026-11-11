@@ -544,6 +544,14 @@ Append/delete/reorder and HTML/Markdown imports preserve their observation
 requirements and use the same original-credential and privacy admission checks.
 
 Document PATCH `default_locale` must identify a shipped signing language.
+New REST block/PDF-template documents, PDF/HTML imports and HTML-template
+instantiations also accept optional `default_locale`. It is validated and saved
+inside their original creation transaction before audit and commit. Multipart
+PDF imports use a `default_locale` form field. The interface supplies its selected
+language for new documents; omission keeps the existing English default.
+Explicit recipient languages remain authoritative for their messages. Owner
+document notifications follow the saved document language. Existing documents
+and queued email bodies are unchanged by an interface language switch.
 Supported regional tags such as `sv-SE` normalize to the base language `sv`,
 using the same rules as recipient authoring. Unknown languages return400
 before database mutation instead of creating an unusable recipient default.

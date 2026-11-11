@@ -540,6 +540,7 @@ ALTER TABLE documents ADD COLUMN html_current_materialization_id uuid;
 CREATE TABLE document_attachment_drafts_v1(package_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
 CREATE TABLE document_package_capture_members_v1(package_id uuid,revision bigint,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
 CREATE TABLE document_package_send_attempts_v1(attempt_id uuid,org_id uuid,document_id uuid,package_id uuid,capture_revision bigint,retention_started_at timestamptz,retain_until timestamptz);
+CREATE TABLE document_pdf_revisions_v1(id uuid,org_id uuid,document_id uuid,sequence integer,pdf_key text,pdf_version_id text,pdf_sha256 bytea,previous_pdf_key text,previous_pdf_version_id text,previous_pdf_sha256 bytea);
 CREATE TABLE html_document_materializations(id uuid,document_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea);
 CREATE TABLE html_document_materialization_snapshots(id uuid,document_id uuid,org_id uuid,pdf_key text,pdf_version_id text,pdf_sha256 bytea,rendered_pdf_key text,rendered_pdf_version_id text,rendered_pdf_sha256 bytea,retain_until timestamptz);
 -- Match migration 00060's UTC calendar normalization and upward whole-second

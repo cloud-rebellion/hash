@@ -1,4 +1,4 @@
-import { attachmentPreviewKey, checkedAttachmentInventory, type AttachmentInventory, type AttachmentMember } from './documentAttachments';
+import { attachmentIncomplete, incomplete, attachmentPreviewKey, checkedAttachmentInventory, type AttachmentInventory, type AttachmentMember } from './documentAttachments';
 export type AttachmentPreviewSelection = { key: string; bytes: Uint8Array; pages: number; title: string };
 export type AttachmentPreviewState = { selection: AttachmentPreviewSelection | null; opening: boolean; closing: boolean; blocked: boolean; error: string | null };
 export const initialAttachmentPreview = (): AttachmentPreviewState => ({ selection: null, opening: false, closing: false, blocked: false, error: null });
@@ -32,7 +32,7 @@ export class AttachmentPreviewController {
    try { const bytes = await this.fetchPDF(v, m, abort.signal);
     if (this.disposed || revision !== this.revision || abort.signal.aborted) { bytes.fill(0); return; }
     this.update({ selection: { key: attachmentPreviewKey(org, v, m), bytes, pages: m.pdf_pages, title: m.title }, opening: false, closing: false });
-   } catch { if (revision === this.revision && !this.disposed) this.update({ opening: false, closing: false, error: 'The selected attachment could not be verified. Refresh attachments before opening it again.' }); }
+   } catch (e) { if (revision === this.revision && !this.disposed) this.update({ opening: false, closing: false, error: incomplete(e) ? attachmentIncomplete : 'The selected attachment could not be verified. Refresh attachments before opening it again.' }); }
   });
   this.work = request.catch(() => {}); return request;
  }

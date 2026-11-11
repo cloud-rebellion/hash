@@ -14,16 +14,14 @@ import (
 // renderer still decides locale, URL validity and required expiry errors.
 func CompletedNotificationComponentsV1(kind string, ctx TemplateContext) (subjectBytes, htmlBytes, textBytes int64, err error) {
 	if kind == KindCompletedSender {
-		suffix := " signing ceremony complete"
-		if ctx.Acknowledgement {
-			suffix = " acknowledgements complete"
-		}
+		suffix := completedSenderSubjectSuffixV1(ctx)
 		subjectBytes, err = inviteAddBytesV1(int64(len(suffix)), int64(len(ctx.DocumentName)), 1)
 		if err != nil {
 			return 0, 0, 0, err
 		}
-		htmlBytes = int64(len(completedSenderHTML))
-		textBytes = int64(len(completedSenderText))
+		htmlSource, textSource := nativeEmailTemplateSourcesV1(kind, ctx.Locale)
+		htmlBytes = int64(len(htmlSource))
+		textBytes = int64(len(textSource))
 		// Each branch has a document and two distinct URL insertions. Counting BOTH fixed
 		// branches permits no undercount and changes no original branch decision.
 		htmlBytes, err = inviteAddBytesV1(htmlBytes, int64(len(ctx.DocumentName)), 12)
@@ -87,6 +85,14 @@ func CompletedNotificationComponentsV1(kind string, ctx TemplateContext) (subjec
 			}
 		}
 	}
+	htmlBytes, err = inviteAddBytesV1(htmlBytes, int64(len(completedOriginalFilesLabelV1(ctx.Locale))), 6)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	textBytes, err = inviteAddBytesV1(textBytes, int64(len(completedOriginalFilesLabelV1(ctx.Locale))), 1)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 	htmlBytes, err = inviteAddBytesV1(htmlBytes, int64(len(nativeEmailFooterFallbackV1)), 6)
 	if err != nil {
 		return 0, 0, 0, err
@@ -106,5 +112,5 @@ func CompletedNotificationComponentsV1(kind string, ctx TemplateContext) (subjec
 // The original sender branch parses only these two fixed application-owned
 // templates. Actual output/context demand remains separate and source-derived.
 func CompletedSenderTemplateSourceBytesV1() int64 {
-	return int64(len(completedSenderHTML) + len(completedSenderText))
+	return int64(max(len(completedSenderHTML)+len(completedSenderText), len(completedSenderHTMLSV)+len(completedSenderTextSV)))
 }

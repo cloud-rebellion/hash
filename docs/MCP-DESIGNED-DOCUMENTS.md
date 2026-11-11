@@ -84,13 +84,12 @@ server-injected `brand_<slot>` assets from `input.html_master_json.assets` and p
 `brand_profile`/`asset_slots` again. The server re-resolves those bytes and refuses
 client collisions. Preserve unrelated authored assets such as embedded fonts.
 
-## Preview, inspect and explicitly approve
+## Preview, inspect, then a human approves
 
 `preview_design_template` takes `template_id` and
 `input:{expected_version,expected_content_sha256,values?,sections?}`. It returns
-exact `pdf_base64`, `pdf_sha256`, `page_count`, a materialization commitment and an
-expiring `preview_receipt` bound to the exact API key, actor, organization,
-template/version/content and PDF. It neither approves nor creates a document.
+exact `pdf_base64`, `pdf_sha256`, `page_count` and a materialization commitment.
+It neither approves nor creates a document.
 
 Render these exact PDF bytes to page images and inspect **every page individually**
 at useful scale. Check logo fidelity, typography, contrast, clipping, overflow,
@@ -99,26 +98,10 @@ overview only. Fix the editable design, render again and inspect every page.
 If the host cannot obtain, render or view page images, report visual review
 pending; do not approve or call the design ready.
 
-After actual inspection an owner may call `approve_design_template` with:
-
-```json
-{
-  "template_id":"<design UUID>",
-  "visually_reviewed":true,
-  "reviewed_pages":[1,2],
-  "input":{
-    "expected_version":3,
-    "expected_content_sha256":"<observed SHA-256>",
-    "preview_receipt":"<receipt from this exact preview>",
-    "expected_preview_pdf_sha256":"<preview PDF SHA-256>"
-  }
-}
-```
-
-`reviewed_pages` must cover exactly `1..page_count`. This is an explicit caller
-attestation; it is not machine proof of aesthetics, approval of contractual terms
-or authorization to send. A cookie preview receipt cannot substitute for an
-API-key receipt. Revocation, expiry or changed source still refuses approval.
+Template approval is human-only. MCP has no approval tool: an agent inspects the
+preview, then tells the user the design is ready, and an owner approves that exact
+version in the Hash app (staff session, `POST /api/v1/templates/{id}/html/approve`).
+API keys cannot reach that route.
 
 ## Create and iterate on an internal draft
 
@@ -156,11 +139,15 @@ pagination. Then use `review_document_design` with `document_id`,
 `visually_reviewed:true`, all `reviewed_pages` and
 `input:{expected_updated_at,expected_pdf_sha256,expected_html_source_commitment}`.
 
+Agents may review only non-signing documents (purpose `document` or
+`presentation`). `review_document_design` is refused for a signing document,
+acknowledgement mode included; a human reviews it in a staff session.
+
 `revise_document_design_values` accepts current updated-at/source pins, string
 `values`/`sections` and optional plain-text `summary`. It revises declared text
 only, preserves prior exact PDFs and resets PDF review/field placement. It cannot
 replace layout/assets. For layout edits update the editable template, preview,
-inspect, explicitly approve the new version and create a new document from it.
+inspect, have an owner approve the new version in the app and create a new document from it.
 No existing frozen document or signed artifact is rewritten.
 
 Report saved, rendered, visually inspected, explicitly approved and sent states

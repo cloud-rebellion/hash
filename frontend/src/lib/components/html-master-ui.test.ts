@@ -31,7 +31,7 @@ function design(version = 3) {
 }
 function populateFixture() {
   const calls: any[] = [], template = design();
-  const env: any = { templateCreationUnconfirmed: false, purpose: 'signing', profile: null, requireDocumentPurpose, template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
+  const env: any = { $staffLocale: 'en', templateCreationUnconfirmed: false, purpose: 'signing', profile: null, requireDocumentPurpose, template, sourceID: 'design', sourceOrg: 'org', design: template, pendingDesign: null,
     fields: htmlTemplateFields(template as any), values: { customer: 'Typed <AB> & Co' }, name: 'Typed draft name',
     sections: {}, sectionDefinitions: [], proposed: {}, populationState: { mappings: [], observation: null },
     approved: true, loading: false, busy: false, navigating: false, createdDocument: null, creationUncertain: false, markerError: false, clock: 0,
@@ -66,7 +66,8 @@ test('contract populate retains conflicting printed identities and refuses creat
 });
 test('essential wording uses its declared section key, permits preview-only blank input, and is required for creation', async () => {
   const s = populateFixture(), t = contractTemplateFixture(); t.html_master_json!.sections![0].default_text = '';
-  s.actions.adoptDesign(t); s.calls.length = 0;
+  s.actions.adoptDesign(t); s.calls.length = 0; s.env.$staffLocale = 'sv';
+  expect(s.actions.candidate().default_locale).toBe('sv');
   expect(s.actions.candidate().sections).toEqual({ scope_text: '' });
   s.env.sections.scope_text = 'Explicit human-proposed service scope.'; await s.actions.create(event);
   expect(s.calls[0].candidate.sections).toEqual({ scope_text: 'Explicit human-proposed service scope.' }); expect(s.calls[0].candidate.sections.scope).toBeUndefined();

@@ -103,7 +103,9 @@ func TestDSRErasureRollsBackEverySideEffectWhenSignatureScrubFailsE2E(t *testing
 		// Invoke the authoritative application transaction. These input rows are
 		// explicitly synthetic legacy-shaped components, not a verified signature
 		// journey or current/legacy legal artifact acceptance claim.
-		recorder := transitionDSRE2E(server, orgID, userID, dsr.ID, "fulfilled")
+		// Erasure of a completed document needs confirm:true; without it the
+		// request stops at the 409 prompt and never reaches the scrub.
+		recorder := transitionDSRBodyE2E(server, orgID, userID, dsr.ID, `{"status":"fulfilled","confirm":true}`)
 		if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "anonymize signatures") {
 			t.Fatalf("actual component handler scrub failure=%d %s", recorder.Code, recorder.Body.String())
 		}
@@ -550,19 +552,26 @@ func completeDSRDocumentE2E(
 }
 
 func transitionDSRE2E(server *Server, orgID, userID, requestID uuid.UUID, status string) *httptest.ResponseRecorder {
+	return transitionDSRBodyE2E(server, orgID, userID, requestID, `{"status":"`+status+`"}`)
+}
+
+func transitionDSRBodyE2E(server *Server, orgID, userID, requestID uuid.UUID, body string) *httptest.ResponseRecorder {
 	ctx := context.WithValue(context.Background(), auth.UserIDKey, userID)
 	ctx = context.WithValue(ctx, auth.OrgIDKey, orgID)
 	ctx = context.WithValue(ctx, auth.RoleKey, "owner")
 	routeContext := chi.NewRouteContext()
 	routeContext.URLParams.Add("id", requestID.String())
 	ctx = context.WithValue(ctx, chi.RouteCtxKey, routeContext)
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/dsr/"+requestID.String(), strings.NewReader(`{"status":"`+status+`"}`)).WithContext(ctx)
-	req.Header.Set("Content-Type", "application/json")
 	payload, _ := json.Marshal(auth.SessionPayload{UserID: userID})
-	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: server.Cookies.Mint(payload, time.Hour)})
-	recorder := httptest.NewRecorder()
-	server.handleTransitionDSR(recorder, req)
-	return recorder
+	cookie := server.Cookies.Mint(payload, time.Hour)
+	return confirmedDSRBodyE2E(body, func(input string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/dsr/"+requestID.String(), strings.NewReader(input)).WithContext(ctx)
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookie})
+		recorder := httptest.NewRecorder()
+		server.handleTransitionDSR(recorder, req)
+		return recorder
+	})
 }
 
 func TestDSRErasureSoftDeletedDraftRequiresArchiveReviewAndCanCompleteE2E(t *testing.T) {

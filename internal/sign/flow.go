@@ -1201,6 +1201,7 @@ func (e *Engine) renderCompletionMessages(doc *generated.Document, sender *gener
 	senderURL := baseURL + "/api/v1/documents/" + doc.ID.String() + "/final-pdf"
 	senderMessage, err := renderNotificationEmail(doc.OrgID, dispatch.KindCompletedSender, sender.Email, dispatch.TemplateContext{
 		DocumentName:    doc.Name,
+		Locale:          doc.DefaultLocale,
 		SenderName:      sender.Name,
 		SenderEmail:     sender.Email,
 		RecipientName:   sender.Name,
@@ -1393,6 +1394,7 @@ func (e *Engine) Decline(ctx context.Context, rc *RecipientContext, reason strin
 		}
 		notificationMessages, err = e.prepareNotificationTx(ctx, q, lockedDoc.OrgID, dispatch.KindDeclined, sender.Email, dispatch.TemplateContext{
 			DocumentName:  lockedDoc.Name,
+			Locale:        lockedDoc.DefaultLocale,
 			SenderName:    sender.Name,
 			SenderEmail:   sender.Email,
 			RecipientName: freshRec.Name,
@@ -1551,6 +1553,7 @@ func (e *Engine) requestChangesLegacyV1(ctx context.Context, rc *RecipientContex
 		}
 		notificationMessages, err = e.prepareNotificationTx(ctx, q, lockedDoc.OrgID, dispatch.KindChangesRequested, sender.Email, dispatch.TemplateContext{
 			DocumentName:   lockedDoc.Name,
+			Locale:         lockedDoc.DefaultLocale,
 			SenderName:     sender.Name,
 			SenderEmail:    sender.Email,
 			RecipientName:  freshRec.Name,

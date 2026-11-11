@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DocumentResponse } from './api/client';
-import { DocumentAttachmentsController, attachmentGeneration, attachmentLabel, checkedAttachmentInventory, checkedAttachmentLayout, type AttachmentInventory, type AttachmentOutcome, type AttachmentTransport, type AttachmentActor } from './documentAttachments';
+import { APIError } from './api/client';
+import { DocumentAttachmentsController, attachmentIncomplete, attachmentGeneration, attachmentLabel, checkedAttachmentInventory, checkedAttachmentLayout, type AttachmentInventory, type AttachmentOutcome, type AttachmentTransport, type AttachmentActor } from './documentAttachments';
 export const ATTACH_ROOT='11111111-1111-4111-8111-111111111111', ATTACH_A='22222222-2222-4222-8222-222222222222', ATTACH_B='33333333-3333-4333-8333-333333333333', ATTACH_ORG='44444444-4444-4444-8444-444444444444', ATTACH_USER='55555555-5555-4555-8555-555555555555', ATTACH_PKG='66666666-6666-4666-8666-666666666666', ATTACH_EVENT='77777777-7777-4777-8777-777777777777';
 export const ATTACH_TIME='2026-10-18T04:10:00.123456Z', ATTACH_NEXT='2026-10-18T04:10:01.654321Z';
 export const attachmentActor:AttachmentActor={org_id:ATTACH_ORG,user_id:ATTACH_USER,role:'owner'};
@@ -31,7 +32,7 @@ test('source choices are freshly reread and unreviewed HTML cannot be added',asy
 test('double-submit cannot dispatch a second selection while the first waits',async()=>{const f=fixture(true);await f.c.refresh();await f.c.list();await f.c.choose(ATTACH_A);let calls=0;const gate=deferredAttachment<AttachmentOutcome>();f.transport.select=async()=>{calls++;return gate.promise};const pending=f.c.select('Exact NDA','NDA');while(!calls)await Promise.resolve();await f.c.select('Exact NDA','NDA');expect(calls).toBe(1);gate.resolve({state:'unknown',reconciliation_required:true});await pending;expect(f.c.state.candidate?.id).toBe(ATTACH_A);expect(f.c.sendBlocked()).toBe(true)});
 
 test('cancelling a source choice preserves existing local attachment labels',async()=>{const f=fixture();const id='88888888-8888-4888-8888-888888888888';f.transport.choices=async()=>({documents:[attachmentDoc(id)],limit:20,offset:0,total:1});await f.c.refresh();await f.c.list();await f.c.choose(id);f.c.labels(ATTACH_A,'Local retained title','NDA');f.c.clearCandidate();expect(f.c.state.candidate).toBe(null);expect(f.c.state.draft[0].title).toBe('Local retained title');expect(f.c.dirty()).toBe(true);});
-test('oversized escaped layout refuses locally while retaining a fresh editable draft',async()=>{const f=fixture();const v=attachmentView();v.members=Array.from({length:16},(_,i)=>({...v.members[0],document_id:'99999999-9999-4999-8999-'+String(i+1).padStart(12,'0'),ordinal:i+1,title:'Saved '+i}));f.set(v);await f.c.refresh();for(const m of v.members)f.c.labels(m.document_id,'"'.repeat(512),'"'.repeat(128));let writes=0;f.transport.layout=async()=>{writes++;throw Error('must not dispatch')};await f.c.saveLayout(true);expect(writes).toBe(0);expect(f.c.state.fresh).toBe(true);expect(f.c.state.needsReadback).toBe(false);expect(f.c.canEdit()).toBe(true);expect(f.c.state.error).toContain('16KiB');expect(f.c.dirty()).toBe(true);});
+test('oversized escaped layout refuses locally while retaining a fresh editable draft',async()=>{const f=fixture();const v=attachmentView();v.members=Array.from({length:16},(_,i)=>({...v.members[0],document_id:'99999999-9999-4999-8999-'+String(i+1).padStart(12,'0'),ordinal:i+1,title:'Saved '+i}));f.set(v);await f.c.refresh();for(const m of v.members)f.c.labels(m.document_id,'"'.repeat(512),'"'.repeat(128));let writes=0;f.transport.layout=async()=>{writes++;throw Error('must not dispatch')};await f.c.saveLayout(true);expect(writes).toBe(0);expect(f.c.state.fresh).toBe(true);expect(f.c.state.needsReadback).toBe(false);expect(f.c.canEdit()).toBe(true);expect(f.c.state.error).toContain('16 KiB');expect(f.c.dirty()).toBe(true);});
 
 test('changed actor role refuses selection before dispatch even when the former owner owns the root',async()=>{const f=fixture(true);await f.c.refresh();await f.c.list();await f.c.choose(ATTACH_A);f.transport.identity=async()=>({...attachmentActor,role:'sender'});let calls=0;f.transport.select=async()=>{calls++;throw Error('must not dispatch')};await f.c.select('NDA','NDA');expect(calls).toBe(0);expect(f.c.state.fresh).toBe(false);expect(f.c.state.candidate?.id).toBe(ATTACH_A);});
 test('saving existing labels preserves a pending source choice and does not consume its information',async()=>{const f=fixture();const id='88888888-8888-4888-8888-888888888888';f.transport.choices=async()=>({documents:[attachmentDoc(id)],limit:20,offset:0,total:1});await f.c.refresh();await f.c.list();await f.c.choose(id);f.c.labels(ATTACH_A,'Edited NDA','NDA');f.transport.layout=async()=>{const v=attachmentView();v.updated_at=ATTACH_NEXT;v.generation='9';v.members[0]={...v.members[0],ordinal:1,title:'Edited NDA',category:'NDA'};v.members[1].ordinal=2;f.set(v);return{state:'committed',reconciliation_required:false,layout:{package_id:ATTACH_PKG,generation:'9',updated_at:ATTACH_NEXT,changed_rows:2,event_id:ATTACH_EVENT}}};await f.c.saveLayout(true);expect(f.c.state.candidate?.id).toBe(id);expect(f.c.dirty()).toBe(false);expect(f.c.canSelect()).toBe(true);expect(f.counts().adopts).toBe(1);});
@@ -42,4 +43,25 @@ test('stale Send invalidates its observation, reads changed members, and require
  const changed=attachmentView();changed.updated_at=ATTACH_NEXT;changed.generation='8';changed.members=changed.members.slice(0,1);f.set(changed);
  await f.c.inspectReadback();expect(f.c.state.readback?.inventory.members).toHaveLength(1);expect(f.c.sendBlocked()).toBe(true);expect(f.c.sendObservation()).toBeUndefined();
  f.c.acceptReadback();expect(f.c.sendBlocked()).toBe(false);expect(f.c.sendObservation()).toEqual({expected_updated_at:ATTACH_NEXT,package_id:ATTACH_PKG,generation:'8'});expect(f.counts().adopts).toBe(1);
+});
+
+test('a 409 incomplete-record refusal reaches staff and does not ask for a readback', async () => {
+  const f = fixture();
+  f.transport.inventory = async () => { throw new APIError(409, attachmentIncomplete); };
+  await f.c.refresh();
+  expect(f.c.state.error).toBe(attachmentIncomplete);
+  expect(f.c.state.needsReadback).toBe(false);
+});
+
+test('the attachment client turns the exact server 409 body into the incomplete-record message', async () => {
+  const { getDocumentAttachments } = await import('./api/documentAttachments');
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: "this draft's saved record is incomplete and cannot be used for attachments; contact support" }) + '\n', { status: 409, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+  try {
+    const err = await getDocumentAttachments(ATTACH_ROOT, new AbortController().signal).catch(e => e);
+    expect([err.status, err.message]).toEqual([409, attachmentIncomplete]);
+    globalThis.fetch = (async () => new Response('{"error":"document or attachments changed; reload and review"}', { status: 409 })) as typeof fetch;
+    const other = await getDocumentAttachments(ATTACH_ROOT, new AbortController().signal).catch(e => e);
+    expect(other.message).not.toBe(attachmentIncomplete);
+  } finally { globalThis.fetch = real; }
 });

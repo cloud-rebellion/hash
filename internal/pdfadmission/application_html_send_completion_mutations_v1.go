@@ -514,12 +514,12 @@ func htmlSendDocumentExactTupleEqualV1(a, b *generated.Document) bool {
 
 func (w *ApplicationHTMLSendWorkV1) CompleteDocumentSendV1(call context.Context) (*generated.Document, error) {
 	if w == nil || w.self != w {
-		return nil, ErrHTMLSendWorkV1
+		return nil, fmt.Errorf("%w: completion_receiver", ErrHTMLSendWorkV1)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.valid(call) || w.stage.purpose != HTMLSendCompletionV1 || w.sourceDocument == nil || w.sourceIntent == nil || w.completedAttempted {
-		return nil, ErrHTMLSendWorkV1
+		return nil, fmt.Errorf("%w: completion_guard", ErrHTMLSendWorkV1)
 	}
 	w.completedAttempted = true
 	raw, _, err := w.admitDocumentReturnV1(call, int64(len("sent")+len("hash-a13-2026-08-31")))
@@ -532,7 +532,7 @@ func (w *ApplicationHTMLSendWorkV1) CompleteDocumentSendV1(call context.Context)
 		return nil, err
 	}
 	if !w.verifyDocumentReturnV1(row, raw) || row.Status != "sent" {
-		return nil, ErrHTMLSendWorkV1
+		return nil, fmt.Errorf("%w: completion_return", ErrHTMLSendWorkV1)
 	}
 	before, after := *w.sourceDocument, *row
 	before.Status = after.Status
@@ -541,8 +541,14 @@ func (w *ApplicationHTMLSendWorkV1) CompleteDocumentSendV1(call context.Context)
 	before.Article13NoticeSchema = after.Article13NoticeSchema
 	before.Article13NoticeEpochV61Committed = after.Article13NoticeEpochV61Committed
 	before.UpdatedAt = after.UpdatedAt
-	if !htmlSendDocumentExactTupleEqualV1(&before, &after) || row.SentAt != w.sourceIntent.Article13NoticeEpochAt || row.Article13NoticeEpochAt != w.sourceIntent.Article13NoticeEpochAt || row.Article13NoticeSchema != "hash-a13-2026-08-31" || !row.Article13NoticeEpochV61Committed {
-		return nil, ErrHTMLSendWorkV1
+	if !htmlSendDocumentExactTupleEqualV1(&before, &after) {
+		return nil, fmt.Errorf("%w: completion_tuple", ErrHTMLSendWorkV1)
+	}
+	if row.SentAt != w.sourceIntent.Article13NoticeEpochAt || row.Article13NoticeEpochAt != w.sourceIntent.Article13NoticeEpochAt {
+		return nil, fmt.Errorf("%w: completion_epoch", ErrHTMLSendWorkV1)
+	}
+	if row.Article13NoticeSchema != "hash-a13-2026-08-31" || !row.Article13NoticeEpochV61Committed {
+		return nil, fmt.Errorf("%w: completion_notice", ErrHTMLSendWorkV1)
 	}
 	w.sourceDocument = htmlSendCloneDocumentV1(row)
 	w.models.Document = row

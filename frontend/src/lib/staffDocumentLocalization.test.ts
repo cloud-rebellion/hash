@@ -62,3 +62,8 @@ test('all staff document text and explicit UI labels are localized while protect
     expect(source).not.toContain('$ui(executionState.preview.disclosure)');
   }
 });
+
+test('attachment errors shown in the panel have Swedish translations', () => {
+  expect(translateStaffText('sv', 'The saved attachments could not be verified. Refresh and inspect the saved state before continuing.')).toBe('De sparade bilagorna kunde inte verifieras. Uppdatera och granska det sparade läget innan du fortsätter.');
+  expect(translateStaffText('sv', 'Select a saved attachment.')).toBe('Välj en sparad bilaga.');
+});

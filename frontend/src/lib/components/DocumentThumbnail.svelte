@@ -3,7 +3,7 @@
   import { FileText } from 'lucide-svelte';
   import { ui } from '$lib/staffPreferences';
   import { getDocument, getTemplate, fetchVerifiedDocumentPDF, fetchVerifiedTemplatePDF } from '$lib/api/client';
-  import { previewLines, thumbnailTurn, type ThumbnailItem } from '$lib/documentThumbnail';
+  import { cachedThumbnail, previewLines, rememberThumbnail, thumbnailKey, thumbnailTurn, type ThumbnailItem } from '$lib/documentThumbnail';
   import type { PdfDoc } from '$lib/pdf';
   import type { PdfLoad } from '$lib/pdfLoad';
   import { captureFlarePDFViewError } from '$lib/flare-client';
@@ -28,7 +28,11 @@
   }
   async function renderPreview() {
     if (started || closed) return;
-    started = true; previewState = 'loading'; observer?.disconnect();
+    started = true; observer?.disconnect();
+    const cacheKey = thumbnailKey(sourceKind, source), hit = cachedThumbnail(cacheKey);
+    if (hit?.image) { imageURL = URL.createObjectURL(hit.image); previewState = 'ready'; return; }
+    if (hit?.lines) { lines = hit.lines; previewState = lines.length ? 'ready' : 'empty'; return; }
+    previewState = 'loading';
     let release: (() => void) | null = null;
     let pdfOperation = false;
     try {
@@ -53,7 +57,7 @@
         const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.82));
         if (!blob) throw new Error('Preview image unavailable');
         if (closed) return;
-        imageURL = URL.createObjectURL(blob); previewState = 'ready'; pdfOperation = false;
+        rememberThumbnail(cacheKey, { image: blob }); imageURL = URL.createObjectURL(blob); previewState = 'ready'; pdfOperation = false;
       } else {
         let detail = source;
         if (!source.blocks_json && !source.html_master_json) detail = sourceKind === 'document'
@@ -63,7 +67,7 @@
           || (sourceKind === 'template' && (detail.version !== source.version || detail.content_sha256 !== source.content_sha256))
           || (sourceKind === 'document' && source.updated_at && detail.updated_at !== source.updated_at)) throw new Error('Preview source changed');
         lines = previewLines(detail.source_kind === 'html' ? detail.html_master_json : detail.blocks_json, detail.source_kind === 'html');
-        previewState = lines.length ? 'ready' : 'empty';
+        previewState = lines.length ? 'ready' : 'empty'; rememberThumbnail(cacheKey, { lines });
       }
     } catch (error) {
       if (!closed && !(error instanceof Error && (error.name === 'AbortError' || error.name === 'RenderingCancelledException'))) {

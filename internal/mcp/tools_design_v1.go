@@ -95,22 +95,22 @@ func registerDesignToolsV1(s *Server, d Deps) {
 	// Each fixed operation selects its own native input profile. The caller
 	// cannot select a tenant, grant, cost, actor or native-work profile.
 	type def struct {
-		name, description             string
-		write, owner, document, input bool
-		profile                       pdfadmission.HTMLAuthoringInputProfileV1
+		name, description      string
+		write, document, input bool
+		profile                pdfadmission.HTMLAuthoringInputProfileV1
 	}
 	defs := []def{
-		{"create_design_template", "Save a new editable, versioned HTML design. Read hash://guides/designed-documents first. This does not visually review, approve, create recipients or send anything.", true, false, false, true, pdfadmission.HTMLTemplateMasterInputV1},
-		{"get_design_template", "Read current editable HTML source, or the exact immutable version pinned by a document. For historical source supply version AND expected_content_sha256. Result separates current_parent_version/name from selected version/master/defaults/approval.", false, false, false, false, 0},
-		{"update_design_template", "Save a new HTML layout/assets/defaults version using expected_version. Existing documents keep their frozen design; instantiate the reviewed new version to use its layout.", true, false, false, true, pdfadmission.HTMLTemplateMasterInputV1},
-		{"preview_design_template", "Render the saved exact design to a PDF. Returns bytes, SHA, page count and an API-key-bound expiring preview receipt. Inspect EVERY page; rendering/readback is not visual review.", false, false, false, true, pdfadmission.HTMLTemplatePreviewInputV1},
-		{"approve_design_template", "Explicit OWNER approval of the exact design preview after inspecting every page. Supply visually_reviewed=true and reviewed_pages=1..N. This is a caller attestation, not contract approval or Send.", true, true, false, true, pdfadmission.HTMLTemplateApprovalInputV1},
-		{"create_document_from_design", "Create an internal draft from an exact approved design version. Supply purpose document/presentation/signing explicitly and a unique request_id. Retains master, declared text and exact PDF history. Does not add recipients or send.", true, false, false, true, pdfadmission.HTMLDocumentCreationInputV1},
-		{"get_document_design_source", "Read current declared source/PDF commitments and the frozen editable-template origin. Layout/assets remain frozen; text revisions do not replace a layout. Returns retained brand provenance when present.", false, false, true, false, 0},
-		{"get_document_design_history", "Read retained HTML materialization revisions and exact source/PDF/page-count pins.", false, false, true, false, 0},
-		{"download_document_pdf", "Download an exact saved PDF for visual inspection. Supply current updated_at/PDF SHA and HTML source commitment; revision selects retained HTML history. No approval or Send occurs.", false, false, true, true, 0},
-		{"revise_document_design_values", "Revise declared plain-text values/sections using current source/updated_at pins. Preserves the frozen master/assets and retained PDF history; new PDF requires fresh visual review and field placement.", true, false, true, true, pdfadmission.HTMLDocumentRevisionInputV1},
-		{"review_document_design", "Explicitly acknowledge the exact current HTML PDF after inspecting EVERY page. Supply visually_reviewed=true and reviewed_pages=1..N. Save, download and successful rendering are insufficient. Does not approve contractual terms or Send.", true, false, true, true, 0},
+		{"create_design_template", "Save a new editable, versioned HTML design. Read hash://guides/designed-documents first. This does not visually review, approve, create recipients or send anything.", true, false, true, pdfadmission.HTMLTemplateMasterInputV1},
+		{"get_design_template", "Read current editable HTML source, or the exact immutable version pinned by a document. For historical source supply version AND expected_content_sha256. Result separates current_parent_version/name from selected version/master/defaults/approval.", false, false, false, 0},
+		{"update_design_template", "Save a new HTML layout/assets/defaults version using expected_version. Existing documents keep their frozen design; instantiate the reviewed new version to use its layout.", true, false, true, pdfadmission.HTMLTemplateMasterInputV1},
+		{"preview_design_template", "Render the saved exact design to a PDF. Returns bytes, SHA and page count. Inspect EVERY page; rendering/readback is not visual review. Agents cannot approve templates: a human owner approves in the Hash app.", false, false, true, pdfadmission.HTMLTemplatePreviewInputV1},
+		{"create_document_from_design", "Create an internal draft from an exact approved design version. Supply purpose document/presentation/signing explicitly and a unique request_id. Retains master, declared text and exact PDF history. Does not add recipients or send.", true, false, true, pdfadmission.HTMLDocumentCreationInputV1},
+		{"get_document_design_source", "Read current declared source/PDF commitments and the frozen editable-template origin. Layout/assets remain frozen; text revisions do not replace a layout. Returns retained brand provenance when present.", false, true, false, 0},
+		{"get_document_design_history", "Read retained HTML materialization revisions and exact source/PDF/page-count pins.", false, true, false, 0},
+		{"download_document_pdf", "Download an exact saved PDF for visual inspection. Supply current updated_at/PDF SHA and HTML source commitment; revision selects retained HTML history. No approval or Send occurs.", false, true, true, 0},
+		{"revise_document_design_values", "Revise declared plain-text values/sections using current source/updated_at pins. Preserves the frozen master/assets and retained PDF history; new PDF requires fresh visual review and field placement.", true, true, true, pdfadmission.HTMLDocumentRevisionInputV1},
+		{"review_document_design", "Explicitly acknowledge the exact current HTML PDF after inspecting EVERY page. Supply visually_reviewed=true and reviewed_pages=1..N. Save, download and successful rendering are insufficient. Refused for signing-purpose documents: a human reviews those in a staff session. Does not approve contractual terms or Send.", true, true, true, 0},
+		{"move_document_to_design_version", "Move a DRAFT designed document to a NEWER approved version of its own template, keeping its ID, link and history. Supply expected_updated_at, expected_html_source_commitment, template_version and expected_template_content_sha256 (stale pins are refused). Current values and sections are carried over exactly as typed; only fields newly declared by the new version take its defaults (listed in adopted_default_values). Optional values/sections must be declared by the new version. A field the new version removes is dropped only if it still holds the old default or is empty, otherwise the move is refused. Schema, contract kind or party-slot changes are refused: create a new document then. Review and placed fields are reset, so a fresh human review is needed before sending a signing document.", true, true, true, pdfadmission.HTMLDocumentTemplateMoveInputV1},
 	}
 	for _, item := range defs {
 		item := item
@@ -139,16 +139,13 @@ func registerDesignToolsV1(s *Server, d Deps) {
 			props["purpose"] = documentPurposeSchemaV1()
 			required = append(required, "purpose")
 		}
-		if item.owner || item.name == "review_document_design" {
+		if item.name == "review_document_design" {
 			props["visually_reviewed"] = map[string]any{"type": "boolean", "description": "Explicit attestation that you inspected every page of this exact PDF"}
 			props["reviewed_pages"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 500, "items": map[string]any{"type": "integer", "minimum": 1, "maximum": 500}}
 			required = append(required, "visually_reviewed", "reviewed_pages")
 		}
 		tool := ToolDef{Name: item.name, Description: item.description, Write: item.write, InputSchema: schemaObject(props, required)}
 		tool.InputSchema["additionalProperties"] = false
-		if item.owner {
-			tool.MinRole = auth.RoleOwner
-		}
 		tool.Handler = func(r *http.Request, raw json.RawMessage) (result any, failure error) {
 			if d.Design == nil {
 				return nil, errors.New("native design authoring unavailable")
@@ -195,7 +192,7 @@ func registerDesignToolsV1(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			if (item.owner || item.name == "review_document_design") && !args.VisuallyReviewed {
+			if item.name == "review_document_design" && !args.VisuallyReviewed {
 				return nil, errors.New("visual review remains pending; inspect every page before explicitly acknowledging it")
 			}
 			var input *pdfadmission.ApplicationHTMLAuthoringInputV1
@@ -229,11 +226,6 @@ func registerDesignToolsV1(s *Server, d Deps) {
 				if err = designDecodeV1(args.Input, &p); err == nil {
 					value, err = d.Design.PreviewTemplateV1(r.Context(), actor, id, p)
 				}
-			case "approve_design_template":
-				var p DesignApprovalInputV1
-				if err = designDecodeV1(args.Input, &p); err == nil {
-					value, err = d.Design.ApproveTemplateV1(r.Context(), actor, id, p, args.ReviewedPages)
-				}
 			case "create_document_from_design":
 				var p DesignCreationInputV1
 				if err = designDecodeV1(args.Input, &p); err == nil {
@@ -257,6 +249,11 @@ func registerDesignToolsV1(s *Server, d Deps) {
 				var p DesignRevisionInputV1
 				if err = designDecodeV1(args.Input, &p); err == nil {
 					value, err = d.Design.ReviseDocumentV1(r.Context(), actor, id, p, input)
+				}
+			case "move_document_to_design_version":
+				var p DesignTemplateMoveInputV1
+				if err = designDecodeV1(args.Input, &p); err == nil {
+					value, err = d.Design.MoveDocumentTemplateV1(r.Context(), actor, id, p, input)
 				}
 			case "review_document_design":
 				var p DesignReviewInputV1
@@ -294,15 +291,11 @@ func designInputSchemaV1(name string) map[string]any {
 			fields["expected_version"] = intSchema("current template version", 1, 2147483647, 1)
 			required = append(required, "expected_version")
 		}
-	case "preview_design_template", "approve_design_template":
+	case "preview_design_template":
 		fields["expected_version"] = intSchema("current template version", 1, 2147483647, 1)
 		required = append(required, "expected_version")
 		strings("expected_content_sha256")
-		if name == "preview_design_template" {
-			maps()
-		} else {
-			strings("preview_receipt", "expected_preview_pdf_sha256")
-		}
+		maps()
 	case "create_document_from_design":
 		strings("name", "expected_template_content_sha256", "request_id")
 		fields["expected_template_version"] = intSchema("approved exact design version", 1, 2147483647, 1)
@@ -310,6 +303,12 @@ func designInputSchemaV1(name string) map[string]any {
 		maps()
 	case "revise_document_design_values":
 		strings("expected_updated_at", "expected_html_source_commitment")
+		maps()
+		fields["summary"] = stringSchema("plain-text change summary, at most 500 characters")
+	case "move_document_to_design_version":
+		strings("expected_updated_at", "expected_html_source_commitment", "expected_template_content_sha256")
+		fields["template_version"] = intSchema("newer approved version of this document's template", 1, 2147483647, 1)
+		required = append(required, "template_version")
 		maps()
 		fields["summary"] = stringSchema("plain-text change summary, at most 500 characters")
 	case "download_document_pdf":

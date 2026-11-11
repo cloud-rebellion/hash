@@ -42,10 +42,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # stays consistent with brightcrm and gives us a shell for emergency debug.
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 # The current official 3.24 base contains OpenSSL 3.5.7-r0. Keep the base
-# immutable, but fail closed unless Alpine can install the CVE-2026-14456 fix.
+# immutable, but fail closed unless Alpine can install the CVE-2026-14456 and
+# CVE-2026-107891 fixes.
 RUN apk add --no-cache \
+        'musl>=1.2.6-r3' \
+        'musl-utils>=1.2.6-r3' \
         'libcrypto3>=3.5.8-r0' \
         'libssl3>=3.5.8-r0' \
+        'zlib>=1.3.2-r1' \
         ca-certificates \
         tzdata && \
     addgroup -S hash && adduser -S -G hash hash

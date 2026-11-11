@@ -87,21 +87,18 @@ func holdDocumentMetadataParentE2E(t *testing.T, f lifecycleAuthorizationFixture
 	return tx
 }
 
-// attach_metadata now borrows the original measured document through the native
-// reader. Its successful fixture must originate through the real public creator;
-// set_expiry retains the original details-only legacy path and fixture.
+// Both metadata tools borrow the original measured document through the native
+// reader. Successful fixtures originate through the real public creator and
+// use the same owned application sessions as the production handlers.
 func setupDocumentMetadataAuthorization756(t *testing.T, role, tool string) lifecycleAuthorizationFixture {
 	t.Helper()
-	if tool == "attach_metadata" {
-		return setupNativeLifecycleAuthorization256(t, role, false, false)
-	}
-	return setupLifecycleAuthorizationE2E(t, role, false, false)
+	return setupNativeLifecycleAuthorization256(t, role, false, false)
 }
 
 func awaitDocumentMetadataAuditLock756E2E(t *testing.T, f lifecycleAuthorizationFixture, held pgx.Tx, tool string) {
 	t.Helper()
-	if tool == "attach_metadata" && (f.s.Send == nil || f.s.Send.WorkRuntime == nil ||
-		!f.s.Send.WorkRuntime.MatchesPoolV1(f.pool) || f.s.Send.WorkRuntime.SessionsV1() != f.s.HTMLCreationSessions) {
+	if f.s.Send == nil || f.s.Send.WorkRuntime == nil ||
+		!f.s.Send.WorkRuntime.MatchesPoolV1(f.pool) || f.s.Send.WorkRuntime.SessionsV1() != f.s.HTMLCreationSessions {
 		t.Fatal("metadata waiter requires the genuine shared-pool work runtime")
 	}
 	// This fixture's direct sessions are born from the original pool's exact
@@ -120,11 +117,7 @@ func TestDocumentMetadataMCPOriginalCredentialAfterParentWaitE2E(t *testing.T) {
 				blocked := holdDocumentMetadataParentE2E(t, f)
 				result := make(chan *httptest.ResponseRecorder, 1)
 				go func() { result <- submitDocumentMetadataE2E(f, f.ctx, tool, mint.Plaintext) }()
-				query := "-- name: GetDocumentForUpdate"
-				if tool == "attach_metadata" {
-					query = "-- name: GetHTMLRevisionDocumentReadHeaderV1"
-				}
-				awaitAuthoringParentWait624E2E(t, f, blocked, query, tool == "attach_metadata")
+				awaitAuthoringParentWait624E2E(t, f, blocked, "-- name: GetHTMLRevisionDocumentReadHeaderV1", true)
 				var err error
 				switch change {
 				case "key-delete":

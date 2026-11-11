@@ -16,13 +16,14 @@ function actualPath(task: any) {
   );
   return { budget, args, ...path };
 }
+const assetOptions = { wasmUrl: '/pdfjs/wasm/', cMapUrl: '/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/pdfjs/standard_fonts/' };
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 test('actual loading wrapper retains the native promise/data and native destroy receiver exactly once', async () => {
   const parsed = deferred<any>(), retired = deferred<void>(); let destroys = 0;
   const native = { promise: parsed.promise, destroy() { expect(this).toBe(native); destroys++; return retired.promise; } };
   const actual = actualPath(native), data = new Uint8Array([1, 2, 3]);
-  const load = actual.startPdfData(data); expect(load.promise).toBe(parsed.promise); expect(actual.args).toEqual([{ data }]);
+  const load = actual.startPdfData(data); expect(load.promise).toBe(parsed.promise); expect(actual.args).toEqual([{ data, ...assetOptions }]);
   const closing = load.destroy(); expect(load.destroy()).toBe(closing); expect(destroys).toBe(1);
   parsed.resolve({}); retired.resolve(); await closing; expect(actual.budget.snapshot().owners).toBe(0);
   expect(Array.from(data)).toEqual([1, 2, 3]);
@@ -67,4 +68,10 @@ test('actual render path preserves the original rejection and does not touch uns
   const load = actual.startPdfData(new Uint8Array([1])); parsed.resolve(owned); await load.promise;
   const painting = actual.renderPage(owned, 1, { width: 0, height: 0, getContext: () => ({}) }, 1); await flush();
   native.reject(failure); await expect(painting).rejects.toBe(failure); await load.destroy();
+});
+
+test('every load gets its own pdf.js worker: no load options carry a shared worker', () => {
+  const actual = actualPath({ promise: new Promise(() => {}), destroy: async () => {} });
+  actual.startPdfData(new Uint8Array([1])); actual.startPdfData(new Uint8Array([2])); actual.startPdf('/doc.pdf');
+  for (const options of actual.args as Array<Record<string, unknown>>) expect(options).toMatchObject(assetOptions);
 });

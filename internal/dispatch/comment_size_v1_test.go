@@ -53,7 +53,7 @@ func TestCommentNotificationKeepsOriginalURLPolicyV1(t *testing.T) {
 func TestCommentNotificationUnusedContextStaysUnusedV1(t *testing.T) {
 	a := TemplateContext{RecipientName: "Signer", DocumentName: "Contract", OpenURL: "/documents/id"}
 	b := a
-	b.Locale, b.OrgName, b.SenderName, b.SenderEmail, b.BrandColor = "sv", "ignored org", "ignored sender", "ignored email", "ignored color"
+	b.OrgName, b.SenderName, b.SenderEmail, b.BrandColor = "ignored org", "ignored sender", "ignored email", "ignored color"
 	b.Acknowledgement, b.InternalOperator = true, true
 	as, ah, ap, ae := CommentNotificationComponentsV1(a)
 	bs, bh, bp, be := CommentNotificationComponentsV1(b)
@@ -84,7 +84,7 @@ func TestCommentNotificationCheckedBoundaryV1(t *testing.T) {
 func TestCommentNotificationActualTemplateShapeV1(t *testing.T) {
 	want := map[string]int{"RecipientName": 1, "DocumentName": 1, "DeclineReason": 1, "OpenURL": 1}
 	wantIf := map[string]int{"OpenURL": 1}
-	for _, input := range []struct{ name, source string }{{"html", htmlFor(KindNewComment)}, {"text", textFor(KindNewComment)}} {
+	for _, input := range []struct{ name, source string }{{"html", newCommentHTML}, {"text", newCommentText}, {"html-sv", newCommentHTMLSV}, {"text-sv", newCommentTextSV}} {
 		t.Run(input.name, func(t *testing.T) {
 			tpl, err := template.New(input.name).Parse(input.source)
 			if err != nil {
@@ -103,7 +103,7 @@ func TestCommentNotificationActualTemplateShapeV1(t *testing.T) {
 				var escapers []string
 				if afterEscape && !condition {
 					escapers = []string{"_html_template_htmlescaper"}
-					if input.name == "html" && strings.HasSuffix(f.Ident[0], "URL") {
+					if strings.HasPrefix(input.name, "html") && strings.HasSuffix(f.Ident[0], "URL") {
 						escapers = []string{"_html_template_urlfilter", "_html_template_urlnormalizer", "_html_template_attrescaper"}
 					}
 				}
@@ -155,7 +155,7 @@ func TestCommentNotificationActualTemplateShapeV1(t *testing.T) {
 			if !reflect.DeepEqual(fields, want) || !reflect.DeepEqual(conditions, wantIf) {
 				t.Fatal("escaped template multiplicities changed")
 			}
-			if input.name == "html" {
+			if strings.HasPrefix(input.name, "html") {
 				for name := range want {
 					if strings.HasSuffix(name, "URL") {
 						if strings.Count(input.source, `href="{{.`+name+`}}"`) != 1 {
@@ -169,7 +169,7 @@ func TestCommentNotificationActualTemplateShapeV1(t *testing.T) {
 }
 
 func TestCommentNotificationTemplateSourcesMatchV1(t *testing.T) {
-	if CommentNotificationTemplateSourceBytesV1() != int64(len(htmlFor(KindNewComment))+len(textFor(KindNewComment))) {
+	if CommentNotificationTemplateSourceBytesV1() != int64(max(len(newCommentHTML)+len(newCommentText), len(newCommentHTMLSV)+len(newCommentTextSV))) {
 		t.Fatal("template parsing source credit changed")
 	}
 }

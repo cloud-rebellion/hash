@@ -27,6 +27,7 @@ import (
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/versions"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -42,14 +43,33 @@ func validMCPDesignActorV1(ctx context.Context, a mcp.DesignActorV1) error {
 	}
 	return nil
 }
+func validMCPDesignPreviewV1(a mcp.DesignActorV1, id uuid.UUID, version int32, contentSHA, materialSHA, pdfSHA string, pages int) error {
+	if a.KeyID == uuid.Nil || a.OrgID == uuid.Nil || a.UserID == uuid.Nil || id == uuid.Nil || version <= 0 ||
+		pages <= 0 || pages > sanitize.MaxPDFPages ||
+		!htmlPreviewSHA256(contentSHA) || !htmlPreviewSHA256(materialSHA) || !htmlPreviewSHA256(pdfSHA) {
+		return errHTMLTemplatePreviewReceipt
+	}
+	return nil
+}
+
+// mcpPreviewContextErr reports the real timeout or cancellation, not a receipt error.
+func mcpPreviewContextErr(ctx context.Context) error { return ctx.Err() }
 func safeMCPDesignFailureV1(err error) error {
 	if err == nil {
 		return nil
 	}
-	for _, known := range []error{auth.ErrMutationPermissionRevoked, auth.ErrMutationCredentialExpired, context.Canceled, context.DeadlineExceeded, errHTMLTemplatePreviewReceipt, documentpurpose.ErrInvalid} {
+	for _, known := range []error{auth.ErrMutationPermissionRevoked, auth.ErrMutationCredentialExpired, context.Canceled, context.DeadlineExceeded, errHTMLTemplatePreviewReceipt, documentpurpose.ErrInvalid, errHumanReviewRequiredV1} {
 		if errors.Is(err, known) {
 			return known
 		}
+	}
+	for _, known := range []error{pdfadmission.ErrHTMLTemplateMoveStaleV1, pdfadmission.ErrHTMLTemplateMoveNotForwardV1, pdfadmission.ErrHTMLTemplateMoveSupersededV1, pdfadmission.ErrHTMLTemplateMoveSchemaV1} {
+		if errors.Is(err, known) {
+			return known
+		}
+	}
+	if errors.Is(err, pdfadmission.ErrHTMLTemplateMoveUndeclaredV1) {
+		return err // names only: identifiers, never document text
 	}
 	if errors.Is(err, errHTMLTemplateConflict) || errors.Is(err, errHTMLDocumentRevisionConflict) || errors.Is(err, resolver.ErrPreviewChanged) || errors.Is(err, htmlmaterialization.ErrInvalid) || errors.Is(err, htmlsource.ErrInvalid) {
 		return errors.New("design or document changed; reload its exact source and PDF before continuing")
@@ -148,37 +168,6 @@ func (b *mcpDesignBridgeV1) WriteTemplateV1(ctx context.Context, a mcp.DesignAct
 	return out, nil
 }
 
-const mcpDesignPreviewPurposeV1 = "hash.mcp-design-preview.v1"
-
-func (s *Server) mintMCPDesignPreviewV1(p htmlTemplatePreviewReceipt) (string, error) {
-	if s.Cookies == nil || p.CredentialID == uuid.Nil || p.validate(time.Now()) != nil {
-		return "", errHTMLTemplatePreviewReceipt
-	}
-	raw, err := json.Marshal(p)
-	if err != nil || len(raw) > maxHTMLPreviewReceiptJSON {
-		return "", errHTMLTemplatePreviewReceipt
-	}
-	return s.Cookies.MintPurpose(mcpDesignPreviewPurposeV1, raw, time.Until(p.ExpiresAt))
-}
-func (s *Server) validateMCPDesignPreviewV1(ctx context.Context, a mcp.DesignActorV1, id uuid.UUID, in mcp.DesignApprovalInputV1) (htmlTemplatePreviewReceipt, error) {
-	var p htmlTemplatePreviewReceipt
-	if validMCPDesignActorV1(ctx, a) != nil || s.Cookies == nil || len(in.PreviewReceipt) == 0 || len(in.PreviewReceipt) > maxHTMLPreviewReceipt || !htmlPreviewSHA256(in.ExpectedContentSHA256) || !htmlPreviewSHA256(in.ExpectedPreviewPDFSHA256) {
-		return p, errHTMLTemplatePreviewReceipt
-	}
-	raw, err := s.Cookies.VerifyPurpose(mcpDesignPreviewPurposeV1, in.PreviewReceipt)
-	if err != nil || len(raw) == 0 || len(raw) > maxHTMLPreviewReceiptJSON {
-		return p, errHTMLTemplatePreviewReceipt
-	}
-	if err = validateUniqueJSONObject(raw); err != nil {
-		return p, errHTMLTemplatePreviewReceipt
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF || p.validate(time.Now()) != nil || p.CredentialID != a.KeyID || p.OrgID != a.OrgID || p.ReviewerID != a.UserID || p.TemplateID != id || p.Version != in.ExpectedVersion || p.TemplateContentSHA256 != in.ExpectedContentSHA256 || p.PDFSHA256 != in.ExpectedPreviewPDFSHA256 {
-		return htmlTemplatePreviewReceipt{}, errHTMLTemplatePreviewReceipt
-	}
-	return p, nil
-}
 func (b *mcpDesignBridgeV1) PreviewTemplateV1(parent context.Context, a mcp.DesignActorV1, id uuid.UUID, in mcp.DesignPreviewInputV1) (out mcp.DesignResultV1, failure error) {
 	defer func() { failure = safeMCPDesignFailureV1(failure) }()
 	if err := validMCPDesignActorV1(parent, a); err != nil {
@@ -215,10 +204,10 @@ func (b *mcpDesignBridgeV1) PreviewTemplateV1(parent context.Context, a mcp.Desi
 		return out, err
 	}
 	digest := sha256.Sum256(cleaned.Bytes)
-	now := time.Now().UTC()
-	p := htmlTemplatePreviewReceipt{SchemaVersion: 1, PreviewID: uuid.New(), OrgID: a.OrgID, ReviewerID: a.UserID, CredentialID: a.KeyID, TemplateID: id, Version: in.ExpectedVersion, TemplateContentSHA256: content.SHA256, MaterializationSHA256: material, PDFSHA256: hex.EncodeToString(digest[:]), PageCount: pages, IssuedAt: now, ExpiresAt: now.Add(htmlTemplatePreviewTTL)}
-	token, err := s.mintMCPDesignPreviewV1(p)
-	if err != nil {
+	pdfSHA := hex.EncodeToString(digest[:])
+	// The MCP preview mints no receipt: template approval is human-only. This is
+	// defense in depth; upstream guards already guarantee each of these.
+	if err := validMCPDesignPreviewV1(a, id, in.ExpectedVersion, content.SHA256, material, pdfSHA, pages); err != nil {
 		return out, err
 	}
 	closeRecheck, err := s.recheckHTMLTemplatePreview(ctx, a.Actor, id, in.ExpectedVersion, in.ExpectedContentSHA256)
@@ -226,30 +215,12 @@ func (b *mcpDesignBridgeV1) PreviewTemplateV1(parent context.Context, a mcp.Desi
 		return out, err
 	}
 	closeRecheck()
-	if p.validate(time.Now()) != nil || ctx.Err() != nil {
-		return out, errHTMLTemplatePreviewReceipt
+	if err := mcpPreviewContextErr(ctx); err != nil {
+		return out, err
 	}
 	retained = true
-	return mcp.DesignResultV1{Value: map[string]any{"template_id": id, "version": p.Version, "content_sha256": p.TemplateContentSHA256, "materialization_sha256": material, "pdf_sha256": p.PDFSHA256, "page_count": pages, "pdf_base64": base64.StdEncoding.EncodeToString(cleaned.Bytes), "preview_receipt": token, "preview_expires_at": p.ExpiresAt, "visual_review": "pending", "review_instructions": "Render and inspect every page of these exact bytes. A hash, download, save or readback does not establish visual quality."}, Release: func() { closeContent(); release(); cancel() }}, nil
+	return mcp.DesignResultV1{Value: map[string]any{"template_id": id, "version": in.ExpectedVersion, "content_sha256": content.SHA256, "materialization_sha256": material, "pdf_sha256": pdfSHA, "page_count": pages, "pdf_base64": base64.StdEncoding.EncodeToString(cleaned.Bytes), "visual_review": "pending", "review_instructions": "Render and inspect every page of these exact bytes. A hash, download, save or readback does not establish visual quality. Template approval is a human act: an owner approves the design in the Hash app."}, Release: func() { closeContent(); release(); cancel() }}, nil
 }
-func (b *mcpDesignBridgeV1) ApproveTemplateV1(ctx context.Context, a mcp.DesignActorV1, id uuid.UUID, in mcp.DesignApprovalInputV1, pages []int) (out mcp.DesignResultV1, failure error) {
-	defer func() { failure = safeMCPDesignFailureV1(failure) }()
-	p, err := b.server.validateMCPDesignPreviewV1(ctx, a, id, in)
-	if err != nil {
-		return out, err
-	}
-	if err = mcp.DesignPageCoverageV1(pages, p.PageCount); err != nil {
-		return out, err
-	}
-	a.Authorize = htmlTemplatePreviewReceiptAuthorization(a.Authorize, p)
-	digest, _ := hex.DecodeString(in.ExpectedContentSHA256)
-	row, close, err := b.server.approveHTMLTemplateOwnedV1(ctx, a.Actor, id, htmlTemplateApprovalInput{ExpectedVersion: in.ExpectedVersion, ExpectedContentSHA256: in.ExpectedContentSHA256, ExpectedPreviewPDFSHA256: in.ExpectedPreviewPDFSHA256, PreviewReceipt: in.PreviewReceipt}, digest, p)
-	if err != nil {
-		return out, err
-	}
-	return mcp.DesignResultV1{Value: map[string]any{"template_id": id, "version": row.Version, "content_sha256": in.ExpectedContentSHA256, "approved_by": a.UserID, "approved_at": row.ApprovedAt.Time, "visual_review": "caller_attested_all_pages", "contract_approval": false, "sent": false}, Release: close}, nil
-}
-
 func (b *mcpDesignBridgeV1) CreateDocumentV1(parent context.Context, a mcp.DesignActorV1, id uuid.UUID, in mcp.DesignCreationInputV1) (out mcp.DesignResultV1, failure error) {
 	defer func() { failure = safeMCPDesignFailureV1(failure) }()
 	if err := validMCPDesignActorV1(parent, a); err != nil {
@@ -501,8 +472,12 @@ func (b *mcpDesignBridgeV1) ReviewDocumentV1(ctx context.Context, a mcp.DesignAc
 		return out, err
 	}
 	defer scope.cancel()
-	source, _, _, err := b.sourceV1(scope)
+	source, reviewed, _, err := b.sourceV1(scope)
 	if err != nil {
+		return out, err
+	}
+	// A signing document may only be reviewed by a human in a staff session.
+	if err = requireNonSigningForAgentReviewV1(reviewed.Metadata); err != nil {
 		return out, err
 	}
 	if source.UpdatedAt != in.ExpectedUpdatedAt || source.PDFSHA256 != in.ExpectedPDFSHA256 || source.HTMLSourceCommitment != in.ExpectedHTMLSourceCommitment {
@@ -513,11 +488,59 @@ func (b *mcpDesignBridgeV1) ReviewDocumentV1(ctx context.Context, a mcp.DesignAc
 	}
 	expected, _ := time.Parse(time.RFC3339Nano, in.ExpectedUpdatedAt)
 	pdf, _ := hex.DecodeString(in.ExpectedPDFSHA256)
-	doc, close, err := b.server.reviewHTMLDocumentOwnedV1(ctx, a.Actor, id, htmlDocumentReviewInput{ExpectedUpdatedAt: in.ExpectedUpdatedAt, ExpectedPDFSHA256: in.ExpectedPDFSHA256, ExpectedHTMLSourceCommitment: in.ExpectedHTMLSourceCommitment}, expected, pdf)
+	doc, close, err := b.server.reviewHTMLDocumentOwnedV1(ctx, a.Actor, id, htmlDocumentReviewInput{ExpectedUpdatedAt: in.ExpectedUpdatedAt, ExpectedPDFSHA256: in.ExpectedPDFSHA256, ExpectedHTMLSourceCommitment: in.ExpectedHTMLSourceCommitment, ReviewerKind: reviewerKindAgentV1}, expected, pdf)
 	if err != nil {
 		return out, err
 	}
 	return mcp.DesignResultV1{Value: map[string]any{"document": toDocumentResponse(doc), "visual_review": "caller_attested_all_pages", "contract_approval": false, "sent": false}, Release: close}, nil
 }
 
+// MoveDocumentTemplateV1 moves a draft to a newer approved version of its own
+// template. The move resets review and placed fields; a signing document then
+// still needs a human review in a staff session before it can be sent.
+func (b *mcpDesignBridgeV1) MoveDocumentTemplateV1(ctx context.Context, a mcp.DesignActorV1, id uuid.UUID, in mcp.DesignTemplateMoveInputV1, _ *pdfadmission.ApplicationHTMLAuthoringInputV1) (out mcp.DesignResultV1, failure error) {
+	defer func() { failure = safeMCPDesignFailureV1(failure) }()
+	if err := validMCPDesignActorV1(ctx, a); err != nil {
+		return out, err
+	}
+	move := htmlDocumentTemplateMoveInputV1{ExpectedUpdatedAt: in.ExpectedUpdatedAt, ExpectedHTMLSourceCommitment: in.ExpectedHTMLSourceCommitment,
+		TemplateVersion: in.TemplateVersion, ExpectedTemplateContentSHA256: in.ExpectedTemplateContentSHA256,
+		Values: htmlStringMap(in.Values), Sections: htmlStringMap(in.Sections), Summary: in.Summary, via: versions.ViaMCP}
+	if _, err := move.validatePinsV1(); err != nil || !validHTMLMoveSummaryV1(in.Summary) {
+		return out, htmlsource.ErrInvalid
+	}
+	if b.server.Pool == nil || b.server.Storage == nil || b.server.Sign == nil || b.server.Sign.PDF == nil || b.server.Versions == nil || b.server.Audit == nil {
+		return out, pdfadmission.ErrHTMLRevisionOperationV1
+	}
+	release, err := importguard.Shared.Acquire(a.OrgID)
+	if err != nil {
+		return out, err
+	}
+	defer release()
+	result, err := b.server.moveHTMLDocumentTemplateV1(ctx, a.Actor, id, move)
+	if err != nil {
+		return out, err
+	}
+	return mcp.DesignResultV1{Value: map[string]any{"document": toDocumentResponse(result.Document), "materialization_revision": result.MaterializationRevision, "page_count": result.PageCount, "review_required": true, "placement_reset": true,
+		"adopted_default_values": nonNilStringsV1(result.Diff.AdoptedDefaultValues), "dropped_values": nonNilStringsV1(result.Diff.DroppedValues), "dropped_sections": nonNilStringsV1(result.Diff.DroppedSections)}}, nil
+}
+
 var _ mcp.DesignBridgeV1 = (*mcpDesignBridgeV1)(nil)
+
+// errHumanReviewRequiredV1 is returned to agents. Reviewing the exact PDF of a
+// document whose purpose is signing (acknowledgement mode included) is a human
+// act: it needs a staff session, never an MCP/agent credential.
+var errHumanReviewRequiredV1 = errors.New("a human must review this signing document in a staff session; agents may review only non-signing documents")
+
+// requireNonSigningForAgentReviewV1 fails closed: absent purpose keeps its
+// historical signing meaning and malformed reserved data is never non-signing.
+func requireNonSigningForAgentReviewV1(metadata []byte) error {
+	purpose, err := documentpurpose.Parse(metadata)
+	if err != nil {
+		return err
+	}
+	if purpose == documentpurpose.Signing {
+		return errHumanReviewRequiredV1
+	}
+	return nil
+}

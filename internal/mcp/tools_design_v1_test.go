@@ -140,14 +140,15 @@ func TestDesignMCP783ExactRetainedSelectionAndLastUse(t *testing.T) {
 }
 func TestDesignMCP783RegistrationAndGuidance(t *testing.T) {
 	s := New(Deps{})
-	for _, name := range []string{"create_design_template", "get_design_template", "update_design_template", "preview_design_template", "approve_design_template", "create_document_from_design", "get_document_design_source", "get_document_design_history", "download_document_pdf", "revise_document_design_values", "review_document_design"} {
+	for _, name := range []string{"create_design_template", "get_design_template", "update_design_template", "preview_design_template", "create_document_from_design", "get_document_design_source", "get_document_design_history", "download_document_pdf", "revise_document_design_values", "review_document_design", "move_document_to_design_version"} {
 		tool, ok := s.tools[name]
 		if !ok || mcpToolRequiredScopes[name] == "" || tool.InputSchema["additionalProperties"] != false {
 			t.Fatal("design tool missing or open", name)
 		}
-		if name == "approve_design_template" && tool.MinRole != auth.RoleOwner {
-			t.Fatal("design approval lost owner gate")
-		}
+	}
+	// Template approval is human-only: no MCP tool, scope or guidance may offer it.
+	if _, ok := s.tools["approve_design_template"]; ok || mcpToolRequiredScopes["approve_design_template"] != "" {
+		t.Fatal("agents can approve design templates")
 	}
 	for _, uri := range []string{"hash://schema/html-master", "hash://guides/designed-documents"} {
 		if _, ok := s.resources[uri]; !ok || !docScopeSafeResources[uri] {

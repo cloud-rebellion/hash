@@ -45,8 +45,14 @@ func frontendHandler() http.Handler {
 			http.Error(w, "frontend not embedded", http.StatusInternalServerError)
 		})
 	}
+	return frontendHandlerFS(sub)
+}
 
+// frontendHandlerFS serves the given build tree; tests inject an in-memory one
+// so they do not depend on a frontend build being embedded.
+func frontendHandlerFS(sub fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
+	gz := newGzipAssets(sub)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clean := path.Clean(r.URL.Path)
@@ -75,6 +81,9 @@ func frontendHandler() http.Handler {
 					w.Header().Set("Access-Control-Allow-Origin", "*")
 				default:
 					w.Header().Set("Cache-Control", "public, max-age=300")
+				}
+				if gz.serve(w, r, lookup) {
+					return
 				}
 				fileServer.ServeHTTP(w, r)
 				return

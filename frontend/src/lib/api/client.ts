@@ -2,8 +2,11 @@ import { checkedPackageSendObservation, checkedPackageSendReceipt, checkedPackag
 import { commentQuery, latestComments, type CommentPage, type CommentSelection } from '../commentHistory';
 import { checkedPreSignDocumentView, type PreSignDocumentView } from '../presignExecution';
 import { type DocumentPurpose } from '../documentPurpose';
+import { get } from 'svelte/store';
+import { staffLocale } from '../staffPreferences';
 // Hash frontend API client.
 import type { HTMLContractProfile, HTMLMaster, HTMLPartySlot, HTMLSigningPage } from '../htmlTemplate';
+import { requestDSRTransition, type DSRTransitionResult } from './dsrTransition';
 
 export interface TemplateResponse {
   id: string;
@@ -189,6 +192,7 @@ export async function approveHTMLTemplate(id: string, version: number, contentSH
 }
 
 export interface HTMLDocumentInput {
+  default_locale?: string;
   purpose?: DocumentPurpose;
   name: string;
   expected_template_version: number;
@@ -205,6 +209,7 @@ export interface HTMLDocumentInput {
 export async function createHTMLTemplateDocument(templateID: string, input: HTMLDocumentInput): Promise<ImportResult & { review_required: boolean }> {
   return request('POST', `/api/v1/templates/${encodeURIComponent(templateID)}/html/documents`, {
     name: input.name,
+    ...(input.default_locale === undefined ? {} : { default_locale: input.default_locale }),
     ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
     expected_template_version: input.expected_template_version,
     expected_template_content_sha256: input.expected_template_content_sha256,
@@ -284,13 +289,13 @@ export async function getHTMLDocumentHistory(documentID: string): Promise<{ revi
 }
 export async function getHTMLRevisionSource(documentID: string, sequence: number): Promise<HTMLDocumentSource> {
   if (!Number.isInteger(sequence) || sequence < 1) throw new Error('Select a valid immutable revision.');
-  return request('GET', `/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${sequence}/source`);
+  return request('GET', `/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${encodeURIComponent(sequence)}/source`);
 }
 export async function fetchVerifiedHTMLRevisionPDF(documentID: string, revision: HTMLDocumentSource, signal: AbortSignal): Promise<Uint8Array> {
   if (!revision || revision.document_id !== documentID || !Number.isInteger(revision.materialization_revision) || revision.materialization_revision < 1) {
     throw new Error('Select a valid immutable revision for this document.');
   }
-  const res = await fetch(`/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${revision.materialization_revision}/pdf`, {
+  const res = await fetch(`/api/v1/documents/${encodeURIComponent(documentID)}/html/revisions/${encodeURIComponent(revision.materialization_revision)}/pdf`, {
     credentials: 'include', cache: 'no-store', headers: { Accept: 'application/pdf' }, signal,
   });
   if (!res.ok) throw new APIError(res.status, await friendlyError(res));
@@ -435,11 +440,12 @@ export async function moveDocumentFolder(documentId: string, folderId: string | 
   return request('PUT', `/api/v1/documents/${encodeURIComponent(documentId)}/folder`, { folder_id: folderId });
 }
 
-export async function createBlocksDocument(name: string, purpose?: DocumentPurpose): Promise<DocumentResponse> {
+export async function createBlocksDocument(name: string, purpose?: DocumentPurpose, defaultLocale = get(staffLocale)): Promise<DocumentResponse> {
   return request('POST', '/api/v1/documents', {
     name,
     ...(purpose === undefined ? {} : { purpose }),
     source_kind: 'blocks',
+    default_locale: defaultLocale,
     blocks_json: { version: 1, blocks: [] },
     variables_json: {}
   });
@@ -449,7 +455,7 @@ export async function createDocumentFromTemplate(
   name: string,
   templateID: string,
   sourceKind: 'blocks' | 'pdf',
-  layout?: { expected_template_version: number; parties?: PDFPartyBinding[] },
+  layout?: { expected_template_version: number; parties?: PDFPartyBinding[]; default_locale?: string },
   purpose?: DocumentPurpose,
 ): Promise<DocumentResponse> {
   // Omit blocks_json/variables_json so the server seeds both from the template
@@ -460,6 +466,7 @@ export async function createDocumentFromTemplate(
     template_id: templateID,
     ...(purpose === undefined ? {} : { purpose }),
     ...layout,
+    default_locale: layout?.default_locale ?? get(staffLocale),
   });
 }
 
@@ -474,7 +481,7 @@ export async function savePDFSigningTemplate(
   documentID: string,
   input: { name: string; expected_updated_at: string; expected_field_ids: string[]; parties: { recipient_id: string; role: string; label: string }[] },
 ): Promise<TemplateResponse> {
-  return request('POST', `/api/v1/documents/${documentID}/pdf-template`, input);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(documentID)}/pdf-template`, input);
 }
 
 export interface ImportResult {
@@ -488,6 +495,7 @@ export async function importProposalPDF(name: string, file: File, purpose?: Docu
   const fd = new FormData();
   fd.append('name', name);
   fd.append('pdf', file);
+  fd.append('default_locale', get(staffLocale));
   if (purpose !== undefined) fd.append('purpose', purpose);
   const res = await fetch('/api/v1/documents/import', {
     method: 'POST',
@@ -508,11 +516,11 @@ export async function importProposalHTML(
   landscape = false,
   purpose?: DocumentPurpose,
 ): Promise<ImportResult> {
-  return request('POST', '/api/v1/documents/import', { name, html, landscape, ...(purpose === undefined ? {} : { purpose }) });
+  return request('POST', '/api/v1/documents/import', { name, html, landscape, default_locale: get(staffLocale), ...(purpose === undefined ? {} : { purpose }) });
 }
 
 export async function getDocument(id: string, signal?: AbortSignal): Promise<DocumentResponse> {
-  const document = await request<DocumentResponse>('GET', `/api/v1/documents/${id}`, undefined, signal);
+  const document = await request<DocumentResponse>('GET', `/api/v1/documents/${encodeURIComponent(id)}`, undefined, signal);
   if (Object.hasOwn(document, 'pre_sign')) document.pre_sign = checkedPreSignDocumentView(document.pre_sign);
   return document;
 }
@@ -532,15 +540,15 @@ export interface ChangeRequest {
 }
 
 export async function listChangeRequests(id: string): Promise<{ change_requests: ChangeRequest[] }> {
-  return request('GET', `/api/v1/documents/${id}/change-requests`);
+  return request('GET', `/api/v1/documents/${encodeURIComponent(id)}/change-requests`);
 }
 
 export async function approveChangeRequest(docID: string, crID: string): Promise<void> {
-  await request('POST', `/api/v1/documents/${docID}/change-requests/${crID}/approve`);
+  await request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/change-requests/${encodeURIComponent(crID)}/approve`);
 }
 
 export async function denyChangeRequest(docID: string, crID: string): Promise<void> {
-  await request('POST', `/api/v1/documents/${docID}/change-requests/${crID}/deny`);
+  await request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/change-requests/${encodeURIComponent(crID)}/deny`);
 }
 
 export async function setChangeApprovalMode(mode: 'accept' | 'auto_apply'): Promise<void> {
@@ -560,13 +568,13 @@ export async function listComments(id: string, selection: CommentSelection = lat
 }
 
 export async function postComment(id: string, body: string): Promise<DocComment> {
-  return request('POST', `/api/v1/documents/${id}/comments`, { body });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(id)}/comments`, { body });
 }
 
 // reviseDocument reopens a document a signer paused with a change request back to
 // draft so the sender can edit and re-send it.
 export async function reviseDocument(id: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${id}/revise`);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(id)}/revise`);
 }
 
 // documentSignatureFields walks a block document and returns the signature
@@ -602,18 +610,18 @@ export async function updateDocument(
     purpose?: DocumentPurpose;
   }
 ): Promise<DocumentResponse> {
-  return request('PATCH', `/api/v1/documents/${id}`, patch);
+  return request('PATCH', `/api/v1/documents/${encodeURIComponent(id)}`, patch);
 }
 
 export async function appendBlock(docID: string, block: Omit<Block, 'id'>, expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/blocks`, { block, expected_updated_at: expectedUpdatedAt });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/blocks`, { block, expected_updated_at: expectedUpdatedAt });
 }
 
 export async function saveCollaborativeDocument(id: string, input: {
   peer_id: string; checkpoint: string; generation: string;
   expected_updated_at: string; blocks_json: BlockTree;
 }): Promise<{ document: DocumentResponse; generation: string }> {
-  return request('POST', `/api/v1/documents/${id}/collab/save`, input);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(id)}/collab/save`, input);
 }
 
 export interface CollaborationRecoveryArchive {
@@ -652,27 +660,27 @@ export async function deleteCollaborationArchive(id: string, archiveID: string):
 }
 
 export async function updateBlock(docID: string, blockID: string, block: Block, expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('PATCH', `/api/v1/documents/${docID}/blocks/${blockID}`, { block, expected_updated_at: expectedUpdatedAt });
+  return request('PATCH', `/api/v1/documents/${encodeURIComponent(docID)}/blocks/${encodeURIComponent(blockID)}`, { block, expected_updated_at: expectedUpdatedAt });
 }
 
 export async function deleteBlock(docID: string, blockID: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('DELETE', `/api/v1/documents/${docID}/blocks/${blockID}`, { expected_updated_at: expectedUpdatedAt });
+  return request('DELETE', `/api/v1/documents/${encodeURIComponent(docID)}/blocks/${encodeURIComponent(blockID)}`, { expected_updated_at: expectedUpdatedAt });
 }
 
 export async function reorderBlocks(docID: string, ids: string[], expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/blocks/reorder`, { block_ids: ids, expected_updated_at: expectedUpdatedAt });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/blocks/reorder`, { block_ids: ids, expected_updated_at: expectedUpdatedAt });
 }
 
 export async function importHTML(docID: string, html: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/import-html`, { html, expected_updated_at: expectedUpdatedAt });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/import-html`, { html, expected_updated_at: expectedUpdatedAt });
 }
 
 export async function importMarkdown(docID: string, markdown: string, expectedUpdatedAt: string): Promise<DocumentResponse> {
-  return request('POST', `/api/v1/documents/${docID}/import-md`, { markdown, expected_updated_at: expectedUpdatedAt });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/import-md`, { markdown, expected_updated_at: expectedUpdatedAt });
 }
 
 export function previewURL(docID: string): string {
-  return `/api/v1/documents/${docID}/preview`;
+  return `/api/v1/documents/${encodeURIComponent(docID)}/preview`;
 }
 
 // --- Recipients -----------------------------------------------------------
@@ -712,7 +720,7 @@ export interface RecipientInput {
 export async function listRecipients(docID: string): Promise<Recipient[]> {
   const res = await request<{ recipients: Recipient[] }>(
     'GET',
-    `/api/v1/documents/${docID}/recipients`,
+    `/api/v1/documents/${encodeURIComponent(docID)}/recipients`,
   );
   return res.recipients ?? [];
 }
@@ -721,7 +729,7 @@ export async function createRecipient(
   docID: string,
   input: RecipientInput,
 ): Promise<Recipient> {
-  return request('POST', `/api/v1/documents/${docID}/recipients`, input);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/recipients`, input);
 }
 
 export async function updateRecipient(
@@ -731,13 +739,13 @@ export async function updateRecipient(
 ): Promise<Recipient> {
   return request(
     'PATCH',
-    `/api/v1/documents/${docID}/recipients/${recipientID}`,
+    `/api/v1/documents/${encodeURIComponent(docID)}/recipients/${encodeURIComponent(recipientID)}`,
     input,
   );
 }
 
 export async function deleteRecipient(docID: string, recipientID: string): Promise<void> {
-  await request('DELETE', `/api/v1/documents/${docID}/recipients/${recipientID}`);
+  await request('DELETE', `/api/v1/documents/${encodeURIComponent(docID)}/recipients/${encodeURIComponent(recipientID)}`);
 }
 
 // --- Billing --------------------------------------------------------------
@@ -847,7 +855,7 @@ export type LawfulBasis = 'contract';
 export async function inspectPackageSendAttempt(documentID: string, attemptID: string, signal?: AbortSignal): Promise<'active'|'completed'|'aborted'|'not_recorded'> {
   // Validate the selector before interpolating a path.
   checkedPackageSendInspection({attempt_id:attemptID,outcome:'active',retry_authorized:false},attemptID);
-  const response=await fetch(`/api/v1/documents/${documentID}/send-attempts/${attemptID}`,{credentials:'include',cache:'no-store',signal,headers:{Accept:'application/json'}});
+  const response=await fetch(`/api/v1/documents/${encodeURIComponent(documentID)}/send-attempts/${encodeURIComponent(attemptID)}`,{credentials:'include',cache:'no-store',signal,headers:{Accept:'application/json'}});
   if(!response.ok) throw new Error('Send inspection is unavailable. Refresh the saved document before continuing.');
   return checkedPackageSendInspection(await response.json(),attemptID);
 }
@@ -855,7 +863,7 @@ export async function inspectPackageSendAttempt(documentID: string, attemptID: s
 
 export async function sendDocument(docID: string, lawfulBasis: LawfulBasis, packageSend?: PackageSendObservation): Promise<SendResult> {
   const selection=packageSend===undefined ? undefined : checkedPackageSendObservation(packageSend);
-  const res = await fetch(`/api/v1/documents/${docID}/send`, {
+  const res = await fetch(`/api/v1/documents/${encodeURIComponent(docID)}/send`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -892,14 +900,14 @@ export async function sendDocument(docID: string, lawfulBasis: LawfulBasis, pack
 }
 
 export async function remindDocument(docID: string): Promise<{ reminded: number }> {
-  return request('POST', `/api/v1/documents/${docID}/remind`);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/remind`);
 }
 
 export async function voidDocument(
   docID: string,
   reason?: string,
 ): Promise<{ status: string }> {
-  return request('POST', `/api/v1/documents/${docID}/void`, reason ? { reason } : undefined);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/void`, reason ? { reason } : undefined);
 }
 
 // --- Audit timeline + signed artefacts ------------------------------------
@@ -923,19 +931,19 @@ export interface TimelineEntry {
 export async function getTimeline(
   docID: string,
 ): Promise<{ entries: TimelineEntry[]; count: number }> {
-  return request('GET', `/api/v1/documents/${docID}/timeline`);
+  return request('GET', `/api/v1/documents/${encodeURIComponent(docID)}/timeline`);
 }
 
 export function finalPdfURL(docID: string): string {
-  return `/api/v1/documents/${docID}/final-pdf`;
+  return `/api/v1/documents/${encodeURIComponent(docID)}/final-pdf`;
 }
 
 export function auditCertURL(docID: string): string {
-  return `/api/v1/documents/${docID}/audit-cert`;
+  return `/api/v1/documents/${encodeURIComponent(docID)}/audit-cert`;
 }
 
 export function timelineCsvURL(docID: string): string {
-  return `/api/v1/documents/${docID}/timeline.csv`;
+  return `/api/v1/documents/${encodeURIComponent(docID)}/timeline.csv`;
 }
 
 export async function getMe(): Promise<{ user_id: string; org_id: string; email: string; role: string; change_approval_mode?: string }> {
@@ -987,7 +995,7 @@ export async function listMembers(): Promise<Member[]> {
 }
 
 export async function updateMemberRole(id: string, role: string): Promise<Member> {
-  return request('PATCH', `/api/v1/members/${id}/role`, { role });
+  return request('PATCH', `/api/v1/members/${encodeURIComponent(id)}/role`, { role });
 }
 
 export interface DashboardKPIs {
@@ -1025,7 +1033,7 @@ export async function createAPIKey(input: { name: string; scopes: string[]; expi
 }
 
 export async function deleteAPIKey(id: string): Promise<void> {
-  return request('DELETE', `/api/v1/api-keys/${id}`);
+  return request('DELETE', `/api/v1/api-keys/${encodeURIComponent(id)}`);
 }
 
 export interface WebhookEndpoint {
@@ -1048,7 +1056,7 @@ export async function createWebhook(url: string, events: string[]): Promise<Webh
 }
 
 export async function deleteWebhook(id: string): Promise<void> {
-  return request('DELETE', `/api/v1/webhooks/${id}`);
+  return request('DELETE', `/api/v1/webhooks/${encodeURIComponent(id)}`);
 }
 
 export interface WebhookDelivery {
@@ -1062,7 +1070,7 @@ export interface WebhookDelivery {
 }
 
 export async function listWebhookDeliveries(id: string): Promise<{ deliveries: WebhookDelivery[] }> {
-  return request('GET', `/api/v1/webhooks/${id}/deliveries`);
+  return request('GET', `/api/v1/webhooks/${encodeURIComponent(id)}/deliveries`);
 }
 
 // --- Org branding -----------------------------------------------------
@@ -1126,7 +1134,7 @@ export async function listComplianceFlags(status?: string): Promise<{ flags: Com
 }
 
 export async function setComplianceFlagStatus(id: string, status: string): Promise<unknown> {
-  return request('PATCH', `/api/v1/compliance/flags/${id}`, { status });
+  return request('PATCH', `/api/v1/compliance/flags/${encodeURIComponent(id)}`, { status });
 }
 
 export async function runComplianceFlagSweep(): Promise<unknown> {
@@ -1151,7 +1159,7 @@ export async function listEIDASRules(): Promise<{ rules: EIDASRule[] }> {
 }
 
 export async function deleteEIDASRule(id: string): Promise<void> {
-  return request('DELETE', `/api/v1/eidas-rules/${id}`);
+  return request('DELETE', `/api/v1/eidas-rules/${encodeURIComponent(id)}`);
 }
 
 export async function seedSwedishEIDASDefaults(): Promise<unknown> {
@@ -1175,7 +1183,7 @@ export async function updateEIDASRule(
   id: string,
   input: Partial<EIDASRuleInput>,
 ): Promise<EIDASRule> {
-  return request('PATCH', `/api/v1/eidas-rules/${id}`, input);
+  return request('PATCH', `/api/v1/eidas-rules/${encodeURIComponent(id)}`, input);
 }
 
 export interface EIDASPreviewInput {
@@ -1269,21 +1277,21 @@ export interface FieldInput {
 export async function listFields(docID: string): Promise<DocumentField[]> {
   const res = await request<{ fields: DocumentField[] }>(
     'GET',
-    `/api/v1/documents/${docID}/fields`,
+    `/api/v1/documents/${encodeURIComponent(docID)}/fields`,
   );
   return res.fields ?? [];
 }
 
 export async function addField(docID: string, input: FieldInput): Promise<DocumentField> {
-  return request('POST', `/api/v1/documents/${docID}/fields`, input);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/fields`, input);
 }
 
 export async function deleteField(fieldID: string, pins?: { expected_pdf_sha256: string; expected_html_source_commitment: string }): Promise<void> {
-  await request('DELETE', `/api/v1/fields/${fieldID}`, pins);
+  await request('DELETE', `/api/v1/fields/${encodeURIComponent(fieldID)}`, pins);
 }
 
 export function documentPdfURL(docID: string): string {
-  return `/api/v1/documents/${docID}/pdf`;
+  return `/api/v1/documents/${encodeURIComponent(docID)}/pdf`;
 }
 
 // --- Data Subject Rights ---------------------------------------------
@@ -1310,8 +1318,8 @@ export async function listDSR(status?: string): Promise<{ requests: DSRRequest[]
   return request('GET', `/api/v1/dsr${qs}`);
 }
 
-export async function transitionDSR(id: string, status: string, resolution_note = ''): Promise<DSRRequest> {
-  return request('PATCH', `/api/v1/dsr/${id}`, { status, resolution_note });
+export async function transitionDSR(id: string, status: string, resolution_note = '', confirmationReceipt?: string, signal?: AbortSignal): Promise<DSRTransitionResult> {
+  return requestDSRTransition(id, status, resolution_note, confirmationReceipt, signal);
 }
 
 export async function exportSubjectData(email: string): Promise<unknown> {
@@ -1336,7 +1344,7 @@ export interface DocAgentToken {
 }
 
 export async function listDocAgentTokens(docID: string): Promise<{ tokens: DocAgentToken[] }> {
-  return request('GET', `/api/v1/documents/${docID}/agent-tokens`);
+  return request('GET', `/api/v1/documents/${encodeURIComponent(docID)}/agent-tokens`);
 }
 
 export async function mintDocAgentToken(
@@ -1344,11 +1352,11 @@ export async function mintDocAgentToken(
   scopes: string[],
   ttl_days?: number
 ): Promise<DocAgentToken> {
-  return request('POST', `/api/v1/documents/${docID}/agent-tokens`, { scopes, ttl_days });
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/agent-tokens`, { scopes, ttl_days });
 }
 
 export async function revokeDocAgentToken(tokenID: string): Promise<void> {
-  return request('DELETE', `/api/v1/agent-tokens/${tokenID}`);
+  return request('DELETE', `/api/v1/agent-tokens/${encodeURIComponent(tokenID)}`);
 }
 
 // --- Audit hash-chain verifier ---------------------------------------
@@ -1397,7 +1405,7 @@ export async function runRiskAnalysis(
   docID: string,
   opts: { locale?: string; sender_context?: string } = {}
 ): Promise<RiskAnalyzeResult> {
-  return request('POST', `/api/v1/documents/${docID}/risk-analysis`, {
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/risk-analysis`, {
     locale: opts.locale || 'en',
     sender_context: opts.sender_context || '',
   });
@@ -1427,32 +1435,32 @@ export interface EnvelopeManifest {
 }
 
 export async function listEnvelopeChildren(envelopeID: string): Promise<{ children: EnvelopeChild[] }> {
-  return request('GET', `/api/v1/envelopes/${envelopeID}/children`);
+  return request('GET', `/api/v1/envelopes/${encodeURIComponent(envelopeID)}/children`);
 }
 
 export async function getEnvelopeManifest(envelopeID: string): Promise<EnvelopeManifest> {
-  return request('GET', `/api/v1/envelopes/${envelopeID}/manifest`);
+  return request('GET', `/api/v1/envelopes/${encodeURIComponent(envelopeID)}/manifest`);
 }
 
 export async function attachToEnvelope(envelopeID: string, childID: string, position?: number): Promise<unknown> {
-  return request('POST', `/api/v1/envelopes/${envelopeID}/attach`, {
+  return request('POST', `/api/v1/envelopes/${encodeURIComponent(envelopeID)}/attach`, {
     child_id: childID,
     position,
   });
 }
 
 export async function detachFromEnvelope(envelopeID: string, childID: string): Promise<unknown> {
-  return request('POST', `/api/v1/envelopes/${envelopeID}/detach`, {
+  return request('POST', `/api/v1/envelopes/${encodeURIComponent(envelopeID)}/detach`, {
     child_id: childID,
   });
 }
 
 export async function reorderEnvelope(envelopeID: string, orderedChildIDs: string[]): Promise<unknown> {
-  return request('POST', `/api/v1/envelopes/${envelopeID}/reorder`, {
+  return request('POST', `/api/v1/envelopes/${encodeURIComponent(envelopeID)}/reorder`, {
     ordered_child_ids: orderedChildIDs,
   });
 }
 
 export async function promoteToEnvelope(docID: string): Promise<unknown> {
-  return request('POST', `/api/v1/documents/${docID}/promote-to-envelope`);
+  return request('POST', `/api/v1/documents/${encodeURIComponent(docID)}/promote-to-envelope`);
 }

@@ -79,7 +79,7 @@ func TestServiceEmailNativeScalarAndBodyReadsFollowOwnedLoansV1(t *testing.T) {
 
 func TestServiceEmailNativeProducerMeasuresSelectedRevisionBeforeRenderingV1(t *testing.T) {
 	for _, tc := range []struct{ file, fn, source, next string }{
-		{"application_comment_notifications_v1.go", "RenderCommentNotificationsV1", "serviceEmailTemplateV1", "applicationServiceEmailComponentsV1"},
+		{"application_comment_notifications_v1.go", "RenderCommentNotificationsV1", "serviceEmailTemplateV1", "ServiceEmailTemplateComponentsV1"},
 		{"application_html_send_completion_mutations_v1.go", "PrepareCompletionOutputsV1", "serviceEmailTemplateV1", "applicationServiceEmailComponentsV1"},
 		{"application_html_send_completion_mutations_v1.go", "RenderInviteV1", "cachedServiceEmailTemplateV1", "RenderServiceEmailV1"},
 		{"application_package_send_outbox_batch_v1.go", "packageSendOutboxShapeV1", "cachedServiceEmailTemplateV1", "applicationServiceEmailComponentsV1"},
@@ -99,6 +99,19 @@ func TestServiceEmailNativeProducerMeasuresSelectedRevisionBeforeRenderingV1(t *
 			}
 			if len(serviceEmailNativeCallPositionsV1(fn, "Render")) != 0 {
 				t.Fatal("native producer bypasses selected revision with a builtin render")
+			}
+			if tc.fn == "RenderCommentNotificationsV1" {
+				// Both the default and explicit Swedish recipient variants must be
+				// measured before the selected authored edition is priced once.
+				// Compare positions only in this parsed function's FileSet.
+				native := serviceEmailNativeCallPositionsV1(fn, "CommentNotificationComponentsV1")
+				selected := serviceEmailNativeCallPositionsV1(fn, "ServiceEmailTemplateComponentsV1")
+				loans := serviceEmailNativeCallPositionsV1(fn, "acquireOwnedRetainedBodyV1")
+				renders := serviceEmailNativeCallPositionsV1(fn, "RenderServiceEmailV1")
+				if len(native) != 2 || len(selected) != 1 || len(loans) != 2 || len(renders) != 1 ||
+					!(loans[0] < source[0] && source[0] < native[0] && native[0] < native[1] && native[1] < selected[0] && selected[0] < loans[1] && loans[1] < renders[0]) {
+					t.Fatal("native comment producer must measure both locale variants and the selected revision before funding and rendering output")
+				}
 			}
 		})
 	}

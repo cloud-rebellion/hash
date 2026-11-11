@@ -108,3 +108,36 @@ func TestOperationalBacklog446FailedMailRequiresFreshDurableRemediation(t *testi
 		t.Fatal("fresh requeued state did not distinguish remediation", s)
 	}
 }
+
+// A deletion that never drains must stay visible: the pending count and oldest
+// age reach the snapshot, and an inconsistent projection is refused.
+func TestOperationalBacklogPendingObjectDeletionsReachSnapshotAndAreValidated(t *testing.T) {
+	var c operationalBacklogCacheV1
+	clock := func() time.Time { return time.Unix(3000, 0) }
+	row := &generated.GetOperationalBacklogV1Row{PendingObjectCount: 3, PendingObjectOldestObservedAgeSeconds: 86400}
+	read := func(context.Context) (*generated.GetOperationalBacklogV1Row, error) { return row, nil }
+	s, ok := c.collectV1(context.Background(), read, clock)
+	if !ok || !s.HasSample || s.ReadUnavailable || s.Data.PendingObjectCount != 3 || s.Data.PendingObjectOldestObservedAgeSeconds != 86400 || s.Data.PendingObjectLimitReached {
+		t.Fatal("pending object deletions did not reach the snapshot", s)
+	}
+	// At the cap the flag must reach the snapshot: ValidV1 refuses a full count
+	// with the flag false, so dropping the copy flips the whole snapshot to
+	// ReadUnavailable exactly when a deletion backlog is largest.
+	row = &generated.GetOperationalBacklogV1Row{PendingObjectCount: 1000, PendingObjectOldestObservedAgeSeconds: 1, PendingObjectLimitReached: true}
+	s, ok = c.collectV1(context.Background(), read, clock)
+	if !ok || !s.HasSample || s.ReadUnavailable || s.Data.PendingObjectCount != 1000 || !s.Data.PendingObjectLimitReached || s.Data.PendingObjectOldestObservedAgeSeconds != 1 {
+		t.Fatal("PendingObjectLimitReached was not copied into the snapshot", s)
+	}
+	for name, bad := range map[string]*generated.GetOperationalBacklogV1Row{
+		"over the cap":      {PendingObjectCount: 1001},
+		"age without rows":  {PendingObjectOldestObservedAgeSeconds: 5},
+		"negative age":      {PendingObjectCount: 1, PendingObjectOldestObservedAgeSeconds: -1},
+		"cap flag mismatch": {PendingObjectCount: 1000},
+	} {
+		row = bad
+		s, _ = c.collectV1(context.Background(), read, clock)
+		if !s.ReadUnavailable {
+			t.Fatal("invalid pending object projection accepted: " + name)
+		}
+	}
+}

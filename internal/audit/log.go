@@ -85,6 +85,9 @@ const (
 	KindDataSubjectFulfilled  = "data_subject.fulfilled"
 	KindDataSubjectDenied     = "data_subject.denied"
 	KindDataSubjectAnonymized = "data_subject.anonymized"
+	// One per document whose PDF revision history a DSR erasure removed. The
+	// payload carries counts and ids only, never subject data.
+	KindDataSubjectPDFHistoryErased = "data_subject.pdf_history_erased"
 )
 
 // EventHook fires AFTER a successful audit-row insert. The hook receives
@@ -241,7 +244,38 @@ func (l *Logger) append(ctx context.Context, q *generated.Queries, p preparedEnt
 		slog.Error("audit log insert failed", "org_id", e.OrgID, "kind", e.Kind, "error_type", fmt.Sprintf("%T", err))
 		return uuid.Nil, err
 	}
+	// Every event that names a document gets its payload-size row (00094) in
+	// the same transaction as the event. Without it an HTML draft can never be
+	// revised again: the revise header counts every event of the document and
+	// answers 503 "retry later" for any unmeasured one. Measuring here, in the
+	// only place that inserts events, covers every caller of Log and LogTx
+	// instead of asking each call site to remember. The statement is idempotent
+	// (ON CONFLICT), so a writer that also measures its own event is harmless.
+	// Non-HTML documents get the row too: a PDF draft can become an HTML draft
+	// after its first events (SetDocumentHTMLSource), a conditional read here
+	// would race that, and only the HTML revise and certificate readers use it.
+	if e.DocumentID != nil {
+		if err := measureDocumentEventV1(ctx, q, e.OrgID, *e.DocumentID, row.ID); err != nil {
+			slog.Error("audit event measurement failed", "org_id", e.OrgID, "kind", e.Kind, "error_type", fmt.Sprintf("%T", err))
+			return uuid.Nil, err
+		}
+	}
 	return row.ID, nil
+}
+
+// measureDocumentEventV1 records html_snapshot_event_payload_sizes_v1 for an
+// event appended by this transaction. The derive trigger takes the org chain
+// lock already held here, validates the event's real org and document, and
+// measures the stored JSONB; the caller supplies only the scope.
+func measureDocumentEventV1(ctx context.Context, q *generated.Queries, org, doc, event uuid.UUID) error {
+	cache, err := q.MeasureHTMLSnapshotEventPayloadV1(ctx, generated.MeasureHTMLSnapshotEventPayloadV1Params{EventID: event, DocumentID: doc, OrgID: org})
+	if err != nil {
+		return fmt.Errorf("audit: measure event: %w", err)
+	}
+	if cache == nil || cache.EventID != event || cache.DocumentID != doc || cache.OrgID != org || cache.PayloadWireBytes < 2 || cache.MeasurementServerVersionNum <= 0 || !cache.MeasuredAt.Valid {
+		return errors.New("audit: event measurement refused")
+	}
+	return nil
 }
 
 // nextAuditTimestamp preserves the chain's ORDER BY created_at,id invariant
@@ -285,6 +319,7 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 // per-org chain lock after the caller has taken its document row lock, which is
 // the global lock order used by signing state transitions. Hooks are deliberately
 // deferred; call Publish with the returned value only after Commit succeeds.
+// An event that names a document is also measured (append) in this transaction.
 func (l *Logger) LogTx(ctx context.Context, tx pgx.Tx, e Entry) (PendingEvent, error) {
 	p, err := prepareEntry(e)
 	if err != nil {

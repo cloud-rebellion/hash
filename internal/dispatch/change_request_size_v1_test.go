@@ -53,7 +53,7 @@ func TestChangeRequestNotificationKeepsOriginalURLPolicyV1(t *testing.T) {
 func TestChangeRequestNotificationUnusedContextStaysUnusedV1(t *testing.T) {
 	a := TemplateContext{RecipientName: "Signer", DocumentName: "Contract", OpenURL: "/documents/id"}
 	b := a
-	b.Locale, b.OrgName, b.SenderName, b.SenderEmail, b.BrandColor = "sv", "ignored org", "ignored sender", "ignored email", "ignored color"
+	b.OrgName, b.SenderName, b.SenderEmail, b.BrandColor = "ignored org", "ignored sender", "ignored email", "ignored color"
 	b.Acknowledgement, b.InternalOperator = true, true
 	as, ah, ap, ae := ChangeRequestNotificationComponentsV1(a)
 	bs, bh, bp, be := ChangeRequestNotificationComponentsV1(b)
@@ -85,7 +85,7 @@ func TestChangeRequestNotificationActualTemplateShapeV1(t *testing.T) {
 	want := map[string]int{"RecipientName": 1, "DocumentName": 1, "ChangeContext": 1, "ChangeQuote": 1,
 		"DeclineReason": 1, "ChangeProposed": 1, "ApproveURL": 1, "DenyURL": 1, "OpenURL": 1}
 	wantIf := map[string]int{"ChangeContext": 1, "ChangeQuote": 1, "DeclineReason": 1, "ChangeProposed": 1, "ApproveURL": 1, "DenyURL": 1}
-	for _, input := range []struct{ name, source string }{{"html", htmlFor(KindChangesRequested)}, {"text", textFor(KindChangesRequested)}} {
+	for _, input := range []struct{ name, source string }{{"html", changesRequestedHTML}, {"text", changesRequestedText}, {"html-sv", changesRequestedHTMLSV}, {"text-sv", changesRequestedTextSV}} {
 		t.Run(input.name, func(t *testing.T) {
 			tpl, err := template.New(input.name).Parse(input.source)
 			if err != nil {
@@ -104,7 +104,7 @@ func TestChangeRequestNotificationActualTemplateShapeV1(t *testing.T) {
 				var escapers []string
 				if afterEscape && !condition {
 					escapers = []string{"_html_template_htmlescaper"}
-					if input.name == "html" && strings.HasSuffix(f.Ident[0], "URL") {
+					if strings.HasPrefix(input.name, "html") && strings.HasSuffix(f.Ident[0], "URL") {
 						escapers = []string{"_html_template_urlfilter", "_html_template_urlnormalizer", "_html_template_attrescaper"}
 					}
 				}
@@ -152,7 +152,7 @@ func TestChangeRequestNotificationActualTemplateShapeV1(t *testing.T) {
 			}
 			afterEscape = true
 			walk(tpl.Tree.Root)
-			if input.name == "html" {
+			if strings.HasPrefix(input.name, "html") {
 				for name := range want {
 					if strings.HasSuffix(name, "URL") {
 						if strings.Count(input.source, `href="{{.`+name+`}}"`) != 1 {

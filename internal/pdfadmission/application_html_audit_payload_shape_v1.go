@@ -83,6 +83,9 @@ const (
 	HTMLAuditCRMAppliedV1
 	HTMLAuditDocumentPurposeUpdatedV1
 	HTMLAuditDocumentMetadataAttachedV1
+	HTMLAuditDocumentExpiryUpdatedV1
+	HTMLAuditPDFRevisionV1
+	HTMLAuditPDFReviewV1
 )
 
 func (p HTMLAuditPurposeV1) KindV1() string {
@@ -149,7 +152,7 @@ func (p HTMLAuditPurposeV1) KindV1() string {
 		return "document.created"
 	case HTMLAuditAutomationRecipientCreatedV1:
 		return "recipient.created"
-	case HTMLAuditPlainDraftUpdatedV1, HTMLAuditDocumentPurposeUpdatedV1, HTMLAuditDocumentMetadataAttachedV1:
+	case HTMLAuditPlainDraftUpdatedV1, HTMLAuditDocumentPurposeUpdatedV1, HTMLAuditDocumentMetadataAttachedV1, HTMLAuditDocumentExpiryUpdatedV1, HTMLAuditPDFRevisionV1, HTMLAuditPDFReviewV1:
 		return "document.updated"
 	case HTMLAuditBlockSignedV1, HTMLAuditPackageSignedV1:
 		return "document.signed"
@@ -274,6 +277,12 @@ func htmlAuditRootKeyV1(p HTMLAuditPurposeV1, k string) bool {
 		fields = "|purpose|via|tool|"
 	case HTMLAuditDocumentMetadataAttachedV1:
 		fields = "|via|tool|key|value|"
+	case HTMLAuditPDFRevisionV1:
+		fields = "|pdf_revision|summary_present|previous_pdf_sha256|pdf_sha256|previous_pdf_version_id|pdf_version_id|page_count|review_required|placement_reset|via|tool|"
+	case HTMLAuditPDFReviewV1:
+		fields = "|pdf_revision|pdf_sha256|reviewer_kind|reviewed_pages|via|tool|"
+	case HTMLAuditDocumentExpiryUpdatedV1:
+		fields = "|via|tool|expires_at|"
 	case HTMLAuditBlockSignedV1:
 		fields = "|font|typed_name|image_sha256|signature_id|notice_schema|notice_digest|notice_snapshot|"
 	case HTMLAuditPlainRecipientCreatedV1, HTMLAuditPlainRecipientUpdatedV1, HTMLAuditPlainRecipientDeletedV1:

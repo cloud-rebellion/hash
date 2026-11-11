@@ -123,8 +123,8 @@ def validate_review(root, bun_version):
         "schema": 1, "package": PACKAGE, "version": VERSION, "integrity": INTEGRITY,
         "lock_sha256": LOCK_SHA256, "lock_bytes": LOCK_BYTES, "bun_version": "1.3.9",
         "adapter": "@sveltejs/adapter-static", "adapter_version": "3.0.10",
-        "profile": "hash-go-embedded-static-v1", "reviewed_on": "2026-10-24",
-        "review_expires_on": "2026-11-07",
+        "profile": "hash-go-embedded-static-v1", "reviewed_on": "2026-11-07",
+        "review_expires_on": "2026-11-21",
     }
     require(all(review[key] == value for key, value in expected.items())
             and type(review["schema"]) is int and type(review["lock_bytes"]) is int
@@ -154,8 +154,8 @@ def validate_review(root, bun_version):
     require(build["package"] == BUILD_PACKAGE and build["version"] == BUILD_VERSION
             and build["integrity"] == BUILD_INTEGRITY
             and build["dependency_path"] == ["@sveltejs/vite-plugin-svelte@5.1.1", "deepmerge@4.3.1"]
-            and build["reviewed_on"] == "2026-10-28"
-            and build["review_expires_on"] == "2026-11-07"
+            and build["reviewed_on"] == "2026-11-07"
+            and build["review_expires_on"] == "2026-11-21"
             and datetime.date.fromisoformat(build["reviewed_on"]) <= today <= expires,
             "reviewed build dependency identity changed")
     entry = build["advisory"]

@@ -134,7 +134,7 @@
     // Resolve the wss/ws scheme + base from window.location so dev (http)
     // + prod (https) both work without config.
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsBase = `${scheme}//${window.location.host}/api/v1/documents/${doc.id}`;
+    const wsBase = `${scheme}//${window.location.host}/api/v1/documents/${encodeURIComponent(doc.id)}`;
     provider = new WebsocketProvider(wsBase, 'collab', ydoc, {
       // y-websocket appends "/{room}" to the URL; we want the room
       // path to be the entire endpoint, so set room='' via the

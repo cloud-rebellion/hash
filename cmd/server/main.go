@@ -176,6 +176,8 @@ func run() (runErr error) {
 				slog.Warn("process work cleanup remains unresolved")
 			}
 		}()
+		stopWorkCleanup := workRuntime.StartCleanupV1()
+		defer stopWorkCleanup() // Join before the earlier runtime/pool closes.
 	}
 
 	queries := generated.New(pool)
@@ -558,6 +560,7 @@ func run() (runErr error) {
 	// the owned HTML services and original transport authorization.
 	mcpServer := mcp.New(mcp.Deps{
 		Design:              srv.MCPDesignBridgeV1(),
+		PDFRevisions:        srv.MCPPDFRevisionBridgeV1(),
 		BrandCatalog:        brandCatalog,
 		PDFCreationSessions: workRuntime.SessionsV1(),
 		Pool:                pool,

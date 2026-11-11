@@ -243,6 +243,42 @@ func TestHTMLInputFiniteSchemaPreservesArbitraryNamesEscapesAndTypedShapesV1(t *
 		}
 	}
 }
+func TestHTMLInputDocumentLocaleAndPurposeScalarsUseOwnedShapeV1(t *testing.T) {
+	ctx := context.Background()
+	base, err := htmlAuthoringInputShapeForV1(ctx, HTMLDocumentCreationInputV1, []byte(`{"name":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"name":"x","default_locale":"sv","purpose":"document"}`)
+	shape, err := htmlAuthoringInputShapeForV1(ctx, HTMLDocumentCreationInputV1, raw)
+	if err != nil || shape.raw != int64(len(raw)) || shape.strings != base.strings+4 || shape.stringBytes != base.stringBytes+int64(len("default_locale")+len("sv")+len("purpose")+len("document")) {
+		t.Fatal("declared document scalars were not measured from their exact wire bytes", shape, err)
+	}
+	baseCost, err := htmlAuthoringInputParseResourcesV1(HTMLDocumentCreationInputV1, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cost, err := htmlAuthoringInputParseResourcesV1(HTMLDocumentCreationInputV1, shape)
+	if err != nil || cost <= baseCost {
+		t.Fatal("locale and purpose bypassed the existing parser/output funding", cost, baseCost, err)
+	}
+	for _, bad := range []string{
+		`{"name":"x","default_locale":{}}`, `{"name":"x","default_locale":[]}`,
+		`{"name":"x","purpose":{}}`, `{"name":"x","purpose":[]}`,
+		`{"name":"x","default_locale":"sv","purpose":"document","unexpected":"x"}`,
+	} {
+		if _, err := htmlAuthoringInputShapeForV1(ctx, HTMLDocumentCreationInputV1, []byte(bad)); err == nil {
+			t.Fatal("closed document input schema accepted an unknown field or container-valued scalar", bad)
+		}
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if _, err := htmlAuthoringInputShapeForV1(ctx, HTMLDocumentCreationInputV1, raw); err != nil {
+			panic(err)
+		}
+	}); allocations != 0 {
+		t.Fatal("locale/purpose shape preflight allocated before its parser grant", allocations)
+	}
+}
 func TestHTMLInputCanonicalPreservesExactLegacyCommitmentAndConsumerV1(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -21,7 +21,7 @@ func TestReviewedAutomation121AndDesign122RetainWriterEight(t *testing.T) {
 		for n := 118; n <= highest; n++ {
 			versions = append(versions, int64(n))
 		}
-		if err := requireReviewedLifecycleTreeV1(f, versions); err != nil || LifecycleContractVersionV1 != 8 {
+		if err := requireReviewedLifecycleTreeV1(f, versions); err != nil || LifecycleContractVersionV1 != 9 {
 			t.Fatal("reviewed prior/current named tail refused", highest, err)
 		}
 	}

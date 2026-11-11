@@ -14,7 +14,7 @@
   }>();
   let confirming = $state(false), busy = $state(false), uncertain = $state(false), done = $state(false);
   let error = $state<string | null>(null);
-  let trigger = $state.raw<HTMLButtonElement>(), cancelButton = $state.raw<HTMLButtonElement>();
+  let trigger = $state.raw<HTMLButtonElement>(), cancelButton = $state.raw<HTMLButtonElement>(), dialog = $state.raw<HTMLDialogElement>();
   let disposed = false, revision = 0;
   let controller: AbortController | null = null;
   let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -27,10 +27,18 @@
   async function openConfirmation() {
     if (disposed || disabled || !eligible || busy || uncertain || done) return;
     confirming = true; error = null;
-    await tick(); if (!disposed && confirming) cancelButton?.focus();
+    await tick(); if (!disposed && confirming) { if (dialog && !dialog.open) dialog.showModal(); cancelButton?.focus(); }
   }
   async function cancelConfirmation() {
     if (disposed || busy || uncertain || done) return;
+    confirming = false; error = null; dialog?.close();
+    await tick(); if (!disposed) trigger?.focus();
+  }
+  // The browser may close a modal on a third Escape (non-cancelable). While a delete is pending or unconfirmed, or a message is
+  // showing (a refusal that landed during the close), the dialog must stay.
+  async function dialogClosed() {
+    if (disposed || !confirming) return;
+    if (busy || uncertain || error) { if (dialog && !dialog.open) dialog.showModal(); return; }
     confirming = false; error = null;
     await tick(); if (!disposed) trigger?.focus();
   }
@@ -40,16 +48,20 @@
     busy = true; error = null; onbusy(true);
     let dispatched = false;
     try {
-      if (beforeRemove && !await beforeRemove()) {
+      // One deadline covers beforeRemove too, so a hung preview retirement cannot leave the modal busy forever.
+      const abort = new AbortController(); controller = abort;
+      const timedOut = new Promise<never>((_, reject) => {
+        rejectPending = reject;
+        deadline = setTimeout(() => {
+          abort.abort();
+          reject(new LibraryRemovalError('unknown', dispatched ? 'The result could not be confirmed. Reload the library before trying again.' : 'Close the preview or creation form before removing this item.'));
+        }, 25000);
+      });
+      if (beforeRemove && !await Promise.race([beforeRemove(), timedOut])) {
         if (!disposed && ticket === revision) error = 'Close the preview or creation form before removing this item.';
         return;
       }
       if (disposed || ticket !== revision || key !== currentKey()) return;
-      const abort = new AbortController(); controller = abort;
-      const timedOut = new Promise<never>((_, reject) => {
-        rejectPending = reject;
-        deadline = setTimeout(() => { abort.abort(); reject(new LibraryRemovalError('unknown', 'The result could not be confirmed. Reload the library before trying again.')); }, 25000);
-      });
       dispatched = true;
       await Promise.race([removeLibraryItem(selectedKind, id, abort.signal), timedOut]);
       if (disposed || ticket !== revision || key !== currentKey()) return;
@@ -75,12 +87,13 @@
 {#if eligible}
   <div class="library-removal" aria-busy={busy}>
     {#if done}<p role="status" class="text-xs text-success">{$ui(kind === 'document' ? 'Draft deleted.' : 'Template archived.')}</p>
-    {:else if !confirming}
-      <button bind:this={trigger} type="button" class="removal-trigger" disabled={disabled || busy} aria-label={$ui(kind === 'document' ? 'Delete draft {name}' : 'Archive template {name}', { name: item.name })} aria-expanded="false" onclick={openConfirmation}>
+    {:else}
+      <button bind:this={trigger} type="button" class="removal-trigger" disabled={disabled || busy} aria-label={$ui(kind === 'document' ? 'Delete draft {name}' : 'Archive template {name}', { name: item.name })} aria-haspopup="dialog" aria-expanded={confirming} onclick={openConfirmation}>
         {#if kind === 'document'}<Trash2 class="size-3.5" />{:else}<Archive class="size-3.5" />{/if}{$ui(kind === 'document' ? 'Delete draft' : 'Archive template')}
       </button>
-    {:else}
-      <div class="removal-confirmation" role="group" aria-label={$ui(kind === 'document' ? 'Confirm draft deletion' : 'Confirm template archive')}>
+    {/if}
+    {#if confirming}
+      <dialog bind:this={dialog} class="removal-confirmation" aria-label={$ui(kind === 'document' ? 'Confirm draft deletion' : 'Confirm template archive')} oncancel={(event) => { event.preventDefault(); void cancelConfirmation(); }} onclose={dialogClosed}>
         <p class="text-sm font-medium [overflow-wrap:anywhere]">{$ui(kind === 'document' ? 'Delete “{name}”?' : 'Archive “{name}”?', { name: item.name })}</p>
         <p class="text-xs leading-relaxed text-text-secondary mt-2">{$ui(kind === 'document' ? 'This removes the draft from your library. Source files are retained during the cleanup grace period. Sent and signed documents cannot be deleted here.' : 'This removes the template from the library. Documents already created from it and their saved evidence are kept.')}</p>
         {#if error}<p role="alert" class="text-xs text-danger mt-3">{$ui(error)}</p>{/if}
@@ -89,7 +102,7 @@
           <button bind:this={cancelButton} type="button" class="btn btn-secondary !text-xs !py-2" disabled={busy} onclick={cancelConfirmation}>{$ui('Cancel')}</button>
           <button type="button" class="btn btn-secondary removal-submit !text-xs !py-2" disabled={disabled || busy} onclick={remove}>{$ui(busy ? 'Removing…' : kind === 'document' ? 'Delete draft' : 'Archive template')}</button>
         </div>{/if}
-      </div>
+      </dialog>
     {/if}
     {#if done && error}<p role="alert" class="text-xs text-danger mt-2">{$ui(error)}</p>{/if}
   </div>
@@ -101,6 +114,7 @@
   .removal-trigger:hover{color:var(--t-danger);}
   .removal-trigger:focus-visible{outline:2px solid var(--t-accent);outline-offset:4px;}
   .removal-trigger:disabled{opacity:.4;cursor:default;}
-  .removal-confirmation{margin-top:8px;padding:14px;border:1px solid color-mix(in srgb,var(--t-danger) 25%,var(--t-border));border-radius:10px;background:var(--t-bg-elevated);}
+  .removal-confirmation{width:min(24rem,calc(100vw - 2rem));margin:auto;padding:20px;border:1px solid color-mix(in srgb,var(--t-danger) 25%,var(--t-border));border-radius:12px;background:var(--t-bg-elevated);color:var(--t-text-primary);box-shadow:0 20px 50px rgb(0 0 0/.25);}
+  .removal-confirmation::backdrop{background:rgb(15 23 42/.55);}
   .removal-submit{color:var(--t-danger);}
 </style>

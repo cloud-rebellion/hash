@@ -18,7 +18,7 @@ function fixture() {
   let prevented = 0, nextTimer = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   const env: any = {
-    busy: false, error: null, disposed: false, request: null, AbortController,
+    busy: false, error: null, disposed: false, request: null, AbortController, clearThumbnailCache: () => {},
     setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimeout: (id: number) => { timers.delete(id); },
     fetch: (url: string, options: RequestInit) => new Promise((resolve, reject) => {

@@ -116,7 +116,7 @@ func setupHTMLTemplateAuthorizationE2E(t *testing.T, database, role string, prof
 		// DELETE is intentionally forbidden for immutable authoring history.
 		// This explicit whole synthetic-estate teardown runs only after checks;
 		// it neither disables the triggers nor supplies a product disposal API.
-		if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil { //nolint:rawsql -- all rows belong to this unique test DB
+		if err := disposeSyntheticEstateV1(f.pool); err != nil {
 			t.Error(err)
 		}
 	})
@@ -1108,5 +1108,35 @@ func TestHTMLTemplateMigrationDownRefusesRetainedSourcesE2E(t *testing.T) {
 	}
 	if head, err := mdb.GetMigrationVersionContext(ctx, historical.db); err != nil || head != 76 {
 		t.Fatal("historical migration history changed", head, err)
+	}
+}
+
+// M125: a revision is born unapproved. An INSERT carrying approval is refused
+// by the database, while insert-then-approve (the normal path) still works.
+func TestHTMLTemplateRevisionInsertGuardRefusesPreApprovedE2E(t *testing.T) {
+	database := isolateHTMLTemplateDatabaseE2E(t)
+	f := setupHTMLTemplateAuthorizationE2E(t, database, "owner")
+	template := createHTMLTemplateE2E(t, f)
+	const insert = `INSERT INTO html_template_revisions(template_id,version,org_id,html_master_json,variables_json,content_sha256,created_by,approved_by,approved_at) SELECT template_id,99,org_id,html_master_json,variables_json,content_sha256,created_by,$3,$4 FROM html_template_revisions WHERE template_id=$1 AND org_id=$2 AND version=1` //nolint:rawsql -- guard witness
+	for name, args := range map[string][]any{
+		"both":    {f.user.ID, time.Now().UTC()},
+		"by only": {f.user.ID, nil},
+		"at only": {nil, time.Now().UTC()},
+	} {
+		_, err := f.pool.Exec(f.ctx, insert, append([]any{template.ID, f.org}, args...)...)
+		var pg *pgconn.PgError
+		if !errors.As(err, &pg) || (pg.Code != "23514" && pg.Code != "P0001") {
+			t.Fatalf("%s: pre-approved revision INSERT must be refused by the database: %v", name, err)
+		}
+	}
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM html_template_revisions WHERE template_id=$1 AND version=99`, template.ID).Scan(&n); err != nil || n != 0 { //nolint:rawsql -- guard witness
+		t.Fatalf("refused INSERT left a row: n=%d err=%v", n, err)
+	}
+	if _, err := f.pool.Exec(f.ctx, insert, template.ID, f.org, nil, nil); err != nil { //nolint:rawsql -- guard witness
+		t.Fatalf("unapproved INSERT refused: %v", err)
+	}
+	if tag, err := f.pool.Exec(f.ctx, `UPDATE html_template_revisions SET approved_by=$3,approved_at=now() WHERE template_id=$1 AND org_id=$2 AND version=99`, template.ID, f.org, f.user.ID); err != nil || tag.RowsAffected() != 1 { //nolint:rawsql -- guard witness
+		t.Fatalf("insert-then-approve must still work: %v", err)
 	}
 }

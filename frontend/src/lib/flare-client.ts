@@ -2,7 +2,7 @@
 // deployed server, not an ingest key or release baked into a previous SPA build.
 // Only fixed failure categories and same-origin compiled-code locations leave
 // the page. Error text, rejection values, resource URLs and user state do not.
-import { isStaffAuthPath } from './staffAuth';
+import { isStaffAuthPath, isNoticePath, routeCategory } from './routeSurface';
 
 export interface FlareBrowserCaptureOptions {
 	dsn?: string;
@@ -82,21 +82,12 @@ function eventID(): string {
 // Capability entry and native account pages never initialize or emit telemetry.
 // Check pathname only: never inspect the credential fragment.
 function noticeCapabilityPage(): boolean {
-	return typeof location !== 'undefined' && (location.pathname.startsWith('/notice/') || isStaffAuthPath(location.pathname));
+	return typeof location !== 'undefined' && (isNoticePath(location.pathname) || isStaffAuthPath(location.pathname));
 }
 
 function pageCategory(): string {
 	if (typeof location === 'undefined') return 'unknown';
-	const path = location.pathname;
-	if (path === '/') return 'home';
-	for (const [prefix, category] of [
-		['/sign', 'signer'], ['/completed', 'completed'], ['/auth', 'auth'],
-		['/legal', 'legal'], ['/dashboard', 'dashboard'], ['/documents', 'documents'],
-		['/templates', 'templates'], ['/settings', 'settings'], ['/verify', 'verify']
-	]) {
-		if (path === prefix || path.startsWith(prefix + '/')) return category;
-	}
-	return 'other';
+	return routeCategory(location.pathname);
 }
 
 // Reading own data properties avoids invoking getters/toJSON on rejected values.

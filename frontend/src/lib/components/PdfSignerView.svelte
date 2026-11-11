@@ -127,7 +127,7 @@
       const signal = active.controller.signal;
       pendingPDF = await fetchSignerPDF(scope, signal);
       active.assertCurrent();
-      const data = await fetch(`/sign/${scope.token}/fields`, { signal, cache: 'no-store', credentials: 'same-origin' })
+      const data = await fetch(`/sign/${encodeURIComponent(scope.token)}/fields`, { signal, cache: 'no-store', credentials: 'same-origin' })
         .then(response => readSignerFieldResponse(response, scope.observation, signal));
       active.assertCurrent();
       const pdf = await import('$lib/pdf');
@@ -234,7 +234,7 @@
     delete saveErrors[f.id];
     try {
       const scope = active.scope;
-      const res = await fetch(`/sign/${scope.token}/fields`, {
+      const res = await fetch(`/sign/${encodeURIComponent(scope.token)}/fields`, {
         method: 'POST',
         signal: active.controller.signal,
         cache: 'no-store',

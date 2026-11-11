@@ -18,6 +18,11 @@ import (
 
 var ErrHTMLRevisionReadV1 = errors.New("pdfadmission: owned HTML revision read unavailable")
 
+// ErrHTMLResponseMeasurementMissingV1 is joined with ErrHTMLRevisionReadV1 when
+// the draft has no html_creation_response_sizes_v1 row (the header query reports
+// -1). The reader never repairs it: only an admitted source writer may derive it.
+var ErrHTMLResponseMeasurementMissingV1 = errors.New("pdfadmission: response measurement missing")
+
 type HTMLRevisionReadAccessV1 struct {
 	DocumentID, OrgID, SenderID            uuid.UUID
 	UpdatedAt, ExpiresAt                   pgtype.Timestamptz
@@ -141,6 +146,9 @@ func (r *ApplicationHTMLRevisionReaderV1) readDocumentBodyModeV1(ctx context.Con
 		if err = r.authoring.AcquireActorV1(ctx, s.org, user, false); err != nil {
 			return nil, errors.Join(ErrHTMLRevisionReadV1, err)
 		}
+	}
+	if r.valid(ctx) && h.ResponseMeasurementServerVersionNum < 0 {
+		return nil, errors.Join(ErrHTMLRevisionReadV1, ErrHTMLResponseMeasurementMissingV1)
 	}
 	if !r.valid(ctx) || h.PolicyMeasurementServerVersionNum != h.ServerVersionNum || h.ResponseMeasurementServerVersionNum != h.ServerVersionNum || h.ReportMeasurementServerVersionNum != h.ServerVersionNum {
 		return nil, ErrHTMLRevisionReadV1

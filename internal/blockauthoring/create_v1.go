@@ -36,6 +36,7 @@ type ActorV1 struct {
 	Via, Tool, IP, UserAgent string
 }
 type CreateInputV1 struct {
+	DefaultLocale             string
 	Purpose                   documentpurpose.Purpose
 	Name                      string
 	TemplateID                pgtype.UUID
@@ -209,6 +210,10 @@ func CreateV1(ctx context.Context, d DependenciesV1, actor ActorV1, in CreateInp
 			return err
 		}
 		doc, err = state.writer.CreateBlocksDocument(call, generated.CreateBlocksDocumentParams{OrgID: actor.OrgID, TemplateID: in.TemplateID, Name: in.Name, SenderID: actor.UserID, ExpiresAt: in.ExpiresAt})
+		if err != nil {
+			return err
+		}
+		doc, err = state.writer.RecordDefaultLocaleV1(call, in.DefaultLocale)
 		if err != nil {
 			return err
 		}

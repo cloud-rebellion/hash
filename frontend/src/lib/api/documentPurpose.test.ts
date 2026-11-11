@@ -18,10 +18,10 @@ test('native create, import, reuse and purpose-only PATCH carry the explicit pur
     await importProposalPDF('Name', new File(['%PDF-synthetic'], 'design.pdf'), 'document'); await importProposalHTML('Name', '<h1>Content</h1>', false, 'presentation');
     const input = { name: 'Name', purpose: 'document' as const, expected_template_version: 2, expected_template_content_sha256: 'a'.repeat(64), values: { customer: 'Preserved' }, request_id: 'request' };
     await createHTMLTemplateDocument('template', input); await updateDocument('document', { expected_updated_at: 'exact', purpose: 'document' });
-    expect(JSON.parse(calls[0].init.body as string)).toEqual({ name: 'Name', purpose: 'document', source_kind: 'blocks', blocks_json: { version: 1, blocks: [] }, variables_json: {} });
-    expect(JSON.parse(calls[1].init.body as string)).toEqual({ name: 'Name', purpose: 'presentation', source_kind: 'pdf', template_id: 'template' });
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ name: 'Name', purpose: 'document', source_kind: 'blocks', default_locale: 'en', blocks_json: { version: 1, blocks: [] }, variables_json: {} });
+    expect(JSON.parse(calls[1].init.body as string)).toEqual({ name: 'Name', purpose: 'presentation', source_kind: 'pdf', template_id: 'template', default_locale: 'en' });
     expect((calls[2].init.body as FormData).get('purpose')).toBe('document'); expect((calls[2].init.body as FormData).get('pdf')).toBeInstanceOf(File);
-    expect(JSON.parse(calls[3].init.body as string)).toEqual({ name: 'Name', html: '<h1>Content</h1>', landscape: false, purpose: 'presentation' });
+    expect(JSON.parse(calls[3].init.body as string)).toEqual({ name: 'Name', html: '<h1>Content</h1>', landscape: false, default_locale: 'en', purpose: 'presentation' });
     expect(JSON.parse(calls[4].init.body as string)).toEqual(input); expect(JSON.parse(calls[5].init.body as string)).toEqual({ expected_updated_at: 'exact', purpose: 'document' });
     for (const call of calls) expect(call.init.credentials).toBe('include');
   } finally { globalThis.fetch = original; }

@@ -5,15 +5,14 @@ export type DownloadDocument = Pick<DocumentResponse, 'id' | 'name' | 'status' |
 export type DocumentDownloadKind = 'pdf' | 'evidence';
 
 export function documentDownloadURL(document: DownloadDocument, kind: DocumentDownloadKind = 'pdf'): string {
-  const id = encodeURIComponent(document.id);
   if (kind === 'evidence') {
     if (document.status !== 'completed') throw new Error('The evidence report is available after completion.');
-    return `/api/v1/documents/${id}/audit-cert`;
+    return `/api/v1/documents/${encodeURIComponent(document.id)}/audit-cert`;
   }
-  if (document.status === 'completed') return `/api/v1/documents/${id}/final-pdf`;
+  if (document.status === 'completed') return `/api/v1/documents/${encodeURIComponent(document.id)}/final-pdf`;
   const query = new URLSearchParams({ download: '1', expected_updated_at: document.updated_at });
   if (document.pdf_sha256) query.set('expected_pdf_sha256', document.pdf_sha256);
-  return `/api/v1/documents/${id}/pdf?${query}`;
+  return `/api/v1/documents/${encodeURIComponent(document.id)}/pdf?${query}`;
 }
 
 export function documentDownloadName(document: DownloadDocument, kind: DocumentDownloadKind = 'pdf'): string {

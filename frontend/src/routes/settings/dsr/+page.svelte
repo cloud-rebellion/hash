@@ -8,6 +8,7 @@
     getMe,
     type DSRRequest,
   } from '$lib/api/client';
+  import { DSRTransitionError, type DSRErasureConfirmation } from '$lib/api/dsrTransition';
   import { UserSearch, Download, Check, X, Pause } from 'lucide-svelte';
   import RecoveryPanel from '$lib/components/BlockEditor/RecoveryPanel.svelte';
 
@@ -20,6 +21,10 @@
   let selectedArchiveRequest = $state<Pick<DSRRequest, 'id' | 'document_id' | 'org_id'> | null>(null);
   let disposed = false;
   let refreshVersion = 0;
+  let confirmationPending = $state<DSRErasureConfirmation & { id: string; note: string } | null>(null);
+  let transitionBusy = $state(false);
+  let transitionUnknown = $state(false);
+  let transitionAbort: AbortController | null = null;
 
   let exportEmail = $state('');
   let exporting = $state(false);
@@ -29,10 +34,13 @@
     const version = ++refreshVersion;
     const filter = statusFilter;
     loading = true;
+    confirmationPending = null;
     try {
       const res = await listDSR(filter);
       if (disposed || version !== refreshVersion || filter !== statusFilter) return;
       requests = res.requests ?? [];
+      transitionUnknown = false;
+      error = null;
       if (selectedArchiveRequest && !requests.some((request) => request.id === selectedArchiveRequest?.id
           && request.document_id === selectedArchiveRequest.document_id && request.org_id === selectedArchiveRequest.org_id)) {
         selectedArchiveRequest = null;
@@ -64,20 +72,57 @@
   }
 
   onMount(() => { void refresh(); void checkArchiveAccess(); });
-  onDestroy(() => { disposed = true; refreshVersion++; });
+  onDestroy(() => { disposed = true; refreshVersion++; confirmationPending = null; transitionAbort?.abort(); });
 
   async function transition(id: string, status: string) {
+    if (disposed || transitionBusy || transitionUnknown || confirmationPending) return;
     const note = status === 'denied'
-      ? prompt('Resolution note (visible to the data subject):') || ''
+      ? prompt($ui('Resolution note (visible to the data subject):')) || ''
       : '';
+    await submitTransition(id, status, note);
+  }
+
+  async function submitTransition(id: string, status: string, note: string, receipt?: string) {
+    if (disposed || transitionBusy || transitionUnknown) return;
+    transitionBusy = true;
+    error = null;
+    const abort = new AbortController();
+    transitionAbort = abort;
+    const deadline = setTimeout(() => abort.abort(), 25000);
     try {
-      await transitionDSR(id, status, note);
+      const result = await transitionDSR(id, status, note, receipt, abort.signal);
+      if (disposed) return;
+      if (result.state === 'confirmation') {
+        // Keep this receipt only on the current page. A stale confirmation
+        // produces a fresh preview, and can only be sent after another click.
+        confirmationPending = { ...result.confirmation, id, note };
+        return;
+      }
       await refresh();
     } catch (e) {
+      if (disposed) return;
+      transitionUnknown = !(e instanceof DSRTransitionError) || e.outcome === 'unknown';
       error = (e as Error).message;
+    } finally {
+      clearTimeout(deadline);
+      if (!disposed) transitionBusy = false;
+      transitionAbort = null;
     }
   }
 
+  async function confirmErasure() {
+    if (!confirmationPending || transitionBusy || disposed || transitionUnknown) return;
+    const pending = confirmationPending;
+    confirmationPending = null;
+    await submitTransition(pending.id, 'fulfilled', pending.note, pending.receipt);
+  }
+
+  function cancelErasure() { if (!transitionBusy) confirmationPending = null; }
+
+  function documentStatusLabel(status: string): string {
+    const labels: Record<string, string> = { draft: 'Draft', sent: 'Sent', in_progress: 'In progress', completed: 'Completed', declined: 'Declined', expired: 'Expired', voided: 'Voided' };
+    return $ui(labels[status] ?? status);
+  }
   async function runExport() {
     if (!exportEmail.trim()) return;
     exporting = true;
@@ -121,6 +166,26 @@
 
   {#if error}
     <div class="card p-4 mb-4 text-danger text-sm">{$ui(error)}</div>
+  {/if}
+  {#if transitionUnknown}
+    <button type="button" class="btn btn-secondary mb-4" disabled={transitionBusy || loading} onclick={refresh}>{$ui('Refresh requests')}</button>
+  {/if}
+
+  {#if confirmationPending}
+    <section class="card p-5 mb-6 border-warning" aria-labelledby="dsr-confirmation-title" aria-live="polite">
+      <h2 id="dsr-confirmation-title" class="font-display text-lg mb-3">{$ui('Confirm irreversible erasure')}</h2>
+      {#if confirmationPending.stale}<p class="text-sm text-warning mb-3">{$ui('The erasure scope changed or the confirmation expired. Review this fresh preview and confirm again.')}</p>{/if}
+      <dl class="grid gap-2 text-sm mb-4">
+        <div><dt class="text-text-muted">{$ui('Subject')}</dt><dd class="font-medium [overflow-wrap:anywhere]">{confirmationPending.preview.subject_email}</dd></div>
+        <div><dt class="text-text-muted">{$ui('Linked document status')}</dt><dd>{documentStatusLabel(confirmationPending.preview.document_status)}</dd></div>
+        <div><dt class="text-text-muted">{$ui('PDF history to erase')}</dt><dd>{$ui('{documents} documents · {revisions} revisions', { documents: confirmationPending.preview.pdf_revision_documents, revisions: confirmationPending.preview.pdf_revisions })}</dd></div>
+      </dl>
+      <p class="text-sm text-text-secondary mb-4">{$ui('This anonymizes the linked recipient and permanently erases the listed PDF revision history. Current and signed PDF files are preserved under the retention procedure. This cannot be undone.')}</p>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="btn btn-secondary" disabled={transitionBusy} onclick={cancelErasure}>{$ui('Cancel')}</button>
+        <button type="button" class="btn btn-primary" disabled={transitionBusy} onclick={confirmErasure}>{$ui('Confirm erasure')}</button>
+      </div>
+    </section>
   {/if}
 
   <section class="card p-5 mb-6">
@@ -166,7 +231,7 @@
       <h2 class="font-display font-extralight text-lg flex items-center gap-2">
         <UserSearch class="size-4" /> {$ui("Pending requests")}
       </h2>
-      <select bind:value={statusFilter} onchange={refresh} class="text-sm px-3 py-1.5 rounded border border-border-light bg-bg-elevated">
+      <select bind:value={statusFilter} onchange={refresh} disabled={transitionBusy} class="text-sm px-3 py-1.5 rounded border border-border-light bg-bg-elevated">
         <option value="open">{$ui("Open")}</option>
         <option value="in_progress">{$ui("In progress")}</option>
         <option value="fulfilled">{$ui("Fulfilled")}</option>
@@ -209,11 +274,11 @@
             </div>
             <div class="flex gap-2 justify-end">
               {#if r.status === 'open' || r.status === 'in_progress'}
-                <button class="btn btn-secondary text-xs" onclick={() => transition(r.id, 'in_progress')}>
+                <button class="btn btn-secondary text-xs" disabled={transitionBusy || transitionUnknown || confirmationPending !== null} onclick={() => transition(r.id, 'in_progress')}>
                   <Pause class="size-3" /> {$ui("In progress")}
                 </button>
                 {#if r.kind === 'erasure'}
-                  <button class="btn btn-primary text-xs" onclick={() => transition(r.id, 'fulfilled')}>
+                  <button class="btn btn-primary text-xs" disabled={transitionBusy || transitionUnknown || confirmationPending !== null} onclick={() => transition(r.id, 'fulfilled')}>
                     <Check class="size-3" /> {$ui("Run erasure & fulfill")}
                   </button>
                 {:else}
@@ -221,7 +286,7 @@
                     {$ui("Manual procedure required")}
                   </span>
                 {/if}
-                <button class="btn btn-secondary text-xs" onclick={() => transition(r.id, 'denied')}>
+                <button class="btn btn-secondary text-xs" disabled={transitionBusy || transitionUnknown || confirmationPending !== null} onclick={() => transition(r.id, 'denied')}>
                   <X class="size-3" /> {$ui("Deny")}
                 </button>
               {:else}

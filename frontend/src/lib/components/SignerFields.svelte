@@ -73,7 +73,7 @@
 
   onMount(async () => {
     try {
-      const res = await fetch(`/sign/${token}/fields`);
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/fields`);
       if (!res.ok) {
         throw new Error(await responseError(res));
       }
@@ -120,7 +120,7 @@
     savedAt = null;
     try {
       const values = fields.map((f) => ({ field_id: f.id, value: buf[f.id] ?? emptyValue(f) }));
-      const res = await fetch(`/sign/${token}/fields`, {
+      const res = await fetch(`/sign/${encodeURIComponent(token)}/fields`, {
         method: 'POST',
         headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ values })

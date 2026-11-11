@@ -112,7 +112,7 @@
     try {
       const parties = t.source_kind === 'pdf' ? pdfTemplateParties(t.fields_json) : [];
       selectedTemplate = t; selectedParties = parties;
-      bindings = parties.map((party) => ({ role: party.role, name: '', email: '', locale: 'en' }));
+      bindings = parties.map((party) => ({ role: party.role, name: '', email: '', locale: $staffLocale }));
       documentName = `${t.name} (${new Date().toLocaleDateString($staffLocale)})`;
       documentPurpose = '';
     } catch (e) { error = (e as Error).message; }

@@ -49,13 +49,15 @@ test('template use collects identities and pins the selected revision; failed cr
   const template = { id: 'template', name: 'Master', source_kind: 'pdf', version: 7,
     fields_json: { version: 1, parties: [{ role: 'provider', label: 'Provider' }, { role: 'client', label: 'Client' }],
       fields: [{ party_role: 'provider', type: 'signature', required: true }, { party_role: 'client', type: 'signature', required: true }] } };
-  const env: any = { $staffLocale: 'en', $ui: (text: string) => text, documentPurpose: '', templateCreationUnconfirmed: false, requireDocumentPurpose, creatingId: null, pendingCreation: false, removalBusy: false, error: null, selectedTemplate: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedParties: [], bindings: [], documentName: '', disposed: false,
+  const env: any = { $staffLocale: 'sv', $ui: (text: string) => text, documentPurpose: '', templateCreationUnconfirmed: false, requireDocumentPurpose, creatingId: null, pendingCreation: false, removalBusy: false, error: null, selectedTemplate: null, selectedHTMLTemplate: null, htmlFormDirty: false, selectedParties: [], bindings: [], documentName: '', disposed: false,
     pdfTemplateParties, createDocumentFromTemplate: (...args: any[]) => new Promise((resolve, reject) => calls.push({ args, resolve, reject })),
     goto: (url: string) => { navigations.push(url); } };
   const actions = bind('../../routes/templates/+page.svelte', ['useTemplate', 'createBoundDocument'], env);
   await actions.useTemplate(template);
   expect(calls).toHaveLength(0);
   expect(env.bindings.map((party: any) => party.role)).toEqual(['provider', 'client']);
+  expect(env.bindings.map((party: any) => party.locale)).toEqual(['sv', 'sv']);
+  env.bindings[0].locale = 'en'; // Explicit recipient override remains authoritative.
   env.documentPurpose = 'signing';
   env.bindings[0].name = ' Provider Person '; env.bindings[0].email = ' provider@example.test ';
   env.bindings[1].name = 'Client Person'; env.bindings[1].email = 'client@example.test';
@@ -64,7 +66,7 @@ test('template use collects identities and pins the selected revision; failed cr
   expect(calls).toHaveLength(1);
   expect(calls[0].args[3]).toEqual({ expected_template_version: 7, parties: [
     { role: 'provider', name: 'Provider Person', email: 'provider@example.test', locale: 'en' },
-    { role: 'client', name: 'Client Person', email: 'client@example.test', locale: 'en' }] });
+    { role: 'client', name: 'Client Person', email: 'client@example.test', locale: 'sv' }] });
   calls[0].reject(new Error('Template changed; review it again')); await failed;
   expect(env.selectedTemplate).toBe(template);
   expect(env.bindings[0].name).toBe(' Provider Person ');

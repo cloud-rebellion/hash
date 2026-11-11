@@ -141,6 +141,39 @@ retain their bytes. Ordinary versioned S3 deletion only creates a marker, so the
 worker uses the persisted version ID without retention bypass. See
 [S3 version deletion](https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeletingObjectVersions.html).
 
+A draft with retained PDF revision history (an imported PDF replaced one or more
+times, with its reviews) is erased with the document, at any stage. The
+`DELETE` returns `409` with `code: "confirmation_required"` and a `will_erase`
+count until the body is `{"confirm": true}`. After the 90-day grace period the
+worker purge deletes the revision and review rows and their stored PDF versions
+(an object another row still names is kept), then the draft. DSR erasure
+(`PATCH /api/v1/dsr/{id}` with `status: "fulfilled"`) also erases the revision
+history of the linked document and of every document on which the subject is a
+recipient (exact, case-insensitive email, never a substring), and requires
+an explicit confirmation when the history exists or the linked document is past
+draft. The `409 confirmation_required` response includes `confirmation_receipt`
+and `will_erase` with the subject email, linked document status, PDF-history
+document count and revision count. Review that scope, then submit
+`{"status":"fulfilled","confirm":true,"confirmation_receipt":"<returned receipt>"}`
+from the same staff session. The receipt expires after ten minutes and binds
+the exact request, actor, subject and retained revision/object set. A changed,
+expired or missing receipt returns a fresh preview and erases nothing; review
+and confirm again rather than automatically retrying. Keep receipts out of
+URLs, persistent browser storage and logs. Current/signed PDFs remain under
+the existing retention procedure. Each such document must pass the linked
+document's checks: one in an
+active or unsealed ceremony, or holding collaboration recovery archives, refuses
+the whole request with `409 dsr_history_documents_blocked` (`blocking_documents`
+is the count), and a document the caller did not send needs an owner, otherwise
+`403 dsr_history_owner_required`. Nothing is erased on a refusal. Each erased
+document gets a `data_subject.pdf_history_erased` audit event (document id,
+revision, review and object counts, request id). Stored objects are deleted only
+after the transaction commits. The document and its current PDF stay; its PDF
+must be replaced and reviewed again before it can be sent. `GET
+/api/v1/data-subject/export` returns `409` while a revision archive names the
+subject by exact email. The history is append-only for every other update and delete. MCP has no
+document delete tool, so it is unchanged.
+
 Drafts with captured signing/acceptance/field data, terminal artifact metadata or
 pending sealing records are retained for review before source retirement. These
 are anomalous draft states; deleting their parent would lose evidence references
@@ -627,6 +660,23 @@ Concurrent scheduled workers fire one actual due batch. Outbox commit and direct
 mail dispatch still do not prove inbox delivery. See the
 [reminder contract](API.md#reminder-scheduling-and-delivery) for schedule, authorization and
 delivery behavior.
+
+## Upgrade note: human review before signing (migration 00124)
+
+From migration 00124 a document that will be signed needs a review recorded as
+made by a person in a staff session. A review made before the migration has no
+recorded reviewer kind and does not count. Two populations need one human
+re-review after the upgrade:
+
+- HTML signing drafts that were reviewed before 00124. Attaching one to an
+  envelope, or sending it, is refused with `409` and `code: "pdf_review_required"`
+  until a person reviews it again.
+- HTML documents that are members of a signing package and were reviewed before
+  00124. Attaching or capturing them under a signing root is refused the same
+  way until a person reviews them again.
+
+Nothing is deleted and no document changes state. Open the document, review its
+current pages and confirm. PDF documents reviewed by a person are unaffected.
 
 ## Document previews
 

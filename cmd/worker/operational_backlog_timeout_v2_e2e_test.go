@@ -74,6 +74,7 @@ func TestOperationalBacklog426ActualQueryTimeoutAndBackendRetirementE2E(t *testi
 	_, err = conn.Exec(setup, `
  CREATE TEMP TABLE documents(id bigint,org_id bigint,status text,deleted_at timestamptz,parent_envelope_id bigint);
  CREATE TEMP TABLE document_finalization_intents(document_id bigint PRIMARY KEY,org_id bigint,created_at timestamptz);
+ CREATE TEMP TABLE pending_object_deletions_v1(id bigint,created_at timestamptz);
  CREATE TEMP VIEW email_deliveries AS
  WITH delay AS MATERIALIZED (SELECT pg_sleep(5) AS slept)
  SELECT 1::bigint AS id,'pending'::text AS status,

@@ -290,7 +290,7 @@ func (b *RevisionValidationBuilderV1) ValidateRecordV1() error {
 		}
 		return nil
 	}
-	if b.normalized && (!sameApprovedOrigin(b.origin, s) || (b.document.HtmlCurrentMaterializationSequence.Int32 == 1 && s.Commitment != b.origin.Commitment)) {
+	if b.normalized && (!approvedLineage(b.origin, s) || (b.document.HtmlCurrentMaterializationSequence.Int32 == 1 && s.Commitment != b.origin.Commitment)) {
 		return b.failV1(invalid("current materialization changed its immutable approved origin"))
 	}
 	b.effective = s

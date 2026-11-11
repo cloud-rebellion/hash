@@ -47,7 +47,7 @@ class ReviewTests(unittest.TestCase):
         clock = patch.object(audit.datetime, "datetime", wraps=datetime.datetime)
         self.clock = clock.start()
         self.addCleanup(clock.stop)
-        self.clock.now.return_value = REAL_DATETIME(2026, 10, 29, tzinfo=datetime.timezone.utc)
+        self.clock.now.return_value = REAL_DATETIME(2026, 11, 8, tzinfo=datetime.timezone.utc)
 
     def check(self):
         approved, _expires = audit.validate_review(self.root, "1.3.9")
@@ -144,12 +144,12 @@ class ReviewTests(unittest.TestCase):
         self.refuse()
 
     def test_review_expired(self):
-        self.clock.now.return_value = REAL_DATETIME(2026, 11, 8, tzinfo=datetime.timezone.utc)
+        self.clock.now.return_value = REAL_DATETIME(2026, 11, 22, tzinfo=datetime.timezone.utc)
         self.refuse()
 
     def test_review_cannot_be_extended(self):
         self.change_json("frontend/vulnerability-review.json",
-                         lambda value: value["build_dependency"].update(review_expires_on="2026-11-08"))
+                         lambda value: value["build_dependency"].update(review_expires_on="2026-11-22"))
         self.refuse()
 
     def test_existing_kit_guard_remains(self):

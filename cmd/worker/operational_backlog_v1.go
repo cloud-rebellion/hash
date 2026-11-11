@@ -44,6 +44,7 @@ func (c *operationalBacklogCacheV1) collectV1(ctx context.Context, read operatio
 			MailFailedOldestObservedCreationAgeSeconds: row.MailFailedOldestObservedCreationAgeSeconds, MailFailedLimitReached: row.MailFailedLimitReached,
 			FinalizingRootCount: row.FinalizingRootCount, FinalizingIntentCount: row.FinalizingIntentCount, FinalizingMissingIntentCount: row.FinalizingMissingIntentCount,
 			FinalizingUnknownIntentAgeCount: row.FinalizingUnknownIntentAgeCount, FinalizingOldestObservedIntentAgeSeconds: row.FinalizingOldestObservedIntentAgeSeconds, FinalizingLimitReached: row.FinalizingLimitReached,
+			PendingObjectCount: row.PendingObjectCount, PendingObjectOldestObservedAgeSeconds: row.PendingObjectOldestObservedAgeSeconds, PendingObjectLimitReached: row.PendingObjectLimitReached,
 		}
 		if !d.ValidV1() {
 			unavailable = true

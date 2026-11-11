@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 
 const API_KEY =
   process.env.HASH_E2E_API_KEY ||
@@ -40,11 +41,12 @@ test.describe('MCP workflow write tools', () => {
   });
 
   test('full agent workflow: create -> add_recipient -> send -> mailhog has invite', async ({ request }) => {
-    const before = await mailCount(request);
+    const nonce = randomUUID();
+    const documentName = `Workflow E2E ${nonce}`;
 
     // Step 1: author
     const doc = await tool(request, 'create_document', {
-      name: `Workflow E2E ${Date.now()}`,
+      name: documentName,
       source_kind: 'blocks',
       blocks_json: {
         version: 1,
@@ -57,7 +59,7 @@ test.describe('MCP workflow write tools', () => {
     expect(doc.status).toBe('draft');
 
     // Step 2: recipient
-    const recipientEmail = `wf-${Date.now()}@example.com`;
+    const recipientEmail = `wf-${nonce}@example.test`;
     await tool(request, 'add_recipient', {
       document_id: doc.id,
       role: 'signer',
@@ -72,13 +74,14 @@ test.describe('MCP workflow write tools', () => {
     expect(sendResult.links.length).toBe(1);
     expect(sendResult.links[0].url).toMatch(/\/sign\//);
 
-    // Step 4: invite email shows up in mailhog within 3 seconds.
-    let after = before;
-    for (let i = 0; i < 30 && after === before; i++) {
+    // Step 4: require this invitation, preserving the original 30 x 100ms poll.
+    // Another workspace's auth mail or a paginated global count proves nothing.
+    let delivered = false;
+    for (let i = 0; i < 30 && !delivered; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      after = await mailCount(request);
+      delivered = await hasDeliveredInvite(request, recipientEmail, documentName);
     }
-    expect(after).toBeGreaterThan(before);
+    expect(delivered, 'The unique workflow invitation was not delivered to MailHog').toBe(true);
   });
 
   test('void_document on a sent doc cancels it', async ({ request }) => {
@@ -192,9 +195,27 @@ async function tool(request: APIRequestContext, name: string, args: unknown) {
   return JSON.parse(res.result.content[0].text);
 }
 
-async function mailCount(request: APIRequestContext): Promise<number> {
-  const res = await request.get(`${MAILHOG}/api/v2/messages`);
-  if (res.status() !== 200) return 0;
-  const body = await res.json();
-  return body.count ?? body.total ?? body.items?.length ?? 0;
+async function hasDeliveredInvite(request: APIRequestContext, recipient: string, documentName: string): Promise<boolean> {
+  const response = await request.get(`${MAILHOG}/api/v2/search`, {
+    params: { kind: 'to', query: recipient, start: 0, limit: 50 },
+    maxRedirects: 0
+  });
+  expect(response.status(), 'The synthetic MailHog receiver is unavailable').toBe(200);
+  const raw = await response.body();
+  expect(raw.byteLength, 'The searched synthetic mailbox exceeded its fixture budget').toBeLessThanOrEqual(1 << 20);
+  const body = JSON.parse(raw.toString('utf8'));
+  expect(Array.isArray(body.items) && body.items.length <= 50, 'MailHog returned an invalid search page').toBe(true);
+  const matches = body.items.filter((item: any) => {
+    // SMTP envelope To is authoritative; a display/header address is not proof.
+    const to = Array.isArray(item?.To) ? item.To : [];
+    const exactRecipient = to.some((path: any) => typeof path?.Mailbox === 'string'
+      && typeof path?.Domain === 'string' && `${path.Mailbox}@${path.Domain}` === recipient);
+    const headers = item?.Content?.Headers;
+    const subject = headers && typeof headers === 'object'
+      ? Object.entries(headers).find(([name]) => name.toLowerCase() === 'subject')?.[1] : undefined;
+    return exactRecipient && Array.isArray(subject)
+      && subject.some((value: unknown) => typeof value === 'string' && value.includes(documentName));
+  });
+  expect(matches.length, 'The workflow produced duplicate matching invitations').toBeLessThanOrEqual(1);
+  return matches.length === 1;
 }

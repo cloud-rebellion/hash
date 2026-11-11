@@ -36,8 +36,11 @@ LABEL org.opencontainers.image.title="Hash Chromium renderer" \
 # floor. The lower bounds make repository lag fail the build closed.
 RUN apk add --no-cache \
       'chromium>=152.0.7977.82-r0' \
+      'musl>=1.2.6-r3' \
+      'musl-utils>=1.2.6-r3' \
       'libcrypto3>=3.5.8-r0' \
       'libssl3>=3.5.8-r0' \
+      'zlib>=1.3.2-r1' \
       'libexpat>=2.10.0-r0' \
       ca-certificates \
       font-noto \

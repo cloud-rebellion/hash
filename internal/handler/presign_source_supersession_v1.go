@@ -8,6 +8,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
 	"github.com/bright-interaction/hash/internal/presign"
 	"github.com/bright-interaction/hash/internal/presignregistry"
@@ -33,6 +34,9 @@ func (s *Server) sealPreSignAPISupersessionV1(ctx context.Context, tx pgx.Tx, re
 	}})
 	if err != nil {
 		return audit.PendingEvent{}, false, preSignAPISourceFailureV1("callback_supersession_audit", err)
+	}
+	if err = measureBorrowedAuditEventV1(ctx, generated.New(tx), a.OrgID(), facts.DocumentID, event.ID); err != nil {
+		return audit.PendingEvent{}, false, preSignAPISourceFailureV1("callback_supersession_measure", err)
 	}
 	if err = reader.SealPreSignSupersessionBirthV1(ctx, a.UserID(), c.RequestID, event.ID, c.InputSHA256, p, template.ID); err != nil {
 		return audit.PendingEvent{}, false, preSignAPISourceFailureV1("callback_supersession_seal", err)

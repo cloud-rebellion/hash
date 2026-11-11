@@ -35,7 +35,7 @@ type TemplateContext struct {
 	SenderEmail   string
 	RecipientName string
 	OrgName       string
-	Locale        string // recipient locale for invite/reminder/completed_signer; empty = English
+	Locale        string // message language: recipient override or document default for owner notices; empty = English
 	SignURL       string // signer-side magic link (for invite/reminder)
 	// BeaconURL is retained only for source compatibility with older callers.
 	// Recipient-identifiable pre-notice email tracking is disabled: invite and
@@ -85,6 +85,7 @@ func Render(kind string, ctx TemplateContext) (subject, html, text string, err e
 }
 
 func renderNativeEmailV1(kind string, ctx TemplateContext, recipientFooter string) (subject, html, text string, err error) {
+	ctx = emailQuotaPresentationV1(ctx)
 	for _, link := range []string{ctx.SignURL, ctx.DownloadURL, ctx.AuditCertURL, ctx.PackagePortalURL, ctx.OpenURL, ctx.ApproveURL, ctx.DenyURL, ctx.UpgradeURL} {
 		if err := validateEmailLink(link); err != nil {
 			return "", "", "", err
@@ -139,6 +140,9 @@ func validateEmailLink(value string) error {
 }
 
 func renderSubject(kind string, ctx TemplateContext) (string, error) {
+	if subject, ok := localizedStaffEmailSubjectV1(kind, ctx); ok {
+		return subject, nil
+	}
 	if recipientLocalized(kind) {
 		return localizedSubject(kind, ctx), nil
 	}
@@ -157,7 +161,8 @@ func renderSubject(kind string, ctx TemplateContext) (string, error) {
 	case KindDeclined:
 		return fmt.Sprintf("%s declined %s", ctx.RecipientName, ctx.DocumentName), nil
 	case KindChangesRequested:
-		return fmt.Sprintf("%s requested changes to %s", ctx.RecipientName, ctx.DocumentName), nil
+		join, _, _ := changesRequestedSourcesV1(ctx.Locale)
+		return ctx.RecipientName + join + ctx.DocumentName, nil
 	case KindNewComment:
 		return fmt.Sprintf("New comment on %s", ctx.DocumentName), nil
 	case KindVoided:
@@ -176,7 +181,7 @@ func renderHTMLTemplate(kind string, ctx TemplateContext, recipientFooter string
 	if recipientLocalized(kind) {
 		return localizedHTML(kind, ctx, recipientFooter), nil
 	}
-	src := htmlFor(kind)
+	src, _ := nativeEmailTemplateSourcesV1(kind, ctx.Locale)
 	if src == "" {
 		return "", fmt.Errorf("no html template for %s", kind)
 	}
@@ -195,7 +200,7 @@ func renderTextTemplate(kind string, ctx TemplateContext, recipientFooter string
 	if recipientLocalized(kind) {
 		return localizedText(kind, ctx, recipientFooter), nil
 	}
-	src := textFor(kind)
+	_, src := nativeEmailTemplateSourcesV1(kind, ctx.Locale)
 	if src == "" {
 		return "", fmt.Errorf("no text template for %s", kind)
 	}
@@ -214,9 +219,9 @@ func renderTextTemplate(kind string, ctx TemplateContext, recipientFooter string
 //
 // invite / reminder / completed_signer go to the external counterparty, so
 // they render in the recipient's locale from the i18n catalog (English
-// fallback per key). Sender-facing emails stay English. The HTML skeleton is
-// shared; only the prose comes from the catalog, so there is no per-language
-// HTML to break.
+// fallback per key). Owner notifications use the document's selected language;
+// participant comments retain the target recipient's override. Those native
+// notification sources are selected separately below.
 
 func recipientLocalized(kind string) bool {
 	switch kind {
@@ -310,7 +315,7 @@ func localizedHTML(kind string, ctx TemplateContext, recipientFooter string) str
 		extra = fmt.Sprintf("<p><a href=\"%s\">%s</a></p>", esc(ctx.AuditCertURL), auditCTA)
 	}
 	if kind == KindCompletedSigner && ctx.PackagePortalURL != "" {
-		extra += fmt.Sprintf("<p><a href=\"%s\">Download original contract files</a></p>", esc(ctx.PackagePortalURL))
+		extra += fmt.Sprintf("<p><a href=\"%s\">%s</a></p>", esc(ctx.PackagePortalURL), esc(completedOriginalFilesLabelV1(ctx.Locale)))
 	}
 	return fmt.Sprintf(`<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
@@ -340,7 +345,7 @@ func localizedText(kind string, ctx TemplateContext, recipientFooter string) str
 		extra = fmt.Sprintf("%s: %s\n\n", i18n.T(loc, prefix+".auditCta", p), ctx.AuditCertURL)
 	}
 	if kind == KindCompletedSigner && ctx.PackagePortalURL != "" {
-		extra += fmt.Sprintf("Download original contract files: %s\n\n", ctx.PackagePortalURL)
+		extra += fmt.Sprintf("%s: %s\n\n", completedOriginalFilesLabelV1(ctx.Locale), ctx.PackagePortalURL)
 	}
 	return fmt.Sprintf("%s\n\n%s\n\n%s: %s\n\n%s%s\n", heading, body, cta, url, extra, footer)
 }
@@ -499,21 +504,30 @@ const declinedText = `{{.RecipientName}} declined {{.DocumentName}}.
 {{if .DeclineReason}}Reason: {{.DeclineReason}}{{end}}
 `
 
+// The producer supplies the document's selected notification locale. Recipient
+// overrides remain independent. Unsupported locales keep the English fallback.
+func changesRequestedSourcesV1(locale string) (subjectJoin, htmlSource, textSource string) {
+	if i18n.Normalize(locale) == "sv" {
+		return " har begärt ändringar i ", changesRequestedHTMLSV, changesRequestedTextSV
+	}
+	return " requested changes to ", changesRequestedHTML, changesRequestedText
+}
+
 const changesRequestedHTML = `<!doctype html>
-<html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
-<p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Changes requested</p>
-<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.RecipientName}} requested changes to {{.DocumentName}}</h1>
-{{if .ChangeContext}}<p style="font-size: 13px; color: #777; margin-bottom: 4px;">In context:</p><p style="color: #555; font-size: 13px; line-height: 1.5;">{{.ChangeContext}}</p>{{end}}
-{{if .ChangeQuote}}<p style="font-size: 13px; color: #777; margin: 12px 0 4px;">Marked text:</p><blockquote style="border-left: 3px solid #0891B2; padding-left: 12px; color: #111; font-weight: 500;">{{.ChangeQuote}}</blockquote>{{end}}
-{{if .DeclineReason}}<p style="font-size: 13px; color: #777; margin: 12px 0 4px;">Their comment:</p><blockquote style="border-left: 3px solid #ccc; padding-left: 12px; color: #555;">{{.DeclineReason}}</blockquote>{{end}}
-{{if .ChangeProposed}}<p style="font-size: 13px; color: #777; margin: 12px 0 4px;">Proposed text:</p><blockquote style="border-left: 3px solid #16a34a; padding-left: 12px; color: #111;">{{.ChangeProposed}}</blockquote>{{end}}
-<p style="margin-top: 20px;">
-{{if .ApproveURL}}<a href="{{.ApproveURL}}" style="display: inline-block; background: #16a34a; color: #fff; text-decoration: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; margin-right: 8px;">Approve</a>{{end}}
-{{if .DenyURL}}<a href="{{.DenyURL}}" style="display: inline-block; background: #b91c1c; color: #fff; text-decoration: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; margin-right: 8px;">Deny</a>{{end}}
-<a href="{{.OpenURL}}" style="display: inline-block; background: #0891B2; color: #fff; text-decoration: none; padding: 10px 16px; border-radius: 6px; font-weight: 600;">Open document</a>
-</p>
-<p style="font-size: 12px; color: #999;">Signing is paused until you revise and re-send.</p>
-</body></html>`
+<html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;padding:24px 20px;font-family:Arial,-apple-system,sans-serif;font-size:16px;line-height:1.6;color:#151515;background-color:#ffffff;">
+<div style="max-width:560px;margin:0 auto;overflow-wrap:anywhere;word-break:break-word;">
+<p style="margin:0 0 12px;font-size:12px;line-height:1.5;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#65665f;">Changes requested</p>
+<h1 style="margin:0 0 28px;font-size:24px;line-height:1.3;font-weight:700;">{{.RecipientName}} requested changes to {{.DocumentName}}</h1>
+{{if .ChangeContext}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">In context</p><p style="margin:0;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeContext}}</p>{{end}}
+{{if .ChangeQuote}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Marked text</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-left:3px solid #151515;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeQuote}}</blockquote>{{end}}
+{{if .DeclineReason}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Their comment</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.DeclineReason}}</blockquote>{{end}}
+{{if .ChangeProposed}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Proposed text</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-left:3px solid #151515;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeProposed}}</blockquote>{{end}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:separate;margin:32px 0 0;"><tbody>
+<tr><td colspan="2" style="padding:0 0 12px;"><a href="{{.OpenURL}}" style="display:block;background-color:#151515;color:#ffffff;padding:14px 16px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Open document</a></td></tr>
+<tr><td width="50%" style="width:50%;padding:0 6px 0 0;vertical-align:top;">{{if .ApproveURL}}<a href="{{.ApproveURL}}" style="display:block;color:#151515;border:1px solid #b8b9b2;padding:13px 12px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Approve</a>{{end}}</td><td width="50%" style="width:50%;padding:0 0 0 6px;vertical-align:top;">{{if .DenyURL}}<a href="{{.DenyURL}}" style="display:block;color:#151515;border:1px solid #b8b9b2;padding:13px 12px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Deny</a>{{end}}</td></tr>
+</tbody></table>
+<p style="margin:24px 0 0;font-size:14px;line-height:1.6;color:#65665f;">Signing is paused until you revise and re-send.</p>
+</div></body></html>`
 
 const changesRequestedText = `{{.RecipientName}} requested changes to {{.DocumentName}}.
 {{if .ChangeContext}}In context: {{.ChangeContext}}{{end}}
@@ -523,6 +537,32 @@ const changesRequestedText = `{{.RecipientName}} requested changes to {{.Documen
 {{if .ApproveURL}}Approve: {{.ApproveURL}}{{end}}
 {{if .DenyURL}}Deny: {{.DenyURL}}{{end}}
 Open document: {{.OpenURL}}
+`
+
+const changesRequestedHTMLSV = `<!doctype html>
+<html lang="sv"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;padding:24px 20px;font-family:Arial,-apple-system,sans-serif;font-size:16px;line-height:1.6;color:#151515;background-color:#ffffff;">
+<div style="max-width:560px;margin:0 auto;overflow-wrap:anywhere;word-break:break-word;">
+<p style="margin:0 0 12px;font-size:12px;line-height:1.5;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#65665f;">Ändringar begärda</p>
+<h1 style="margin:0 0 28px;font-size:24px;line-height:1.3;font-weight:700;">{{.RecipientName}} har begärt ändringar i {{.DocumentName}}</h1>
+{{if .ChangeContext}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Sammanhang</p><p style="margin:0;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeContext}}</p>{{end}}
+{{if .ChangeQuote}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Markerad text</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-left:3px solid #151515;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeQuote}}</blockquote>{{end}}
+{{if .DeclineReason}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Kommentar</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.DeclineReason}}</blockquote>{{end}}
+{{if .ChangeProposed}}<p style="margin:24px 0 8px;font-size:14px;line-height:1.5;font-weight:600;color:#65665f;">Föreslagen text</p><blockquote style="margin:0;padding:16px 18px;border:1px solid #deded8;border-left:3px solid #151515;border-radius:6px;background-color:#f7f7f5;font-size:16px;line-height:1.6;white-space:pre-wrap;">{{.ChangeProposed}}</blockquote>{{end}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:separate;margin:32px 0 0;"><tbody>
+<tr><td colspan="2" style="padding:0 0 12px;"><a href="{{.OpenURL}}" style="display:block;background-color:#151515;color:#ffffff;padding:14px 16px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Öppna dokumentet</a></td></tr>
+<tr><td width="50%" style="width:50%;padding:0 6px 0 0;vertical-align:top;">{{if .ApproveURL}}<a href="{{.ApproveURL}}" style="display:block;color:#151515;border:1px solid #b8b9b2;padding:13px 12px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Godkänn</a>{{end}}</td><td width="50%" style="width:50%;padding:0 0 0 6px;vertical-align:top;">{{if .DenyURL}}<a href="{{.DenyURL}}" style="display:block;color:#151515;border:1px solid #b8b9b2;padding:13px 12px;border-radius:8px;font-size:16px;line-height:20px;font-weight:600;text-align:center;text-decoration:none;">Avvisa</a>{{end}}</td></tr>
+</tbody></table>
+<p style="margin:24px 0 0;font-size:14px;line-height:1.6;color:#65665f;">Signeringen är pausad tills du har reviderat dokumentet och skickat det igen.</p>
+</div></body></html>`
+
+const changesRequestedTextSV = `{{.RecipientName}} har begärt ändringar i {{.DocumentName}}.
+{{if .ChangeContext}}Sammanhang: {{.ChangeContext}}{{end}}
+{{if .ChangeQuote}}Markerad text: {{.ChangeQuote}}{{end}}
+{{if .DeclineReason}}Kommentar: {{.DeclineReason}}{{end}}
+{{if .ChangeProposed}}Föreslagen text: {{.ChangeProposed}}{{end}}
+{{if .ApproveURL}}Godkänn: {{.ApproveURL}}{{end}}
+{{if .DenyURL}}Avvisa: {{.DenyURL}}{{end}}
+Öppna dokumentet: {{.OpenURL}}
 `
 
 const newCommentHTML = `<!doctype html>

@@ -16,7 +16,7 @@ func smtp730LifecycleFiles() fstest.MapFS {
 }
 func TestReviewedNamedSMTP120RetainsContractEight730(t *testing.T) {
 	for _, versions := range [][]int64{{115, 116, 117}, {115, 116, 117, 118}, {115, 116, 117, 118, 119}, {115, 116, 117, 118, 119, 120}} {
-		if e := requireReviewedLifecycleTreeV1(smtp730LifecycleFiles(), versions); e != nil || LifecycleContractVersionV1 != 8 {
+		if e := requireReviewedLifecycleTreeV1(smtp730LifecycleFiles(), versions); e != nil || LifecycleContractVersionV1 != 9 {
 			t.Fatal("reviewed prior/current tree refused", versions, e)
 		}
 	}

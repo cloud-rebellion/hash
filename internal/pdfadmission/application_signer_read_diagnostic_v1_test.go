@@ -88,3 +88,23 @@ func TestSignerPackageDiagnosticLabelsRemainFiniteV1(t *testing.T) {
 		t.Fatal("existing genuine View mutation diagnostic changed")
 	}
 }
+
+// The signer action label (sign, accept, decline, request-changes) may log
+// lookup and recheck refusals but never the View mutation; Other stays refused.
+func TestSignerActionDiagnosticLabelV1(t *testing.T) {
+	if SignerReadDiagnosticActionV1 != 6 {
+		t.Fatal("action diagnostic route value changed", SignerReadDiagnosticActionV1)
+	}
+	for _, operation := range []SignerReadDiagnosticOperationV1{SignerReadDiagnosticLookupV1, SignerReadDiagnosticRecheckV1} {
+		for _, phase := range []SignerReadDiagnosticPhaseV1{SignerReadDiagnosticOpenV1, SignerReadDiagnosticModelsV1, SignerReadDiagnosticCommitV1, SignerReadDiagnosticCloseSQLV1} {
+			if !validSignerReadDiagnosticLabelsV1(SignerReadDiagnosticActionV1, operation, phase) {
+				t.Fatal("genuine action diagnostic label refused", operation, phase)
+			}
+		}
+	}
+	if validSignerReadDiagnosticLabelsV1(SignerReadDiagnosticActionV1, SignerReadDiagnosticViewMutationV1, SignerReadDiagnosticViewMutationPhaseV1) ||
+		validSignerReadDiagnosticLabelsV1(SignerReadDiagnosticOtherV1, SignerReadDiagnosticLookupV1, SignerReadDiagnosticOpenV1) ||
+		validSignerReadDiagnosticLabelsV1(7, SignerReadDiagnosticLookupV1, SignerReadDiagnosticOpenV1) {
+		t.Fatal("action label crossed into View mutation, Other or an unknown route")
+	}
+}

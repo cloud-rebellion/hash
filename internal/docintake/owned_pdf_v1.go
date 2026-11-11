@@ -93,7 +93,11 @@ func (r *OwnedPDFDocumentResultV1) MarshalJSON() ([]byte, error) {
 func CreateOwnedPDFSourceDocumentV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool) (*OwnedPDFDocumentResultV1, error) {
 	return CreateOwnedPDFSourceDocumentWithPurposeV1(ctx, d, actor, name, data, requiresSignature, "")
 }
-func CreateOwnedPDFSourceDocumentWithPurposeV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool, purpose documentpurpose.Purpose) (result *OwnedPDFDocumentResultV1, failure error) {
+func CreateOwnedPDFSourceDocumentWithPurposeV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool, purpose documentpurpose.Purpose) (*OwnedPDFDocumentResultV1, error) {
+	return CreateOwnedPDFSourceDocumentWithLocaleV1(ctx, d, actor, name, data, requiresSignature, purpose, "")
+}
+
+func CreateOwnedPDFSourceDocumentWithLocaleV1(ctx context.Context, d OwnedPDFDependenciesV1, actor OwnedPDFActorV1, name string, data []byte, requiresSignature *bool, purpose documentpurpose.Purpose, locale string) (result *OwnedPDFDocumentResultV1, failure error) {
 	if d.Sessions == nil || nilOwnedPDFDependencyV1(d.Audit) || nilOwnedPDFDependencyV1(d.Store) || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || actor.Authorize == nil {
 		return nil, errors.New("owned PDF creation dependencies unavailable")
 	}
@@ -179,6 +183,10 @@ func CreateOwnedPDFSourceDocumentWithPurposeV1(ctx context.Context, d OwnedPDFDe
 			if err != nil {
 				return err
 			}
+		}
+		doc, err = state.writer.RecordDefaultLocaleV1(call, locale)
+		if err != nil {
+			return err
 		}
 		doc, err = state.writer.RecordPurposeV1(call, purpose)
 		if err != nil {

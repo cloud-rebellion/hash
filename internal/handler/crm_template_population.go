@@ -282,6 +282,9 @@ func (a *crmTemplatePopulationAdmission) persist(ctx context.Context, s *Server,
 	if err != nil {
 		return audit.PendingEvent{}, errors.Join(errHTMLCreationAudit, err)
 	}
+	if err = measureBorrowedAuditEventV1(ctx, q, actor.OrgID, doc.ID, pending.ID); err != nil {
+		return audit.PendingEvent{}, errors.Join(errHTMLCreationAudit, err)
+	}
 	if err = a.checkLocked(ctx, s, tx, actor); err != nil {
 		return audit.PendingEvent{}, err
 	}

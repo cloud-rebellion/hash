@@ -9,6 +9,7 @@ import (
 	"github.com/bright-interaction/hash/internal/authoring"
 	"github.com/bright-interaction/hash/internal/blockauthoring"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/reviewgate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"net/http"
@@ -25,6 +26,12 @@ func (s *Server) mutateEnvelopeOwnedV1(r *http.Request, org, user uuid.UUID, too
 	return blockauthoring.EnvelopeV1(r.Context(), blockauthoring.DependenciesV1{Sessions: s.HTMLCreationSessions, Billing: s.Billing, Audit: s.Audit}, blockauthoring.ActorV1{OrgID: org, UserID: user, Authorize: authorize, Via: "rest", Tool: tool, IP: firstIPFromHeader(r), UserAgent: r.UserAgent()}, input)
 }
 func (s *Server) writeEnvelopeOwnedErrorV1(w http.ResponseWriter, tool string, err error) {
+	// The review gate is a refusal, not an outage: classify it before the
+	// availability branch that the session wrapper would otherwise match.
+	if message, ok := reviewgate.Message(err); ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": message, "code": reviewgate.Code})
+		return
+	}
 	if errors.Is(err, pdfadmission.ErrEnvelopeTopologyV1) || errors.Is(err, pdfadmission.ErrBlocksWriterV1) || errors.Is(err, pdfadmission.ErrBlocksInputV1) || errors.Is(err, pdfadmission.ErrApplicationAdmissionV1) || errors.Is(err, pdfadmission.ErrApplicationSessionV1) || errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1) {
 		writeError(w, http.StatusServiceUnavailable, "envelope editing capacity unavailable; retry later")
 		return

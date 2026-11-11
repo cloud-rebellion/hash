@@ -258,6 +258,23 @@ func (q *Queries) ClaimSoftDeletedDocumentsForPurge(ctx context.Context, arg Cla
 	return items, nil
 }
 
+const countDocumentPDFRevisions = `-- name: CountDocumentPDFRevisions :one
+SELECT count(*) FROM document_pdf_revisions_v1
+WHERE document_id = $1::uuid AND org_id = $2::uuid
+`
+
+type CountDocumentPDFRevisionsParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+func (q *Queries) CountDocumentPDFRevisions(ctx context.Context, arg CountDocumentPDFRevisionsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countDocumentPDFRevisions, arg.DocumentID, arg.OrgID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countDocuments = `-- name: CountDocuments :one
 SELECT COUNT(*) FROM documents
 WHERE org_id = $1
@@ -799,6 +816,24 @@ type DeleteDraftDocumentParams struct {
 func (q *Queries) DeleteDraftDocument(ctx context.Context, arg DeleteDraftDocumentParams) error {
 	_, err := q.db.Exec(ctx, deleteDraftDocument, arg.ID, arg.OrgID)
 	return err
+}
+
+const eraseDocumentPDFHistory = `-- name: EraseDocumentPDFHistory :one
+SELECT hash_erase_document_pdf_history_v1($1::uuid, $2::boolean)::bigint AS erased
+`
+
+type EraseDocumentPDFHistoryParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	Purge      bool      `json:"purge"`
+}
+
+// Caller holds the parent lock. purge = true is the hard delete of a
+// soft-deleted draft; false is DSR erasure of a live document.
+func (q *Queries) EraseDocumentPDFHistory(ctx context.Context, arg EraseDocumentPDFHistoryParams) (int64, error) {
+	row := q.db.QueryRow(ctx, eraseDocumentPDFHistory, arg.DocumentID, arg.Purge)
+	var erased int64
+	err := row.Scan(&erased)
+	return erased, err
 }
 
 const expireDocumentIfActive = `-- name: ExpireDocumentIfActive :one
@@ -1706,6 +1741,8 @@ SELECT EXISTS(
   UNION ALL
   SELECT 1 FROM html_document_materializations m WHERE m.pdf_key = $2::text
   UNION ALL
+  SELECT 1 FROM document_pdf_revisions_v1 r WHERE $2::text IN (r.pdf_key, r.previous_pdf_key)
+  UNION ALL
   SELECT 1 FROM html_document_materialization_snapshots h
     WHERE $2::text IN (h.pdf_key, h.rendered_pdf_key)
 ) AS shared
@@ -1854,6 +1891,47 @@ func (q *Queries) HasRetainedDraftSigningEvidence(ctx context.Context, arg HasRe
 	var retained bool
 	err := row.Scan(&retained)
 	return retained, err
+}
+
+const listDocumentPDFRevisionObjects = `-- name: ListDocumentPDFRevisionObjects :many
+SELECT pdf_key AS object_key, pdf_version_id AS version_id, pdf_sha256 AS sha256
+FROM document_pdf_revisions_v1 WHERE document_id = $1::uuid AND org_id = $2::uuid
+UNION
+SELECT previous_pdf_key, previous_pdf_version_id, previous_pdf_sha256
+FROM document_pdf_revisions_v1 WHERE document_id = $1::uuid AND org_id = $2::uuid AND sequence = 1
+`
+
+type ListDocumentPDFRevisionObjectsParams struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	OrgID      uuid.UUID `json:"org_id"`
+}
+
+type ListDocumentPDFRevisionObjectsRow struct {
+	ObjectKey string `json:"object_key"`
+	VersionID string `json:"version_id"`
+	Sha256    []byte `json:"sha256"`
+}
+
+// Every stored PDF a document's revision history names: each revision PDF and
+// the original that only revision 1 still names. Read before the history is erased.
+func (q *Queries) ListDocumentPDFRevisionObjects(ctx context.Context, arg ListDocumentPDFRevisionObjectsParams) ([]*ListDocumentPDFRevisionObjectsRow, error) {
+	rows, err := q.db.Query(ctx, listDocumentPDFRevisionObjects, arg.DocumentID, arg.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ListDocumentPDFRevisionObjectsRow{}
+	for rows.Next() {
+		var i ListDocumentPDFRevisionObjectsRow
+		if err := rows.Scan(&i.ObjectKey, &i.VersionID, &i.Sha256); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listDocuments = `-- name: ListDocuments :many

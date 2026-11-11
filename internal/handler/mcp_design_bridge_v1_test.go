@@ -4,7 +4,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +13,10 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/authoring"
+	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type designKey783 struct {
@@ -51,9 +52,12 @@ func designActor783(t *testing.T, user, org uuid.UUID) (context.Context, mcp.Des
 	}
 	return ctx, mcp.DesignActorV1{Actor: authoring.Actor{OrgID: org, UserID: user, Authorize: authorize}, KeyID: v.id}
 }
-func TestMCPDesign783PreviewExactKeyActorPinsAndPurpose(t *testing.T) {
+
+// An API-credential preview identity must never become a staff approval
+// receipt: template approval is human-only, through a staff session.
+func TestMCPDesign783CredentialPreviewCannotMintStaffReceipt(t *testing.T) {
 	user, org := uuid.New(), uuid.New()
-	ctx, a := designActor783(t, user, org)
+	_, a := designActor783(t, user, org)
 	cookies, err := auth.NewSignedCookie(strings.Repeat("14", 32))
 	if err != nil {
 		t.Fatal(err)
@@ -61,55 +65,6 @@ func TestMCPDesign783PreviewExactKeyActorPinsAndPurpose(t *testing.T) {
 	s := &Server{Cookies: cookies}
 	now := time.Now().UTC()
 	p := htmlTemplatePreviewReceipt{SchemaVersion: 1, PreviewID: uuid.New(), OrgID: org, ReviewerID: user, CredentialID: a.KeyID, TemplateID: uuid.New(), Version: 3, TemplateContentSHA256: strings.Repeat("a", 64), MaterializationSHA256: strings.Repeat("b", 64), PDFSHA256: strings.Repeat("c", 64), PageCount: 2, IssuedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
-	token, err := s.mintMCPDesignPreviewV1(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in := mcp.DesignApprovalInputV1{ExpectedVersion: p.Version, ExpectedContentSHA256: p.TemplateContentSHA256, ExpectedPreviewPDFSHA256: p.PDFSHA256, PreviewReceipt: token}
-	if _, err = s.validateMCPDesignPreviewV1(ctx, a, p.TemplateID, in); err != nil {
-		t.Fatal(err)
-	}
-	for _, kind := range []string{"key", "actor", "org", "template", "version", "content", "pdf", "no-live-auth", "wrong-purpose", "expired"} {
-		t.Run(kind, func(t *testing.T) {
-			call, actor, id, args := ctx, a, p.TemplateID, in
-			switch kind {
-			case "key":
-				call, actor = designActor783(t, user, org)
-			case "actor":
-				actor.UserID = uuid.New()
-			case "org":
-				actor.OrgID = uuid.New()
-			case "template":
-				id = uuid.New()
-			case "version":
-				args.ExpectedVersion++
-			case "content":
-				args.ExpectedContentSHA256 = strings.Repeat("d", 64)
-			case "pdf":
-				args.ExpectedPreviewPDFSHA256 = strings.Repeat("d", 64)
-			case "no-live-auth":
-				actor.Authorize = nil
-			case "wrong-purpose":
-				raw, _ := json.Marshal(p)
-				args.PreviewReceipt, err = s.Cookies.MintPurpose(htmlTemplatePreviewPurpose, raw, time.Minute)
-				if err != nil {
-					t.Fatal(err)
-				}
-			case "expired":
-				old := p
-				old.IssuedAt = now.Add(-6 * time.Minute)
-				old.ExpiresAt = now.Add(-time.Minute)
-				raw, _ := json.Marshal(old)
-				args.PreviewReceipt, err = s.Cookies.MintPurpose(mcpDesignPreviewPurposeV1, raw, time.Minute)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err = s.validateMCPDesignPreviewV1(call, actor, id, args); err == nil {
-				t.Fatal("foreign/stale receipt accepted")
-			}
-		})
-	}
 	if _, err = s.mintHTMLTemplatePreviewReceipt(p); err == nil {
 		t.Fatal("API credential receipt minted under cookie purpose")
 	}
@@ -128,5 +83,25 @@ func TestMCPDesign783UnverifiedContextCannotSelectActor(t *testing.T) {
 	ctx = context.WithValue(ctx, auth.RoleKey, "owner")
 	if validMCPDesignActorV1(ctx, a) == nil {
 		t.Fatal("public identity context forged private credential admission")
+	}
+}
+
+// validate is the refusal that holds when verify is not in front of it: a
+// credential-bound receipt with no session hash must be refused by validate and
+// by the authorization wrapper, which calls validate alone.
+func TestHTMLTemplatePreviewReceiptValidateRefusesAnyCredential(t *testing.T) {
+	now := time.Now().UTC()
+	p := htmlTemplatePreviewReceipt{SchemaVersion: 1, PreviewID: uuid.New(), OrgID: uuid.New(), ReviewerID: uuid.New(), TemplateID: uuid.New(), Version: 3, TemplateContentSHA256: strings.Repeat("a", 64), MaterializationSHA256: strings.Repeat("b", 64), PDFSHA256: strings.Repeat("c", 64), PageCount: 2, SessionSHA256: strings.Repeat("e", 64), IssuedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
+	if err := p.validate(now); err != nil {
+		t.Fatalf("session receipt must stay valid: %v", err)
+	}
+	p.CredentialID = uuid.New()
+	p.SessionSHA256 = ""
+	if p.validate(now) == nil {
+		t.Fatal("validate accepted a credential-bound receipt")
+	}
+	authz := htmlTemplatePreviewReceiptAuthorization(func(context.Context, pgx.Tx, *generated.User) error { return nil }, p)
+	if authz(context.Background(), nil, nil) == nil {
+		t.Fatal("authorization wrapper accepted a credential-bound receipt")
 	}
 }

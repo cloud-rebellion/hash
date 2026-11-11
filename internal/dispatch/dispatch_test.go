@@ -114,27 +114,33 @@ func TestRender_InviteIncludesSignURL(t *testing.T) {
 
 func TestRender_InviteAndReminderMatchCeremonyMode(t *testing.T) {
 	for _, kind := range []string{KindInvite, KindReminder} {
-		t.Run(kind+"_acknowledgement", func(t *testing.T) {
-			subject, htmlBody, textBody, err := Render(kind, TemplateContext{
-				DocumentName: "Policy", SenderName: "Sender", SenderEmail: "sender@example.test",
-				RecipientName: "Recipient", OrgName: "Org", Locale: "sv",
-				SignURL: "https://example.test/sign/token", Acknowledgement: true,
+		for _, locale := range []string{"en", "sv"} {
+			t.Run(kind+"_acknowledgement/"+locale, func(t *testing.T) {
+				subject, htmlBody, textBody, err := Render(kind, TemplateContext{
+					DocumentName: "Policy", SenderName: "Sender", SenderEmail: "sender@example.test",
+					RecipientName: "Recipient", OrgName: "Org", Locale: locale,
+					SignURL: "https://example.test/sign/token", Acknowledgement: true,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rendered := strings.ToLower(subject + "\n" + htmlBody + "\n" + textBody)
+				wanted := []string{"acknowledg", "no signature will be requested"}
+				if locale == "sv" {
+					wanted = []string{"bekräft", "ingen signatur kommer att begäras"}
+				}
+				for _, want := range wanted {
+					if !strings.Contains(rendered, want) {
+						t.Fatalf("acknowledgement %s missing %q: %s", kind, want, rendered)
+					}
+				}
+				for _, forbidden := range []string{"for signature", "review and sign", "awaiting your signature", "open and sign", "för signering", "granska och signera", "väntar på din signatur", "öppna och signera"} {
+					if strings.Contains(rendered, forbidden) {
+						t.Fatalf("acknowledgement %s contains signing instruction %q: %s", kind, forbidden, rendered)
+					}
+				}
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			rendered := strings.ToLower(subject + "\n" + htmlBody + "\n" + textBody)
-			for _, want := range []string{"acknowledg", "no signature will be requested"} {
-				if !strings.Contains(rendered, want) {
-					t.Fatalf("acknowledgement %s missing %q: %s", kind, want, rendered)
-				}
-			}
-			for _, forbidden := range []string{"for signature", "review and sign", "awaiting your signature", "open and sign"} {
-				if strings.Contains(rendered, forbidden) {
-					t.Fatalf("acknowledgement %s contains signing instruction %q: %s", kind, forbidden, rendered)
-				}
-			}
-		})
+		}
 
 		t.Run(kind+"_signature", func(t *testing.T) {
 			subject, htmlBody, textBody, err := Render(kind, TemplateContext{

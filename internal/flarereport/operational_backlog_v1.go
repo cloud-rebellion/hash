@@ -30,6 +30,10 @@ type OperationalBacklogDataV1 struct {
 	FinalizingUnknownIntentAgeCount            int64 `json:"finalizing_unknown_intent_age_count"`
 	FinalizingOldestObservedIntentAgeSeconds   int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
 	FinalizingLimitReached                     bool  `json:"finalizing_limit_reached"`
+	// Object versions a committed privacy erasure still owes the object store.
+	PendingObjectCount                    int64 `json:"pending_object_count"`
+	PendingObjectOldestObservedAgeSeconds int64 `json:"pending_object_oldest_observed_age_seconds"`
+	PendingObjectLimitReached             bool  `json:"pending_object_limit_reached"`
 }
 
 func (d OperationalBacklogDataV1) ValidV1() bool {
@@ -43,6 +47,9 @@ func (d OperationalBacklogDataV1) ValidV1() bool {
 		return false
 	}
 	if d.MailLimitReached != (d.MailCount == OperationalBacklogRowLimitV1) || d.MailFailedLimitReached != (d.MailFailedCount == OperationalBacklogRowLimitV1) || d.FinalizingLimitReached != (d.FinalizingRootCount == OperationalBacklogRowLimitV1) {
+		return false
+	}
+	if d.PendingObjectCount < 0 || d.PendingObjectCount > OperationalBacklogRowLimitV1 || d.PendingObjectOldestObservedAgeSeconds < 0 || d.PendingObjectLimitReached != (d.PendingObjectCount == OperationalBacklogRowLimitV1) || d.PendingObjectCount == 0 && d.PendingObjectOldestObservedAgeSeconds != 0 {
 		return false
 	}
 	if d.MailFailedUnknownCreatedCount == d.MailFailedCount && d.MailFailedOldestObservedCreationAgeSeconds != 0 {

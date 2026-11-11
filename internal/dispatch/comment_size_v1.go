@@ -13,11 +13,12 @@ var errCommentNotificationSizeV1 = errors.New("comment notification size overflo
 // This is logical work/output accounting, not allocator/RSS or SQL authority.
 // Original Render still decides URL policy. Both templates use html/template.
 func CommentNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlBytes, textBytes int64, err error) {
-	subjectBytes, err = addCommentNotificationBytesV1(int64(len("New comment on ")), int64(len(ctx.DocumentName)), 1)
+	subjectBytes, err = addCommentNotificationBytesV1(int64(len(commentSubjectPrefixV1(ctx.Locale))), int64(len(ctx.DocumentName)), 1)
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	htmlBytes, textBytes = int64(len(newCommentHTML)), int64(len(newCommentText))
+	htmlSource, textSource := nativeEmailTemplateSourcesV1(KindNewComment, ctx.Locale)
+	htmlBytes, textBytes = int64(len(htmlSource)), int64(len(textSource))
 	for _, v := range [...]string{ctx.RecipientName, ctx.DocumentName, ctx.DeclineReason} {
 		htmlBytes, err = addCommentNotificationBytesV1(htmlBytes, int64(len(v)), 6)
 		if err != nil {
@@ -43,7 +44,7 @@ func CommentNotificationComponentsV1(ctx TemplateContext) (subjectBytes, htmlByt
 	return subjectBytes, htmlBytes, textBytes, nil
 }
 func CommentNotificationTemplateSourceBytesV1() int64 {
-	return int64(len(newCommentHTML) + len(newCommentText))
+	return int64(max(len(newCommentHTML)+len(newCommentText), len(newCommentHTMLSV)+len(newCommentTextSV)))
 }
 func addCommentNotificationBytesV1(total, size, factor int64) (int64, error) {
 	if total < 0 || size < 0 || factor <= 0 || size > (math.MaxInt64-total)/factor {

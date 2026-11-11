@@ -121,9 +121,9 @@ func newOwnedAttachmentBrowserFixture228(t *testing.T, publicURL, rendererURL st
 			t.Error("refuse non-owned history disposal", err)
 			return
 		}
-		if _, err := f.pool.Exec(ctx, "TRUNCATE orgs CASCADE"); err != nil {
+		if err := disposeSyntheticEstateV1(f.pool); err != nil {
 			t.Error(err)
-		} //nolint:rawsql -- all rows in this unique synthetic DB
+		}
 	})
 	// Controlled logical-work integration profile, matching the existing
 	// authoring fixture. Retained stored-template compilations alone raise the

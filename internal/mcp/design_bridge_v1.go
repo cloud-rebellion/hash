@@ -38,12 +38,6 @@ type DesignPreviewInputV1 struct {
 	Values                map[string]string `json:"values,omitempty"`
 	Sections              map[string]string `json:"sections,omitempty"`
 }
-type DesignApprovalInputV1 struct {
-	ExpectedVersion          int32  `json:"expected_version"`
-	ExpectedContentSHA256    string `json:"expected_content_sha256"`
-	PreviewReceipt           string `json:"preview_receipt"`
-	ExpectedPreviewPDFSHA256 string `json:"expected_preview_pdf_sha256"`
-}
 type DesignCreationInputV1 struct {
 	Purpose                       documentpurpose.Purpose `json:"purpose"`
 	Name                          string                  `json:"name"`
@@ -59,6 +53,15 @@ type DesignRevisionInputV1 struct {
 	Values                       map[string]string `json:"values,omitempty"`
 	Sections                     map[string]string `json:"sections,omitempty"`
 	Summary                      string            `json:"summary,omitempty"`
+}
+type DesignTemplateMoveInputV1 struct {
+	ExpectedUpdatedAt             string            `json:"expected_updated_at"`
+	ExpectedHTMLSourceCommitment  string            `json:"expected_html_source_commitment"`
+	TemplateVersion               int32             `json:"template_version"`
+	ExpectedTemplateContentSHA256 string            `json:"expected_template_content_sha256"`
+	Values                        map[string]string `json:"values,omitempty"`
+	Sections                      map[string]string `json:"sections,omitempty"`
+	Summary                       string            `json:"summary,omitempty"`
 }
 type DesignPDFInputV1 struct {
 	Revision                     int32  `json:"revision,omitempty"`
@@ -79,13 +82,13 @@ type DesignBridgeV1 interface {
 	ReadTemplateV1(context.Context, DesignActorV1, uuid.UUID, DesignTemplateReadInputV1) (DesignResultV1, error)
 	WriteTemplateV1(context.Context, DesignActorV1, uuid.UUID, DesignTemplateInputV1, *pdfadmission.ApplicationHTMLAuthoringInputV1, json.RawMessage) (DesignResultV1, error)
 	PreviewTemplateV1(context.Context, DesignActorV1, uuid.UUID, DesignPreviewInputV1) (DesignResultV1, error)
-	ApproveTemplateV1(context.Context, DesignActorV1, uuid.UUID, DesignApprovalInputV1, []int) (DesignResultV1, error)
 	CreateDocumentV1(context.Context, DesignActorV1, uuid.UUID, DesignCreationInputV1) (DesignResultV1, error)
 	DocumentSourceV1(context.Context, DesignActorV1, uuid.UUID) (DesignResultV1, error)
 	DocumentHistoryV1(context.Context, DesignActorV1, uuid.UUID) (DesignResultV1, error)
 	DocumentPDFV1(context.Context, DesignActorV1, uuid.UUID, DesignPDFInputV1) (DesignResultV1, error)
 	ReviseDocumentV1(context.Context, DesignActorV1, uuid.UUID, DesignRevisionInputV1, *pdfadmission.ApplicationHTMLAuthoringInputV1) (DesignResultV1, error)
 	ReviewDocumentV1(context.Context, DesignActorV1, uuid.UUID, DesignReviewInputV1, []int) (DesignResultV1, error)
+	MoveDocumentTemplateV1(context.Context, DesignActorV1, uuid.UUID, DesignTemplateMoveInputV1, *pdfadmission.ApplicationHTMLAuthoringInputV1) (DesignResultV1, error)
 }
 
 // Visual review is a caller attestation, never inferred from rendering, saving,

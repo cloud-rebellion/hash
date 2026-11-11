@@ -35,7 +35,7 @@ async function request(path: string, signal: AbortSignal, input?: unknown): Prom
   if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new APIError(response.status, 'The CRM document request was refused.'); }
   return boundedJSON(response, signal);
 }
-function documentRoute(id: string): string { if (!htmlUUID(id)) throw new Error('Invalid document identity.'); return `/api/v1/documents/${id}`; }
+function documentRoute(id: string): string { if (!htmlUUID(id)) throw new Error('Invalid document identity.'); return `/api/v1/documents/${encodeURIComponent(id)}`; }
 export async function getCRMDocumentContext(id: string, signal: AbortSignal) { return checkedCRMContext(await request(`${documentRoute(id)}/crm/context`, signal)); }
 export async function searchCRMDocumentRecords(id: string, input: CRMExpected & { kind: CRMKind; query: string; offset: number }, signal: AbortSignal) {
   const expected = checkedCRMExpected(input);

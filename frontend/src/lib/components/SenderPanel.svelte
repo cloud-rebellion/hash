@@ -384,7 +384,7 @@
       signerRoles.includes(option.value),
     );
     fRole = requiresSignature ? (firstSupportedRequiredRole?.value ?? 'signer') : 'approver';
-    fLocale = requiresSignature ? (docLocale || 'en') : 'en';
+    fLocale = docLocale || 'en';
     showForm = true;
     formRevision++;
     formBaseline = currentForm();
@@ -410,7 +410,7 @@
     fName = r.name;
     fEmail = r.email;
     fRole = r.role;
-    fLocale = requiresSignature ? (r.locale || 'en') : 'en';
+    fLocale = r.locale || docLocale || 'en';
     showForm = true;
     formRevision++;
     formBaseline = currentForm();
@@ -686,9 +686,8 @@
   {#if editable}
     <div class="flex flex-wrap items-center gap-2 mb-4 pb-4 border-b border-border-light">
       <span class="text-xs uppercase tracking-widest text-text-muted font-mono">
-        {$ui(requiresSignature ? 'Default email language' : 'Ceremony language')}
+        {$ui('Default email language')}
       </span>
-      {#if requiresSignature}
         <select
           bind:value={docLocale}
           onchange={changeDocLocale}
@@ -700,9 +699,6 @@
             <option value={l.code}>{l.name}</option>
           {/each}
         </select>
-      {:else}
-        <span class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm">{$ui("English")}</span>
-      {/if}
       <span class="text-xs text-text-muted">
         {$ui(savingLocale ? 'Saving...' : modeCopy.defaultLanguageHelp)}
       </span>
@@ -858,7 +854,6 @@
         </label>
         <div class="text-sm">
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">{$ui("Language")}</span>
-          {#if requiresSignature}
             <select
               bind:value={fLocale}
               class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
@@ -867,9 +862,6 @@
                 <option value={l.code}>{l.name}</option>
               {/each}
             </select>
-          {:else}
-            <div class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">{$ui("English")}</div>
-          {/if}
           <span class="text-xs text-text-muted">{$ui(modeCopy.recipientLanguageHelp)}</span>
         </div>
       </div>

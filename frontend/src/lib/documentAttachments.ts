@@ -11,6 +11,8 @@ export type AttachmentSelection = AttachmentExpected & { member_document_id: str
 export type AttachmentLayout = AttachmentExpected & { members: AttachmentLabel[] };
 export type AttachmentOutcome = { state: 'committed' | 'unchanged' | 'unknown'; reconciliation_required: boolean; message?: string; attachment?: { package_id: string; member_document_id: string; ordinal: number; generation: string; updated_at: string; event_id: string }; layout?: { package_id: string; generation: string; updated_at: string; changed_rows: number; event_id: string } };
 export type AttachmentPage = { documents: DocumentResponse[]; total: number; limit: number; offset: number };
+export const attachmentIncomplete = "This draft's saved record is incomplete and cannot be used for attachments. Contact support.";
+export const attachmentIncompleteServer = "this draft's saved record is incomplete and cannot be used for attachments; contact support";
 export const attachmentInvalid = 'The saved attachments could not be verified. Refresh and inspect the saved state before continuing.';
 const zeroUUID = '00000000-0000-0000-0000-000000000000';
 export const attachmentUUID = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v) && v !== zeroUUID;
@@ -70,6 +72,7 @@ export type AttachmentTransport = { identity(signal: AbortSignal): Promise<unkno
 export type AttachmentReadback = { document: DocumentResponse; inventory: AttachmentInventory };
 export type AttachmentState = { baseline: AttachmentInventory | null; draft: AttachmentLabel[]; candidate: DocumentResponse | null; choices: AttachmentPage | null; busy: 'refresh' | 'choices' | 'candidate' | 'select' | 'layout' | 'readback' | null; fresh: boolean; needsReadback: boolean; readback: AttachmentReadback | null; error: string | null; notice: string | null };
 export const initialAttachmentState = (): AttachmentState => ({ baseline: null, draft: [], candidate: null, choices: null, busy: null, fresh: false, needsReadback: false, readback: null, error: null, notice: null });
+export function incomplete(error: unknown): boolean { return status(error) === 409 && error instanceof Error && error.message === attachmentIncomplete; }
 function status(error: unknown): number { return error && typeof error === 'object' && 'status' in error && typeof error.status === 'number' ? error.status : 0; }
 export class DocumentAttachmentsController {
  state = initialAttachmentState(); private epoch = 0; private abort: AbortController | null = null; private disposed = false;
@@ -108,7 +111,7 @@ export class DocumentAttachmentsController {
   try { const r = await this.read(op.signal); if (!this.current(op.epoch)) return;
    if (attachmentDocumentKey(r.document) !== attachmentDocumentKey(this.doc)) { this.update({ needsReadback: true, readback: r, error: 'A newer agreement is saved. Inspect it before loading attachments.' }); return; }
    this.update(this.baseline(r));
-  } catch { if (this.current(op.epoch)) this.update({ fresh: false, error: attachmentInvalid }); }
+  } catch (e) { if (this.current(op.epoch)) this.update({ fresh: false, error: incomplete(e) ? attachmentIncomplete : attachmentInvalid }); }
   finally { if (this.current(op.epoch)) this.update({ busy: null }); }
  }
  async list(offset = 0) {
@@ -130,7 +133,7 @@ export class DocumentAttachmentsController {
  remove(id: string) { if (this.canEdit()) this.update({ draft: this.state.draft.filter(m => m.document_id !== id) }); }
  clearCandidate() { if (!this.state.busy) this.update({ candidate: null }); }
  undo() { if (this.state.busy || !this.state.baseline) return; this.update({ draft: attachmentLabels(this.state.baseline), candidate: null, notice: 'Unsaved attachment edits were discarded. Saved files are unchanged.' }); }
- private fail(error: unknown, dispatched: boolean) { const code = status(error), reconcile = dispatched && (!code || code >= 500 || code === 409 || code === 401 || code === 403);
+ private fail(error: unknown, dispatched: boolean) { const code = status(error), reconcile = dispatched && !incomplete(error) && (!code || code >= 500 || code === 409 || code === 401 || code === 403);
   this.update({ fresh: false, needsReadback: reconcile, readback: null, error: reconcile ? 'The save was interrupted, refused as stale, or could not be confirmed. Inspect saved attachments before another write. Local attachment edits are retained.' : error instanceof Error ? error.message : attachmentInvalid }); }
  async select(title: string, category: string) {
   if (!this.canSelect() || !attachmentLabel(title) || !attachmentLabel(category, true)) return;
@@ -150,8 +153,8 @@ export class DocumentAttachmentsController {
  async saveLayout(confirmedRemovals: boolean) {
   if (!this.canEdit() || !this.dirty() || !this.state.baseline?.package_id) return;
   const v = this.state.baseline, before = this.doc; const removed = v.members.filter(m => !this.state.draft.some(next => next.document_id === m.document_id)); if (removed.length && !confirmedRemovals) return;
-  let input: AttachmentLayout; try { input = checkedAttachmentLayout({ ...attachmentExpected(v), members: this.state.draft }); } catch { this.update({ error: 'Use nonempty titles of at most512 UTF8 bytes and categories of at most128, without surrounding spaces or control characters.' }); return; }
-  if (new TextEncoder().encode(JSON.stringify(input)).length > 16384) { this.update({ error: 'Attachment labels exceed16KiB. Shorten them before saving.' }); return; }
+  let input: AttachmentLayout; try { input = checkedAttachmentLayout({ ...attachmentExpected(v), members: this.state.draft }); } catch { this.update({ error: 'Use nonempty titles of at most 512 UTF-8 bytes and categories of at most 128, without surrounding spaces or control characters.' }); return; }
+  if (new TextEncoder().encode(JSON.stringify(input)).length > 16384) { this.update({ error: 'Attachment labels exceed 16 KiB. Shorten them before saving.' }); return; }
   const op = this.start('layout'); let dispatched = false;
   try { await this.identity(op.signal); if (!this.current(op.epoch) || !this.clean()) return; dispatched = true; const out = checkedAttachmentOutcome(await this.transport.layout(before.id, input, op.signal), 'layout'); if (!this.current(op.epoch)) return;
    if (out.state === 'unknown' || out.reconciliation_required) { this.update({ fresh: false, needsReadback: true, error: 'The layout may be saved. Inspect saved attachments before another write; do not repeat this save.' }); return; }

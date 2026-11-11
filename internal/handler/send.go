@@ -6,6 +6,7 @@ package handler
 import (
 	"errors"
 	"github.com/bright-interaction/hash/internal/documentpurpose"
+	"github.com/bright-interaction/hash/internal/reviewgate"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -143,6 +144,10 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if message, ok := sendReviewGateMessageV1(err); ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": message, "code": "pdf_review_required"})
+		return
+	}
 	switch {
 	case errors.Is(err, pdfadmission.ErrPackageSendSelectionRequiredV1), errors.Is(err, pdfadmission.ErrPackageSendSelectionChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackageSourceChangedV1), errors.Is(err, pdfadmission.ErrDocumentPackagePendingPrivacyV1):
 		writeError(w, http.StatusConflict, "Review and reconcile the exact document and saved attachment selection before sending")
@@ -194,7 +199,7 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 			"error":       err.Error(),
 			"upgrade_url": "/settings/billing",
 		})
-	case errors.Is(err, pdfadmission.ErrHTMLSendWorkV1), errors.Is(err, pdfadmission.ErrHTMLSendEvidenceV1), errors.Is(err, pdfadmission.ErrHTMLRevisionSourceV1), errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1), errors.Is(err, pdfadmission.ErrWorkRuntimeV1), errors.Is(err, pdfadmission.ErrApplicationSessionV1), errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1), errors.Is(err, pdfadmission.ErrApplicationSessionCommitUnknownV1):
+	case errors.Is(err, pdfadmission.ErrHTMLAuditEventV1), errors.Is(err, pdfadmission.ErrHTMLSendWorkV1), errors.Is(err, pdfadmission.ErrHTMLSendEvidenceV1), errors.Is(err, pdfadmission.ErrHTMLRevisionSourceV1), errors.Is(err, pdfadmission.ErrHTMLAuthoringReadV1), errors.Is(err, pdfadmission.ErrWorkRuntimeV1), errors.Is(err, pdfadmission.ErrApplicationSessionV1), errors.Is(err, pdfadmission.ErrApplicationSessionUnknownV1), errors.Is(err, pdfadmission.ErrApplicationSessionCommitUnknownV1):
 		writeError(w, http.StatusServiceUnavailable, "Send resources are temporarily unavailable")
 	case errors.Is(err, billing.ErrEntitlementUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
@@ -263,3 +268,7 @@ func (s *Server) handleVoidDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "voided"})
 }
+
+// The M124 triggers are the last line of defence behind the application checks;
+// when one fires, say what to do instead of reporting an unavailable service.
+func sendReviewGateMessageV1(err error) (string, bool) { return reviewgate.Message(err) }

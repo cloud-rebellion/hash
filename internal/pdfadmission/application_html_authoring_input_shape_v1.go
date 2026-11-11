@@ -59,6 +59,7 @@ const (
 	htmlInputPreSignPriorV1
 	htmlInputPreSignTemplateV1
 	htmlInputCRMApplyV1
+	htmlInputTemplateMoveV1
 )
 
 type htmlInputFieldV1 struct {
@@ -73,6 +74,7 @@ var htmlInputMasterInputV1Fields = [...]htmlInputFieldV1{
 	{"expected_version", htmlInputScalarV1},
 }
 var htmlInputRevisionV1Fields = [...]htmlInputFieldV1{{"expected_updated_at", htmlInputScalarV1}, {"expected_html_source_commitment", htmlInputScalarV1}, {"values", htmlInputStringMapV1}, {"sections", htmlInputStringMapV1}, {"summary", htmlInputScalarV1}}
+var htmlInputTemplateMoveV1Fields = [...]htmlInputFieldV1{{"expected_updated_at", htmlInputScalarV1}, {"expected_html_source_commitment", htmlInputScalarV1}, {"template_version", htmlInputScalarV1}, {"expected_template_content_sha256", htmlInputScalarV1}, {"values", htmlInputStringMapV1}, {"sections", htmlInputStringMapV1}, {"summary", htmlInputScalarV1}}
 var htmlInputCRMApplyV1Fields = [...]htmlInputFieldV1{
 	{"expected_org_id", htmlInputScalarV1}, {"expected_user_id", htmlInputScalarV1},
 	{"expected_updated_at", htmlInputScalarV1}, {"expected_html_source_commitment", htmlInputScalarV1},
@@ -94,6 +96,8 @@ var htmlInputPreviewV1Fields = [...]htmlInputFieldV1{
 }
 var htmlInputDocumentV1Fields = [...]htmlInputFieldV1{
 	{"name", htmlInputScalarV1},
+	{"default_locale", htmlInputScalarV1},
+	{"purpose", htmlInputScalarV1},
 	{"expected_template_version", htmlInputScalarV1},
 	{"expected_template_content_sha256", htmlInputScalarV1},
 	{"values", htmlInputStringMapV1},
@@ -248,6 +252,8 @@ func htmlInputFieldsV1(n htmlInputNodeV1) []htmlInputFieldV1 {
 		return htmlInputCRMApplyV1Fields[:]
 	case htmlInputRevisionV1:
 		return htmlInputRevisionV1Fields[:]
+	case htmlInputTemplateMoveV1:
+		return htmlInputTemplateMoveV1Fields[:]
 	case htmlInputMasterInputV1:
 		return htmlInputMasterInputV1Fields[:]
 	case htmlInputApprovalV1:
@@ -321,7 +327,7 @@ func htmlAuthoringInputLimitV1(p HTMLAuthoringInputProfileV1) (int64, error) {
 	switch p {
 	case HTMLTemplateMasterInputV1:
 		return htmlmaster.MaxMasterJSONBytes + (2 << 20), nil
-	case HTMLTemplateApprovalInputV1, HTMLTemplatePreviewInputV1, HTMLDocumentCreationInputV1, HTMLDocumentRevisionInputV1:
+	case HTMLTemplateApprovalInputV1, HTMLTemplatePreviewInputV1, HTMLDocumentCreationInputV1, HTMLDocumentRevisionInputV1, HTMLDocumentTemplateMoveInputV1:
 		return 1 << 20, nil
 	case HTMLCRMTemplateSearchInputV1:
 		return 16 << 10, nil
@@ -358,6 +364,8 @@ func htmlInputRootV1(p HTMLAuthoringInputProfileV1) htmlInputNodeV1 {
 		return htmlInputObservationV1
 	case HTMLDocumentRevisionInputV1:
 		return htmlInputRevisionV1
+	case HTMLDocumentTemplateMoveInputV1:
+		return htmlInputTemplateMoveV1
 	case HTMLCRMDocumentApplyInputV1:
 		return htmlInputCRMApplyV1
 	case HTMLCreationClosureInputV1:

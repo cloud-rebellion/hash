@@ -6,6 +6,7 @@ package pdfadmission
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"reflect"
 	"strconv"
@@ -439,8 +440,14 @@ func applicationSessionStartForSignerScopeV1(ctx context.Context, s *application
 		s.unknown = true
 	}
 	zeroDispatch := !s.dialed
+	org, observer, fenced := s.org, s.observer, s.fence != nil
 	applicationSessionSignalV1(s)
 	s.mu.Unlock()
+	if err != nil {
+		// Identity flags only: a raw connect error can carry connection details.
+		slog.Warn("application session start unresolved", "org", org, "observer", observer, "dialed", !zeroDispatch, "fenced", fenced,
+			"cancelled", errors.Is(err, context.Canceled), "deadline", errors.Is(err, context.DeadlineExceeded))
+	}
 	if err != nil && zeroDispatch {
 		s.mu.Lock()
 		s.grant = nil
@@ -488,6 +495,7 @@ func (o *applicationSessionOrganisationV1) ensureObserverV1(ctx context.Context)
 			return ErrApplicationSessionV1
 		}
 		ready := !s.closed && !s.unknown && s.conn != nil && !s.conn.IsClosed() && s.conn.PgConn().TxStatus() == 'I' && s.fence != nil
+		closed, unknown, connClosed, fenced := s.closed, s.unknown, s.conn == nil || s.conn.IsClosed(), s.fence != nil
 		if !ready {
 			s.unknown = true
 		}
@@ -495,6 +503,7 @@ func (o *applicationSessionOrganisationV1) ensureObserverV1(ctx context.Context)
 		if ready {
 			return nil
 		}
+		slog.Warn("application observer unusable", "closed", closed, "already_unknown", unknown, "conn_closed", connClosed, "fenced", fenced)
 		return ErrApplicationSessionUnknownV1
 	}
 	o.initializing = true
@@ -620,9 +629,11 @@ func (f *ApplicationSessionFactoryV1) openProfileV1(ctx context.Context, org, do
 			old.mu.Lock()
 			blocked := old.org == org && (old.closed || old.unknown) && !old.retired
 			canJoin := old.org == org && old.closed && old.retiring > 0 && (!old.unknown || old.retired)
+			closed, unknown, dialed, fenced := old.closed, old.unknown, old.dialed, old.fence != nil
 			old.mu.Unlock()
 			if blocked && !canJoin {
 				p.mu.Unlock()
+				slog.Warn("application session quarantine refused open", "org", org, "closed", closed, "unknown", unknown, "dialed", dialed, "fenced", fenced)
 				return nil, ErrApplicationSessionUnknownV1
 			}
 			if canJoin {

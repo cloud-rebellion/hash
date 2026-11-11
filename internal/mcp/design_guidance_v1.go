@@ -64,17 +64,20 @@ only an overview. Fix the editable master and re-render/re-inspect all pages.
 Storage success, source readback, hashes, page count and successful rendering
 are NOT visual proof. If the host cannot obtain/render/view these page images,
 say visual review is pending and do not approve or claim the design is ready.
-Only after actual inspection may an owner explicitly approve_design_template
-with the same preview receipt/PDF hash, visually_reviewed=true and the exact
-reviewed_pages=[1..N]. This is an explicit caller attestation, not machine proof
-of aesthetic quality or approval of contractual content.
+Template approval is a human act. No tool approves a design: after you have
+inspected every page, tell the user the design is ready for review and an owner
+approves the exact version in the Hash app. Until then the template is not
+approved and create_document_from_design refuses it.
 
 Instantiate the exact approved design using create_document_from_design with
 an explicit purpose and a unique request_id. The document freezes that approved
 master/version/assets. Inspect the resulting document's exact PDF on EVERY PAGE
 again because populated text may change pagination. Only then explicitly
 review_document_design with its current updated_at, source commitment/PDF SHA
-and every reviewed page. No tool adds recipients, sends, or approves terms here.
+and every reviewed page. Agents may review only non-signing documents (purpose
+document or presentation); a signing document, acknowledgement mode included, is
+reviewed by a human in a staff session and this tool refuses it.
+No tool adds recipients, sends, or approves terms here.
 
 get_document_design_source identifies the frozen origin and editable template.
 Pass its editable_template.read_arguments to get_design_template to recover the
@@ -85,7 +88,7 @@ never substitute that current source for a document's older frozen source.
 get_document_design_history and download_document_pdf inspect exact retained
 PDFs. revise_document_design_values changes declared plain text only and resets
 review/field placement. Layout/assets edits require a new editable template
-version, preview/explicit owner approval and a new document from that version;
+version, preview, approval by a human owner in the app and a new document from that version;
 they do not rewrite an existing document's frozen design or signed artifacts.
 When updating a catalog-bound master returned by get_design_template, omit the
 selected server-injected brand_<slot> entries from input.html_master_json.assets and pass the

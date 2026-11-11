@@ -274,7 +274,7 @@ func (w *ApplicationHTMLSendWorkV1) RenderHistoricalCompletionMessagesV1(call co
 			}
 		}
 	}
-	senderContext := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: out.sender.Name, OrgName: companyName, DownloadURL: senderURL, AuditCertURL: baseURL + "/api/v1/documents/" + p.completed.ID.String() + "/audit-cert", Acknowledgement: !p.completed.RequiresSignature}
+	senderContext := dispatch.TemplateContext{DocumentName: p.completed.Name, SenderName: out.sender.Name, SenderEmail: out.sender.Email, RecipientName: out.sender.Name, OrgName: companyName, Locale: p.completed.DefaultLocale, DownloadURL: senderURL, AuditCertURL: baseURL + "/api/v1/documents/" + p.completed.ID.String() + "/audit-cert", Acknowledgement: !p.completed.RequiresSignature}
 	a, b, c, err := applicationServiceEmailComponentsV1(dispatch.KindCompletedSender, senderContext, senderTemplate)
 	if err != nil {
 		return nil, err

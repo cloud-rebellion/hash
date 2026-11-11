@@ -1,6 +1,26 @@
 // Library previews stay in memory and never change the source document.
 export type ThumbnailItem = { id: string; name: string; source_kind: string; version?: number; pdf_sha256?: string; content_sha256?: string; updated_at?: string; blocks_json?: unknown; html_master_json?: unknown };
 
+// Finished previews stay in this module's memory only (never storage), keyed by
+// the content identity, so revisiting the library does not download again.
+export type ThumbnailEntry = { image?: Blob; lines?: string[] };
+const THUMBNAIL_CACHE_LIMIT = 64;
+const thumbnailCache = new Map<string, ThumbnailEntry>();
+export function thumbnailKey(kind: 'document' | 'template', item: ThumbnailItem): string {
+  const identity = item.source_kind === 'pdf' && item.pdf_sha256 ? `pdf:${item.pdf_sha256}` : `at:${item.updated_at ?? ''}:${item.version ?? ''}:${item.content_sha256 ?? ''}`;
+  return JSON.stringify([kind, item.id, item.source_kind, item.version ?? null, identity]);
+}
+export function cachedThumbnail(key: string): ThumbnailEntry | undefined {
+  const entry = thumbnailCache.get(key);
+  if (entry) { thumbnailCache.delete(key); thumbnailCache.set(key, entry); }
+  return entry;
+}
+export function rememberThumbnail(key: string, entry: ThumbnailEntry): void {
+  thumbnailCache.delete(key); thumbnailCache.set(key, entry);
+  while (thumbnailCache.size > THUMBNAIL_CACHE_LIMIT) thumbnailCache.delete(thumbnailCache.keys().next().value as string);
+}
+export function clearThumbnailCache(): void { thumbnailCache.clear(); }
+
 export function previewLines(value: unknown, html = false): string[] {
   if (html) {
     const raw = value && typeof value === 'object' && 'html' in value ? (value as { html: unknown }).html : '';

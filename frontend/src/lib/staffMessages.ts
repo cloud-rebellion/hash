@@ -1,4 +1,5 @@
 import { swedishAutomationMessages } from './staffAutomationMessages';
+import { swedishDSRMessages } from './staffDSRMessages';
 import { swedishEmailDesignMessages } from './staffEmailDesignMessages';
 import { swedishEmailSampleMessages } from './staffEmailSampleMessages';
 import { swedishDeliveryStaffMessages } from './staffDeliveryMessages';
@@ -11,6 +12,7 @@ import { swedishDocumentStaffMessages } from './staffDocumentMessages';
 import { swedishAdvancedStaffMessages } from './staffAdvancedMessages';
 // English literals are stable lookup keys; untranslated staff text remains readable.
 export const swedishStaffMessages: Record<string, string> = {
+  ...swedishDSRMessages,
   'Document theme': 'Dokumenttema',
   'Document logo': 'Dokumentlogotyp',
   'Set document theme colors, fonts and signature ink.': 'Välj dokumenttemats färger, typsnitt och signaturfärg.',
@@ -197,6 +199,11 @@ export const swedishStaffMessages: Record<string, string> = {
   "Send the prepared document for signature. Follow its status, comments and requested changes in the document.": "Skicka det förberedda dokumentet för signering. Följ status, kommentarer och begärda ändringar i dokumentet.",
   "Server address": "Serveradress",
   "Sign out everywhere": "Logga ut överallt",
+  "Sign in again": "Logga in igen",
+  "Sign in again in a new tab, then check again. Unsaved changes stay on this page.": "Logga in igen i en ny flik och kontrollera sedan på nytt. Osparade ändringar finns kvar på sidan.",
+  "Check again": "Kontrollera igen",
+  "You are still signed out.": "Du är fortfarande utloggad.",
+  "Your session has expired": "Din session har gått ut",
   "Signature levels": "Signaturnivåer",
   "Signing out…": "Loggar ut…",
   "Signing rules and your authority to sign.": "Signeringsregler och din behörighet att signera.",

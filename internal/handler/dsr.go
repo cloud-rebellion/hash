@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -30,6 +31,81 @@ func writeDSRPrivacyContentionV1(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	writeError(w, http.StatusConflict, "document privacy review is changing; retry the request")
+	return true
+}
+
+// isDSRRetryableDBErrorV1 reports a lock conflict that rolled this transaction
+// back and that a repeat of the request converges on: a deadlock (40P01), a
+// serialization failure (40001), or a wait that outlived the transaction deadline
+// (context deadline) or was cancelled by the server for it (57014).
+func isDSRRetryableDBErrorV1(err error) bool {
+	var notApplied dsrCommitNotAppliedV1
+	if errors.As(err, &notApplied) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgerr *pgconn.PgError
+	return errors.As(err, &pgerr) && (pgerr.Code == "40P01" || pgerr.Code == "40001" || pgerr.Code == "57014")
+}
+
+// writeDSRRetryableV1 answers a retryable lock conflict with a 503 and
+// Retry-After, the way the PDF revision handlers do, instead of an opaque 500. It
+// reports whether it wrote the response.
+func writeDSRRetryableV1(w http.ResponseWriter, err error) bool {
+	if !isDSRRetryableDBErrorV1(err) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "the request conflicted with another privacy operation; retry it")
+	return true
+}
+
+// classifyDSRDBErrorV1 is the one mapping from a database error on the DSR
+// transition path to a client answer. 55P03 (a package or amendment holds the
+// privacy fence) is a 409 and the lock conflicts above are a 503 with
+// Retry-After. It reports whether it wrote the response; anything else is the
+// caller's to treat as an internal error.
+func classifyDSRDBErrorV1(w http.ResponseWriter, err error) bool {
+	return writeDSRPrivacyContentionV1(w, err) || writeDSRRetryableV1(w, err)
+}
+
+// dsrCommitNotAppliedV1 marks a COMMIT error that provably left nothing applied
+// (the deadline had already passed before COMMIT was sent), so the shared
+// classifier may answer it with a retry.
+type dsrCommitNotAppliedV1 struct{ err error }
+
+func (e dsrCommitNotAppliedV1) Error() string { return e.err.Error() }
+func (e dsrCommitNotAppliedV1) Unwrap() error { return e.err }
+
+// classifyDSRCommitErrorV1 answers a failed tx.Commit. Once COMMIT may have left
+// the client the outcome is unknown: the server may have applied it, and a retry
+// would repeat a write that already happened (the repeat gets a 409 for an
+// erasure that succeeded). So a retry hint is given only when the server
+// answered and rolled back before the commit record (40001, 40P01, or the 55P03
+// contention 409), or when pgx reports a deadline that passed before COMMIT was
+// sent (SafeToRetry together with Timeout). SafeToRetry alone is not enough:
+// pgx reports it for a connection lost after COMMIT was sent. 57014 is not on
+// the list: a cancel that lands inside CommitTransaction is raised after the
+// commit record and follows an applied commit. Anything else is "outcome
+// unknown": a coded 500 with no Retry-After. It writes a response for any
+// non-nil error and reports whether it did.
+func classifyDSRCommitErrorV1(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) {
+		switch pgerr.Code {
+		case "55P03", "40001", "40P01":
+			return classifyDSRDBErrorV1(w, err)
+		}
+	} else if pgconn.SafeToRetry(err) && pgconn.Timeout(err) {
+		return classifyDSRDBErrorV1(w, dsrCommitNotAppliedV1{err})
+	}
+	slog.Error("dsr commit outcome unknown", "operation", "classifyDSRCommitErrorV1", "error_type", fmt.Sprintf("%T", err))
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error": "the request may have been applied; reload it before trying again",
+		"code":  "dsr_commit_outcome_unknown",
+	})
 	return true
 }
 
@@ -155,7 +231,7 @@ func (s *Server) handleSignerDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
-		if writeDSRPrivacyContentionV1(w, err) {
+		if classifyDSRDBErrorV1(w, err) {
 			return
 		}
 		writeInternalErrorMsg(w, "persist", err)
@@ -293,7 +369,7 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
+	if !s.authorizeTransactionSessionClassified(w, r, tx, u, session, cookie, auth.RoleSender, classifyDSRDBErrorV1) {
 		return
 	}
 	// The admission lookup identifies the parent to lock. A recipient can be
@@ -328,7 +404,7 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
-		if writeDSRPrivacyContentionV1(w, err) {
+		if classifyDSRDBErrorV1(w, err) {
 			return
 		}
 		writeInternalErrorMsg(w, "persist", err)
@@ -382,6 +458,10 @@ func (s *Server) handleListDSR(w http.ResponseWriter, r *http.Request) {
 type dsrTransitionInput struct {
 	Status         string `json:"status"`
 	ResolutionNote string `json:"resolution_note,omitempty"`
+	// Confirm acknowledges the irreversible erasure of a past-draft document's
+	// recipient data or of retained PDF revision history.
+	Confirm             bool   `json:"confirm,omitempty"`
+	ConfirmationReceipt string `json:"confirmation_receipt,omitempty"`
 }
 
 // PATCH /api/v1/dsr/{id}
@@ -427,6 +507,29 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
+	// Lock contention (55P03, deadlock, serialization failure, a lock wait past the
+	// transaction deadline) is retryable, not an internal error.
+	fail := func(publicMsg string, err error) {
+		if !classifyDSRDBErrorV1(w, err) {
+			writeInternalErrorMsg(w, publicMsg, err)
+		}
+	}
+	// Erasure fulfilment locks its linked document first and then every document
+	// whose history it erases, in id order. Two requests for the same subject with
+	// different linked documents invert that order and deadlock, so they take turns
+	// per organization. Nothing else takes this lock.
+	if in.Status == "fulfilled" && observed.Kind == "erasure" {
+		// A transition that cannot be valid must not queue for the lock. The check
+		// below, under the row lock, is the authoritative one.
+		if !IsValidDSRStatusTransition(observed.Status, in.Status) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("invalid transition %s -> %s", observed.Status, in.Status))
+			return
+		}
+		if err := q.LockDSRErasureFulfilmentV1(r.Context(), u.OrgID.String()); err != nil {
+			fail("serialize erasure fulfilment", err)
+			return
+		}
+	}
 	var linkedDocumentID uuid.UUID
 	if observed.DocumentID.Valid {
 		linkedDocumentID = uuid.UUID(observed.DocumentID.Bytes)
@@ -434,6 +537,9 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if linkedDocumentID == uuid.Nil && observed.RecipientID.Valid {
 		recipient, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{ID: uuid.UUID(observed.RecipientID.Bytes), OrgID: u.OrgID})
 		if err != nil {
+			if classifyDSRDBErrorV1(w, err) {
+				return
+			}
 			writeError(w, http.StatusConflict, "linked recipient not found in this org")
 			return
 		}
@@ -441,6 +547,9 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	}
 	if linkedDocumentID != uuid.Nil {
 		if _, err := q.GetDocumentForPrivacyUpdate(r.Context(), generated.GetDocumentForPrivacyUpdateParams{DocumentID: linkedDocumentID, OrgID: u.OrgID}); err != nil {
+			if classifyDSRDBErrorV1(w, err) {
+				return
+			}
 			writeError(w, http.StatusConflict, "linked document unavailable for privacy review")
 			return
 		}
@@ -451,14 +560,14 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeInternalError(w, err)
+		fail("internal error", err)
 		return
 	}
 	if cur.DocumentID != observed.DocumentID || cur.RecipientID != observed.RecipientID {
 		writeError(w, http.StatusConflict, "request scope changed; review before retrying")
 		return
 	}
-	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
+	if !s.authorizeTransactionSessionClassified(w, r, tx, u, session, cookie, auth.RoleSender, classifyDSRDBErrorV1) {
 		return
 	}
 	if !IsValidDSRStatusTransition(cur.Status, in.Status) {
@@ -470,13 +579,17 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pendingAudits := make([]audit.PendingEvent, 0, 2)
+	var retiredObjects []*generated.PendingObjectDeletionsV1
+	var confirmedScope *dsrConfirmationScopeV1
+	var confirmedReceipt *dsrConfirmationReceiptV1
+	var confirmedEmail string
 	// Erasure fulfillment is all-or-nothing with the status flip and audit
 	// rows. A request without a linked recipient cannot truthfully be marked
 	// fulfilled by this targeted workflow.
 	if in.Status == "fulfilled" && cur.Kind == "erasure" {
 		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 		if err != nil {
-			writeInternalErrorMsg(w, "inspect retained authoring and attachment inventory", err)
+			fail("inspect retained authoring and attachment inventory", err)
 			return
 		}
 		if hasHTMLAuthoring {
@@ -494,18 +607,35 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeInternalErrorMsg(w, "load linked recipient", err)
+			fail("load linked recipient", err)
 			return
 		}
 		if cur.DocumentID.Valid && recipient.DocumentID != uuid.UUID(cur.DocumentID.Bytes) {
 			writeError(w, http.StatusConflict, "linked recipient does not belong to the linked document")
 			return
 		}
+		// The owner approves an erasure by the request's subject_email, but the
+		// data erased is the linked recipient's. Refuse unless they are the same
+		// person, compared the way the history scope query compares them.
+		subjectMatches, err := q.DSRSubjectEmailMatchesRecipientV1(r.Context(), generated.DSRSubjectEmailMatchesRecipientV1Params{
+			SubjectEmail: cur.SubjectEmail, RecipientEmail: recipient.Email,
+		})
+		if err != nil {
+			fail("compare request subject to linked recipient", err)
+			return
+		}
+		if !subjectMatches {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "the request's subject email does not match the linked recipient; nothing was erased",
+				"code":  "dsr_subject_mismatch",
+			})
+			return
+		}
 		lockedDoc, err := q.GetDocumentForPrivacyUpdate(r.Context(), generated.GetDocumentForPrivacyUpdateParams{
 			DocumentID: recipient.DocumentID, OrgID: u.OrgID,
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "lock linked document", err)
+			fail("lock linked document", err)
 			return
 		}
 		// Recovery archives can contain replaced personal data that cannot be
@@ -515,7 +645,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			DocumentID: lockedDoc.ID, OrgID: u.OrgID,
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "check collaboration recovery archives", err)
+			fail("check collaboration recovery archives", err)
 			return
 		}
 		if hasRecoveryArchives {
@@ -524,12 +654,84 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		}
 		signatures, err := q.ListSignaturesByDocument(r.Context(), lockedDoc.ID)
 		if err != nil {
-			writeInternalErrorMsg(w, "load signatures", err)
+			fail("load signatures", err)
 			return
 		}
 		if !documentAllowsDestructiveErasure(lockedDoc, len(signatures) > 0) {
 			writeError(w, http.StatusConflict, "linked document has an active or unsealed evidence ceremony")
 			return
+		}
+
+		// Tom, 2026-11-08: erasure works at any stage, behind an explicit
+		// confirmation. Retained PDF revision archives name the subject and are
+		// erased with their stored objects; the request never silently skips them.
+		historyDocs, err := q.ListPDFRevisionDocumentsForSubject(r.Context(), generated.ListPDFRevisionDocumentsForSubjectParams{
+			OrgID: u.OrgID, DocumentID: lockedDoc.ID, Email: recipient.Email,
+		})
+		if err != nil {
+			fail("inspect retained PDF revision history", err)
+			return
+		}
+		// Every document whose history would be erased gets the linked document's
+		// eligibility checks and an ownership check. One failure refuses the whole
+		// request, so an erasure is never partial.
+		actorIsOwner, err := dsrHistoryActorIsOwnerV1(r.Context(), q, u.OrgID, u.UserID)
+		if err != nil {
+			fail("load actor role", err)
+			return
+		}
+		unauthorizedDocs, blockedDocs := 0, 0
+		for _, historyDoc := range historyDocs {
+			gate, err := dsrHistoryGateDocumentV1(r.Context(), q, u.OrgID, u.UserID, actorIsOwner, historyDoc)
+			if err != nil {
+				fail("gate PDF revision history erasure", err)
+				return
+			}
+			if !gate.Authorized {
+				unauthorizedDocs++
+			}
+			if !gate.Eligible {
+				blockedDocs++
+			}
+		}
+		if unauthorizedDocs > 0 {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":                  fmt.Sprintf("erasing the PDF revision history of %d document(s) you did not send requires an owner; nothing was erased", unauthorizedDocs),
+				"code":                   "dsr_history_owner_required",
+				"unauthorized_documents": unauthorizedDocs,
+			})
+			return
+		}
+		if blockedDocs > 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":              fmt.Sprintf("%d document(s) whose PDF revision history this erasure would remove have an active or unsealed evidence ceremony or collaboration recovery archives; nothing was erased", blockedDocs),
+				"code":               "dsr_history_documents_blocked",
+				"blocking_documents": blockedDocs,
+			})
+			return
+		}
+		if len(historyDocs) > 0 || lockedDoc.Status != "draft" || in.Confirm || in.ConfirmationReceipt != "" {
+			scope, err := readDSRConfirmationScopeV1(r.Context(), q, u, cookie, cur, recipient, lockedDoc, historyDocs)
+			if err != nil {
+				fail("inspect exact erasure confirmation scope", err)
+				return
+			}
+			receipt, err := s.verifyDSRConfirmationV1(in.ConfirmationReceipt, scope, time.Now())
+			if !in.Confirm || err != nil {
+				s.writeDSRConfirmationRequiredV1(w, scope, recipient.Email)
+				return
+			}
+			confirmedScope, confirmedReceipt, confirmedEmail = &scope, &receipt, recipient.Email
+		}
+		// Stored objects are deleted only after this transaction commits.
+		for _, historyDoc := range historyDocs {
+			objects, pendingHistoryAudit, err := s.erasePDFRevisionHistoryTx(r.Context(), tx, q, u.OrgID, u.UserID, id, historyDoc)
+			if err != nil {
+				fail("erase PDF revision history", err)
+				return
+			}
+			retiredObjects = append(retiredObjects, objects...)
+			pendingAudits = append(pendingAudits, pendingHistoryAudit)
 		}
 
 		anonEmail := AnonymizedEmail(cur.ID)
@@ -543,7 +745,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		// the request open and prevents a partial redaction from escaping.
 		if anonErr != nil || affected == 0 {
 			if anonErr != nil {
-				writeInternalErrorMsg(w, "anonymize", anonErr)
+				fail("anonymize", anonErr)
 			} else {
 				writeError(w, http.StatusConflict, "anonymize: linked recipient not found in this org")
 			}
@@ -561,7 +763,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			OrgID:       u.OrgID,
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "anonymize signatures", err)
+			fail("anonymize signatures", err)
 			return
 		}
 		if scrubbed != targetSignatureCount {
@@ -572,7 +774,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			ID: id, OrgID: u.OrgID, SubjectEmail: anonEmail, SubjectName: AnonymizationMarker,
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "redact request identifiers", err)
+			fail("redact request identifiers", err)
 			return
 		}
 		if redacted != 1 {
@@ -590,7 +792,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "audit anonymization", err)
+			fail("audit anonymization", err)
 			return
 		}
 		pendingAudits = append(pendingAudits, pendingAudit)
@@ -609,10 +811,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		if writeDSRPrivacyContentionV1(w, err) {
-			return
-		}
-		writeInternalError(w, err)
+		fail("internal error", err)
 		return
 	}
 
@@ -631,7 +830,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 		if err != nil {
-			writeInternalErrorMsg(w, "audit transition", err)
+			fail("audit transition", err)
 			return
 		}
 		pendingAudits = append(pendingAudits, pendingAudit)
@@ -643,7 +842,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if in.Status == "fulfilled" && cur.Kind == "erasure" {
 		hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
 		if err != nil {
-			writeInternalErrorMsg(w, "recheck retained authoring and attachment inventory", err)
+			fail("recheck retained authoring and attachment inventory", err)
 			return
 		}
 		if hasHTMLAuthoring {
@@ -654,13 +853,20 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 	if !s.transactionSessionFresh(w, cookie) {
 		return
 	}
+	// A receipt can expire while the transaction waits for the audit-chain lock.
+	// Refuse before COMMIT; the deferred rollback preserves the original scope.
+	if confirmedReceipt != nil && !confirmedReceipt.validAt(time.Now()) {
+		s.writeDSRConfirmationRequiredV1(w, *confirmedScope, confirmedEmail)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
-		writeInternalErrorMsg(w, "commit", err)
+		classifyDSRCommitErrorV1(w, err)
 		return
 	}
 	for _, pendingAudit := range pendingAudits {
 		s.Audit.Publish(pendingAudit)
 	}
+	s.retireDSRHistoryObjectsV1(r.Context(), retiredObjects)
 	writeJSON(w, http.StatusOK, row)
 }
 
@@ -693,7 +899,7 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rollbackSessionTransaction(ctx, tx)
 	q := s.Queries.WithTx(tx)
-	if !s.authorizeTransactionSession(w, r, tx, u, session, cookie, auth.RoleSender) {
+	if !s.authorizeTransactionSessionClassified(w, r, tx, u, session, cookie, auth.RoleSender, classifyDSRDBErrorV1) {
 		return
 	}
 	hasHTMLAuthoring, err := q.HasHTMLAuthoringDataForDSR(r.Context(), u.OrgID)
@@ -703,6 +909,15 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasHTMLAuthoring {
 		writeError(w, http.StatusConflict, "Document attachments, HTML designs and source history require a separate privacy export review; this recipient export cannot fulfill the request")
+		return
+	}
+	hasRevisionHistory, err := q.HasPDFRevisionsMentioningSubject(r.Context(), generated.HasPDFRevisionsMentioningSubjectParams{OrgID: u.OrgID, Email: email})
+	if err != nil {
+		writeInternalErrorMsg(w, "inspect retained PDF revision history", err)
+		return
+	}
+	if hasRevisionHistory {
+		writeError(w, http.StatusConflict, "retained PDF revision history names this recipient; fulfill an erasure request or review the export separately")
 		return
 	}
 	rows, err := q.ExportSubjectData(r.Context(), generated.ExportSubjectDataParams{

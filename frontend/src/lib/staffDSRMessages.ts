@@ -1,0 +1,17 @@
+export const swedishDSRMessages: Record<string, string> = {
+  'Confirm irreversible erasure': 'Bekräfta permanent radering',
+  'Confirm erasure': 'Bekräfta radering',
+  'Subject': 'Registrerad person',
+  'Linked document status': 'Det kopplade dokumentets status',
+  'PDF history to erase': 'PDF-historik som raderas',
+  '{documents} documents · {revisions} revisions': '{documents} dokument · {revisions} versioner',
+  'The erasure scope changed or the confirmation expired. Review this fresh preview and confirm again.': 'Omfattningen ändrades eller bekräftelsen löpte ut. Granska den nya förhandsvisningen och bekräfta igen.',
+  'This anonymizes the linked recipient and permanently erases the listed PDF revision history. Current and signed PDF files are preserved under the retention procedure. This cannot be undone.': 'Detta anonymiserar den kopplade mottagaren och raderar den angivna PDF-historiken permanent. Aktuella och signerade PDF-filer bevaras enligt bevaranderutinen. Det går inte att ångra.',
+  'Refresh requests': 'Uppdatera förfrågningar',
+  'Resolution note (visible to the data subject):': 'Motivering (synlig för den registrerade personen):',
+  'Refresh the erasure preview before confirming.': 'Uppdatera förhandsvisningen av raderingen innan du bekräftar.',
+  'The result could not be confirmed. Refresh the requests before trying again.': 'Resultatet kunde inte bekräftas. Uppdatera förfrågningarna innan du försöker igen.',
+  'The erasure preview could not be verified. Refresh the requests before trying again.': 'Förhandsvisningen av raderingen kunde inte verifieras. Uppdatera förfrågningarna innan du försöker igen.',
+  'The request may have been applied. Refresh the requests before trying again.': 'Åtgärden kan ha genomförts. Uppdatera förfrågningarna innan du försöker igen.',
+  'The request could not be changed. Refresh the requests and review its current state.': 'Förfrågan kunde inte ändras. Uppdatera förfrågningarna och granska aktuell status.',
+};

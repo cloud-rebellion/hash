@@ -181,7 +181,7 @@ func TestMetadataCache756MissingMeasurementIsNotLazyRecoveryE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := q.f.snapshot(t)
-	metadataCacheInventory756(t, q, doc.ID, http.StatusServiceUnavailable)
+	metadataCacheInventory756(t, q, doc.ID, http.StatusConflict)
 	w := submitRecipientMCPE2E(q.f, "attach_metadata", key.Plaintext, map[string]any{"document_id": doc.ID.String(), "key": "must-not-recover", "value": "no fresh authority"})
 	assertLifecycleMCPResultE2E(t, w, true)
 	if q.f.snapshot(t) != before {
@@ -192,5 +192,5 @@ func TestMetadataCache756MissingMeasurementIsNotLazyRecoveryE2E(t *testing.T) {
 		t.Fatal("old missing cache was silently remeasured", err, n)
 	}
 	ownedPlainAssertDrainedV1(t, q)
-	metadataCacheInventory756(t, q, doc.ID, http.StatusServiceUnavailable)
+	metadataCacheInventory756(t, q, doc.ID, http.StatusConflict)
 }

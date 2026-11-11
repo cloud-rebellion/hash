@@ -334,7 +334,7 @@ type signerSignResponse struct {
 }
 
 func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticActionV1)
 	if !ok {
 		return
 	}
@@ -407,7 +407,7 @@ type signerAcceptInput struct {
 }
 
 func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticActionV1)
 	if !ok {
 		return
 	}
@@ -466,7 +466,7 @@ type signerDeclineInput struct {
 }
 
 func (s *Server) handleSignerDecline(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticActionV1)
 	if !ok {
 		return
 	}
@@ -513,7 +513,7 @@ type signerRequestChangesInput struct {
 }
 
 func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
+	rc, ok := s.lookupTokenOrErrorV1(w, r, pdfadmission.SignerReadDiagnosticActionV1)
 	if !ok {
 		return
 	}
@@ -784,10 +784,15 @@ func (s *Server) lookupTokenOrErrorV1(w http.ResponseWriter, r *http.Request, ro
 		rc, err = s.Sign.LookupSignerCommentsByTokenV1(r.Context(), hash)
 	case pdfadmission.SignerReadDiagnosticViewV1:
 		rc, err = s.Sign.LookupSignerViewByTokenV1(r.Context(), hash)
+	case pdfadmission.SignerReadDiagnosticActionV1:
+		rc, err = s.Sign.LookupSignerActionByTokenV1(r.Context(), hash)
 	default:
 		rc, err = s.Sign.LookupByToken(r.Context(), hash)
 	}
 	if errors.Is(err, sign.ErrSigningAdmissionUnavailableV1) {
+		// Token lookup is read-only and precedes all handler work: the signer
+		// UI may retry this exact refusal (status, message and Retry-After).
+		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "signer access is temporarily unavailable")
 		return nil, false
 	}

@@ -69,6 +69,9 @@ type Deps struct {
 	// pull in the html/template + http stack itself. Pass nil to skip
 	// email sends entirely (tests, dev environments without SMTP).
 	RenderEmail func(m dispatch.Mailer, kind, toEmail, toName, docName, senderEmail, signURL, beaconURL string)
+
+	// PDFRevisions replaces and reviews the imported PDF of a draft in place.
+	PDFRevisions PDFRevisionBridgeV1
 }
 
 // New builds a fully-registered MCP server bound to deps.
@@ -99,6 +102,7 @@ func New(d Deps) *Server {
 	registerBillingTools(s, d)
 	registerWebhookTools(s, d)
 	registerFieldTools(s, d)
+	registerPDFRevisionToolsV1(s, d)
 	registerResources(s, d)
 	registerPrompts(s)
 

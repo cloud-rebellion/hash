@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
 import { consumeStaffAuthToken, staffPasswordError, type StaffAuthMode } from '../staffAuth';
 import { staffAuthErrorMessage } from '../api/staffAuth';
+import { safeReturnPath } from '../sessionExpiry';
 
 const source = readFileSync(new URL('./StaffAuthForm.svelte', import.meta.url), 'utf8');
 const tree: any = parse(source, { modern: true });
@@ -27,7 +28,7 @@ function fixture(mode: StaffAuthMode) {
     mode, tokenMode: mode === 'verify' || mode === 'reset', newPassword: mode === 'register' || mode === 'reset',
     email: ' owner@example.test ', name: ' Owner ', company: ' Example ', password: ' unchanged passphrase ', confirmation: ' unchanged passphrase ',
     token: null, busy: false, complete: false, error: null, oidcEnabled: false, disposed: false, request: null, statusRequest: null,
-    consumeStaffAuthToken, staffPasswordError, staffAuthErrorMessage, AbortController,
+    consumeStaffAuthToken, staffPasswordError, staffAuthErrorMessage, safeReturnPath, AbortController,
     loginWithPassword: operation('login'), registerWorkspace: operation('register'), verifyStaffEmail: operation('verify'),
     forgotStaffPassword: operation('forgot'), resetStaffPassword: operation('reset'),
     getStaffAuthStatus: (signal: AbortSignal) => new Promise((resolve, reject) => {
@@ -62,6 +63,14 @@ test('actual login/register/forgot handlers submit captured values once and wait
     expect(f.env.complete).toBe(true); expect(f.env.password).toBe(''); expect(f.env.confirmation).toBe(''); expect(f.timers.size).toBe(0);
     expect(f.navigations).toEqual(mode === 'login' ? ['/dashboard'] : []);
     await f.send(); expect(f.calls).toHaveLength(1);
+  }
+});
+
+test('login returns to a safe next path and ignores an unsafe one', async () => {
+  for (const [search, want] of [['?next=%2Fdocuments%2F1', '/documents/1'], ['?next=%2F%2Fevil.test', '/dashboard'], ['?next=https%3A%2F%2Fevil.test', '/dashboard']] as const) {
+    const f = fixture('login'); f.env.window.location.search = search;
+    const pending = f.send(); f.calls[0].resolve(); await pending;
+    expect(f.navigations).toEqual([want]);
   }
 });
 

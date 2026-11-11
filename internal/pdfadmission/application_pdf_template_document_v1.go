@@ -29,6 +29,7 @@ import (
 var ErrPDFTemplateDocumentV1 = errors.New("pdfadmission: owned PDF template document unavailable")
 
 type PDFTemplateDocumentInputV1 struct {
+	DefaultLocale                 string
 	Purpose                       documentpurpose.Purpose
 	Name, TemplateText, Via, Tool string
 	Variables                     []byte
@@ -79,11 +80,17 @@ func (h *ApplicationSessionV1) NewPDFTemplateDocumentV1(ctx context.Context, rea
 	if err != nil || observed != p.template.ID || (input.Via != "rest" && input.Via != "mcp") || (input.Via == "rest" && input.Tool != "") || (input.Via == "mcp" && input.Tool != "create_document") {
 		return nil, ErrPDFTemplateDocumentV1
 	}
-	raw, err := htmlAuthoringSumV1(2*int64(unsafe.Sizeof(applicationPDFTemplateDocumentStateV1{})), 2*int64(unsafe.Sizeof(applicationPDFLayoutAuditBatchV1{})), 2*8*int64(unsafe.Sizeof("")+unsafe.Sizeof(any(nil))), 2*int64(unsafe.Sizeof(ApplicationPDFTemplateDocumentV1{})), 2*int64(unsafe.Sizeof(PDFTemplateDocumentInputV1{})), 2*16*int64(unsafe.Sizeof((func())(nil))), int64(len(input.Name)+len(input.TemplateText)+len(input.Via)+len(input.Tool)+len(input.Variables)), 2*int64(len(input.Parties))*int64(unsafe.Sizeof(pdflayout.Binding{})), 2*int64(unsafe.Sizeof(sanitize.Report{})), 2*int64(unsafe.Sizeof(pdfTemplateDocumentQuotaReadsV1{})), int64(len("template-pdfapplication/pdflegacy-templatelegacy-unknown")))
+	raw, err := htmlAuthoringSumV1(2*int64(unsafe.Sizeof(applicationPDFTemplateDocumentStateV1{})), 2*int64(unsafe.Sizeof(applicationPDFLayoutAuditBatchV1{})), 2*8*int64(unsafe.Sizeof("")+unsafe.Sizeof(any(nil))), 2*int64(unsafe.Sizeof(ApplicationPDFTemplateDocumentV1{})), 2*int64(unsafe.Sizeof(PDFTemplateDocumentInputV1{})), 2*16*int64(unsafe.Sizeof((func())(nil))), int64(len(input.Name)+len(input.DefaultLocale)+len(input.TemplateText)+len(input.Via)+len(input.Tool)+len(input.Variables)), 2*int64(len(input.Parties))*int64(unsafe.Sizeof(pdflayout.Binding{})), 2*int64(unsafe.Sizeof(sanitize.Report{})), 2*int64(unsafe.Sizeof(pdfTemplateDocumentQuotaReadsV1{})), int64(len("template-pdfapplication/pdflegacy-templatelegacy-unknown")))
 	if err != nil {
 		return nil, err
 	}
 	for _, binding := range input.Parties {
+		if binding.Locale == "" {
+			raw, err = htmlAuthoringSumV1(raw, int64(len(input.DefaultLocale)))
+			if err != nil {
+				return nil, err
+			}
+		}
 		raw, err = htmlAuthoringSumV1(raw, int64(len(binding.Role)+len(binding.Name)+len(binding.Email)+len(binding.Locale)))
 		if err != nil {
 			return nil, err
@@ -95,6 +102,7 @@ func (h *ApplicationSessionV1) NewPDFTemplateDocumentV1(ctx context.Context, rea
 	}
 	s := &applicationPDFTemplateDocumentStateV1{session: h, reader: reader, source: source, sourcePin: p.template, user: user, queries: generated.New(&applicationOwnedDBTXV1{session: h.state}), closes: []func(){close}, input: input}
 	s.input.Name = strings.Clone(input.Name)
+	s.input.DefaultLocale = strings.Clone(input.DefaultLocale)
 	s.input.TemplateText = strings.Clone(input.TemplateText)
 	s.input.Via = strings.Clone(input.Via)
 	s.input.Tool = strings.Clone(input.Tool)
@@ -222,6 +230,11 @@ func (w *ApplicationPDFTemplateDocumentV1) PrepareSigningV1(ctx context.Context)
 		s.layout = nil
 		s.values = nil
 	} else {
+		for i := range s.input.Parties {
+			if s.input.Parties[i].Locale == "" && s.input.DefaultLocale != "" {
+				s.input.Parties[i].Locale = s.input.DefaultLocale
+			}
+		}
 		s.layout, s.values, err = pdflayout.Prepare(s.sourcePin, s.input.ExpectedTemplateVersion, s.input.Parties)
 	}
 	if err != nil {
@@ -263,6 +276,10 @@ func (w *ApplicationPDFTemplateDocumentV1) CreateDocumentV1(ctx context.Context)
 		return nil, err
 	}
 	doc, err = s.writer.FreezeVariablesV1(ctx, s.variables)
+	if err != nil {
+		return nil, err
+	}
+	doc, err = s.writer.RecordDefaultLocaleV1(ctx, s.input.DefaultLocale)
 	if err != nil {
 		return nil, err
 	}

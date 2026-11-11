@@ -38,6 +38,8 @@ type softDeletePurgeQueries interface {
 	HasOtherDocumentSourceReferences(context.Context, generated.HasOtherDocumentSourceReferencesParams) (bool, error)
 	HasRetainedDraftEvidenceForPurge(context.Context, generated.HasRetainedDraftEvidenceForPurgeParams) (bool, error)
 	DeleteClaimedSoftDeletedDocument(context.Context, generated.DeleteClaimedSoftDeletedDocumentParams) (int64, error)
+	ListDocumentPDFRevisionObjects(context.Context, generated.ListDocumentPDFRevisionObjectsParams) ([]*generated.ListDocumentPDFRevisionObjectsRow, error)
+	EraseDocumentPDFHistory(context.Context, generated.EraseDocumentPDFHistoryParams) (int64, error)
 }
 
 type softDeletePurgeTransaction struct {
@@ -198,6 +200,12 @@ func purgeClaimedSoftDeletedDocument(ctx context.Context, claim *generated.Docum
 	if err != nil {
 		return 0, err
 	}
+	// Imported-PDF revision history is erased with its draft (Tom, 2026-11-08):
+	// rows first inside this transaction, then the stored objects. A storage
+	// failure rolls the row erasure back.
+	if err := erasePurgedPDFRevisionHistory(totalCtx, tx.queries, lockedDoc, sourceKey, objects); err != nil {
+		return 0, err
+	}
 	if sourceKey != "" {
 		shared, err := tx.queries.HasOtherDocumentSourceReferences(totalCtx, generated.HasOtherDocumentSourceReferencesParams{
 			DocumentID: lockedDoc.ID, ObjectKey: sourceKey,
@@ -344,6 +352,64 @@ func validateHTMLPurgeSource(doc *generated.Document) error {
 	}
 	if err := htmlsource.Validate(doc, false); err != nil {
 		return fmt.Errorf("soft delete purge: HTML source provenance requires review: %w", err)
+	}
+	return nil
+}
+
+// erasePurgedPDFRevisionHistory deletes a purged draft's PDF revision and review
+// rows and the stored objects they name. The draft's own current source object
+// (sourceKey) is left to the caller's existing exact-version deletion. An object
+// still named by any other durable row is retained.
+func erasePurgedPDFRevisionHistory(ctx context.Context, q softDeletePurgeQueries, doc *generated.Document, sourceKey string, objects purgeObjectDeleter) error {
+	revisionObjects, err := q.ListDocumentPDFRevisionObjects(ctx, generated.ListDocumentPDFRevisionObjectsParams{DocumentID: doc.ID, OrgID: doc.OrgID})
+	if err != nil {
+		return fmt.Errorf("list PDF revision objects: %w", err)
+	}
+	// The kinds table can exist without revisions, so erase unconditionally.
+	if _, err := q.EraseDocumentPDFHistory(ctx, generated.EraseDocumentPDFHistoryParams{DocumentID: doc.ID, Purge: true}); err != nil {
+		return fmt.Errorf("erase PDF revision history: %w", err)
+	}
+	seen := map[string]bool{sourceKey: true, "": true}
+	for _, object := range revisionObjects {
+		if seen[object.ObjectKey] {
+			continue
+		}
+		seen[object.ObjectKey] = true
+		if err := validatePurgeObjectKey(doc, object.ObjectKey); err != nil {
+			return err
+		}
+		if strings.TrimSpace(object.VersionID) != object.VersionID || object.VersionID == "" || len(object.VersionID) > 1024 || len(object.Sha256) != sha256.Size {
+			return errors.New("soft delete purge: revision object lacks its exact-version cleanup commitment")
+		}
+		shared, err := q.HasOtherDocumentSourceReferences(ctx, generated.HasOtherDocumentSourceReferencesParams{DocumentID: doc.ID, ObjectKey: object.ObjectKey})
+		if err != nil {
+			return fmt.Errorf("check shared revision references: %w", err)
+		}
+		if shared {
+			continue
+		}
+		if objects == nil {
+			return errors.New("soft delete purge: storage unavailable")
+		}
+		deleteCtx, cancel := context.WithTimeout(ctx, softDeleteObjectTimeout)
+		err = objects.DeleteVersion(deleteCtx, object.ObjectKey, object.VersionID, object.Sha256)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("delete revision object: %w", err)
+		}
+	}
+	return nil
+}
+
+func validatePurgeObjectKey(doc *generated.Document, key string) error {
+	parts := strings.Split(key, "/")
+	if len(parts) != 4 || parts[0] != "org" || parts[1] != doc.OrgID.String() || parts[2] != "documents" || !strings.HasSuffix(parts[3], ".pdf") {
+		return errors.New("soft delete purge: revision namespace requires review")
+	}
+	name := strings.TrimSuffix(parts[3], ".pdf")
+	id, err := uuid.Parse(name)
+	if err != nil || id == uuid.Nil || id.String() != name {
+		return errors.New("soft delete purge: revision namespace requires review")
 	}
 	return nil
 }

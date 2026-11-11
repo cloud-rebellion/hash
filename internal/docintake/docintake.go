@@ -91,6 +91,15 @@ func (p *PreparedPDFSource) OwnedSource() OwnedPDFSource {
 	return p.owned
 }
 
+// MetadataRedactionReport returns a copy of the exact report persisted with
+// the sanitized object.
+func (p *PreparedPDFSource) MetadataRedactionReport() json.RawMessage {
+	if p == nil {
+		return nil
+	}
+	return bytes.Clone(p.report)
+}
+
 func (p *PreparedPDFSource) PageCount() int {
 	if p == nil {
 		return 0

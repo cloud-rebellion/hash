@@ -40,7 +40,7 @@ func TestHandlerCatalogPlanIsStableCompleteAndAnchored(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, c := range forward {
-		if len(c.Roots) == 0 || len(c.Roots) > 16 {
+		if len(c.Roots) == 0 || len(c.Roots) > 4 {
 			t.Fatal("cohort is empty or over bounded root count")
 		}
 		r := regexp.MustCompile(c.Pattern)
@@ -294,7 +294,7 @@ func FuzzSeeds(f *testing.F){f.Add("seed");f.Fuzz(func(t *testing.T,s string){if
 		if err := json.Unmarshal(raw, &summary); err != nil {
 			t.Fatal(err)
 		}
-		if !summary.CoverageVerified || summary.HandlerRoots != 20 || summary.ExpectedPackages != 2 || len(summary.Invocations) != 3 || summary.PassedTests+len(summary.FailedTests) != 22 {
+		if !summary.CoverageVerified || summary.HandlerRoots != 20 || summary.ExpectedPackages != 2 || len(summary.Invocations) != 6 || summary.PassedTests+len(summary.FailedTests) != 22 {
 			t.Fatal("native catalog union/root/fuzz/package accounting differs", string(raw))
 		}
 		if fail && summary.FailedPackages != 1 || !fail && summary.PassedPackages != 2 {

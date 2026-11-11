@@ -350,7 +350,7 @@ func (s *Server) handleAutomationDocumentAttachments(w http.ResponseWriter, r *h
 		defer result.CloseConsumerV1()
 	}
 	if err != nil {
-		status, message := packageauthoring.PublicErrorV1(err)
+		status, message := packageauthoring.PublicErrorLoggedV1(r.Context(), err, u.OrgID, id)
 		writeError(w, status, message)
 		return
 	}

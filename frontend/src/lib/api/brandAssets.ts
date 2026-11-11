@@ -56,7 +56,7 @@ export async function listBrandAssets(signal: AbortSignal, after = ''): Promise<
 }
 export function brandAssetContentURL(asset: BrandAsset, representation: 'original' | 'render') {
   checkedBrandAsset(asset);
-  return `/api/v1/brand-assets/${asset.asset_id}/revisions/${asset.revision}/content?representation=${representation}`;
+  return `/api/v1/brand-assets/${encodeURIComponent(asset.asset_id)}/revisions/${encodeURIComponent(asset.revision)}/content?representation=${representation}`;
 }
 async function fileData(file: File, max: number) {
   if (file.size < 1 || file.size > max) throw new Error('Brand asset file is outside the upload limit');
@@ -89,11 +89,11 @@ export async function uploadBrandAsset(prepared: PreparedBrandAsset, signal: Abo
 }
 export async function inspectBrandAssetUpload(prepared: PreparedBrandAsset, signal: AbortSignal): Promise<BrandAsset | null> {
   const id = prepared.input.request_id; if (!uuid.test(id)) throw new Error('Invalid upload reference');
-  const result = await request('GET', `/api/v1/brand-assets/uploads/${id}`, signal);
+  const result = await request('GET', `/api/v1/brand-assets/uploads/${encodeURIComponent(id)}`, signal);
   if (!object(result) || result.request_id !== id || !['preparing', 'committed'].includes(String(result.state))) throw new Error('Invalid upload state');
   if (result.state === 'preparing') return null;
   if (typeof result.asset_id !== 'string' || !uuid.test(result.asset_id) || !positive(result.revision)) throw new Error('Invalid uploaded asset identity');
-  const asset = checkedBrandAsset(await request('GET', `/api/v1/brand-assets/${result.asset_id}?revision=${result.revision}`, signal));
+  const asset = checkedBrandAsset(await request('GET', `/api/v1/brand-assets/${encodeURIComponent(result.asset_id)}?revision=${result.revision}`, signal));
   if (asset.asset_id !== result.asset_id || asset.revision !== result.revision) throw new Error('Uploaded asset revision changed');
   return matches(asset, prepared);
 }

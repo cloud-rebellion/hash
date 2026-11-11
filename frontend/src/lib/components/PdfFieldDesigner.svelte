@@ -236,6 +236,7 @@
 
   onDestroy(() => {
     emitProof(false);
+    onStateChange?.({ busy: false, dirty: false }); // an unmounted designer must not leave Send blocked
     disposed = true;
     paintLane.close();
     abort.abort();

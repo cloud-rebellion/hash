@@ -29,3 +29,4 @@ docker-compose.override.yml
 # HISTORY, so a single `git add -A` would carry them into every future publish
 # and only a filter-repo strip could remove them again. Ignored at the source.
 .claude/
+

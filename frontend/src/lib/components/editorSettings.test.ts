@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 import { compile, parse } from 'svelte/compiler';
+import { documentDownloadName } from '../documentDownload';
 
 const source = readFileSync(new URL('./DocumentAIAccessSettings.svelte', import.meta.url), 'utf8');
 const tree: any = parse(source, { modern: true });
@@ -44,4 +48,84 @@ test('editor has a download action, while optional document tokens are keyed and
     const component=readFileSync(new URL(`./${name}.svelte`,import.meta.url),'utf8');
     for(const generate of ['client','server'] as const)expect(compile(component,{filename:`${name}.svelte`,generate}).warnings.filter(w=>w.code.startsWith('a11y'))).toEqual([]);
   }
+});
+
+const downloadFile = fileURLToPath(new URL('./DocumentDownload.svelte', import.meta.url));
+const downloadSource = readFileSync(downloadFile, 'utf8'), downloadTree: any = parse(downloadSource, { modern: true });
+function downloadFixture() {
+  const calls: any[] = [], effects: any[] = [], timers = new Map<number, () => void>(); let timerID = 0;
+  const env: any = { document: { id: 'doc', name: 'Contract', status: 'completed', updated_at: 'exact', pdf_sha256: 'a'.repeat(64) }, blocked: false,
+    busy: false, downloadKind: 'pdf', error: null, disposed: false, revision: 0, controller: null, urls: new Set<string>(),
+    documentDownloadName, fetch: () => { throw Error('Only the download port may fetch'); }, AbortController,
+    fetchDocumentDownload: (...args: any[]) => new Promise((resolve, reject) => calls.push({ args, resolve, reject })),
+    setTimeout: (callback: () => void, milliseconds: number) => { const id = ++timerID; timers.set(id, callback); return id; }, clearTimeout: (id: number) => timers.delete(id),
+    URL: { createObjectURL: (blob: Blob) => { effects.push(['url', blob.type]); return 'blob:owned'; }, revokeObjectURL: (url: string) => effects.push(['revoke', url]) },
+    window: { document: { body: { append: (link: any) => effects.push(['append', link.download]) }, createElement: () => ({ href: '', download: '', click() { effects.push(['click', this.download]); }, remove() { effects.push(['remove']); } }) } },
+  };
+  const functions = ['identity', 'download'].map(name => {
+    const node = downloadTree.instance.content.body.find((node: any) => node.type === 'FunctionDeclaration' && node.id.name === name);
+    return downloadSource.slice(node.start, node.end);
+  }).join('\n');
+  const destroy = downloadTree.instance.content.body.find((node: any) => node.type === 'ExpressionStatement' && node.expression?.callee?.name === 'onDestroy').expression.arguments[0];
+  const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(functions + '\nconst retire = ' + downloadSource.slice(destroy.start, destroy.end));
+  const actions = new Function('env', `with(env) { ${code}; return {download,retire}; }`)(env);
+  return { env, calls, effects, timers, ...actions };
+}
+test('actual package download callback uses the validated extension, dispatches once and retires its object URL', async () => {
+  for (const type of ['application/pdf', 'application/zip']) {
+    const f = downloadFixture(), pending = f.download('package'); await f.download('pdf');
+    expect(f.calls).toHaveLength(1); expect(f.calls[0].args[3]).toBe('package'); expect(f.calls[0].args[1]).toBe(f.env.controller.signal);
+    f.calls[0].resolve(new Blob(['fixture'], { type })); await pending;
+    expect(f.effects).toContainEqual(['click', type === 'application/zip' ? 'Contract-evidence.zip' : 'Contract-evidence.pdf']);
+    expect(f.env.busy).toBe(false); expect(f.env.urls.size).toBe(1);
+    for (const retire of [...f.timers.values()]) retire();
+    expect(f.env.urls.size).toBe(0); expect(f.effects).toContainEqual(['revoke', 'blob:owned']);
+  }
+});
+test('package download retains blocked, changed-document, timeout and unmount fences without saving stale bytes', async () => {
+  for (const state of ['blocked', 'different document', 'different parent', 'unmount', 'timeout']) {
+    const f = downloadFixture(), pending = f.download('package');
+    if (state === 'blocked') f.env.blocked = true;
+    if (state === 'different document') f.env.document = { ...f.env.document, id: 'other' };
+    if (state === 'different parent') f.env.document = { ...f.env.document, parent_envelope_id: 'parent' };
+    if (state === 'unmount') f.retire();
+    if (state === 'timeout') [...f.timers.values()][0]();
+    f.calls[0].resolve(new Blob(['fixture'], { type: 'application/zip' })); await pending;
+    expect(f.effects).toEqual([]); expect(f.env.urls.size).toBe(0);
+    if (state === 'unmount' || state === 'timeout') expect(f.calls[0].args[1].aborted).toBe(true);
+  }
+  const blocked = downloadFixture(); blocked.env.blocked = true; await blocked.download('package'); expect(blocked.calls).toEqual([]);
+  const retained = downloadFixture(), pending = retained.download('package'); retained.calls[0].resolve(new Blob(['fixture'], { type: 'application/zip' })); await pending;
+  retained.retire(); expect(retained.env.urls.size).toBe(0); expect(retained.effects).toContainEqual(['revoke', 'blob:owned']);
+});
+test('actual EN/SV completed-root view exposes package export beside the existing signed PDF and certificate actions', async () => {
+  const lib = resolve(dirname(downloadFile), '..');
+  const built = await Bun.build({ entrypoints: ['download-view-entry'], target: 'bun', plugins: [{ name: 'actual-download-view', setup(build) {
+    build.onResolve({ filter: /^download-view-entry$/ }, () => ({ path: 'entry', namespace: 'download-view' }));
+    build.onLoad({ filter: /.*/, namespace: 'download-view' }, () => ({ contents: `import View from ${JSON.stringify(downloadFile)}; import {render} from 'svelte/server'; import {setStaffLocale} from ${JSON.stringify(join(lib, 'staffPreferences.ts'))}; export {View,render,setStaffLocale};`, loader: 'ts', resolveDir: process.cwd() }));
+    build.onResolve({ filter: /^\$lib\// }, args => ({ path: Bun.resolveSync('./' + args.path.slice(5), lib) }));
+    build.onLoad({ filter: /\/svelte\/src\/store\/index-server\.js$/ }, args => ({ contents: readFileSync(args.path, 'utf8'), loader: 'js', resolveDir: dirname(args.path) }));
+    build.onLoad({ filter: /\.svelte$/ }, args => ({ contents: compile(readFileSync(args.path, 'utf8'), { filename: args.path, generate: 'server' }).js.code, loader: 'js', resolveDir: dirname(args.path) }));
+  } }] });
+  if (!built.success) throw Error(built.logs.map(String).join('\n'));
+  const temporary = mkdtempSync(join(tmpdir(), 'hash-download-view-'));
+  try {
+    const file = join(temporary, 'view.mjs'); writeFileSync(file, await built.outputs[0].text()); const view = await import(pathToFileURL(file).href);
+    for (const locale of ['en', 'sv']) {
+      view.setStaffLocale(locale);
+      const document = { id: 'doc', name: 'Contract', status: 'completed', updated_at: 'exact', requires_signature: true };
+      const label = locale === 'sv' ? 'Exportera bevispaket' : 'Export evidence package';
+      for (const parent_envelope_id of [undefined, null]) {
+        const html = view.render(view.View, { props: { document: { ...document, parent_envelope_id } } }).body;
+        expect(html).toContain(label); expect(html).toContain(locale === 'sv' ? 'Ladda ner signerad PDF' : 'Download signed PDF');
+        expect(html).toContain(locale === 'sv' ? 'Ladda ner bevisrapport' : 'Download evidence report');
+      }
+      const blocked = view.render(view.View, { props: { document, blocked: true } }).body;
+      const button = blocked.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find((html: string) => html.includes(label));
+      expect(button).toContain('disabled');
+      for (const status of ['draft', 'sent', 'finalizing', 'declined', 'voided', 'unknown']) expect(view.render(view.View, { props: { document: { ...document, status } } }).body).not.toContain(label);
+      expect(view.render(view.View, { props: { document: { ...document, parent_envelope_id: 'parent' } } }).body).not.toContain(label);
+    }
+    view.setStaffLocale('en');
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
 });

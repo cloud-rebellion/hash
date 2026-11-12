@@ -53,16 +53,20 @@ func toHTMLTemplateDetailResponseOwnedV1(ctx context.Context, reader *pdfadmissi
 		len(template.HtmlContentSha256) != 32 || !bytes.Equal(template.HtmlContentSha256, revision.ContentSha256) {
 		return empty, errors.New("HTML template revision identity does not match")
 	}
+	retained, err := reader.CanonicalRetainedTemplateV1(ctx, revision.TemplateID, revision.Version)
+	if err != nil {
+		return empty, err
+	}
+	// Preparation owns the full canonical work first. The same native reader
+	// may then price only a defensive CURRENT copy when its actual source bytes
+	// and pins exactly match this retained revision; differing sources still
+	// take their independent canonical path and all comparisons below remain.
 	current, err := reader.CanonicalCurrentTemplateV1(ctx, template.ID, template.Version)
 	if err != nil {
 		return empty, err
 	}
 	if current.SHA256 != hex.EncodeToString(template.HtmlContentSha256) {
 		return empty, errors.New("HTML template content commitment does not match")
-	}
-	retained, err := reader.CanonicalRetainedTemplateV1(ctx, revision.TemplateID, revision.Version)
-	if err != nil {
-		return empty, err
 	}
 	return toHTMLTemplateDetailCanonicalV1(template, revision, current, retained)
 }

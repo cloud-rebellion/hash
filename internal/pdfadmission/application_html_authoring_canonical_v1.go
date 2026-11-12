@@ -125,7 +125,21 @@ func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context
 	r.closeConsumers = append(r.closeConsumers, owner.CloseConsumerV1)
 	defer owner.finishV1()
 	content := entry.content
-	if entry.reused && entry.purpose.coversV1(purpose) {
+	reuse := entry.reused && entry.purpose.coversV1(purpose)
+	if !reuse && !revision && purpose == htmlStoredTemplateCurrentV1 {
+		// Both entries were installed by this reader's genuine scoped SQL reads.
+		// Look now, not at registration: both rows can precede the retained
+		// producer. Its immutable result and full charge remain live until this
+		// same reader closes; only this new defensive copy needs another loan.
+		for i := r.canonicalCount - 1; i >= 0; i-- {
+			previous := &r.canonicalSources[i]
+			if htmlAuthoringCurrentCanReuseRetainedV1(entry, previous) {
+				content, reuse = previous.content, true
+				break
+			}
+		}
+	}
+	if reuse {
 		// The original parser/Compile/output grants remain live. Price THIS new
 		// defensive byte-copy consumer before exposing another actual result.
 		phase = "reused_copy_cost"
@@ -155,4 +169,18 @@ func (r *ApplicationHTMLAuthoringReaderV1) canonicalSourceV1(ctx context.Context
 
 func htmlAuthoringCanonicalSameV1(a, b *htmlAuthoringCanonicalSourceV1) bool {
 	return a != nil && b != nil && a.id == b.id && a.version == b.version && a.revision == b.revision && a.digestValid && b.digestValid && a.digest == b.digest && bytes.Equal(a.master, b.master) && bytes.Equal(a.defaults, b.defaults)
+}
+
+// This narrower cross-view path grants only CURRENT canonical bytes. It never
+// grants retained preparation, approval or a source read. The caller holds the
+// original valid reader lock and selects both private entries from its array.
+// Keep the revision-sensitive same-view/prepared predicate above unchanged.
+func htmlAuthoringCurrentCanReuseRetainedV1(current, retained *htmlAuthoringCanonicalSourceV1) bool {
+	return current != nil && retained != nil && current != retained &&
+		!current.revision && current.started && !current.ready && !current.delivered &&
+		retained.revision && retained.started && retained.ready && retained.delivered &&
+		retained.purpose.coversV1(htmlStoredTemplateRecheckV1) &&
+		current.id != uuid.Nil && current.id == retained.id && current.version > 0 && current.version == retained.version &&
+		current.digestValid && retained.digestValid && current.digest == retained.digest &&
+		bytes.Equal(current.master, retained.master) && bytes.Equal(current.defaults, retained.defaults)
 }

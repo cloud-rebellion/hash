@@ -10,6 +10,7 @@ package render
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -27,6 +28,17 @@ import (
 // buffer that ~5x through the downstream pdfcpu sanitize passes and OOM the
 // shared multi-tenant process. 60 MB is well above any legitimate signable doc.
 const maxRenderedPDF = 60 << 20
+
+// ErrPDFResponseTooLarge identifies the closed response-byte policy without
+// carrying upstream response content. The returned error retains its legacy text.
+var ErrPDFResponseTooLarge = errors.New("render: PDF response exceeds byte limit")
+
+type pdfResponseLimitError struct{ limit int }
+
+func (e pdfResponseLimitError) Error() string {
+	return fmt.Sprintf("gotenberg render exceeded the %d-byte limit", e.limit)
+}
+func (pdfResponseLimitError) Unwrap() error { return ErrPDFResponseTooLarge }
 
 // Gotenberg wraps the HTTP client we use to talk to a Gotenberg instance.
 // Default endpoint matches the docker-compose wiring; production uses the
@@ -261,7 +273,7 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 				return nil, err
 			}
 			if len(out) > responseLimit {
-				return nil, fmt.Errorf("gotenberg render exceeded the %d-byte limit", responseLimit)
+				return nil, pdfResponseLimitError{limit: responseLimit}
 			}
 			return out, nil
 		}

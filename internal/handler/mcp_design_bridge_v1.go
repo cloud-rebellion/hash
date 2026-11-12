@@ -19,12 +19,15 @@ import (
 	"github.com/bright-interaction/hash/internal/branding/catalog"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/documentpurpose"
+	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlmaterialization"
 	"github.com/bright-interaction/hash/internal/htmlsource"
 	"github.com/bright-interaction/hash/internal/importguard"
+	"github.com/bright-interaction/hash/internal/malwarescan"
 	"github.com/bright-interaction/hash/internal/mcp"
 	"github.com/bright-interaction/hash/internal/pdfadmission"
+	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -54,6 +57,42 @@ func validMCPDesignPreviewV1(a mcp.DesignActorV1, id uuid.UUID, version int32, c
 
 // mcpPreviewContextErr reports the real timeout or cancellation, not a receipt error.
 func mcpPreviewContextErr(ctx context.Context) error { return ctx.Err() }
+
+// The public design error intentionally loses internal causes. Classify only
+// these known preview-operation failures before that mask; expected input,
+// policy and credential refusals must not become pageable service failures.
+func captureMCPPreviewFailureV1(ctx context.Context, err error) {
+	if err == nil || errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		return
+	}
+	for _, expected := range []error{auth.ErrMutationPermissionRevoked, auth.ErrMutationCredentialExpired,
+		errHTMLTemplateConflict, errTemplateNotFound, errHTMLTemplatePreviewReceipt, errHumanReviewRequiredV1,
+		htmlmaster.ErrInvalid, htmlmaster.ErrLimit, htmlmaster.ErrMissingValues, htmlmaster.ErrContractIncomplete,
+		sanitize.ErrPDFWorkerCapacity, sanitize.ErrPDFTooLarge, sanitize.ErrTooManyPages, malwarescan.ErrDetected,
+		errHTMLTemplatePreviewOutputLimitV1, render.ErrPDFResponseTooLarge} {
+		if errors.Is(err, expected) {
+			return
+		}
+	}
+	var category flarereport.FailureCategory
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		category = flarereport.FailureTimeout
+	case errors.Is(err, errHTMLTemplatePreviewRenderV1), errors.Is(err, sanitize.ErrPDFWorkerUnavailable), errors.Is(err, malwarescan.ErrUnavailable):
+		category = flarereport.FailureDependency
+	case errors.Is(err, errHTMLTemplatePreviewInvalidV1):
+		// These bytes were produced by our renderer from an already compiled
+		// master, unlike an expected refusal of an uploaded untrusted PDF.
+		category = flarereport.FailureInternal
+	default:
+		return
+	}
+	if ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		category = flarereport.FailureTimeout
+	}
+	flarereport.CaptureOperationFailure(ctx, flarereport.OperationMCP, category)
+}
+
 func safeMCPDesignFailureV1(err error) error {
 	if err == nil {
 		return nil
@@ -194,6 +233,9 @@ func (b *mcpDesignBridgeV1) PreviewTemplateV1(parent context.Context, a mcp.Desi
 			cancel()
 		}
 	}()
+	// Runs before the cleanup defer cancels ctx and before the outer public
+	// error mask; the existing HTTP observation deduplicates fixed signals.
+	defer func() { captureMCPPreviewFailureV1(ctx, failure) }()
 	native := htmlTemplatePreviewInput{ExpectedVersion: in.ExpectedVersion, ExpectedContentSHA256: in.ExpectedContentSHA256, Values: htmlStringMap(in.Values), Sections: htmlStringMap(in.Sections)}
 	content, closeContent, err := s.loadHTMLTemplatePreview(ctx, a.Actor, id, in.ExpectedVersion, in.ExpectedContentSHA256, in.Values, in.Sections)
 	if err != nil {

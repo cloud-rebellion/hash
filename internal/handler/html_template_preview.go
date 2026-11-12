@@ -277,6 +277,7 @@ func (s *Server) handlePreviewHTMLTemplate(w http.ResponseWriter, r *http.Reques
 
 var errHTMLTemplatePreviewRenderV1 = errors.New("HTML template preview rendering unavailable")
 var errHTMLTemplatePreviewInvalidV1 = errors.New("rendered template preview could not be accepted")
+var errHTMLTemplatePreviewOutputLimitV1 = errors.New("rendered template preview exceeds byte policy")
 
 // The two transports share rendering, production PDF sanitization, signing-page
 // composition and the original credential check. The caller retains content's
@@ -294,10 +295,16 @@ func (s *Server) renderHTMLTemplatePDFV1(ctx context.Context, actor authoring.Ac
 	}
 	pdf, err := s.Sign.PDF.HTMLToPDF(ctx, rendered.HTML, render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"})
 	if err != nil {
+		if errors.Is(err, render.ErrPDFResponseTooLarge) {
+			return cleaned, 0, "", errors.Join(errHTMLTemplatePreviewRenderV1, render.ErrPDFResponseTooLarge)
+		}
 		return cleaned, 0, "", errHTMLTemplatePreviewRenderV1
 	}
-	if len(pdf) == 0 || len(pdf) > sanitize.MaxPDFBytes {
+	if len(pdf) == 0 {
 		return cleaned, 0, "", errHTMLTemplatePreviewInvalidV1
+	}
+	if len(pdf) > sanitize.MaxPDFBytes {
+		return cleaned, 0, "", errors.Join(errHTMLTemplatePreviewInvalidV1, errHTMLTemplatePreviewOutputLimitV1)
 	}
 	master, err := htmlmaster.Decode(content.MasterJSON)
 	if err != nil {

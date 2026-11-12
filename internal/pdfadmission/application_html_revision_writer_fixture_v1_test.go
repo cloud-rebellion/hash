@@ -73,7 +73,6 @@ func withHTMLRevisionConstructedWriterVariantV1(t *testing.T, variant int, use f
 	factory := &ApplicationSessionFactoryV1{state: session.state.factory}
 	factory.state.htmlAdmissions = make(map[*ApplicationAdmissionV1]*applicationHTMLAdmissionRegistrationV1)
 	factory.state.htmlInputProducers = make(map[*applicationHTMLAuthoringInputStateV1]struct{})
-	ctx := applicationTestContextV1(t)
 	in, doc, _ := testfixture.HTMLContract(t)
 	// Genuine schema1 generic design: recipient/field collections really are
 	// empty in this component fixture, rather than omitted from a contract.
@@ -155,6 +154,9 @@ func withHTMLRevisionConstructedWriterVariantV1(t *testing.T, variant int, use f
 	var input *ApplicationHTMLAuthoringInputV1
 	var operation *ApplicationHTMLRevisionOperationV1
 	fixture := &htmlRevisionWriterFixtureV1{native: f, session: session, coordinator: coordinator, tx: tx, document: doc}
+	// Start the unchanged bounded operation context after synthetic source and
+	// receipt setup, so fixture construction cannot consume the native deadline.
+	ctx := applicationTestContextV1(t)
 	t.Cleanup(func() {
 		if fixture.collections != nil {
 			fixture.collections.CloseConsumerV1()

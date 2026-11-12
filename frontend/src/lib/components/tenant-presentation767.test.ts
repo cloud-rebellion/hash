@@ -17,9 +17,10 @@ function between(source: string, start: string, end: string) {
   return source.slice(first, last + end.length);
 }
 const head = (source: string) => between(source, '<svelte:head>', '</svelte:head>');
+const ceremonyKey = between(signer, '  function currentCeremonyKey(): string {', '\n  }');
 const shells = {
   layout: `<script lang="ts">import { isStaffAuthPath, routeCategory } from ${JSON.stringify(join(lib, 'routeSurface.ts'))}; let { showChrome = false, path = '/sign/example' } = $props();</script>${head(layout)}`,
-  signer: `<script lang="ts">import { FileSignature } from 'lucide-svelte'; import { t } from ${JSON.stringify(join(lib, 'i18n.ts'))}; let { ctx = null } = $props();</script>${head(signer)}${between(signer, '<header class="signer-bar">', '</header>')}`,
+  signer: `<script lang="ts">import { FileSignature } from 'lucide-svelte'; import { readable } from 'svelte/store'; import { t } from ${JSON.stringify(join(lib, 'i18n.ts'))}; import { signerCeremonyKey } from ${JSON.stringify(join(lib, 'signerPDF.ts'))}; let { ctx = null, token = 'presentation-token', loadedToken = 'presentation-token', routeDisposed = false, packageReview = { key: '', settled: false } } = $props(); const page = readable({ params: { token } }); ${ceremonyKey}</script>${head(signer)}${between(signer, '<header class="signer-bar">', '</header>')}`,
   completed: head(completed),
   notice: `${head(notice)}${between(notice, '<p class="font-display text-xl">', '</p>')}`
 };
@@ -89,6 +90,28 @@ test('actual signer presentation escapes tenant strings and has a neutral pre-co
   const empty = m.render(m.Signer, { props: { ctx: null } });
   expect(empty.body).toContain('<span>Document</span>'); expect(empty.head).toContain('<title>Document</title>');
   expect(empty.body + empty.head).not.toContain('Hash');
+});
+
+test('actual signer header labels only the settled package language for the current ceremony', async () => {
+  const m = await renderer();
+  const ctx = { document_id: 'document', document_name: 'Review copy', recipient: { id: 'recipient', name: 'Example', role: 'signer' }, privacy: { controller: 'Customer', notice_digest: 'notice' } };
+  // Use the actual key helper and actual header condition, without mounting a
+  // viewer or treating this presentation fixture as proof of signing readiness.
+  const { signerCeremonyKey } = await import('../signerPDF');
+  const key = signerCeremonyKey('presentation-token', 'notice', 'document', 'recipient');
+  for (const canonicalLocale of ['en', 'sv']) {
+    const packageReview = { key, settled: true, canonicalLocale };
+    const current = m.render(m.Signer, { props: { ctx, packageReview } }).body;
+    expect(current).toContain(canonicalLocale === 'sv' ? 'Package consent: Swedish.' : 'Package consent: English.');
+    for (const props of [
+      { ctx, packageReview: { ...packageReview, settled: false } },
+      { ctx, packageReview: { ...packageReview, key: 'stale-ceremony' } },
+      { ctx, packageReview, loadedToken: 'stale-token' },
+      { ctx, packageReview, routeDisposed: true }
+    ]) {
+      expect(m.render(m.Signer, { props }).body).not.toContain('Package consent:');
+    }
+  }
 });
 
 test('actual separate completion and notice shells use neutral document labels without an identity fetch', async () => {

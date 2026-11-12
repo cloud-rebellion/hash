@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { compile } from 'svelte/compiler';
 import { SignerPDFSession, confirmSignerPDFField, readSignerFieldResponse, signerPDFScopeKey, validateSignerPDFFields, type SignerPDFScope } from '../signerPDF';
 
 const component = await Bun.file(new URL('./PdfSignerView.svelte', import.meta.url)).text();
@@ -37,6 +42,35 @@ function fixture() {
   };
   return { env, calls, navigate() { live = signerPDFScopeKey('next-token', scope.noticeDigest, scope.observation); },
     save: callback('saveField', '  function fieldsOnPage(', env), filled: callback('recomputeFilled', '  $effect(', env) };
+}
+
+let alertView: Promise<any> | undefined;
+async function renderSaveErrors(selectedLocale: 'en' | 'sv', message: string, label: string) {
+  const view = await (alertView ??= (async () => {
+    const start = component.indexOf('  {#each Object.entries(saveErrors)');
+    const end = component.indexOf('  {/each}', start);
+    const fieldNameStart = component.indexOf('  function fieldName(');
+    const fieldNameEnd = component.indexOf('\n</script>', fieldNameStart);
+    if (start < 0 || end < start || fieldNameStart < 0 || fieldNameEnd < fieldNameStart) throw Error('Production field error view not found');
+    const markup = component.slice(start, end + '  {/each}'.length);
+    const source = `<script lang="ts">import {writable} from 'svelte/store'; import {signerRoomText,signerRoomError,signerRoomFieldType} from '../signerRoomUi'; let {selectedLocale,saveErrors,fields}=$props(); const locale=writable(selectedLocale); ${component.slice(fieldNameStart, fieldNameEnd)}</script>${markup}`;
+    const directory = dirname(fileURLToPath(new URL('./PdfSignerView.svelte', import.meta.url)));
+    const build = await Bun.build({ entrypoints: ['pdf-signer-errors'], target: 'bun', plugins: [{ name: 'production-pdf-signer-errors', setup(builder) {
+      builder.onResolve({ filter: /^(svelte(?:\/|$)|\.\.\/signerRoomUi$)/ }, args => ({ path: Bun.resolveSync(args.path, directory) }));
+      builder.onResolve({ filter: /^pdf-signer-errors$/ }, () => ({ path: 'entry', namespace: 'errors-entry' }));
+      builder.onLoad({ filter: /.*/, namespace: 'errors-entry' }, () => ({ contents: "export {default as View} from 'pdf-signer-error-view'; export {render} from 'svelte/server';", loader: 'ts', resolveDir: directory }));
+      builder.onResolve({ filter: /^pdf-signer-error-view$/ }, () => ({ path: 'view', namespace: 'errors-view' }));
+      builder.onLoad({ filter: /.*/, namespace: 'errors-view' }, () => ({ contents: compile(source, { filename: join(directory, 'PdfSignerErrorFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: directory }));
+    } }] });
+    if (!build.success) throw Error(build.logs.map(String).join('\n'));
+    const temporary = mkdtempSync(join(tmpdir(), 'hash-pdf-signer-errors-'));
+    try {
+      const output = join(temporary, 'view.mjs');
+      writeFileSync(output, await build.outputs[0].text());
+      return await import(pathToFileURL(output).href);
+    } finally { rmSync(temporary, { recursive: true, force: true }); }
+  })());
+  return view.render(view.View, { props: { selectedLocale, saveErrors: { [field.id]: message }, fields: [{ ...field, label }] } }).body;
 }
 
 describe('PDF signer readiness and durable edits', () => {
@@ -80,7 +114,21 @@ describe('PDF signer readiness and durable edits', () => {
       expect(state.env.saving[field.id]).toBe(false);
       expect(state.filled()).toBe(false);
     }
-    expect(component).toContain('Could not save {fieldName(fieldID)}: {message}');
+  });
+  test('actual blocking alert localizes EN/SV while escaping the field label and withholding unknown error details', async () => {
+    const label = 'Customer <img src=x onerror=privateMarker>';
+    for (const selected of ['en', 'sv'] as const) {
+      const html = await renderSaveErrors(selected, 'The server did not confirm the saved field.', label);
+      expect(html).toContain('role="alert"');
+      expect(html).toContain(selected === 'sv'
+        ? 'Kunde inte spara Customer &lt;img src=x onerror=privateMarker>: Servern bekräftade inte det sparade fältet.'
+        : 'Could not save Customer &lt;img src=x onerror=privateMarker>: The server did not confirm the saved field.');
+      expect(html).not.toContain('<img');
+      const unknown = await renderSaveErrors(selected, 'private-server-error <script>secret</script>', 'Customer');
+      expect(unknown).toContain(selected === 'sv' ? 'Kunde inte spara Customer: Begäran misslyckades.' : 'Could not save Customer: The request failed.');
+      expect(unknown).not.toContain('private-server-error');
+      expect(unknown).not.toContain('secret');
+    }
   });
   test('late successful and failed writes cannot mutate a different ceremony or release its pending state', async () => {
     for (const fail of [false, true]) {

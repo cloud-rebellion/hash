@@ -33,7 +33,6 @@ func TestHTMLRevisionSourceActualStagesOriginalInputAndJoinedConsumersV1(t *test
 			factory := &ApplicationSessionFactoryV1{state: session.state.factory}
 			factory.state.htmlAdmissions = make(map[*ApplicationAdmissionV1]*applicationHTMLAdmissionRegistrationV1)
 			factory.state.htmlInputProducers = make(map[*applicationHTMLAuthoringInputStateV1]struct{})
-			ctx := applicationTestContextV1(t)
 			sourceInput, doc, _ := testfixture.HTMLContract(t)
 			doc.ID = fixture.scope.DocumentID
 			doc.OrgID = fixture.scope.OrgID
@@ -59,6 +58,9 @@ func TestHTMLRevisionSourceActualStagesOriginalInputAndJoinedConsumersV1(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Canonical synthetic source/request construction is fixture setup,
+			// not part of the unchanged bounded native operation below.
+			ctx := applicationTestContextV1(t)
 			input, err := factory.NewHTMLAuthoringInputV1(ctx, doc.OrgID, HTMLDocumentRevisionInputV1)
 			if err != nil {
 				t.Fatal(err)

@@ -39,32 +39,6 @@ func withPackageSourceFixture285(t *testing.T, in packageSourceFixture285, use f
 	fixture, session, coordinator := applicationRequestLoanFixtureV1(t)
 	factory := &ApplicationSessionFactoryV1{state: session.state.factory}
 	factory.state.htmlAdmissions = make(map[*ApplicationAdmissionV1]*applicationHTMLAdmissionRegistrationV1)
-	ctx := applicationTestContextV1(t)
-	operation, err := factory.NewHTMLSendOperationV1(ctx, fixture.scope.OrgID, fixture.scope.DocumentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stage := &ApplicationHTMLSendSQLStageV1{operation: operation, purpose: HTMLSendAdmissionV1, ctx: ctx, cancel: func() {}, session: session, active: true}
-	stage.self = stage
-	operation.stages = append(operation.stages, stage)
-	var work *ApplicationHTMLSendWorkV1
-	defer func() {
-		if work != nil {
-			work.CloseConsumerV1()
-		}
-		operation.EndConsumerV1()
-		if !applicationDoneV1(fixture.done) {
-			close(fixture.done)
-		}
-		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
-		defer stop()
-		if err := fixture.adapter.CloseV1(cleanup); err != nil {
-			t.Error("synthetic physical fixture retirement failed", err)
-		}
-		if got := coordinator.SnapshotV1(fixture.scope.OrgID); got.Global != (workguard.VectorV1{}) || got.GlobalGrants != 0 {
-			t.Error("package source fixture retained actual coordinator debt", got)
-		}
-	}()
 	stamp := time.Date(2026, 10, 19, 0, 0, 0, 1, time.UTC)
 	digest := sha256.Sum256([]byte("synthetic fixed package source PDF"))
 	template, actor := uuid.New(), uuid.New()
@@ -95,6 +69,34 @@ func withPackageSourceFixture285(t *testing.T, in packageSourceFixture285, use f
 			t.Fatal(e)
 		}
 	}
+	// Build the synthetic canonical document before the unchanged one-second
+	// native operation starts, as in the shared Send evidence fixture.
+	ctx := applicationTestContextV1(t)
+	operation, err := factory.NewHTMLSendOperationV1(ctx, fixture.scope.OrgID, fixture.scope.DocumentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := &ApplicationHTMLSendSQLStageV1{operation: operation, purpose: HTMLSendAdmissionV1, ctx: ctx, cancel: func() {}, session: session, active: true}
+	stage.self = stage
+	operation.stages = append(operation.stages, stage)
+	var work *ApplicationHTMLSendWorkV1
+	defer func() {
+		if work != nil {
+			work.CloseConsumerV1()
+		}
+		operation.EndConsumerV1()
+		if !applicationDoneV1(fixture.done) {
+			close(fixture.done)
+		}
+		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		if err := fixture.adapter.CloseV1(cleanup); err != nil {
+			t.Error("synthetic physical fixture retirement failed", err)
+		}
+		if got := coordinator.SnapshotV1(fixture.scope.OrgID); got.Global != (workguard.VectorV1{}) || got.GlobalGrants != 0 {
+			t.Error("package source fixture retained actual coordinator debt", got)
+		}
+	}()
 	err = session.WithTxV1(ctx, func(call context.Context, _ generated.DBTX) error {
 		var e error
 		work, e = session.NewHTMLSendWorkV1(call, stage)

@@ -45,14 +45,6 @@ func htmlSendEvidenceFixtureDocumentV1(t *testing.T, purpose HTMLSendSQLPurposeV
 	fixture, session, coordinator := applicationRequestLoanFixtureV1(t)
 	factory := &ApplicationSessionFactoryV1{state: session.state.factory}
 	factory.state.htmlAdmissions = make(map[*ApplicationAdmissionV1]*applicationHTMLAdmissionRegistrationV1)
-	ctx := applicationTestContextV1(t)
-	operation, err := factory.NewHTMLSendOperationV1(ctx, fixture.scope.OrgID, fixture.scope.DocumentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stage := &ApplicationHTMLSendSQLStageV1{operation: operation, purpose: purpose, ctx: ctx, cancel: func() {}, session: session, active: true}
-	stage.self = stage
-	operation.stages = append(operation.stages, stage)
 	payload := []byte("synthetic fixed evidence bytes")
 	digest := sha256.Sum256(payload)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,10 +62,6 @@ func htmlSendEvidenceFixtureDocumentV1(t *testing.T, purpose HTMLSendSQLPurposeV
 		}
 	}))
 	t.Cleanup(server.Close)
-	client, err := storage.New(ctx, storage.Config{Endpoint: strings.TrimPrefix(server.URL, "http://"), Region: "us-east-1", Bucket: "send-evidence", AccessKey: "synthetic", SecretKey: "synthetic-secret", BucketLookup: "path", RequireExistingBucket: true, AllowInsecureDevelopmentEndpoint: true, SkipTransientLifecycle: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 	canonical, err := htmlmaster.CanonicalTemplate([]byte("{\"schema_version\":1,\"html\":\"<p>Evidence</p>\",\"css\":\"\"}"), []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +100,22 @@ func htmlSendEvidenceFixtureDocumentV1(t *testing.T, purpose HTMLSendSQLPurposeV
 			doc.HtmlReviewedPdfSha256 = nil
 		}
 	}
+
+	// Finish canonical source and loopback storage setup before starting the
+	// native operation clock. Storage initialization keeps its own unchanged
+	// one-second bound rather than consuming the later source/consumer budget.
+	client, err := storage.New(applicationTestContextV1(t), storage.Config{Endpoint: strings.TrimPrefix(server.URL, "http://"), Region: "us-east-1", Bucket: "send-evidence", AccessKey: "synthetic", SecretKey: "synthetic-secret", BucketLookup: "path", RequireExistingBucket: true, AllowInsecureDevelopmentEndpoint: true, SkipTransientLifecycle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := applicationTestContextV1(t)
+	operation, err := factory.NewHTMLSendOperationV1(ctx, fixture.scope.OrgID, fixture.scope.DocumentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := &ApplicationHTMLSendSQLStageV1{operation: operation, purpose: purpose, ctx: ctx, cancel: func() {}, session: session, active: true}
+	stage.self = stage
+	operation.stages = append(operation.stages, stage)
 
 	var work *ApplicationHTMLSendWorkV1
 	var source *ApplicationHTMLSendSourceV1

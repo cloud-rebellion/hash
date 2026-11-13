@@ -18,9 +18,14 @@ The following messages support saved content:
 | Completion sent to the sender | `email.completed_sender` |
 | Requested document changes | `email.changes_requested` |
 | New negotiation comment | `email.new_comment` |
+| Declined document | `email.declined` |
+| Quota warning | `email.quota_warning_80` |
 
-Declined, voided and quota-warning messages currently use their built-in content.
-Their previews are available; saving overrides for them is refused.
+Voided messages remain built-in-only: their previews are available, but saving
+overrides is refused. Quota warnings use the saved workspace email language;
+declined-document messages use the document's language. See
+[workspace email language](WORKSPACE-EMAIL-LANGUAGE.md) for delivery and synthetic
+preview language selection.
 
 ## Variables and formatting
 

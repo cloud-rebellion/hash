@@ -47,7 +47,7 @@ class ReviewTests(unittest.TestCase):
         clock = patch.object(audit.datetime, "datetime", wraps=datetime.datetime)
         self.clock = clock.start()
         self.addCleanup(clock.stop)
-        self.clock.now.return_value = REAL_DATETIME(2026, 11, 8, tzinfo=datetime.timezone.utc)
+        self.clock.now.return_value = REAL_DATETIME(2026, 11, 14, tzinfo=datetime.timezone.utc)
 
     def check(self):
         approved, _expires = audit.validate_review(self.root, "1.3.9")

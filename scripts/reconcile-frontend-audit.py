@@ -17,10 +17,10 @@ import sys
 
 
 PACKAGE = "@sveltejs/kit"
-VERSION = "2.70.3"
-INTEGRITY = "sha512-UDvEYuZqAMbfB/oXIoqKvbKcb7YczK5zYrzmsGV1zRJk03jntwp8dXiYoIJotxAndsKvcPFtx9H1GRSKFdSHgg=="
-LOCK_SHA256 = "c1e7b5e13f679b3ee7341d6ae1e192e3c5beb4feb6e0a406ca3fe918494df3d3"
-LOCK_BYTES = 55105
+VERSION = "2.70.4"
+INTEGRITY = "sha512-IDfRnmSXgtlmv5Q+KyvP1HGr2XUvZooo0yBwzTnJA7CBbczy+sSMHXubfbcI9gz4EKksRSyYx44y/eCcf/B+rg=="
+LOCK_SHA256 = "aa4c14c4e94da4418548da0e6e4aa5840652fbb0d9448fd3f4ae5fc595f62721"
+LOCK_BYTES = 55103
 KNOWN = {1243067: "GHSA-pfhg-q3qv-9q6r", 1243076: "GHSA-27mw-82g8-phjj"}
 BUILD_PACKAGE = "deepmerge"
 BUILD_VERSION = "4.3.1"
@@ -122,8 +122,8 @@ def validate_review(root, bun_version):
     expected = {
         "schema": 1, "package": PACKAGE, "version": VERSION, "integrity": INTEGRITY,
         "lock_sha256": LOCK_SHA256, "lock_bytes": LOCK_BYTES, "bun_version": "1.3.9",
-        "adapter": "@sveltejs/adapter-static", "adapter_version": "3.0.10",
-        "profile": "hash-go-embedded-static-v1", "reviewed_on": "2026-11-07",
+        "adapter": "@sveltejs/adapter-static", "adapter_version": "3.0.11",
+        "profile": "hash-go-embedded-static-v1", "reviewed_on": "2026-11-13",
         "review_expires_on": "2026-11-21",
     }
     require(all(review[key] == value for key, value in expected.items())
@@ -154,7 +154,7 @@ def validate_review(root, bun_version):
     require(build["package"] == BUILD_PACKAGE and build["version"] == BUILD_VERSION
             and build["integrity"] == BUILD_INTEGRITY
             and build["dependency_path"] == ["@sveltejs/vite-plugin-svelte@5.1.1", "deepmerge@4.3.1"]
-            and build["reviewed_on"] == "2026-11-07"
+            and build["reviewed_on"] == "2026-11-13"
             and build["review_expires_on"] == "2026-11-21"
             and datetime.date.fromisoformat(build["reviewed_on"]) <= today <= expires,
             "reviewed build dependency identity changed")
@@ -171,10 +171,10 @@ def validate_review(root, bun_version):
             "reviewed frozen lock changed")
     package = read_json(root / "frontend/package.json")
     require(type(package) is dict and type(package.get("devDependencies")) is dict
-            and package["devDependencies"].get(PACKAGE) == "^2.70.3"
-            and package["devDependencies"].get("@sveltejs/adapter-static") == "^3.0.10",
+            and package["devDependencies"].get(PACKAGE) == "2.70.4"
+            and package["devDependencies"].get("@sveltejs/adapter-static") == "3.0.11",
             "reviewed package or adapter requirement changed")
-    for name, version in ((PACKAGE, VERSION), ("@sveltejs/adapter-static", "3.0.10")):
+    for name, version in ((PACKAGE, VERSION), ("@sveltejs/adapter-static", "3.0.11")):
         installed = read_json(root / "frontend/node_modules" / name / "package.json")
         require(type(installed) is dict and installed.get("name") == name
                 and installed.get("version") == version, "installed package or adapter version changed")

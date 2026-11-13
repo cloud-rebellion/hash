@@ -480,6 +480,8 @@ func TestDocumentPackageWorkerRecoveryCancellationV1E2E(t *testing.T) {
 // M104 adds queue readiness and an index only. Both empty and occupied attempt
 // histories survive its real Goose rollback; the new reader must refuse until
 // the matching schema is reapplied. M103's occupied-history guard is unchanged.
+// Full current inspection is tested only after restoring the captured current
+// schema: its generated projection includes columns introduced after M104.
 func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 	for _, occupied := range []bool{false, true} {
 		name := "empty queue"
@@ -488,9 +490,7 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q := inspectionFixturePG236(t)
-			job := packageLegacyWorkerBirth619(t, q, occupied)
-			before := packageMeasurementState232(t, q)
-			requests := q.storagePeer.requests.Load()
+			currentVersion := assertCurrentHandlerMigrationHistoryE2E(t, q.f.ctx, q.f.pool)
 			cfg, err := pgx.ParseConfig(os.Getenv("HASH_E2E_DB_URL"))
 			if err != nil {
 				t.Fatal(err)
@@ -499,6 +499,19 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 			db.SetMaxOpenConns(1)
 			db.SetMaxIdleConns(1)
 			defer db.Close()
+			restore := true
+			defer func() {
+				if restore {
+					cleanup, stop := context.WithTimeout(context.WithoutCancel(q.f.ctx), 5*time.Second)
+					defer stop()
+					if err := mdb.RunMigrationsUpToContext(cleanup, db, currentVersion); err != nil {
+						t.Error("restore captured current schema after test failure", err)
+					}
+				}
+			}()
+			job := packageLegacyWorkerBirth619(t, q, occupied)
+			before := packageMeasurementState232(t, q)
+			requests := q.storagePeer.requests.Load()
 			// Exercise the unchanged M104 reader from its actual schema. The new
 			// member ledger is empty in this inspection-only fixture.
 			if err := mdb.RunMigrationsDownToContext(q.f.ctx, db, 104); err != nil {
@@ -510,16 +523,6 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 			if err := mdb.RunMigrationsDownToContext(q.f.ctx, db, 103); err != nil {
 				t.Fatal("M104 rollback refused unchanged attempt history", err)
 			}
-			restore := true
-			defer func() {
-				if restore {
-					cleanup, stop := context.WithTimeout(context.WithoutCancel(q.f.ctx), 5*time.Second)
-					defer stop()
-					if err := mdb.RunMigrationsUpToContext(cleanup, db, 106); err != nil {
-						t.Error("restore current M106 after test failure", err)
-					}
-				}
-			}()
 			if version, err := mdb.GetMigrationVersionContext(q.f.ctx, db); err != nil || version != 103 {
 				t.Fatal("M104 rollback did not stop at M103", version, err)
 			}
@@ -542,10 +545,27 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 			if err := mdb.RunMigrationsUpToContext(q.f.ctx, db, 104); err != nil {
 				t.Fatal(err)
 			}
-			restore = false
 			if version, err := mdb.GetMigrationVersionContext(q.f.ctx, db); err != nil || version != 104 {
 				t.Fatal("M104 reapply did not restore schema", version, err)
 			}
+			// The unchanged M104 queue exposes four scalars, not the later full
+			// attempt projection (which now includes M128 incorporation_version).
+			// Keep the real native scan and its physical retirement at this boundary.
+			historical := packageWorkerScan239(t, q, pdfadmission.PackageSendRecoveryCursorV1{})
+			historical.CloseConsumerV1()
+			packageWorkerDrained239(t, q)
+			packageWorkerQueue104E2E(t, q, job, occupied)
+			if packageMeasurementState232(t, q) != before || q.storagePeer.requests.Load() != requests {
+				t.Fatal("M104 down/up changed history or performed provider IO")
+			}
+			if err := mdb.RunMigrationsUpToContext(q.f.ctx, db, currentVersion); err != nil {
+				t.Fatal("restore captured current inspection schema", err)
+			}
+			if actual := assertCurrentHandlerMigrationHistoryE2E(t, q.f.ctx, q.f.pool); actual != currentVersion {
+				t.Fatal("current inspection schema differs from captured version", actual, currentVersion)
+			}
+			restore = false
+			currentBefore := packageMeasurementState232(t, q)
 			recovered := packageWorkerScan239(t, q, pdfadmission.PackageSendRecoveryCursorV1{})
 			defer recovered.CloseConsumerV1()
 			called := false
@@ -561,13 +581,44 @@ func TestDocumentPackageWorkerRecoverySchemaV1E2E(t *testing.T) {
 			}
 			recovered.CloseConsumerV1()
 			packageWorkerDrained239(t, q)
-			if packageMeasurementState232(t, q) != before || q.storagePeer.requests.Load() != requests {
-				t.Fatal("M104 down/up changed history or performed provider IO")
-			}
-			if err := mdb.RunMigrationsUpToContext(q.f.ctx, db, 106); err != nil {
-				t.Fatal("restore current member-retention schema", err)
+			if packageMeasurementState232(t, q) != currentBefore || q.storagePeer.requests.Load() != requests {
+				t.Fatal("current recovery inspection changed history or performed provider IO")
 			}
 
 		})
+	}
+}
+
+// Frozen M104 ListPendingDocumentPackageSendRecoveryV1 scalar contract. Later
+// generated attempt rows must not be decoded against this historical schema.
+func packageWorkerQueue104E2E(t *testing.T, q *ownedPublicReadFixtureV1, job packageWorkerJob239, occupied bool) {
+	t.Helper()
+	rows, err := q.f.pool.Query(q.f.ctx, `SELECT attempt_id,org_id,document_id,created_at
+FROM document_package_send_attempts_v1
+WHERE terminal_outcome IS NULL
+ AND hash_package_send_recovery_queue_version_v1()=1
+ AND (created_at,attempt_id)>($1::timestamptz,$2::uuid)
+ORDER BY created_at,attempt_id LIMIT 50`, pgtype.Timestamptz{Valid: true, InfinityModifier: pgtype.NegativeInfinity}, uuid.Nil)
+	if err != nil {
+		t.Fatal("M104 scalar queue read", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var attempt, org, document uuid.UUID
+		var created time.Time
+		if err := rows.Scan(&attempt, &org, &document, &created); err != nil {
+			t.Fatal(err)
+		}
+		count++
+		if !occupied || count != 1 || attempt != job.meta.AttemptID || org != job.meta.Capture.OrgID || document != job.meta.Capture.DocumentID || !created.Equal(job.created) {
+			t.Fatal("M104 queue changed exact persisted coordinates", count, occupied)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if (count == 1) != occupied {
+		t.Fatal("M104 queue lost or invented durable work", count, occupied)
 	}
 }

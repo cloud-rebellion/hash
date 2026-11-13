@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/htmlmaster"
 	"github.com/bright-interaction/hash/internal/htmlsource"
@@ -346,6 +347,22 @@ func TestHTMLDocumentTemplateMoveRefusalsE2E(t *testing.T) {
 		}
 		if w := submitSessionOperationE2E(c.f.s, http.MethodPost, "/api/v1/documents/"+c.doc.ID.String()+"/html/review", string(review), c.cookie); w.Code != http.StatusOK {
 			t.Fatalf("review non-draft refusal fixture=%d %s", w.Code, w.Body.String())
+		}
+		// M65 independently requires Send's complete canonical branding snapshot.
+		// Freeze the actual effective theme before modelling the closed state.
+		theme, err := c.f.q.GetHTMLSendBrandingInputHeaderV1(c.f.ctx, generated.GetHTMLSendBrandingInputHeaderV1Params{DocumentID: c.doc.ID, OrgID: c.f.org})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.f.q.FreezeHTMLSendBrandingV1(c.f.ctx, htmlSendFreezeFixtureV1(theme)); err != nil {
+			t.Fatal("freeze non-draft refusal fixture branding", err)
+		}
+		frozen, err := c.f.q.GetDocumentBrandingOverride(c.f.ctx, c.doc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := branding.ValidateFrozenSnapshot(c.doc.ID, frozen); err != nil {
+			t.Fatal("canonical non-draft refusal fixture branding", err)
 		}
 		if _, err := c.f.pool.Exec(c.f.ctx, `UPDATE documents SET status='voided' WHERE id=$1`, c.doc.ID); err != nil { //nolint:rawsql -- models a closed document
 			t.Fatalf("non-draft refusal fixture could not be established: %v", err)

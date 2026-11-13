@@ -51,10 +51,10 @@ func htmlPreviewRecheckActorE2E(t *testing.T, f lifecycleAuthorizationFixture) a
 // fake admission, caller-supplied resource credit or PDF worker is involved.
 func htmlPreviewRecheckRichTemplateE2E(t *testing.T, f lifecycleAuthorizationFixture) *generated.Template {
 	t.Helper()
-	img := image.NewNRGBA(image.Rect(0, 0, 128, 128))
+	img := image.NewNRGBA(image.Rect(0, 0, 384, 384))
 	state := uint32(1)
-	for y := 0; y < 128; y++ {
-		for x := 0; x < 128; x++ {
+	for y := 0; y < 384; y++ {
+		for x := 0; x < 384; x++ {
 			state ^= state << 13
 			state ^= state >> 17
 			state ^= state << 5

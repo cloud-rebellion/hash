@@ -56,13 +56,6 @@ func TestMCPDesignMoveDocumentToDesignVersionE2E(t *testing.T) {
 		return source.Declared
 	}
 	before := readSource()
-	second := master
-	second.HTML = `<main><h1>Second</h1><p><span data-hash-value="customer"></span></p></main>`
-	var next struct {
-		Version int32  `json:"version"`
-		SHA     string `json:"content_sha256"`
-	}
-	callDesign783(t, f, key, "update_design_template", map[string]any{"template_id": design.TemplateID, "input": map[string]any{"name": "Movable design", "html_master_json": second, "variables_json": map[string]string{"customer": "Example customer"}, "expected_version": 1}}, &next, false)
 	// move returns the tool's text: the refusal sentence on an error, so each
 	// refusal is pinned by its content and not only by IsError.
 	move := func(version int32, sha, updatedAt string, extra map[string]any, wantError bool) string {
@@ -82,6 +75,16 @@ func TestMCPDesignMoveDocumentToDesignVersionE2E(t *testing.T) {
 			t.Fatalf("%s: got the generic refusal %q", name, got)
 		}
 	}
+	// The current parent and draft are both version 1 here. Check the
+	// non-forward refusal before a newer parent makes version 1 superseded.
+	wantText("not forward", move(1, design.SHA, before.UpdatedAt, nil, true), "newer template version")
+	second := master
+	second.HTML = `<main><h1>Second</h1><p><span data-hash-value="customer"></span></p></main>`
+	var next struct {
+		Version int32  `json:"version"`
+		SHA     string `json:"content_sha256"`
+	}
+	callDesign783(t, f, key, "update_design_template", map[string]any{"template_id": design.TemplateID, "input": map[string]any{"name": "Movable design", "html_master_json": second, "variables_json": map[string]string{"customer": "Example customer"}, "expected_version": 1}}, &next, false)
 	// An agent cannot approve, so version 2 is still unapproved: refused.
 	wantText("unapproved target", move(next.Version, next.SHA, before.UpdatedAt, nil, true), "not an approved revision")
 	template, err = f.q.GetTemplate(f.ctx, generated.GetTemplateParams{ID: design.TemplateID, OrgID: f.org})
@@ -90,7 +93,6 @@ func TestMCPDesignMoveDocumentToDesignVersionE2E(t *testing.T) {
 	}
 	approveHTMLCreationTemplateE2E(t, f, template) // a human approves
 	wantText("stale updated_at", move(next.Version, next.SHA, "2000-01-01T00:00:00Z", nil, true), "reload its exact source")
-	wantText("not forward", move(1, design.SHA, before.UpdatedAt, nil, true), "newer template version")
 	wantText("undeclared value", move(next.Version, next.SHA, before.UpdatedAt, map[string]any{"values": map[string]string{"not_declared": "x"}}, true), "not declared")
 	// U1: version 2 is approved but a newer approved version 3 now exists, so
 	// the agent is told the target is superseded and not the generic refusal.

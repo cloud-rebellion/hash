@@ -1495,9 +1495,11 @@ step "HTTP route inventory freshness"           go run ./cmd/apidocgen -check
 step "OpenAPI contract + request boundaries"    bash scripts/check-automation-openapi.sh
 step "build"                                   go build ./...
 step "vet"                                     vet_all
-# Race instrumentation makes the full adversarial PDF-layout package costly.
-# Keep one bounded whole-suite run with margin for hosted-runner variation.
-step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=300s
+# Race instrumentation and the whole-module AST guards are memory intensive.
+# Run one package at a time so a small CI container does not run those tests
+# alongside other packages and their compilers. Keep every test, race check and
+# the existing per-package deadline; only package concurrency is reduced.
+step "tests (executed, not merely compiled)"   go test -race -p=1 ./... -count=1 -timeout=300s
 step "PDF worker Linux syscall/resource checks" pdf_worker_sandbox_checks
 step "nested renderer module verify + test"    renderer_module_checks
 step "renderer pinned-source/module policy"    renderer_source_policy

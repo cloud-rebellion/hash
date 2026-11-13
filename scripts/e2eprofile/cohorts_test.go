@@ -381,6 +381,110 @@ func TestCohortDiagnosticBudgetDoesNotLoseFailureAccounting(t *testing.T) {
 	}
 }
 
+func TestCohortFailureJournalRetainsLateCauseAfterAggregateBudget(t *testing.T) {
+	total := profileSummary{Result: "passed"}
+	for i := 0; i < diagnosticMaxRecords; i++ {
+		mergeInvocation(&total, profileSummary{Result: "failed", Diagnostics: []failureDiagnostic{{Package: handlerPackage, Test: fmt.Sprintf("TestEarly%02d", i), State: "failed", Tail: []string{"early failure"}}}}, true)
+	}
+	var events bytes.Buffer
+	encode := json.NewEncoder(&events)
+	for _, event := range []map[string]string{
+		{"Action": "run", "Package": handlerPackage, "Test": "TestLateFailure"},
+		{"Action": "output", "Package": handlerPackage, "Test": "TestLateFailure", "Output": "late_test.go:42: late cohort exact assertion\n"},
+		{"Action": "fail", "Package": handlerPackage, "Test": "TestLateFailure"},
+		{"Action": "run", "Package": handlerPackage, "Test": "TestUnexpected"},
+		{"Action": "skip", "Package": handlerPackage, "Test": "TestUnexpected"},
+		{"Action": "run", "Package": handlerPackage, "Test": "TestUnfinished"},
+		{"Action": "fail", "Package": handlerPackage},
+	} {
+		if err := encode.Encode(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	part, _ := summarizeEvents("ordinary", 1, strings.NewReader(handlerPackage+"\n"), &events, map[string]bool{handlerPackage: true})
+	before, _ := json.Marshal(part)
+	var out bytes.Buffer
+	if err := reportInvocationFailure(&out, "handler-099", 1, part); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(part)
+	if !bytes.Equal(before, after) {
+		t.Fatal("failure journal changed native part accounting or diagnostics")
+	}
+	mergeInvocation(&total, part, true)
+	aggregate, _ := json.Marshal(total)
+	if bytes.Contains(aggregate, []byte("late cohort exact assertion")) || !total.DiagnosticsTruncated || len(total.Diagnostics) != diagnosticMaxRecords || total.Result != "failed" {
+		t.Fatal("aggregate diagnostic budget or failure decision changed")
+	}
+	var journal invocationFailureJournal
+	if err := json.Unmarshal(out.Bytes(), &journal); err != nil {
+		t.Fatal(err)
+	}
+	if journal.Schema != "hash.e2e-invocation-failure.v1" || journal.Invocation != "handler-099" || journal.NativeExit != 1 || !strings.Contains(out.String(), "late cohort exact assertion") || len(journal.UnfinishedTests) != 1 || len(journal.UnexpectedSkips) != 1 {
+		t.Fatal("late native failure cause or bounded unfinished/skip identities were lost")
+	}
+}
+
+func TestCohortFailureJournalDoesNotReportPassingOrPendingInvocations(t *testing.T) {
+	for _, result := range []string{"passed", "pending"} {
+		var out bytes.Buffer
+		if err := reportInvocationFailure(&out, "handler-000", 0, profileSummary{Result: result}); err != nil || out.Len() != 0 {
+			t.Fatal("nonfailed invocation emitted an extra failure journal", result, err)
+		}
+	}
+}
+
+func TestCohortFailureJournalPreservesRedactionAndEncodedBounds(t *testing.T) {
+	pkg := hashModule + "journalfixture"
+	var events bytes.Buffer
+	encode := json.NewEncoder(&events)
+	emit := func(action, test, output string) {
+		t.Helper()
+		if err := encode.Encode(map[string]string{"Action": action, "Package": pkg, "Test": test, "Output": output}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 80; i++ {
+		name := fmt.Sprintf("TestFailure%03d", i)
+		emit("run", name, "")
+		emit("output", name, "fixture_test.go:7: password=synthetic-journal-credential\n")
+		emit("output", name, "fixture_test.go:8: https://synthetic-user:synthetic-password@localhost/check?token=synthetic-query#synthetic-fragment\n")
+		emit("output", name, "fixture_test.go:9: bounded safe cause "+strings.Repeat("<", 512)+"\n")
+		emit("fail", name, "")
+	}
+	for i := 0; i < 140; i++ {
+		emit("run", fmt.Sprintf("TestUnfinished%03d", i), "")
+	}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("TestSkipped%03d/token=synthetic-id-secret", i)
+		emit("run", name, "")
+		emit("skip", name, "")
+	}
+	emit("fail", "", "")
+	part, _ := summarizeEvents("ordinary", 1, strings.NewReader(pkg+"\n"), &events, map[string]bool{pkg: true})
+	before, _ := json.Marshal(part)
+	var out bytes.Buffer
+	if err := reportInvocationFailure(&out, "handler-001", 1, part); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(part)
+	if !bytes.Equal(before, after) || len(part.FailedTests) != 80 || len(part.UnexpectedSkips) != 40 || part.Result != "failed" {
+		t.Fatal("journal bounds changed native failure or skip accounting")
+	}
+	var journal invocationFailureJournal
+	if err := json.Unmarshal(out.Bytes(), &journal); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() > diagnosticMaxBytes || len(journal.Diagnostics) > diagnosticMaxRecords || len(journal.UnfinishedTests) > diagnosticMaxPending || len(journal.UnexpectedSkips) > diagnosticMaxRecords || !journal.DiagnosticsTruncated {
+		t.Fatal("native failure journal exceeded existing diagnostic limits")
+	}
+	for _, secret := range []string{"synthetic-journal-credential", "synthetic-user", "synthetic-password", "synthetic-query", "synthetic-fragment", "synthetic-id-secret", `"Output"`, `"selected_roots"`, `"failed_tests"`} {
+		if strings.Contains(out.String(), secret) {
+			t.Fatal("native failure journal exposed raw output, credentials or full accounting", secret)
+		}
+	}
+}
+
 func cohortEvent(action, name string) string {
 	raw, _ := json.Marshal(map[string]string{"Action": action, "Package": handlerPackage, "Test": name})
 	return string(raw) + "\n"

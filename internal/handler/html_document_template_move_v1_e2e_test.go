@@ -320,7 +320,7 @@ func TestHTMLDocumentTemplateMoveRefusalsE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err = c.f.pool.Exec(c.f.ctx, `UPDATE recipients SET status='signed', signed_at=clock_timestamp() WHERE id=$1`, recipient.ID); err != nil { //nolint:rawsql -- models a signed recipient
-			t.Skipf("database refuses to fabricate a signed recipient on a draft: %v", err)
+			t.Fatalf("signed-recipient refusal fixture could not be established: %v", err)
 		}
 		fresh, _ := c.f.q.GetDocument(c.f.ctx, generated.GetDocumentParams{ID: c.doc.ID, OrgID: c.f.org})
 		before := revisionStateE2E(t, c.f)
@@ -333,12 +333,33 @@ func TestHTMLDocumentTemplateMoveRefusalsE2E(t *testing.T) {
 	})
 	t.Run("not a draft", func(t *testing.T) {
 		c := newTemplateMoveCaseE2E(t, approvedSecondDesignE2E)
-		if _, err := c.f.pool.Exec(c.f.ctx, `UPDATE documents SET status='voided' WHERE id=$1`, c.doc.ID); err != nil { //nolint:rawsql -- models a closed document
-			t.Skipf("database refuses to void this fixture directly: %v", err)
+		// M124 requires the real saved PDF review before any draft departure.
+		// Establish it through the staff route instead of skipping when the
+		// database correctly refuses an unreviewed fixture's transition.
+		commitment, err := htmlsource.Commitment(c.doc)
+		if err != nil {
+			t.Fatal(err)
 		}
-		fresh, _ := c.f.q.GetDocument(c.f.ctx, generated.GetDocumentParams{ID: c.doc.ID, OrgID: c.f.org})
+		review, err := json.Marshal(htmlDocumentReviewInput{ExpectedUpdatedAt: c.doc.UpdatedAt.Time.UTC().Format(time.RFC3339Nano), ExpectedPDFSHA256: hex.EncodeToString(c.doc.PdfSha256), ExpectedHTMLSourceCommitment: commitment})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := submitSessionOperationE2E(c.f.s, http.MethodPost, "/api/v1/documents/"+c.doc.ID.String()+"/html/review", string(review), c.cookie); w.Code != http.StatusOK {
+			t.Fatalf("review non-draft refusal fixture=%d %s", w.Code, w.Body.String())
+		}
+		if _, err := c.f.pool.Exec(c.f.ctx, `UPDATE documents SET status='voided' WHERE id=$1`, c.doc.ID); err != nil { //nolint:rawsql -- models a closed document
+			t.Fatalf("non-draft refusal fixture could not be established: %v", err)
+		}
+		fresh, err := c.f.q.GetDocument(c.f.ctx, generated.GetDocumentParams{ID: c.doc.ID, OrgID: c.f.org})
+		if err != nil || fresh.Status != "voided" {
+			t.Fatal("non-draft refusal fixture has no closed document", err)
+		}
+		before := revisionStateE2E(t, c.f)
 		if w := submitTemplateMoveE2E(t, c.f, templateMoveBodyE2E(t, fresh, c.target), c.cookie); w.Code != http.StatusConflict {
 			t.Fatalf("move of a non-draft=%d %s", w.Code, w.Body.String())
+		}
+		if !bytes.Equal(before, revisionStateE2E(t, c.f)) {
+			t.Fatal("refused non-draft move changed document state")
 		}
 	})
 }

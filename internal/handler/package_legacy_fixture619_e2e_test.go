@@ -66,13 +66,7 @@ func packageLegacyAttempt619(t *testing.T, q *ownedPublicReadFixtureV1, version 
 	tx := beginHTMLQueryFixtureV1(t, q.f.ctx, q.f)
 	defer rollbackHTMLQueryFixtureV1(t, tx)
 	id := uuid.New()
-	a, err := generated.New(tx).CreateDocumentPackageSendAttemptV1(q.f.ctx, generated.CreateDocumentPackageSendAttemptV1Params{
-		AttemptID: id, PackageID: c.PackageID, CaptureRevision: c.Revision, OrgID: c.OrgID, DocumentID: c.DocumentID,
-		ExpectedRootUpdatedAt: pgtype.Timestamptz{Time: c.RootUpdatedAt, Valid: true}, ExpectedDraftGeneration: c.DraftGeneration,
-		ExpectedPreviousRevision: c.PreviousRevision, ExpectedManifestBytes: c.ManifestBytes, ExpectedManifestSha256: c.CanonicalSHA256[:],
-		ExpectedLegalCommitmentSha256: c.CommitmentSHA256[:], ExpectedMemberCount: c.MemberCount, ExpectedPdfBytes: c.PDFBytes,
-		ExpectedPdfPages: c.PDFPages, ActorUserID: c.CreatedBy,
-	})
+	a, err := legacyPackageCreate619(q.f.ctx, tx, id, c)
 	if err != nil || a == nil || a.AttemptID != id || a.OrgID != c.OrgID || a.DocumentID != c.DocumentID || a.PackageID != c.PackageID || a.CaptureRevision != c.Revision || a.PreviousRevision != c.PreviousRevision || a.CapturedDraftGeneration != c.DraftGeneration || !a.CapturedRootUpdatedAt.Time.Equal(c.RootUpdatedAt) || a.ManifestBytes != c.ManifestBytes || a.MemberCount != c.MemberCount || a.PdfBytes != c.PDFBytes || a.PdfPages != c.PDFPages || !bytes.Equal(a.ManifestSha256, c.CanonicalSHA256[:]) || !bytes.Equal(a.LegalCommitmentSha256, c.CommitmentSHA256[:]) || a.ActorUserID != c.CreatedBy || !a.CreatedAt.Valid || !a.Article13NoticeEpochAt.Valid || !a.RetainUntil.Valid || !a.RetainUntil.Time.Equal(storage.EvidenceRetentionDeadline(a.Article13NoticeEpochAt.Time, article13.RetentionYearsV1)) {
 		t.Fatal("historical SQL attempt changed native capture commitments", err)
 	}
@@ -223,7 +217,7 @@ func packageLegacyComplete619(t *testing.T, q *ownedPublicReadFixtureV1, m pdfad
 	if _, err := generated.New(tx).RecordDocumentPackageSendCompletionV1(q.f.ctx, packageCompletionRecordParams241(m)); err != nil {
 		return err
 	}
-	if err := packageCompletionSQLTerminal241(q.f.ctx, generated.New(tx), m); err != nil {
+	if err := packageLegacyTerminal619(q.f.ctx, tx, m); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(q.f.ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
@@ -248,4 +242,137 @@ func packageLegacyWorkerBirth619(t *testing.T, q *ownedPublicReadFixtureV1, occu
 		t.Fatal(err)
 	}
 	return packageWorkerJob239{meta: m, created: created.UTC()}
+}
+
+// Frozen generated attempt SQL/row from 27ea46856e9ed9aaac3f8bc56a45b8c08c643102.
+// M104/M105/M106 fixtures must not insert or select M128 incorporation columns.
+// Native current capture/branding still happens before the real guarded Down;
+// all historical scope, commitment, epoch, terminal and missing/foreign checks
+// are retained, with no fabricated schema columns or response evidence.
+const legacyPackageCreateAttemptSQL619 = `-- name: CreateDocumentPackageSendAttemptV1 :one
+WITH candidate AS MATERIALIZED (
+ SELECT c.package_id,c.revision,c.previous_revision,c.org_id,c.document_id,c.captured_root_updated_at,
+ c.captured_draft_generation,octet_length(c.manifest)::integer AS manifest_bytes,
+ c.manifest_sha256,c.legal_commitment_sha256,c.member_count,c.pdf_bytes,c.pdf_pages,c.created_by,
+ GREATEST(statement_timestamp(),clock_timestamp(),COALESCE(d.article13_notice_epoch_at+interval '1 microsecond','-infinity'::timestamptz)) AS epoch
+ FROM document_package_captures_v1 c JOIN documents d ON d.id=c.document_id AND d.org_id=c.org_id
+ WHERE c.package_id=$2::uuid AND c.revision=$3::bigint
+ AND c.org_id=$4::uuid AND c.document_id=$5::uuid
+ AND c.captured_root_updated_at=$6::timestamptz
+ AND c.captured_draft_generation=$7::bigint
+ AND c.previous_revision=$8::bigint
+ AND octet_length(c.manifest)=$9::integer
+ AND c.manifest_sha256=$10::bytea
+ AND c.legal_commitment_sha256=$11::bytea
+ AND c.member_count=$12::smallint
+ AND c.pdf_bytes=$13::bigint AND c.pdf_pages=$14::integer
+ AND c.created_by=$15::uuid
+)
+INSERT INTO document_package_send_attempts_v1(attempt_id,org_id,document_id,package_id,capture_revision,previous_revision,
+ manifest_bytes,member_count,pdf_bytes,pdf_pages,captured_root_updated_at,captured_draft_generation,
+ manifest_sha256,legal_commitment_sha256,actor_user_id,article13_notice_epoch_at,retain_until)
+SELECT $1::uuid,org_id,document_id,package_id,revision,previous_revision,manifest_bytes,member_count,pdf_bytes,pdf_pages,
+ captured_root_updated_at,captured_draft_generation,manifest_sha256,legal_commitment_sha256,created_by,epoch,hash_evidence_retain_until(epoch,7)
+FROM candidate RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at
+`
+
+const legacyPackageInspectAttemptSQL619 = `-- name: InspectDocumentPackageSendAttemptV1 :one
+SELECT a.attempt_id, a.org_id, a.document_id, a.package_id, a.capture_revision, a.previous_revision, a.manifest_bytes, a.member_count, a.pdf_bytes, a.pdf_pages, a.captured_root_updated_at, a.captured_draft_generation, a.manifest_sha256, a.legal_commitment_sha256, a.actor_user_id, a.article13_notice_epoch_at, a.retain_until, a.retention_started_at, a.retention_completed_at, a.terminal_outcome, a.terminal_at, a.created_at,(EXISTS(SELECT 1 FROM send_sealing_intents i WHERE i.package_send_attempt_id=a.attempt_id
+ AND i.org_id=a.org_id AND i.document_id=a.document_id))::boolean AS has_active_intent
+FROM document_package_send_attempts_v1 a
+WHERE a.attempt_id=$1::uuid AND a.org_id=$2::uuid AND a.document_id=$3::uuid
+`
+
+const legacyPackageTerminalAttemptSQL619 = `-- name: TerminalizeDocumentPackageSendAttemptV1 :one
+UPDATE document_package_send_attempts_v1 SET terminal_outcome=$1::text,terminal_at=clock_timestamp()
+WHERE attempt_id=$2::uuid AND org_id=$3::uuid AND document_id=$4::uuid
+ AND manifest_sha256=$5::bytea AND legal_commitment_sha256=$6::bytea
+ AND terminal_outcome IS NULL AND $1::text IN ('completed','aborted')
+RETURNING attempt_id, org_id, document_id, package_id, capture_revision, previous_revision, manifest_bytes, member_count, pdf_bytes, pdf_pages, captured_root_updated_at, captured_draft_generation, manifest_sha256, legal_commitment_sha256, actor_user_id, article13_notice_epoch_at, retain_until, retention_started_at, retention_completed_at, terminal_outcome, terminal_at, created_at
+`
+
+const legacyPackageDeleteIntentSQL619 = `-- name: DeleteDocumentPackageSealingIntentV1 :execrows
+DELETE FROM send_sealing_intents i USING document_package_send_attempts_v1 a
+WHERE a.attempt_id=$1::uuid AND a.org_id=$2::uuid AND a.document_id=$3::uuid
+ AND a.manifest_sha256=$4::bytea AND a.legal_commitment_sha256=$5::bytea
+ AND a.terminal_outcome IS NOT NULL AND i.package_send_attempt_id=a.attempt_id AND i.org_id=a.org_id AND i.document_id=a.document_id
+`
+
+type legacyPackageAttemptRow619 struct {
+	AttemptID               uuid.UUID          `json:"attempt_id"`
+	OrgID                   uuid.UUID          `json:"org_id"`
+	DocumentID              uuid.UUID          `json:"document_id"`
+	PackageID               uuid.UUID          `json:"package_id"`
+	CaptureRevision         int64              `json:"capture_revision"`
+	PreviousRevision        int64              `json:"previous_revision"`
+	ManifestBytes           int32              `json:"manifest_bytes"`
+	MemberCount             int16              `json:"member_count"`
+	PdfBytes                int64              `json:"pdf_bytes"`
+	PdfPages                int32              `json:"pdf_pages"`
+	CapturedRootUpdatedAt   pgtype.Timestamptz `json:"captured_root_updated_at"`
+	CapturedDraftGeneration int64              `json:"captured_draft_generation"`
+	ManifestSha256          []byte             `json:"manifest_sha256"`
+	LegalCommitmentSha256   []byte             `json:"legal_commitment_sha256"`
+	ActorUserID             uuid.UUID          `json:"actor_user_id"`
+	Article13NoticeEpochAt  pgtype.Timestamptz `json:"article13_notice_epoch_at"`
+	RetainUntil             pgtype.Timestamptz `json:"retain_until"`
+	RetentionStartedAt      pgtype.Timestamptz `json:"retention_started_at"`
+	RetentionCompletedAt    pgtype.Timestamptz `json:"retention_completed_at"`
+	TerminalOutcome         pgtype.Text        `json:"terminal_outcome"`
+	TerminalAt              pgtype.Timestamptz `json:"terminal_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+}
+
+func legacyPackageScan619(row pgx.Row, active *bool) (*legacyPackageAttemptRow619, error) {
+	var result legacyPackageAttemptRow619
+	targets := []any{&result.AttemptID, &result.OrgID, &result.DocumentID, &result.PackageID, &result.CaptureRevision, &result.PreviousRevision, &result.ManifestBytes, &result.MemberCount, &result.PdfBytes, &result.PdfPages, &result.CapturedRootUpdatedAt, &result.CapturedDraftGeneration, &result.ManifestSha256, &result.LegalCommitmentSha256, &result.ActorUserID, &result.Article13NoticeEpochAt, &result.RetainUntil, &result.RetentionStartedAt, &result.RetentionCompletedAt, &result.TerminalOutcome, &result.TerminalAt, &result.CreatedAt}
+	if active != nil {
+		targets = append(targets, active)
+	}
+	err := row.Scan(targets...)
+	return &result, err
+}
+
+func legacyPackageCreate619(ctx context.Context, tx pgx.Tx, id uuid.UUID, c pdfadmission.HTMLSendPackageCaptureMetadataV1) (*legacyPackageAttemptRow619, error) {
+	return legacyPackageScan619(tx.QueryRow(ctx, legacyPackageCreateAttemptSQL619,
+		id, c.PackageID, c.Revision, c.OrgID, c.DocumentID, pgtype.Timestamptz{Time: c.RootUpdatedAt, Valid: true},
+		c.DraftGeneration, c.PreviousRevision, c.ManifestBytes, c.CanonicalSHA256[:], c.CommitmentSHA256[:], c.MemberCount, c.PDFBytes, c.PDFPages, c.CreatedBy), nil)
+}
+
+func legacyPackageRead619(ctx context.Context, db generated.DBTX, arg generated.InspectDocumentPackageSendAttemptV1Params) (*legacyPackageAttemptRow619, bool, error) {
+	var active bool
+	row, err := legacyPackageScan619(db.QueryRow(ctx, legacyPackageInspectAttemptSQL619, arg.AttemptID, arg.OrgID, arg.DocumentID), &active)
+	return row, active, err
+}
+
+func packageLegacyTerminal619(ctx context.Context, tx pgx.Tx, m pdfadmission.HTMLSendPackageIntentMetadataV1) error {
+	if _, err := legacyPackageScan619(tx.QueryRow(ctx, legacyPackageTerminalAttemptSQL619,
+		"completed", m.AttemptID, m.Capture.OrgID, m.Capture.DocumentID, m.Capture.CanonicalSHA256[:], m.Capture.CommitmentSHA256[:]), nil); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, legacyPackageDeleteIntentSQL619, legacyPackageArgs619(m)...)
+	if err == nil && result.RowsAffected() != 1 {
+		return errors.New("synthetic completion did not delete exact intent")
+	}
+	return err
+}
+
+func packageLegacyInspect619(t *testing.T, q *ownedPublicReadFixtureV1, m pdfadmission.HTMLSendPackageIntentMetadataV1, active bool, outcome string) {
+	t.Helper()
+	row, hasActive, e := legacyPackageRead619(q.f.ctx, q.f.pool, generated.InspectDocumentPackageSendAttemptV1Params{AttemptID: m.AttemptID, OrgID: q.f.org, DocumentID: m.Capture.DocumentID})
+	if e != nil || row.AttemptID != m.AttemptID || row.OrgID != q.f.org || row.DocumentID != m.Capture.DocumentID || row.PackageID != m.Capture.PackageID || row.CaptureRevision != m.Capture.Revision || row.PreviousRevision != m.Capture.PreviousRevision || row.ManifestBytes != m.Capture.ManifestBytes || row.MemberCount != m.Capture.MemberCount || row.PdfBytes != m.Capture.PDFBytes || row.PdfPages != m.Capture.PDFPages || row.CapturedDraftGeneration != m.Capture.DraftGeneration || !row.CapturedRootUpdatedAt.Time.Equal(m.Capture.RootUpdatedAt) || hasActive != active || row.TerminalOutcome.String != outcome || row.TerminalOutcome.Valid != (outcome != "") || !row.Article13NoticeEpochAt.Time.Equal(m.Article13NoticeEpochAt) || !row.RetainUntil.Time.Equal(m.RetainUntil) {
+		t.Fatal("exact attempt inspection differs", row, e)
+	}
+	if !active && !row.TerminalAt.Valid {
+		t.Fatal("terminal history lost")
+	}
+	wrong := generated.InspectDocumentPackageSendAttemptV1Params{AttemptID: uuid.New(), OrgID: q.f.org, DocumentID: m.Capture.DocumentID}
+	if _, _, e = legacyPackageRead619(q.f.ctx, q.f.pool, wrong); !errors.Is(e, pgx.ErrNoRows) {
+		t.Fatal("missing exact attempt inspected as an existing winner", e)
+	}
+	wrong.AttemptID = m.AttemptID
+	wrong.OrgID = uuid.New()
+	if _, _, e = legacyPackageRead619(q.f.ctx, q.f.pool, wrong); !errors.Is(e, pgx.ErrNoRows) {
+		t.Fatal("foreign tenant read attempt history", e)
+	}
 }

@@ -146,9 +146,29 @@ acknowledgement mode included; a human reviews it in a staff session.
 `revise_document_design_values` accepts current updated-at/source pins, string
 `values`/`sections` and optional plain-text `summary`. It revises declared text
 only, preserves prior exact PDFs and resets PDF review/field placement. It cannot
-replace layout/assets. For layout edits update the editable template, preview,
-inspect, have an owner approve the new version in the app and create a new document from it.
-No existing frozen document or signed artifact is rewritten.
+replace layout/assets. For layout edits save a new editable template version,
+preview and inspect every page, then have a human owner approve that exact
+version in the app. You can create a new document from the approved version or
+move an existing draft while keeping its ID, link and history.
+
+`move_document_to_design_version` requires `document_id` and
+`input:{expected_updated_at,expected_html_source_commitment,template_version,expected_template_content_sha256}`.
+Read fresh document pins with `get_document_design_source`. The target must be a
+newer, human-approved current version of that draft's own template. Stale pins,
+superseded targets, other templates and unapproved versions are refused.
+Schema-version, contract-kind or party-slot changes require a new document.
+
+For a layout-only move, omit `values`/`sections` to carry current declared text
+forward. This does not preserve fixed wording changed in the template itself;
+compare its fixed text and commercial terms before a layout-only move. Check
+returned `adopted_default_values`, `dropped_values` and `dropped_sections` for
+added or removed declarations before reporting the content unchanged. The move
+appends a materialization and version snapshot, preserving
+prior exact PDFs, source versions, the immutable origin and signed artifacts.
+It resets PDF review and placed fields: download and visually inspect **every
+page of the new saved PDF**, then review it again. Signing and acknowledgement
+documents still require a human's staff-session review before Send. The move
+adds no recipients and does not send.
 
 Report saved, rendered, visually inspected, explicitly approved and sent states
 separately. Save/readback, hashes and successful rendering are never visual proof.

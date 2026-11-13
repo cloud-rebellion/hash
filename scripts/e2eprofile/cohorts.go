@@ -292,6 +292,56 @@ func boundCohortDiagnostics(summary *profileSummary) {
 	summary.Diagnostics = records
 }
 
+type invocationFailureJournal struct {
+	Schema               string              `json:"schema"`
+	Invocation           string              `json:"invocation"`
+	NativeExit           int                 `json:"native_exit_code"`
+	Diagnostics          []failureDiagnostic `json:"failure_diagnostics,omitempty"`
+	UnfinishedTests      []testID            `json:"unfinished_tests,omitempty"`
+	UnexpectedSkips      []testID            `json:"unexpected_skipped_tests,omitempty"`
+	DiagnosticsTruncated bool                `json:"diagnostics_truncated,omitempty"`
+}
+
+// Report each already-redacted failed part before the aggregate's shared budget
+// can discard a later cohort's cause. Never include raw events or the catalog.
+func reportInvocationFailure(out io.Writer, id string, nativeExit int, part profileSummary) error {
+	if part.Result != "failed" {
+		return nil
+	}
+	journal := invocationFailureJournal{
+		Schema:               "hash.e2e-invocation-failure.v1",
+		Invocation:           diagnosticBound(diagnosticReportedID(testID{Test: id}).Test, 64),
+		NativeExit:           nativeExit,
+		Diagnostics:          append([]failureDiagnostic(nil), part.Diagnostics[:min(len(part.Diagnostics), diagnosticMaxRecords)]...),
+		UnfinishedTests:      append([]testID(nil), part.UnfinishedTests[:min(len(part.UnfinishedTests), diagnosticMaxPending)]...),
+		UnexpectedSkips:      append([]testID(nil), part.UnexpectedSkips[:min(len(part.UnexpectedSkips), diagnosticMaxRecords)]...),
+		DiagnosticsTruncated: part.DiagnosticsTruncated || len(part.Diagnostics) > diagnosticMaxRecords || len(part.UnfinishedTests) > diagnosticMaxPending || len(part.UnexpectedSkips) > diagnosticMaxRecords,
+	}
+	for {
+		raw, err := json.Marshal(journal)
+		if err != nil {
+			return err
+		}
+		if len(raw)+1 <= diagnosticMaxBytes {
+			_, err = out.Write(append(raw, '\n'))
+			return err
+		}
+		// Include JSON framing in this journal's existing16KiB diagnostic bound.
+		// Trim only this copy; native accounting and the part summary stay intact.
+		journal.DiagnosticsTruncated = true
+		switch {
+		case len(journal.UnexpectedSkips) > 0:
+			journal.UnexpectedSkips = journal.UnexpectedSkips[:len(journal.UnexpectedSkips)-1]
+		case len(journal.UnfinishedTests) > 0:
+			journal.UnfinishedTests = journal.UnfinishedTests[:len(journal.UnfinishedTests)-1]
+		case len(journal.Diagnostics) > 0:
+			journal.Diagnostics = journal.Diagnostics[:len(journal.Diagnostics)-1]
+		default:
+			return fmt.Errorf("native failure journal exceeds diagnostic bound")
+		}
+	}
+}
+
 func ordinaryCohortsRun(args []string) (resultErr error) {
 	if len(args) != 4 {
 		return fmt.Errorf("ordinary cohorts require evidence, tagged handler binary, package inventory and source test inventory")
@@ -452,6 +502,9 @@ func ordinaryCohortsRun(args []string) (resultErr error) {
 		}
 		if auditErr != nil {
 			part.AccountingError = auditErr.Error()
+		}
+		if err := reportInvocationFailure(os.Stdout, id, code, part); err != nil {
+			return fmt.Errorf("cannot report native invocation failure")
 		}
 		eventSHA, err := fileSHA256(eventPath)
 		if err != nil {

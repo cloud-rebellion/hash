@@ -112,8 +112,10 @@ func ordinaryExpiryMCPV1(t *testing.T, q *ownedPublicReadFixtureV1, doc *generat
 }
 
 // Reproduce the actual pre-fix producer, not deletion of an existing cache.
-// Every row/hash is created by the original generic audit appender in the same
-// guarded expiry transaction. No measurement row or native grant is seeded.
+// Every row/hash is created with the frozen pre-measurement audit recipe in the
+// same guarded expiry transaction. The current logger deliberately measures all
+// document events, so using it would no longer reproduce the historical defect.
+// No measurement row is deleted or native grant seeded.
 func ordinaryLegacyExpiryV1(t *testing.T, q *ownedPublicReadFixtureV1, doc *generated.Document, payload map[string]any) {
 	t.Helper()
 	f := q.f
@@ -138,17 +140,48 @@ func ordinaryLegacyExpiryV1(t *testing.T, q *ownedPublicReadFixtureV1, doc *gene
 	if _, err = f.q.WithTx(tx).UpdateDraftDocumentDetailsV1(f.ctx, generated.UpdateDraftDocumentDetailsV1Params{ID: doc.ID, OrgID: f.org, Name: guard.Document.Name, ExpiresAt: expiry}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := f.s.Audit.LogTx(f.ctx, tx, audit.Entry{OrgID: f.org, DocumentID: &doc.ID, ActorUserID: &f.user.ID, Kind: audit.KindDocumentUpdated, Payload: payload})
-	if err != nil {
-		t.Fatal(err)
-	}
+	ordinaryLegacyExpiryEventV1(t, f, tx, doc.ID, payload)
 	if err = guard.Recheck(f.ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	f.s.Audit.Publish(pending)
+}
+
+// Freeze only the old producer's event insertion; later Send/Sign and forensic
+// verification still execute the current implementation. Preserve its org lock,
+// fail-closed head read, microsecond ordering and exact canonical chain preimage.
+func ordinaryLegacyExpiryEventV1(t *testing.T, f lifecycleAuthorizationFixture, tx pgx.Tx, documentID uuid.UUID, payload map[string]any) {
+	t.Helper()
+	q := f.q.WithTx(tx)
+	if err := q.AcquireOrgChainLock(f.ctx, f.org.String()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	head, err := q.LatestEventChainHeadForOrg(f.ctx, f.org)
+	var previous []byte
+	if err == nil {
+		previous = head.RowHash
+		if head.CreatedAt.Valid && !createdAt.After(head.CreatedAt.Time) {
+			createdAt = head.CreatedAt.Time.Add(time.Microsecond)
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatal("historical expiry chain head:", err)
+	}
+	rowHash := audit.ChainHashRecord(audit.HashInput{Prev: previous, OrgID: f.org, DocID: documentID,
+		ActorID: f.user.ID, Kind: audit.KindDocumentUpdated, CreatedAt: createdAt, Payload: raw})
+	_, err = q.InsertEvent(f.ctx, generated.InsertEventParams{OrgID: f.org,
+		DocumentID: pgtype.UUID{Bytes: documentID, Valid: true}, ActorUserID: pgtype.UUID{Bytes: f.user.ID, Valid: true},
+		Kind: audit.KindDocumentUpdated, PayloadJson: raw, PayloadHashed: raw, PrevHash: previous, RowHash: rowHash,
+		CreatedAt: pgtype.Timestamptz{Time: createdAt, Valid: true}})
+	if err != nil {
+		t.Fatal("historical unmeasured expiry event:", err)
+	}
 }
 
 func ordinaryExpirySendV1(t *testing.T, q *ownedPublicReadFixtureV1, doc *generated.Document) []signerBrowserPartyE2E {

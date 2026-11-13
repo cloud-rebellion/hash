@@ -87,9 +87,26 @@ and selected revision approval. Omitting both pins reads the current template;
 never substitute that current source for a document's older frozen source.
 get_document_design_history and download_document_pdf inspect exact retained
 PDFs. revise_document_design_values changes declared plain text only and resets
-review/field placement. Layout/assets edits require a new editable template
-version, preview, approval by a human owner in the app and a new document from that version;
-they do not rewrite an existing document's frozen design or signed artifacts.
+review/field placement. For layout/assets edits, save a new editable template
+version, preview and inspect every page, then have a human owner approve that
+exact version in the app. Either create a new document from the approved version
+or use move_document_to_design_version on an existing draft. A move appends a
+newer approved current version of that draft's own template, keeping its ID,
+link and history. Supply fresh expected_updated_at and
+expected_html_source_commitment from get_document_design_source, template_version
+and the exact expected_template_content_sha256. Stale or superseded targets,
+other templates and unapproved versions are refused. Schema-version,
+contract-kind or party-slot changes require a new document.
+For a layout-only move, omit values/sections to carry current declared text
+forward. This does not preserve fixed wording changed in the template itself;
+compare its fixed text and commercial terms before a layout-only move. Check
+adopted_default_values, dropped_values and dropped_sections for added or removed
+declarations before reporting the content unchanged. A move
+resets PDF review and placed fields. Download and visually inspect EVERY PAGE
+of the new saved PDF, then review it again; signing and acknowledgement documents
+still require a human's staff-session review before Send. A move creates no
+recipients and sends nothing. Prior source/PDF versions, the immutable origin
+and signed artifacts remain unchanged.
 When updating a catalog-bound master returned by get_design_template, omit the
 selected server-injected brand_<slot> entries from input.html_master_json.assets and pass the
 same exact brand_profile/asset_slots instead. The server re-resolves them;

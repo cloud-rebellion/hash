@@ -14,7 +14,6 @@ import (
 	"time"
 
 	mdb "github.com/bright-interaction/hash/internal/db"
-	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -220,7 +219,7 @@ func TestFailedMailIndex114FreshOccupiedReplayDownAndCollisionE2E(t *testing.T) 
 // The generated query is executed in a real READ ONLY transaction. Read-only
 // server-clock probes bracket its statement, so changing creation-age seconds
 // are checked honestly before normalization across before/after statements.
-func failedMailRead114(t *testing.T, f migrationPGFixture242, failedAge, activeAge, dueAge bool) generated.GetOperationalBacklogV1Row {
+func failedMailRead114(t *testing.T, f migrationPGFixture242, failedAge, activeAge, dueAge bool) failedMailBacklog114 {
 	t.Helper()
 	begin, stop := context.WithTimeout(f.ctx, 250*time.Millisecond)
 	tx, err := f.admin.BeginTx(begin, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -252,7 +251,8 @@ func failedMailRead114(t *testing.T, f migrationPGFixture242, failedAge, activeA
 	}
 	before := clock()
 	call, cancel := context.WithTimeout(f.ctx, time.Second)
-	row, err := generated.New(tx).GetOperationalBacklogV1(call)
+	row := new(failedMailBacklog114)
+	err = tx.QueryRow(call, failedMailBacklogSQL114).Scan(&row.MailCount, &row.MailDueCount, &row.MailUnknownCreatedCount, &row.MailUnknownDueCount, &row.MailOldestObservedAgeSeconds, &row.MailOldestObservedOverdueSeconds, &row.MailLimitReached, &row.MailFailedCount, &row.MailFailedUnknownCreatedCount, &row.MailFailedOldestObservedCreationAgeSeconds, &row.MailFailedLimitReached, &row.FinalizingRootCount, &row.FinalizingIntentCount, &row.FinalizingMissingIntentCount, &row.FinalizingUnknownIntentAgeCount, &row.FinalizingOldestObservedIntentAgeSeconds, &row.FinalizingLimitReached)
 	cancel()
 	if err != nil || row == nil {
 		t.Fatal("actual generated17-scalar read-only query", err)
@@ -286,13 +286,13 @@ func TestFailedMailIndex114ActualGeneratedMetadataReadOnlyE2E(t *testing.T) {
 	if err := mdb.RunMigrationsUpToContext(f.ctx, f.db, 113); err != nil {
 		t.Fatal("real113 query predecessor", err)
 	}
-	if row := failedMailRead114(t, f, false, false, false); row != (generated.GetOperationalBacklogV1Row{}) {
+	if row := failedMailRead114(t, f, false, false, false); row != (failedMailBacklog114{}) {
 		t.Fatal("real known-empty17scalars differ", row)
 	}
 	failedMailSeed114(t, f)
 	before := failedMailSnapshot114(t, f)
 	sparse := failedMailRead114(t, f, true, true, true)
-	expected := generated.GetOperationalBacklogV1Row{MailCount: 2, MailDueCount: 1, MailUnknownDueCount: 1, MailFailedCount: 3, MailFailedUnknownCreatedCount: 2}
+	expected := failedMailBacklog114{MailCount: 2, MailDueCount: 1, MailUnknownDueCount: 1, MailFailedCount: 3, MailFailedUnknownCreatedCount: 2}
 	if sparse != expected {
 		t.Fatal("real status/backoff/unknown-clock semantics differ", sparse)
 	}
@@ -309,7 +309,7 @@ func TestFailedMailIndex114ActualGeneratedMetadataReadOnlyE2E(t *testing.T) {
 		t.Fatal("explicit owned durable requeue", err)
 	}
 	requeued := failedMailRead114(t, f, false, true, true)
-	if requeued != (generated.GetOperationalBacklogV1Row{MailCount: 5, MailDueCount: 1, MailUnknownCreatedCount: 2, MailUnknownDueCount: 1}) {
+	if requeued != (failedMailBacklog114{MailCount: 5, MailDueCount: 1, MailUnknownCreatedCount: 2, MailUnknownDueCount: 1}) {
 		t.Fatal("durable requeue did not clear only terminal rows", requeued)
 	}
 	if _, err := f.admin.Exec(f.ctx, "UPDATE public.email_deliveries SET status='sent',sent_at=statement_timestamp() WHERE id IN ('11400000-0000-4000-8000-000000000001'::uuid,'11400000-0000-4000-8000-000000000002'::uuid,'11400000-0000-4000-8000-000000000003'::uuid)"); err != nil {
@@ -321,7 +321,7 @@ func TestFailedMailIndex114ActualGeneratedMetadataReadOnlyE2E(t *testing.T) {
 	}
 	cappedBefore := failedMailSnapshot114(t, f)
 	capped := failedMailRead114(t, f, true, true, true)
-	if capped != (generated.GetOperationalBacklogV1Row{MailCount: 2, MailDueCount: 1, MailUnknownDueCount: 1, MailFailedCount: 1000, MailFailedLimitReached: true}) {
+	if capped != (failedMailBacklog114{MailCount: 2, MailDueCount: 1, MailUnknownDueCount: 1, MailFailedCount: 1000, MailFailedLimitReached: true}) {
 		t.Fatal("real observed cap is not exact lower-bound sample", capped)
 	}
 	if err := mdb.RunMigrationsDownToContext(f.ctx, f.db, 113); err != nil {
@@ -437,3 +437,72 @@ func TestFailedMailIndex114ActualObservedLockCancellationE2E(t *testing.T) {
 		})
 	}
 } //nolint:rawsql -- actual observed owned relation/advisory-lock and retirement witnesses
+
+// Frozen real generated17-scalar reader from a6e8fb1ce24cc47a58cc567df41e594e0b1d2482.
+// These tests keep the actual M113/M114 schema and rollback assertions. The
+// current worker's additional M127 pending-object domain remains separately
+// qualified; never add its table to this historical database or skip a read.
+const failedMailBacklogSQL114 = `-- name: GetOperationalBacklogV1 :one
+WITH observation AS MATERIALIZED (
+  SELECT statement_timestamp() AS observed_at
+), mail AS MATERIALIZED (
+  SELECT created_at, next_attempt_at
+  FROM email_deliveries
+  WHERE status IN ('pending', 'retrying')
+  ORDER BY next_attempt_at, id
+  LIMIT 1000
+), failed_mail AS MATERIALIZED (
+  -- Separate capped domain: terminal rows are not eligible for the active queue.
+  -- Creation age is not time since failure; no failure timestamp is stored.
+  SELECT created_at
+  FROM email_deliveries
+  WHERE status='failed'
+  ORDER BY id
+  LIMIT 1000
+), roots AS MATERIALIZED (
+  SELECT i.document_id IS NOT NULL AS has_intent, i.created_at AS intent_created_at
+  FROM documents d
+  LEFT JOIN document_finalization_intents i ON i.document_id=d.id AND i.org_id=d.org_id
+  WHERE d.status='finalizing' AND d.deleted_at IS NULL AND d.parent_envelope_id IS NULL
+  ORDER BY d.id
+  LIMIT 1000
+)
+SELECT
+  (SELECT count(*) FROM mail)::bigint AS mail_count,
+  (SELECT count(*) FROM mail, observation WHERE isfinite(next_attempt_at) AND next_attempt_at<=observed_at)::bigint AS mail_due_count,
+  (SELECT count(*) FROM mail, observation WHERE created_at IS NULL OR NOT isfinite(created_at) OR created_at>observed_at)::bigint AS mail_unknown_created_count,
+  (SELECT count(*) FROM mail WHERE next_attempt_at IS NULL OR NOT isfinite(next_attempt_at))::bigint AS mail_unknown_due_count,
+  (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_age_seconds,
+  (SELECT COALESCE(max(CASE WHEN isfinite(next_attempt_at) AND next_attempt_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM next_attempt_at)) END),0) FROM mail, observation)::bigint AS mail_oldest_observed_overdue_seconds,
+  ((SELECT count(*) FROM mail)=1000)::boolean AS mail_limit_reached,
+  (SELECT count(*) FROM failed_mail)::bigint AS mail_failed_count,
+  (SELECT count(*) FROM failed_mail, observation WHERE created_at IS NULL OR NOT isfinite(created_at) OR created_at>observed_at)::bigint AS mail_failed_unknown_created_count,
+  (SELECT COALESCE(max(CASE WHEN isfinite(created_at) AND created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM created_at)) END),0) FROM failed_mail, observation)::bigint AS mail_failed_oldest_observed_creation_age_seconds,
+  ((SELECT count(*) FROM failed_mail)=1000)::boolean AS mail_failed_limit_reached,
+  (SELECT count(*) FROM roots)::bigint AS finalizing_root_count,
+  (SELECT count(*) FROM roots WHERE has_intent)::bigint AS finalizing_intent_count,
+  (SELECT count(*) FROM roots WHERE NOT has_intent)::bigint AS finalizing_missing_intent_count,
+  (SELECT count(*) FROM roots, observation WHERE has_intent AND (intent_created_at IS NULL OR NOT isfinite(intent_created_at) OR intent_created_at>observed_at))::bigint AS finalizing_unknown_intent_age_count,
+  (SELECT COALESCE(max(CASE WHEN has_intent AND isfinite(intent_created_at) AND intent_created_at<=observed_at THEN floor(extract(epoch FROM observed_at)-extract(epoch FROM intent_created_at)) END),0) FROM roots, observation)::bigint AS finalizing_oldest_observed_intent_age_seconds,
+  ((SELECT count(*) FROM roots)=1000)::boolean AS finalizing_limit_reached
+`
+
+type failedMailBacklog114 struct {
+	MailCount                                  int64 `json:"mail_count"`
+	MailDueCount                               int64 `json:"mail_due_count"`
+	MailUnknownCreatedCount                    int64 `json:"mail_unknown_created_count"`
+	MailUnknownDueCount                        int64 `json:"mail_unknown_due_count"`
+	MailOldestObservedAgeSeconds               int64 `json:"mail_oldest_observed_age_seconds"`
+	MailOldestObservedOverdueSeconds           int64 `json:"mail_oldest_observed_overdue_seconds"`
+	MailLimitReached                           bool  `json:"mail_limit_reached"`
+	MailFailedCount                            int64 `json:"mail_failed_count"`
+	MailFailedUnknownCreatedCount              int64 `json:"mail_failed_unknown_created_count"`
+	MailFailedOldestObservedCreationAgeSeconds int64 `json:"mail_failed_oldest_observed_creation_age_seconds"`
+	MailFailedLimitReached                     bool  `json:"mail_failed_limit_reached"`
+	FinalizingRootCount                        int64 `json:"finalizing_root_count"`
+	FinalizingIntentCount                      int64 `json:"finalizing_intent_count"`
+	FinalizingMissingIntentCount               int64 `json:"finalizing_missing_intent_count"`
+	FinalizingUnknownIntentAgeCount            int64 `json:"finalizing_unknown_intent_age_count"`
+	FinalizingOldestObservedIntentAgeSeconds   int64 `json:"finalizing_oldest_observed_intent_age_seconds"`
+	FinalizingLimitReached                     bool  `json:"finalizing_limit_reached"`
+}

@@ -7,6 +7,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,13 +16,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	mdb "github.com/bright-interaction/hash/internal/db"
-	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/recoveryinventory"
 )
 
@@ -372,11 +374,52 @@ func appendArticle13SendEvent(t *testing.T, ctx context.Context, pool *pgxpool.P
 	t.Helper()
 	var orgID uuid.UUID
 	must(t, pool.QueryRow(ctx, `SELECT org_id FROM documents WHERE id=$1`, docID).Scan(&orgID), "load marker organization")
-	logger := audit.New(generated.New(pool), pool)
-	_, err := logger.Log(ctx, audit.Entry{
-		OrgID: orgID, DocumentID: &docID, Kind: audit.KindDocumentSent, Payload: payload,
-	})
-	must(t, err, "append Article 13 document.sent marker")
+	tx, err := pool.Begin(ctx)
+	must(t, err, "begin historical Article 13 marker")
+	defer func() { _ = tx.Rollback(ctx) }()
+	must(t, appendHistoricalAudit61Tx(ctx, tx, orgID, docID, audit.KindDocumentSent, payload), "append Article 13 document.sent marker")
+	must(t, tx.Commit(ctx), "commit historical Article 13 marker")
+}
+
+// These M60/M61/M62 fixtures need the historical audit producer, not today's
+// Logger, which also measures the M94 HTML snapshot table. Keep the original
+// organization chain lock, exact hashed payload and strictly increasing
+// microsecond timestamp; never install a later table into the old schema.
+// The caller owns this transaction, so markers still commit with the lifecycle
+// mutation. Current runtime Logger measurement remains mandatory and unchanged.
+func appendHistoricalAudit61Tx(ctx context.Context, tx pgx.Tx, orgID, docID uuid.UUID, kind string, payload map[string]any) error {
+	if orgID == uuid.Nil || docID == uuid.Nil || kind == "" {
+		return errors.New("historical audit scope is required")
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, orgID.String()); err != nil {
+		return err
+	}
+	var prev []byte
+	var previous pgtype.Timestamptz
+	err = tx.QueryRow(ctx, `SELECT row_hash,created_at FROM events
+ WHERE org_id=$1 AND row_hash IS NOT NULL ORDER BY created_at DESC,id DESC LIMIT 1`, orgID).Scan(&prev, &previous)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	if previous.Valid && !createdAt.After(previous.Time) {
+		createdAt = previous.Time.Add(time.Microsecond)
+	}
+	rowHash := audit.ChainHashRecord(audit.HashInput{Prev: prev, OrgID: orgID, DocID: docID, Kind: kind, CreatedAt: createdAt, Payload: raw})
+	result, err := tx.Exec(ctx, `INSERT INTO events
+ (org_id,document_id,kind,payload_json,payload_hashed,prev_hash,row_hash,created_at)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, orgID, docID, kind, raw, raw, prev, rowHash, createdAt)
+	if err == nil && result.RowsAffected() != 1 {
+		return errors.New("historical audit did not append exactly one event")
+	}
+	return err
 }
 
 // These migration fixtures intentionally stay at schema 61. Keep their SQL
@@ -533,12 +576,8 @@ func completeArticle13SendSealing(t *testing.T, ctx context.Context, pool *pgxpo
 		must(t, rows.Err(), "drain completed schema-61 envelope children")
 		rows.Close()
 	}
-	logger := audit.New(generated.New(pool), pool)
 	appendMarkerTx := func(doc *article13Document61) {
-		_, logErr := logger.LogTx(ctx, tx, audit.Entry{
-			OrgID: doc.OrgID, DocumentID: &doc.ID, Kind: audit.KindDocumentSent,
-			Payload: article13MarkerPayload(t, doc.SentAt.Time),
-		})
+		logErr := appendHistoricalAudit61Tx(ctx, tx, doc.OrgID, doc.ID, audit.KindDocumentSent, article13MarkerPayload(t, doc.SentAt.Time))
 		must(t, logErr, "append transactional Article 13 send marker")
 	}
 	for _, child := range children {

@@ -528,11 +528,7 @@ func TestEnvelopeFamilyFreezeDrainsChildMutationBeforeHighWaterE2E(t *testing.T)
 		Body:       "commits before the family high-water",
 	})
 	must(t, err, "insert child comment in mutation")
-	logger := audit.New(generated.New(pool), pool)
-	_, err = logger.LogTx(ctx, mutationTx, audit.Entry{
-		OrgID: orgID, DocumentID: &childOneID, Kind: audit.KindCommentPosted,
-		Payload: map[string]any{"side": "sender"},
-	})
+	err = appendHistoricalAudit61Tx(ctx, mutationTx, orgID, childOneID, audit.KindCommentPosted, map[string]any{"side": "sender"})
 	must(t, err, "append child comment event in mutation")
 
 	// Allocate both transactions and register joined cleanup before launching.

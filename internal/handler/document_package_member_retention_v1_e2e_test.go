@@ -436,16 +436,11 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 		// This is synthetic pre105 completion, not historical provider proof.
 		tx := beginHTMLQueryFixtureV1(t, q.f.ctx, q.f)
 		defer rollbackHTMLQueryFixtureV1(t, tx)
-		queries := generated.New(tx)
-		match := packageAttemptMatch235(m)
 		if err := packageLegacyCompletionStage619(t, q, tx, m, false, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := queries.TerminalizeDocumentPackageSendAttemptV1(q.f.ctx, generated.TerminalizeDocumentPackageSendAttemptV1Params{Outcome: "completed", AttemptID: m.AttemptID, OrgID: m.Capture.OrgID, DocumentID: m.Capture.DocumentID, ExpectedManifestSha256: match.ExpectedManifestSha256, ExpectedLegalCommitmentSha256: match.ExpectedLegalCommitmentSha256}); err != nil {
-			t.Fatal(err)
-		}
-		if rows, err := queries.DeleteDocumentPackageSealingIntentV1(q.f.ctx, match); err != nil || rows != 1 {
-			t.Fatal("old terminal fixture did not delete its exact intent", rows, err)
+		if err := packageLegacyTerminal619(q.f.ctx, tx, m); err != nil {
+			t.Fatal("old terminal fixture did not delete its exact intent", err)
 		}
 		if _, err := tx.Exec(q.f.ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
 			t.Fatal(err)
@@ -458,7 +453,7 @@ func TestDocumentPackageMemberRetentionSchemaV1E2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		restore = false
-		packageAttemptInspect235(t, q, m, false, "completed")
+		packageLegacyInspect619(t, q, m, false, "completed")
 		var receipts int
 		var newlyVerified bool
 		if err := q.f.pool.QueryRow(q.f.ctx, "SELECT (SELECT count(*) FROM document_package_send_member_retention_v1 WHERE attempt_id=$1),hash_package_send_members_retained_v1($1)", m.AttemptID).Scan(&receipts, &newlyVerified); err != nil || receipts != 0 || newlyVerified {

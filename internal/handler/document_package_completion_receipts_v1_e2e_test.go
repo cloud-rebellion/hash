@@ -314,7 +314,7 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 		if err := packageLegacyCompletionStage619(t, q, tx, m, true, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := packageCompletionSQLTerminal241(q.f.ctx, generated.New(tx), m); err != nil {
+		if err := packageLegacyTerminal619(q.f.ctx, tx, m); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := tx.Exec(q.f.ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
@@ -327,7 +327,7 @@ func TestDocumentPackageCompletionSchemaV1E2E(t *testing.T) {
 		if err := mdb.RunMigrationsUpToContext(q.f.ctx, db, 106); err != nil {
 			t.Fatal(err)
 		}
-		packageAttemptInspect235(t, q, m, false, "completed")
+		packageLegacyInspect619(t, q, m, false, "completed")
 		var completions, invites int
 		if err := q.f.pool.QueryRow(q.f.ctx, "SELECT (SELECT count(*) FROM document_package_send_completions_v1 WHERE attempt_id=$1),(SELECT count(*) FROM document_package_send_initial_invite_receipts_v1 WHERE attempt_id=$1)", m.AttemptID).Scan(&completions, &invites); err != nil || completions != 0 || invites != 0 {
 			t.Fatal("M106 fabricated historical Send effects", err, completions, invites)

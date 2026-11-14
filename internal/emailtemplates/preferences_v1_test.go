@@ -4,6 +4,7 @@ package emailtemplates
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -52,5 +53,42 @@ func TestWorkspaceEmail128NativeCannotInventAuthorityOrFallback(t *testing.T) {
 			t.Fatal("missing actual runtime/transaction produced mail", kind, err)
 		}
 		result.CloseConsumerV1()
+	}
+}
+
+func TestSyntheticPreviewLocaleExplicitAndLegacyDefaultsV1(t *testing.T) {
+	for _, raw := range []string{`"en"`, `"sv"`} {
+		locale, err := DecodeSyntheticPreviewLocaleV1(json.RawMessage(raw))
+		if err != nil || locale == nil {
+			t.Fatal("valid synthetic locale refused", err)
+		}
+		for _, kind := range []string{dispatch.KindInvite, dispatch.KindDeclined, dispatch.KindQuotaWarning80} {
+			got, err := syntheticContextV1(context.Background(), nil, uuid.New(), kind, locale)
+			if err != nil || got.Locale != *locale || got.DocumentName != SyntheticContext().DocumentName {
+				t.Fatal("explicit synthetic choice changed source or read workspace state", kind, err)
+			}
+		}
+		if _, err := (Service{}).Save(context.Background(), authoring.Actor{}, dispatch.KindInvite, Input{PreviewLocale: locale}); !errors.Is(err, ErrInput) {
+			t.Fatal("presentation locale accepted by Save", err)
+		}
+	}
+	if locale, err := DecodeSyntheticPreviewLocaleV1(nil); err != nil || locale != nil {
+		t.Fatal("omission lost legacy default")
+	}
+	for _, raw := range []string{`null`, `""`, `"SV"`, `"sv-SE"`, `" sv"`, `true`, `[]`, `{}`} {
+		if _, err := DecodeSyntheticPreviewLocaleV1(json.RawMessage(raw)); !errors.Is(err, ErrInput) {
+			t.Fatal("invalid locale accepted", raw, err)
+		}
+	}
+	got, err := syntheticContextV1(context.Background(), nil, uuid.New(), dispatch.KindInvite)
+	if err != nil || got.Locale != "en" {
+		t.Fatal("omitted non-quota default changed", err)
+	}
+	invalid := "sv-SE"
+	if _, err = (Service{}).Preview(context.Background(), authoring.Actor{}, dispatch.KindInvite, Input{PreviewLocale: &invalid}); !errors.Is(err, ErrInput) {
+		t.Fatal("bad preview reached authority", err)
+	}
+	if _, err = (Service{}).Propose(context.Background(), authoring.Actor{}, dispatch.KindInvite, ProposalInput{Input: Input{PreviewLocale: &invalid}, Prompt: "Use current design"}); !errors.Is(err, ErrInput) {
+		t.Fatal("bad proposal reached provider", err)
 	}
 }

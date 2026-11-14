@@ -1,13 +1,13 @@
 import { APIError } from './client';
 import { checkedSMTPTest } from './workspaceSMTP';
-import { emailTemplateKinds, type EmailTemplateKind } from '../emailTemplateEditor';
+import { emailTemplateKinds, isWorkspaceEmailLocale, type WorkspaceEmailLocale, type EmailTemplateKind } from '../emailTemplateEditor';
 
-export async function startSavedEmailTemplateTest(kind: EmailTemplateKind, templateRevision: number, smtpRevision: number, signal: AbortSignal) {
-  if (!emailTemplateKinds.includes(kind) || !Number.isSafeInteger(templateRevision) || templateRevision < 0 || !Number.isSafeInteger(smtpRevision) || smtpRevision < 1) throw new Error('Invalid saved email test observation');
+export async function startSavedEmailTemplateTest(kind: EmailTemplateKind, templateRevision: number, smtpRevision: number, signal: AbortSignal, previewLocale?: WorkspaceEmailLocale) {
+  if ((previewLocale !== undefined && !isWorkspaceEmailLocale(previewLocale)) || !emailTemplateKinds.includes(kind) || !Number.isSafeInteger(templateRevision) || templateRevision < 0 || !Number.isSafeInteger(smtpRevision) || smtpRevision < 1) throw new Error('Invalid saved email test observation');
   const response = await fetch(`/api/v1/email-templates/${encodeURIComponent(kind)}/test`, {
     method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expected_template_revision: templateRevision, expected_smtp_revision: smtpRevision }),
+    body: JSON.stringify({ expected_template_revision: templateRevision, expected_smtp_revision: smtpRevision, ...(previewLocale === undefined ? {} : { preview_locale: previewLocale }) }),
   });
   if (response.status !== 202) {
     await response.body?.cancel().catch(() => {});

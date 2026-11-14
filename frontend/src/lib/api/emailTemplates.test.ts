@@ -168,3 +168,30 @@ test('preference revision limits remain exact at the JavaScript safe-integer bou
   const refused = respond(emailPreferences(maximum)); await expect(saveWorkspaceEmailPreferences(emailPreferences(maximum), 'sv', new AbortController().signal)).rejects.toThrow(); expect(refused).toHaveLength(0);
   respond(emailPreferences(maximum + 1)); await expect(getWorkspaceEmailPreferences(new AbortController().signal)).rejects.toThrow();
 });
+
+
+test('explicit synthetic locale is enum-only, response-bound and never accepted by source Save', async () => {
+  const sample = { schema_version: 1, synthetic: true, revision: 2, subject: 'Literal custom subject', html: '<p>Literal prose</p>', text: 'Literal prose', mandatory_content_preserved: true };
+  for (const locale of ['en', 'sv'] as const) {
+    const calls = respond({ ...sample, locale });
+    expect((await previewEmailTemplate('email.invite', { ...input, preview_locale: locale }, new AbortController().signal)).locale).toBe(locale);
+    expect(JSON.parse(String(calls[0].options.body))).toEqual({ ...input, preview_locale: locale });
+    const saveCalls = respond(item(undefined, 3));
+    await expect(saveEmailTemplate('email.invite', { ...input, preview_locale: locale } as any, new AbortController().signal)).rejects.toThrow();
+    expect(saveCalls).toHaveLength(0);
+  }
+  for (const locale of [null, '', 'SV', 'sv-SE', 1]) {
+    const calls = respond({ ...sample, locale: 'en' });
+    await expect(previewEmailTemplate('email.invite', { ...input, preview_locale: locale } as any, new AbortController().signal)).rejects.toThrow(); expect(calls).toHaveLength(0);
+  }
+  respond({ ...sample, locale: 'en' }); await expect(previewEmailTemplate('email.invite', { ...input, preview_locale: 'sv' }, new AbortController().signal)).rejects.toThrow();
+  respond({ ...sample, locale: 'sv' }); await expect(previewEmailTemplate('email.quota_warning_80', { ...input, preview_locale: 'en' }, new AbortController().signal)).rejects.toThrow();
+});
+test('AI proposal preview uses the requested synthetic language while its returned saveable source cannot contain that setting', async () => {
+  const value = proposal(); value.preview.locale = 'sv';
+  const calls = respond(value);
+  expect((await proposeEmailDesign('email.invite', { ...input, preview_locale: 'sv' }, 'Style only', new AbortController().signal)).preview.locale).toBe('sv');
+  expect(JSON.parse(String(calls[0].options.body))).toEqual({ ...input, preview_locale: 'sv', prompt: 'Style only' });
+  respond({ ...value, input: { ...value.input, preview_locale: 'sv' } });
+  await expect(proposeEmailDesign('email.invite', { ...input, preview_locale: 'sv' }, 'Style only', new AbortController().signal)).rejects.toThrow();
+});

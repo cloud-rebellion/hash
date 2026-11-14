@@ -26,6 +26,9 @@ const templateSampleSubjectPrefixV1 = "[Test] "
 const templateSampleHTMLNoticeV1 = "<p><strong>Test email — no signing request</strong><br>This sample uses synthetic document and recipient details. Its action links cannot be used to sign.</p>"
 const templateSampleTextNoticeV1 = "Test email — no signing request. This sample uses synthetic document and recipient details. Its action links cannot be used to sign.\n\n"
 
+const templateSampleHTMLNoticeSVV1 = "<p><strong>Testmeddelande — ingen signeringsbegäran</strong><br>Det här provet använder påhittade dokument- och mottagaruppgifter. Länkarna kan inte användas för att signera.</p>"
+const templateSampleTextNoticeSVV1 = "Testmeddelande — ingen signeringsbegäran. Det här provet använder påhittade dokument- och mottagaruppgifter. Länkarna kan inte användas för att signera.\n\n"
+
 func renderedTemplateSampleV1(kind string, tpl dispatch.ServiceEmailTemplateV1) (subject, html, text string, err error) {
 	return renderedTemplateSampleContextV1(kind, tpl, emailtemplates.SyntheticContext())
 }
@@ -44,13 +47,24 @@ func renderedTemplateSampleContextV1(kind string, tpl dispatch.ServiceEmailTempl
 		return "", "", "", ErrInput
 	}
 	end += start + 1
-	return templateSampleSubjectPrefixV1 + subject, html[:end] + templateSampleHTMLNoticeV1 + html[end:], templateSampleTextNoticeV1 + text, nil
+	htmlNotice, textNotice := templateSampleHTMLNoticeV1, templateSampleTextNoticeV1
+	if sample.Locale == "sv" {
+		htmlNotice, textNotice = templateSampleHTMLNoticeSVV1, templateSampleTextNoticeSVV1
+	}
+	subject, html, text = templateSampleSubjectPrefixV1+subject, html[:end]+htmlNotice+html[end:], textNotice+text
+	if len(subject) > dispatch.ServiceEmailRenderedSubjectBytesV1 || len(html) > dispatch.ServiceEmailDesignRenderedBytesV1 || len(text) > dispatch.ServiceEmailRenderedBodyBytesV1 {
+		return "", "", "", ErrInput
+	}
+	return subject, html, text, nil
 }
 
 // TestSavedTemplateV1 sends only an already saved edition, through the selected
 // workspace transport, to the authenticated owner's current address. Both CAS
 // observations and the genuine owner locks belong to this single transaction.
-func (s Service) TestSavedTemplateV1(ctx context.Context, a authoring.Actor, kind string, expectedSMTP, expectedTemplate int64) (out TestStatus, err error) {
+func (s Service) TestSavedTemplateV1(ctx context.Context, a authoring.Actor, kind string, expectedSMTP, expectedTemplate int64, overrides ...*string) (out TestStatus, err error) {
+	if len(overrides) > 1 || (len(overrides) == 1 && !emailtemplates.ValidSyntheticPreviewLocaleV1(overrides[0])) {
+		return out, ErrInput
+	}
 	if expectedSMTP < 1 || expectedTemplate < 0 || !dispatch.ServiceEmailKindV1(kind) {
 		return out, ErrInput
 	}
@@ -77,7 +91,7 @@ func (s Service) TestSavedTemplateV1(ctx context.Context, a authoring.Actor, kin
 		if e != nil || address.Address != u.Email {
 			return audit.PendingEvent{}, ErrInput
 		}
-		sample, e := emailtemplates.SavedSampleContextForOwnerV1(ctx, tx, a, guard, kind)
+		sample, e := emailtemplates.SavedSampleContextForOwnerV1(ctx, tx, a, guard, kind, overrides...)
 		if e != nil {
 			return audit.PendingEvent{}, e
 		}
@@ -119,7 +133,11 @@ func workspaceTestContentMatchesV1(d *generated.EmailDelivery, msg dispatch.Mess
 	if !kind.Valid {
 		return !revision.Valid && subjectHash == nil && htmlHash == nil && textHash == nil && d.Subject == testSubject && d.HtmlBody == testHTML && d.TextBody == testText
 	}
-	if !dispatch.ServiceEmailKindV1(kind.String) || !revision.Valid || revision.Int64 < 0 || len(subjectHash) != sha256.Size || len(htmlHash) != sha256.Size || len(textHash) != sha256.Size || !strings.HasPrefix(d.Subject, templateSampleSubjectPrefixV1) || !strings.Contains(d.HtmlBody, templateSampleHTMLNoticeV1) || !strings.HasPrefix(d.TextBody, templateSampleTextNoticeV1) {
+	htmlNotice, textNotice := templateSampleHTMLNoticeV1, templateSampleTextNoticeV1
+	if strings.HasPrefix(d.TextBody, templateSampleTextNoticeSVV1) {
+		htmlNotice, textNotice = templateSampleHTMLNoticeSVV1, templateSampleTextNoticeSVV1
+	}
+	if !dispatch.ServiceEmailKindV1(kind.String) || !revision.Valid || revision.Int64 < 0 || len(subjectHash) != sha256.Size || len(htmlHash) != sha256.Size || len(textHash) != sha256.Size || !strings.HasPrefix(d.Subject, templateSampleSubjectPrefixV1) || !strings.Contains(d.HtmlBody, htmlNotice) || !strings.HasPrefix(d.TextBody, textNotice) {
 		return false
 	}
 	if msg.To != d.ToEmail || msg.Subject != d.Subject || msg.HTML != d.HtmlBody || msg.Text != d.TextBody || msg.ReplyTo != "" || msg.FromName != "" || len(msg.Headers) != 0 {

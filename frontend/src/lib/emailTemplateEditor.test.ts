@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { get } from 'svelte/store';
 import { createEmailTemplateEditor, emailDraftProblems, emailPreviewDocument, emailTemplateKinds, editableEmailTemplateKinds, canEditEmailTemplate,
   type EmailTemplate, type EmailTemplateCatalog, type EmailTemplateEditorPorts, type EmailTemplateInput,
-  type EmailTemplatePreview, type EmailTemplateKind, createWorkspaceEmailPreferences, checkedWorkspaceEmailPreferences, type WorkspaceEmailPreferences, type WorkspaceEmailPreferencesPorts } from './emailTemplateEditor';
+  type EmailTemplatePreview, type EmailTemplateKind, createEmailTemplateSample, syntheticEmailLocale, createWorkspaceEmailPreferences, checkedWorkspaceEmailPreferences, type WorkspaceEmailPreferences, type WorkspaceEmailPreferencesPorts } from './emailTemplateEditor';
 
 const template = (kind: EmailTemplateKind = emailTemplateKinds[0], revision = 0): EmailTemplate => ({ kind, revision, editable: editableEmailTemplateKinds.includes(kind),
   subject_template: '', html_template: '', text_template: '', mandatory_content: 'appended_by_hash', variables: ['document_name', 'recipient_name'] });
@@ -267,4 +267,77 @@ test('the maximum persisted preference revision remains readable but cannot star
   expect(checkedWorkspaceEmailPreferences(snapshot)).toEqual(snapshot);
   const { form, calls } = preferenceSetup({ load: async () => snapshot }); await form.load();
   expect(form.edit('sv')).toBe(false); expect(await form.save()).toBe(false); expect(calls).toEqual([]); expect(get(form).unconfirmed).toBe(false); form.dispose();
+});
+
+
+test('synthetic locale defaults are presentation-only and explicit choices do not rewrite drafts or saves', async () => {
+  expect(syntheticEmailLocale('email.invite', 'sv', 'en')).toBe('sv');
+  expect(syntheticEmailLocale('email.quota_warning_80', 'sv', 'en')).toBe('en');
+  expect(syntheticEmailLocale('email.quota_warning_80', 'sv')).toBeUndefined();
+  expect(syntheticEmailLocale('email.quota_warning_80', 'en', 'en', 'sv')).toBe('sv');
+  const { editor, calls } = setup({ preview: async (_kind, input) => ({ ...rendered(input.expected_revision), locale: input.preview_locale ?? 'en' }) });
+  await editor.load(); editor.edit('text_template', 'Keep this literal English wording');
+  expect(editor.setPreviewLocale('sv')).toBe(true); expect(await editor.preview()).toBe(true);
+  expect(get(editor).preview?.locale).toBe('sv'); expect(get(editor).draft.text_template).toBe('Keep this literal English wording');
+  expect(await editor.save()).toBe(true); expect(calls.save[0]).not.toHaveProperty('preview_locale');
+  expect(calls.save[0].text_template).toBe('Keep this literal English wording');
+  expect(editor.setPreviewLocale('SV' as any)).toBe(false); editor.dispose();
+});
+test('changing synthetic language cancels old preview ownership and refuses late or mismatched language results', async () => {
+  const old = deferred<EmailTemplatePreview>(); let count = 0, oldSignal!: AbortSignal;
+  const { editor } = setup({ preview: async (_kind, input, signal) => {
+    if (++count === 1) { oldSignal = signal; return old.promise; }
+    return { ...rendered(input.expected_revision), locale: input.preview_locale ?? 'en' };
+  } });
+  await editor.load(); editor.setPreviewLocale('en'); const pending = editor.preview();
+  expect(editor.setPreviewLocale('sv')).toBe(true); expect(oldSignal.aborted).toBe(true); expect(await pending).toBe(false);
+  expect(await editor.preview()).toBe(true); old.resolve(rendered()); await Promise.resolve();
+  expect(get(editor).preview?.locale).toBe('sv'); expect(get(editor).dirty).toBe(false); editor.dispose();
+  const mismatched = setup({ preview: async () => rendered() }); await mismatched.editor.load(); mismatched.editor.setPreviewLocale('sv');
+  expect(await mismatched.editor.preview()).toBe(false); expect(get(mismatched.editor).preview).toBeNull(); mismatched.editor.dispose();
+});
+test('a language change invalidates an AI proposal without automatically calling the provider or changing source', async () => {
+  let requests = 0; const pending = deferred<any>();
+  const { editor } = setup({ propose: async () => { requests++; return pending.promise; } });
+  await editor.load(); editor.edit('text_template', 'Literal'); editor.setPreviewLocale('en'); const proposed = editor.propose('Style only');
+  editor.setPreviewLocale('sv'); expect(await proposed).toBe(false); pending.resolve({}); await Promise.resolve();
+  expect(requests).toBe(1); expect(get(editor).proposal).toBeNull(); expect(get(editor).draft.text_template).toBe('Literal'); editor.dispose();
+});
+const sampleReceipt = { delivery_id: '30303030-3030-4030-8030-303030303030', status: 'pending' as const, smtp_accepted: false, inbox_delivery_confirmed: false };
+function sampleSetup(send: Parameters<typeof createEmailTemplateSample>[0]['send']) {
+  const statuses: string[] = [];
+  const sample = createEmailTemplateSample({ load: async () => ({ configured: true, revision: 3 } as any), send,
+    status: async id => { statuses.push(id); return { ...sampleReceipt, delivery_id: id, status: 'sent', smtp_accepted: true }; } });
+  sample.setScope('email.invite', 7, 'en');
+  return { sample, statuses };
+}
+test('locale changes preserve the original in-flight test receipt and its status instead of resending or relabelling it', async () => {
+  const pending = deferred<typeof sampleReceipt>(); const sent: unknown[][] = [];
+  const { sample, statuses } = sampleSetup(async (...args) => { sent.push(args); return pending.promise; });
+  await sample.act('settings'); const sending = sample.act('send');
+  expect(sent).toHaveLength(1); expect(sent[0][4]).toBe('en');
+  sample.setScope('email.invite', 7, 'sv'); expect(await sample.act('send')).toBe(false);
+  pending.resolve(sampleReceipt); expect(await sending).toBe(true);
+  expect(get(sample).attemptLocale).toBe('en'); expect(get(sample).receipt?.delivery_id).toBe(sampleReceipt.delivery_id);
+  expect(await sample.act('send')).toBe(false); expect(await sample.act('status')).toBe(true);
+  expect(statuses).toEqual([sampleReceipt.delivery_id]); expect(get(sample).attemptLocale).toBe('en'); expect(sent).toHaveLength(1); sample.dispose();
+});
+test('unknown test outcome stays latched across locale changes and disabled or invalid selections never send', async () => {
+  let sent = 0; const { sample } = sampleSetup(async () => { sent++; throw { status: 503 }; });
+  await sample.act('settings'); sample.setScope('email.invite', 7, 'en', true); expect(await sample.act('send')).toBe(false);
+  expect(sample.setScope('email.invite', 7, 'SV' as any)).toBe(false);
+  sample.setScope('email.invite', 7, 'en'); expect(await sample.act('send')).toBe(false); expect(get(sample).uncertain).toBe(true);
+  sample.setScope('email.invite', 7, 'sv'); expect(await sample.act('send')).toBe(false);
+  expect(get(sample).uncertain).toBe(true); expect(get(sample).attemptLocale).toBe('en'); expect(sent).toBe(1); sample.dispose();
+});
+
+
+test('a timed-out test send is bounded even if its transport ignores abort and later locale changes cannot retry it', async () => {
+  const late = deferred<typeof sampleReceipt>(); let sends = 0, signal!: AbortSignal;
+  const sample = createEmailTemplateSample({ load: async () => ({ configured: true, revision: 3 } as any),
+    send: async (_kind, _revision, _smtp, request) => { sends++; signal = request; return late.promise; }, status: async () => sampleReceipt }, { requestTimeoutMs: 10 });
+  sample.setScope('email.invite', 7, 'sv'); await sample.act('settings');
+  expect(await sample.act('send')).toBe(false); expect(signal.aborted).toBe(true); expect(get(sample).uncertain).toBe(true);
+  sample.setScope('email.invite', 7, 'en'); late.resolve(sampleReceipt); await Promise.resolve();
+  expect(get(sample).receipt).toBeNull(); expect(await sample.act('send')).toBe(false); expect(sends).toBe(1); sample.dispose();
 });

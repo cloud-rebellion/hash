@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { emailDesignProblem } from './emailDesign';
+import type { WorkspaceSMTP, SMTPTestReceipt } from './workspaceSMTP';
 
 export const emailTemplateKinds = [
   'email.invite', 'email.reminder', 'email.completed_signer', 'email.completed_sender',
@@ -45,11 +46,12 @@ export interface EmailDesignProposal {
   preview: EmailTemplatePreview; saved: false;
 }
 export type EmailTemplateInput = EmailTemplateFields & { expected_revision: number };
+export type EmailTemplatePreviewInput = EmailTemplateInput & { preview_locale?: WorkspaceEmailLocale };
 export interface EmailTemplateEditorPorts {
-  propose?: (kind: EmailTemplateKind, input: EmailTemplateInput, prompt: string, signal: AbortSignal) => Promise<EmailDesignProposal>;
+  propose?: (kind: EmailTemplateKind, input: EmailTemplatePreviewInput, prompt: string, signal: AbortSignal) => Promise<EmailDesignProposal>;
   load: (signal: AbortSignal) => Promise<EmailTemplateCatalog>;
   save: (kind: EmailTemplateKind, input: EmailTemplateInput, signal: AbortSignal) => Promise<EmailTemplate>;
-  preview: (kind: EmailTemplateKind, input: EmailTemplateInput, signal: AbortSignal) => Promise<EmailTemplatePreview>;
+  preview: (kind: EmailTemplateKind, input: EmailTemplatePreviewInput, signal: AbortSignal) => Promise<EmailTemplatePreview>;
 }
 export type EmailField = keyof EmailTemplateFields;
 export interface EmailEditorState {
@@ -63,6 +65,7 @@ export interface EmailEditorState {
   dirty: boolean;
   preview: EmailTemplatePreview | null;
   previewOutdated: boolean;
+  previewLocale?: WorkspaceEmailLocale;
   authorized: boolean;
   proposal: EmailDesignProposal | null;
 }
@@ -192,14 +195,24 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
       preview: null, previewOutdated: false, proposal: null });
     return true;
   }
+  function setPreviewLocale(value: WorkspaceEmailLocale | undefined) {
+    if (disposed || (value !== undefined && !isWorkspaceEmailLocale(value)) || state.previewLocale === value || state.busy === 'saving' || state.busy === 'loading') return false;
+    sequence++; controller?.abort(); cleanupRequest?.(); cleanupRequest = null; controller = null;
+    publish({ previewLocale: value, preview: null, previewOutdated: false, proposal: null, busy: null, error: null, notice: null });
+    return true;
+  }
+  function previewInput(draft: EmailTemplateInput): EmailTemplatePreviewInput {
+    return { ...draft, ...(state.previewLocale === undefined ? {} : { preview_locale: state.previewLocale }) };
+  }
   async function preview() {
     if (disposed || state.busy) return false;
-    const draft = input(); const selected = state.selected; if (!draft || !selected) return false;
+    const source = input(); const selected = state.selected; if (!source || !selected) return false;
+    const draft = previewInput(source);
     const request = start('previewing'); if (!request) return false;
     try {
       const result = await request.wait(ports.preview(selected.kind, draft, request.signal));
       if (!current(request.operation)) return false;
-      if (result.revision !== draft.expected_revision || !result.synthetic || !result.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.locale)) {
+      if (result.revision !== draft.expected_revision || !result.synthetic || !result.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.locale, draft.preview_locale)) {
         throw new Error('Unbound preview');
       }
       publish({ preview: result, previewOutdated: false });
@@ -229,14 +242,16 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
   }
   async function propose(prompt: string) {
     if (disposed || state.busy || !ports.propose || !canEditEmailTemplate(state.selected) || !prompt.trim() || emailFieldBytes(prompt) > 4096) return false;
-    const draft = input(); const selected = state.selected; if (!draft || !selected) return false;
+    const source = input(); const selected = state.selected; if (!source || !selected) return false;
+    const draft = previewInput(source);
     const request = start('proposing'); if (!request) return false;
     try {
       const result = await request.wait(ports.propose(selected.kind, draft, prompt, request.signal));
       if (!current(request.operation)) return false;
       if (result.schema_version !== 1 || result.saved !== false || result.kind !== selected.kind || result.expected_revision !== selected.revision
           || result.input.expected_revision !== selected.revision || result.preview.revision !== selected.revision
-          || !result.preview.synthetic || !result.preview.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.preview.locale)
+          || !result.preview.synthetic || !result.preview.mandatory_content_preserved || !emailPreviewLocale(selected.kind, result.preview.locale, draft.preview_locale)
+          || Object.keys(result.input).some(key => !['expected_revision', 'subject_template', 'html_template', 'text_template', 'design_json'].includes(key))
           || Object.keys(emailDraftProblems(result.input, state.catalog!.limits)).length) throw new Error('Unbound design proposal');
       publish({ proposal: result });
       return true;
@@ -260,7 +275,7 @@ export function createEmailTemplateEditor(ports: EmailTemplateEditorPorts, optio
     publish({ preview: null, previewOutdated: false, proposal: null }); return true;
   }
   function dispose() { disposed = true; sequence++; controller?.abort(); cleanupRequest?.(); cleanupRequest = null; controller = null; }
-  return { subscribe: store.subscribe, load, select, edit, cancel, preview, save, propose, acceptProposal, discardProposal, invalidateQuotaPreview, dispose };
+  return { subscribe: store.subscribe, load, select, edit, cancel, setPreviewLocale, preview, save, propose, acceptProposal, discardProposal, invalidateQuotaPreview, dispose };
 }
 
 // No preview resources, scripts, forms, navigation or parent privileges. The UI
@@ -272,12 +287,101 @@ export function emailPreviewDocument(html: string): string {
 
 
 export type WorkspaceEmailLocale = 'en' | 'sv';
+export interface EmailTemplateSamplePorts {
+  load(signal: AbortSignal): Promise<WorkspaceSMTP>;
+  send(kind: EmailTemplateKind, templateRevision: number, smtpRevision: number, signal: AbortSignal, previewLocale?: WorkspaceEmailLocale): Promise<SMTPTestReceipt>;
+  status(id: string, signal: AbortSignal): Promise<SMTPTestReceipt>;
+}
+export interface EmailTemplateSampleState {
+  smtp: WorkspaceSMTP | null; receipt: SMTPTestReceipt | null; busy: boolean; error: string | null; uncertain: boolean;
+  attemptLocale?: WorkspaceEmailLocale;
+}
+// A presentation choice cannot erase ownership of a durable test request. Its
+// receipt/status remains tied to the original attempt, even after another
+// preview language is selected. No locale change sends or retries anything.
+export function createEmailTemplateSample(ports: EmailTemplateSamplePorts, options: { requestTimeoutMs?: number } = {}) {
+  const timeoutMs = options.requestTimeoutMs ?? 30000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new RangeError('Invalid request deadline');
+  type Scope = { kind: EmailTemplateKind; revision: number; locale?: WorkspaceEmailLocale; disabled: boolean };
+  let scope: Scope | null = null, disposed = false, generation = 0, request: AbortController | null = null;
+  let operation: 'settings' | 'send' | 'status' | null = null;
+  let releaseRequest: (() => void) | null = null;
+  let state: EmailTemplateSampleState = { smtp: null, receipt: null, busy: false, error: null, uncertain: false };
+  const store = writable(state);
+  const publish = (patch: Partial<EmailTemplateSampleState>) => { state = { ...state, ...patch }; store.set(state); };
+  const identity = (value: Scope) => JSON.stringify([value.kind, value.revision]);
+  function setScope(kind: EmailTemplateKind, revision: number, locale: WorkspaceEmailLocale | undefined, disabled = false) {
+    if (disposed || !emailTemplateKinds.includes(kind) || !Number.isSafeInteger(revision) || revision < 0 || locale !== undefined && !isWorkspaceEmailLocale(locale)) return false;
+    const next = { kind, revision, locale, disabled };
+    if (scope && identity(scope) !== identity(next)) {
+      const uncertain = state.uncertain || operation === 'send';
+      generation++; request?.abort(); request = null; operation = null;
+      publish({ busy: false, uncertain, error: uncertain ? 'Could not confirm whether the test was queued. Check your inbox and reload before another test.' : state.error });
+    }
+    scope = next;
+    return true;
+  }
+  async function act(nextOperation: 'settings' | 'send' | 'status') {
+    const selected = scope;
+    if (disposed || !selected || state.busy
+        || nextOperation === 'send' && (selected.disabled || state.uncertain || !state.smtp?.configured || !!state.receipt && !state.receipt.smtp_accepted && state.receipt.status !== 'failed')
+        || nextOperation === 'status' && !state.receipt) return false;
+    const ticket = ++generation, selectedIdentity = identity(selected), deliveryID = state.receipt?.delivery_id;
+    const controller = new AbortController(); request = controller; operation = nextOperation;
+    publish({ busy: true, error: null, ...(nextOperation === 'send' ? { attemptLocale: selected.locale, receipt: null } : {}) });
+    let rejectAbort!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    const abort = () => rejectAbort(new Error('Test request interrupted'));
+    controller.signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const release = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); };
+    releaseRequest = release;
+    const wait = <T>(promise: Promise<T>) => Promise.race([promise, aborted]);
+    const current = () => !disposed && ticket === generation && scope !== null && selectedIdentity === identity(scope);
+    try {
+      if (nextOperation === 'settings') {
+        const result = await wait(ports.load(controller.signal));
+        if (controller.signal.aborted) throw new Error('Test request timed out');
+        if (current()) publish({ smtp: result });
+      } else if (nextOperation === 'send') {
+        const result = await wait(ports.send(selected.kind, selected.revision, state.smtp!.revision, controller.signal, selected.locale));
+        if (controller.signal.aborted) throw new Error('Test request timed out');
+        if (current()) publish({ receipt: result });
+      } else {
+        const result = await wait(ports.status(deliveryID!, controller.signal));
+        if (controller.signal.aborted) throw new Error('Test request timed out');
+        if (result.delivery_id !== deliveryID) throw new Error('Test receipt identity changed');
+        if (current()) publish({ receipt: result });
+      }
+      return current();
+    } catch (cause) {
+      if (!current()) return false;
+      const status = Number((cause as { status?: number })?.status) || 0;
+      if (nextOperation === 'send' && (status === 0 || status >= 500)) {
+        publish({ uncertain: true, error: 'Could not confirm whether the test was queued. Check your inbox and reload before another test.' });
+      } else if (status === 409) publish({ smtp: null, error: 'The saved template or delivery settings changed. Reload and review before testing.' });
+      else if (status === 429) publish({ error: 'A test is pending or was requested recently. Check its status before sending another.' });
+      else if (status === 401 || status === 403) publish({ smtp: null, error: 'Owner access is no longer available. Sign in again.' });
+      else publish({ error: 'Could not check the email test. Try again.' });
+      return false;
+    } finally {
+      release();
+      if (current()) { request = null; operation = null; releaseRequest = null; publish({ busy: false }); }
+    }
+  }
+  function dispose() { disposed = true; generation++; request?.abort(); releaseRequest?.(); releaseRequest = null; request = null; }
+  return { subscribe: store.subscribe, setScope, act, dispose };
+}
+
 export interface WorkspaceEmailPreferences {
   schema_version: 1; org_id: string; revision: number; locale: WorkspaceEmailLocale; updated_at: string | null;
 }
 export const isWorkspaceEmailLocale = (value: unknown): value is WorkspaceEmailLocale => value === 'en' || value === 'sv';
-export function emailPreviewLocale(kind: EmailTemplateKind, value: unknown): value is WorkspaceEmailLocale {
-  return isWorkspaceEmailLocale(value) && (kind === 'email.quota_warning_80' || value === 'en');
+export function emailPreviewLocale(kind: EmailTemplateKind, value: unknown, requested?: WorkspaceEmailLocale): value is WorkspaceEmailLocale {
+  return isWorkspaceEmailLocale(value) && (requested === undefined ? kind === 'email.quota_warning_80' || value === 'en' : value === requested);
+}
+export function syntheticEmailLocale(kind: EmailTemplateKind | undefined, staff: WorkspaceEmailLocale, workspace?: WorkspaceEmailLocale, override?: WorkspaceEmailLocale): WorkspaceEmailLocale | undefined {
+  return override ?? (kind === 'email.quota_warning_80' ? workspace : staff);
 }
 export function checkedWorkspaceEmailPreferences(value: unknown): WorkspaceEmailPreferences {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Email preferences contract rejected');

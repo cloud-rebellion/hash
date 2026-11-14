@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -20,11 +21,17 @@ func (s *Server) handleTestSavedEmailTemplateV1(w http.ResponseWriter, r *http.R
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	var in struct {
-		ExpectedSMTPRevision     *int64 `json:"expected_smtp_revision"`
-		ExpectedTemplateRevision *int64 `json:"expected_template_revision"`
+		ExpectedSMTPRevision     *int64          `json:"expected_smtp_revision"`
+		ExpectedTemplateRevision *int64          `json:"expected_template_revision"`
+		PreviewLocale            json.RawMessage `json:"preview_locale"`
 	}
 	if decodeSignerJSON(r, &in) != nil || in.ExpectedSMTPRevision == nil || in.ExpectedTemplateRevision == nil {
 		s.writeWorkspaceSMTPError(w, workspacesmtp.ErrInput)
+		return
+	}
+	previewLocale, err := emailtemplates.DecodeSyntheticPreviewLocaleV1(in.PreviewLocale)
+	if err != nil {
+		s.writeEmailTemplateError(w, err)
 		return
 	}
 	ctx, source, err := s.emailTemplateService().BeginSourceReadV1(r.Context(), a)
@@ -33,7 +40,7 @@ func (s *Server) handleTestSavedEmailTemplateV1(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer source.CloseConsumerV1()
-	v, err := s.workspaceSMTPService().TestSavedTemplateV1(ctx, a, chi.URLParam(r, "kind"), *in.ExpectedSMTPRevision, *in.ExpectedTemplateRevision)
+	v, err := s.workspaceSMTPService().TestSavedTemplateV1(ctx, a, chi.URLParam(r, "kind"), *in.ExpectedSMTPRevision, *in.ExpectedTemplateRevision, previewLocale)
 	if err != nil {
 		if errors.Is(err, emailtemplates.ErrStale) || errors.Is(err, emailtemplates.ErrInput) {
 			s.writeEmailTemplateError(w, err)

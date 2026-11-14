@@ -301,6 +301,15 @@ REST settings; a proposal rechecks the current owner and revision after AI IO.
 List takes `{}` and returns nine kinds, eight editable capabilities, revisions,
 allowed variables and source byte limits. Preview and Save require `kind`,
 `expected_revision`, `subject_template`, `html_template` and `text_template`.
+Synthetic preview and proposal requests accept optional `preview_locale` with
+exactly `"en"` or `"sv"`; MCP exposes it only on
+`preview_service_email_template` and `propose_service_email_design`. It selects
+native example copy, not custom source or actual delivery language. Omission
+keeps non-quota examples English and quota examples in the saved workspace
+language. Null, empty, aliases and unsupported values are refused, and template
+Save/List do not accept this field. It is never persisted in an edition or sent
+to the AI provider. Responses identify the actual rendered `locale`.
+
 REST uses `GET /api/v1/email-templates`, `PUT /api/v1/email-templates/{kind}`
 and `POST /api/v1/email-templates/{kind}/preview`, with kind in the path.
 The optional `design_json` is a JSON string: omission preserves the saved
@@ -366,6 +375,14 @@ outbox through `POST /api/v1/workspace-smtp/test` and the scoped status GET.
 Usernames/passwords are never returned. SMTP acceptance is separate from inbox
 delivery. See [Workspace SMTP](WORKSPACE-SMTP.md) for exact fields, TLS/egress,
 credential-retention protections and migration compatibility.
+
+The existing owner-session test request additionally accepts optional
+`preview_locale` (`"en"` or `"sv"`) with the same omitted defaults. This changes
+only the synthetic native content and localized test warning. The owner's
+address, both observed revisions, fixed inactive URLs, rate fence and immutable
+subject/HTML/text receipt remain authoritative. There is no MCP test-send tool.
+Choose the same concrete locale used for the preview; a locale change must not
+clear an unknown send outcome or automatically queue a replacement.
 
 `POST /api/v1/email-templates/{kind}/test` tests the observed saved or built-in
 edition and requires

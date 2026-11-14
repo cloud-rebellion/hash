@@ -30,6 +30,7 @@ func (s *Server) handleProposeEmailDesignV1(w http.ResponseWriter, r *http.Reque
 		HTMLTemplate     *string         `json:"html_template"`
 		TextTemplate     *string         `json:"text_template"`
 		DesignJSON       json.RawMessage `json:"design_json"`
+		PreviewLocale    json.RawMessage `json:"preview_locale"`
 		Prompt           *string         `json:"prompt"`
 	}
 	if decodeSignerJSON(r, &wire) != nil || wire.ExpectedRevision == nil || wire.SubjectTemplate == nil || wire.HTMLTemplate == nil || wire.TextTemplate == nil || wire.Prompt == nil {
@@ -44,6 +45,12 @@ func (s *Server) handleProposeEmailDesignV1(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		in.DesignJSON = &value
+	}
+	var localeErr error
+	in.PreviewLocale, localeErr = emailtemplates.DecodeSyntheticPreviewLocaleV1(wire.PreviewLocale)
+	if localeErr != nil {
+		s.writeEmailTemplateError(w, localeErr)
+		return
 	}
 	out, err := s.emailTemplateService().Propose(r.Context(), actor, kind, in)
 	if err != nil {

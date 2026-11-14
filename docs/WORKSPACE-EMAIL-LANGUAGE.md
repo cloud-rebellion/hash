@@ -65,18 +65,28 @@ The nine-kind catalog now has eight editable kinds. `email.declined` and
 the six existing editable kinds. `email.voided` remains built-in-only. There is
 no new voided-email producer.
 
-Synthetic Preview and AI proposal Preview responses include `locale`. A quota
-sample uses the saved workspace email preference at the preview transaction;
-other samples retain their existing English context. The explicit sample
-language is separate from custom literal source. A preference change invalidates
-an old quota preview in the settings UI; reload the preference and preview again.
-The existing explicit saved-template SMTP sample uses the same guarded quota
-language selection in its original owner transaction. Other sample kinds retain
-English. Its authenticated owner destination, SMTP/template CAS, rate fence,
-synthetic notice and immutable queued-byte receipt remain unchanged. Changing
-the preference does not request or deliver a sample.
-Preview never sends or saves. AI proposal still requires the configured enabled
-workspace provider, normal accounting and a separate human-reviewed save.
+Synthetic Preview and AI proposal Preview responses include the actual `locale`.
+Preview, proposal and the existing saved-template test accept an optional
+`preview_locale` of exactly `en` or `sv`. This selects native synthetic copy only;
+it never saves a language preference or translates literal custom source. The
+field is refused on template Save. An omitted field preserves English for
+non-quota samples and the saved workspace language for quota samples.
+
+The email designer defaults non-quota examples to the current interface language
+and quota examples to the confirmed workspace language. The synthetic selector
+can override either. Preview and test use the same selected language, which is
+labelled separately from actual document/recipient and scheduled-mail rules.
+Changing it invalidates an older preview/proposal without saving, sending or
+calling AI. An uncertain test outcome and its original delivery receipt must be
+reconciled before another test; changing presentation language is not a retry.
+
+The saved-template test still queues only to the authenticated owner's account,
+with inactive synthetic links and a test-only warning in the prepared sample's
+language. Original SMTP/template CAS, rate fence, exact queued-byte commitments
+and unknown-outcome safeguards remain. It grants no new recipient or transport
+choice. Preview never sends or saves. AI proposal still requires the existing
+enabled provider and accounting, an explicit request and a separate reviewed save;
+the synthetic language choice is not added to the provider prompt.
 
 ## Native delivery and rollout boundary
 

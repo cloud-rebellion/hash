@@ -37,3 +37,16 @@ test('queued is distinct from SMTP or inbox receipt and unbounded or mismatched 
   await expect(startSavedEmailTemplateTest('email.invite', 7, 3, new AbortController().signal)).rejects.toThrow('exceeded its bound');
   expect(cancelled).toBe(true);
 });
+
+
+test('saved-template test forwards only an optional exact synthetic locale alongside both revisions', async () => {
+  for (const locale of ['en', 'sv'] as const) {
+    let request!: RequestInit;
+    globalThis.fetch = (async (_path, init) => { request = init!; return Response.json(pending, { status: 202 }); }) as typeof fetch;
+    await startSavedEmailTemplateTest('email.invite', 7, 3, new AbortController().signal, locale);
+    expect(JSON.parse(String(request.body))).toEqual({ expected_template_revision: 7, expected_smtp_revision: 3, preview_locale: locale });
+  }
+  let calls = 0; globalThis.fetch = (async () => { calls++; return Response.json(pending, { status: 202 }); }) as typeof fetch;
+  for (const locale of [null, '', 'SV', 'sv-SE', 1]) await expect(startSavedEmailTemplateTest('email.invite', 7, 3, new AbortController().signal, locale as any)).rejects.toThrow();
+  expect(calls).toBe(0);
+});

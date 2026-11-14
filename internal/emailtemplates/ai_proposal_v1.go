@@ -57,7 +57,7 @@ const emailDesignPromptV1 = `You propose an email design for a workspace owner. 
 // provider/Shield/accounting runtime owns the request. A fresh original-owner
 // and revision check is required before any candidate/preview can leave Hash.
 func (s Service) Propose(ctx context.Context, actor authoring.Actor, kind string, in ProposalInput) (out Proposal, err error) {
-	if !dispatch.ServiceEmailTemplateEditableKindV1(kind) || len(in.Prompt) == 0 || len(in.Prompt) > 4096 || !dispatch.ServiceEmailTextSourceV1(in.Prompt) {
+	if !ValidSyntheticPreviewLocaleV1(in.PreviewLocale) || !dispatch.ServiceEmailTemplateEditableKindV1(kind) || len(in.Prompt) == 0 || len(in.Prompt) > 4096 || !dispatch.ServiceEmailTextSourceV1(in.Prompt) {
 		return out, ErrInput
 	}
 	if s.Runtime == nil || s.Runtime.ResolveNativeOrgProvider == nil || s.Runtime.ResolveOrgProvider == nil {
@@ -202,7 +202,7 @@ func (s Service) Propose(ctx context.Context, actor authoring.Actor, kind string
 			return e
 		}
 		defer closeRender()
-		previewContext, e := syntheticContextV1(fresh, tx, actor.OrgID, kind)
+		previewContext, e := syntheticContextV1(fresh, tx, actor.OrgID, kind, in.PreviewLocale)
 		if e != nil {
 			return e
 		}

@@ -410,3 +410,34 @@ func TestServiceEmailMCPNativeErrorsAndEmptyResetDelegation(t *testing.T) {
 		t.Fatal("empty reset rewritten", result)
 	}
 }
+
+func TestServiceEmailMCPSyntheticLocaleIsPreviewOnlyV1(t *testing.T) {
+	for _, locale := range []string{"en", "sv"} {
+		s, v, f := serviceEmailFixture(t)
+		args := strings.TrimSuffix(serviceEmailValidArgs, "}") + `,"preview_locale":"` + locale + `"}`
+		response := serviceEmailCall(t, s, v, "preview_service_email_template", args)
+		if response.Error != nil || decodedToolResult(t, response).IsError || f.input.PreviewLocale == nil || *f.input.PreviewLocale != locale || len(f.calls) != 1 {
+			t.Fatal("preview locale not delegated with original owner", locale)
+		}
+		before := len(f.calls)
+		response = serviceEmailCall(t, s, v, "save_service_email_template", args)
+		if response.Error == nil && !decodedToolResult(t, response).IsError || len(f.calls) != before {
+			t.Fatal("preview locale leaked into save")
+		}
+	}
+	for _, suffix := range []string{`,"preview_locale":null}`, `,"preview_locale":""}`, `,"preview_locale":"sv-SE"}`, `,"preview_locale":"sv","preview_locale":"en"}`} {
+		s, v, f := serviceEmailFixture(t)
+		args := strings.TrimSuffix(serviceEmailValidArgs, "}") + suffix
+		response := serviceEmailCall(t, s, v, "preview_service_email_template", args)
+		if response.Error == nil && !decodedToolResult(t, response).IsError || len(f.calls) != 0 {
+			t.Fatal("invalid locale reached service", suffix)
+		}
+	}
+	s := New(Deps{})
+	if _, ok := s.tools["preview_service_email_template"].InputSchema["properties"].(map[string]any)["preview_locale"]; !ok {
+		t.Fatal("preview locale absent from registered schema")
+	}
+	if _, ok := s.tools["save_service_email_template"].InputSchema["properties"].(map[string]any)["preview_locale"]; ok {
+		t.Fatal("save schema accepts preview locale")
+	}
+}

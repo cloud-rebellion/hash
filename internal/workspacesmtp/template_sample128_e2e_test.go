@@ -22,8 +22,16 @@ import (
 // Genuine owner transaction, native process admission and PostgreSQL queue.
 // No worker/Deliver/SMTP consumer is invoked; this proves prepared bytes only.
 func TestWorkspaceEmail128SavedSampleLanguageAndFrozenQueueE2E(t *testing.T) {
-	for _, kind := range []string{dispatch.KindQuotaWarning80, dispatch.KindDeclined} {
-		t.Run(kind, func(t *testing.T) {
+	en, sv := "en", "sv"
+	for _, tc := range []struct {
+		kind, name string
+		locale     *string
+	}{
+		{dispatch.KindQuotaWarning80, "quota-default", nil}, {dispatch.KindDeclined, "decline-default", nil},
+		{dispatch.KindQuotaWarning80, "quota-explicit-en", &en}, {dispatch.KindDeclined, "decline-explicit-sv", &sv},
+	} {
+		kind := tc.kind
+		t.Run(tc.name, func(t *testing.T) {
 			f := smtpConsumerFixture(t)
 			username, password := "synthetic-sample-user", "synthetic-sample-password"
 			if _, err := f.s.Save(f.ctx, f.a, Input{Host: "smtp.example.invalid", Port: 587, TLSMode: "starttls", SenderName: "Synthetic workspace", SenderEmail: "sender@example.invalid", CredentialsAction: "replace", Username: &username, Password: &password}); err != nil {
@@ -62,7 +70,7 @@ func TestWorkspaceEmail128SavedSampleLanguageAndFrozenQueueE2E(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer source.CloseConsumerV1()
-			receipt, err := f.s.TestSavedTemplateV1(ctx, f.a, kind, 1, 1)
+			receipt, err := f.s.TestSavedTemplateV1(ctx, f.a, kind, 1, 1, tc.locale)
 			if err != nil || receipt.Status != "pending" || receipt.SMTPAccepted || receipt.InboxDeliveryConfirmed {
 				t.Fatal("saved sample did not freeze pending bytes", err)
 			}
@@ -74,16 +82,34 @@ func TestWorkspaceEmail128SavedSampleLanguageAndFrozenQueueE2E(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			expectedLocale := "en"
+			if kind == dispatch.KindQuotaWarning80 {
+				expectedLocale = "sv"
+			}
+			if tc.locale != nil {
+				expectedLocale = *tc.locale
+			}
+			expectedHTMLNotice := templateSampleHTMLNoticeV1
+			if expectedLocale == "sv" {
+				expectedHTMLNotice = templateSampleHTMLNoticeSVV1
+			}
 			owner, err := f.q.GetUserForShare(f.ctx, generated.GetUserForShareParams{ID: f.a.UserID, OrgID: f.a.OrgID})
-			if err != nil || d.ToEmail != owner.Email || !strings.Contains(d.HtmlBody, "Saved sample one") || !strings.Contains(d.HtmlBody, templateSampleHTMLNoticeV1) {
+			if err != nil || d.ToEmail != owner.Email || !strings.Contains(d.HtmlBody, "Saved sample one") || !strings.Contains(d.HtmlBody, expectedHTMLNotice) {
 				t.Fatal("sample changed owner destination, edition or notice", err)
 			}
 			if kind == dispatch.KindQuotaWarning80 {
-				if !strings.Contains(d.HtmlBody, "har nått") || !strings.Contains(d.TextBody, "Perioden") {
-					t.Fatal("quota test ignored saved Swedish preference")
+				if expectedLocale == "sv" && (!strings.Contains(d.HtmlBody, "har nått") || !strings.Contains(d.TextBody, "Perioden")) {
+					t.Fatal("quota sample lost selected Swedish")
+				}
+				if expectedLocale == "en" && strings.Contains(d.HtmlBody, "har nått") {
+					t.Fatal("explicit English quota followed workspace Swedish")
+				}
+			} else if expectedLocale == "sv" {
+				if !strings.Contains(d.HtmlBody, "avböj") {
+					t.Fatal("explicit Swedish nonquota retained English")
 				}
 			} else if strings.Contains(d.HtmlBody, "avböj") || !strings.Contains(d.TextBody, "declined") {
-				t.Fatal("workspace preference changed nonquota synthetic English")
+				t.Fatal("omitted nonquota language changed")
 			}
 			msg := dispatch.Message{To: d.ToEmail, Subject: d.Subject, HTML: d.HtmlBody, Text: d.TextBody}
 			if !workspaceTestContentMatchesV1(&d, msg, headerKind, revision, sh, hh, th) {

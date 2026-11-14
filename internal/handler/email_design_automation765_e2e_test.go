@@ -202,3 +202,13 @@ func TestAutomation121NativePreferenceOccupiedDownAndReUp765E2E(t *testing.T) {
 	}
 	ownedCreationAssertDrainedV1(t, q, 1)
 }
+
+func TestSyntheticEmailProposalLocaleRejectsInvalidBeforeProviderV1E2E(t *testing.T) {
+	f := email720Fixture(t)
+	for _, value := range []string{`null`, `""`, `"sv-SE"`, `true`} {
+		body := `{"expected_revision":0,"subject_template":"","html_template":"","text_template":"","prompt":"Use current design","preview_locale":` + value + `}`
+		if r := f.request(http.MethodPost, "/api/v1/email-templates/email.invite/propose", body); r.Code != 400 {
+			t.Fatal("invalid locale reached proposal provider", value, r.Code)
+		}
+	}
+}

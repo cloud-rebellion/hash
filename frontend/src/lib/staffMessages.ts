@@ -506,4 +506,11 @@ export const swedishStaffMessages: Record<string, string> = {
   ...swedishAutomationMessages,
   ...swedishEmailDesignMessages,
   ...swedishEmailSampleMessages,
+  "Synthetic preview and test language": "Språk för testvisning och testmejl",
+  "Use interface language": "Använd gränssnittets språk",
+  "Use saved workspace language": "Använd arbetsytans sparade språk",
+  "This choice changes only synthetic previews and test emails. Customer messages keep their document or recipient language; usage warnings keep the saved workspace language. Custom wording is never translated.": "Valet ändrar bara testvisningar och testmejl. Kundmejl behåller dokumentets eller mottagarens språk, och användningsvarningar behåller arbetsytans sparade språk. Egen text översätts aldrig.",
+  "Requested test language: {language}": "Språk för det begärda testet: {language}",
+  "Workspace default": "Arbetsytans standard",
+
 };

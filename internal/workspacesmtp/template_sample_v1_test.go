@@ -10,6 +10,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/emailtemplates"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -71,5 +72,46 @@ func TestSavedTemplateSampleReceiptBindsFrozenMessageAndFixedRecipient760(t *tes
 	canned := generated.EmailDelivery{Subject: testSubject, HtmlBody: testHTML, TextBody: testText, HeadersJson: []byte("{}")}
 	if !workspaceTestContentMatchesV1(&canned, dispatch.Message{}, pgtype.Text{}, pgtype.Int8{}, nil, nil, nil) || workspaceTestContentMatchesV1(&d, msg, pgtype.Text{}, pgtype.Int8{}, nil, nil, nil) {
 		t.Fatal("canned and actual-template receipts became interchangeable")
+	}
+}
+
+func TestSavedTemplateSyntheticLocaleNoticeAndFrozenReceiptV1(t *testing.T) {
+	for _, locale := range []string{"en", "sv"} {
+		sample := emailtemplates.SyntheticContext()
+		sample.Locale = locale
+		tpl := dispatch.ServiceEmailTemplateV1{Revision: 1, HTMLTemplate: "<p>Keep this literal introduction</p>", TextTemplate: "Keep this literal introduction"}
+		subject, html, text, err := renderedTemplateSampleContextV1(dispatch.KindInvite, tpl, sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hNotice, tNotice := templateSampleHTMLNoticeV1, templateSampleTextNoticeV1
+		if locale == "sv" {
+			hNotice, tNotice = templateSampleHTMLNoticeSVV1, templateSampleTextNoticeSVV1
+		}
+		if !strings.Contains(html, hNotice) || !strings.HasPrefix(text, tNotice) || !strings.Contains(html, "Keep this literal introduction") || !strings.Contains(html, "https://example.invalid/sign/preview") {
+			t.Fatal("localized sample lost warning, literal source or inert action", locale)
+		}
+		if locale == "sv" && (strings.Contains(html, templateSampleHTMLNoticeV1) || !strings.Contains(html, "Granska och signera")) {
+			t.Fatal("Swedish sample retained English safety/native action")
+		}
+		d := generated.EmailDelivery{ToEmail: "owner@example.invalid", Subject: subject, HtmlBody: html, TextBody: text, HeadersJson: []byte("{}")}
+		msg := dispatch.Message{To: d.ToEmail, Subject: subject, HTML: html, Text: text}
+		sh, hh, th := sha256.Sum256([]byte(subject)), sha256.Sum256([]byte(html)), sha256.Sum256([]byte(text))
+		kind, rev := pgtype.Text{String: dispatch.KindInvite, Valid: true}, pgtype.Int8{Int64: 1, Valid: true}
+		if !workspaceTestContentMatchesV1(&d, msg, kind, rev, sh[:], hh[:], th[:]) {
+			t.Fatal("localized receipt refused", locale)
+		}
+		changed := d
+		changed.TextBody = strings.Replace(text, tNotice, "", 1)
+		changedMsg := msg
+		changedMsg.Text = changed.TextBody
+		if workspaceTestContentMatchesV1(&changed, changedMsg, kind, rev, sh[:], hh[:], th[:]) {
+			t.Fatal("missing warning or changed bytes accepted")
+		}
+		changedTextHash := sha256.Sum256([]byte(changed.TextBody))
+		if workspaceTestContentMatchesV1(&changed, changedMsg, kind, rev, sh[:], hh[:], changedTextHash[:]) {
+			t.Fatal("a new matching receipt cannot authorize missing synthetic warning")
+		}
+
 	}
 }

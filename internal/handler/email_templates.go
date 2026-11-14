@@ -79,6 +79,7 @@ func (s *Server) decodeEmailTemplate(w http.ResponseWriter, r *http.Request) (st
 		HTMLTemplate     *string         `json:"html_template"`
 		TextTemplate     *string         `json:"text_template"`
 		DesignJSON       json.RawMessage `json:"design_json"`
+		PreviewLocale    json.RawMessage `json:"preview_locale"`
 	}
 	if err := decodeSignerJSON(r, &wire); err != nil || wire.ExpectedRevision == nil || wire.SubjectTemplate == nil || wire.HTMLTemplate == nil || wire.TextTemplate == nil {
 		s.writeEmailTemplateError(w, emailtemplates.ErrInput)
@@ -92,6 +93,12 @@ func (s *Server) decodeEmailTemplate(w http.ResponseWriter, r *http.Request) (st
 			return "", emailtemplates.Input{}, false
 		}
 		in.DesignJSON = &design
+	}
+	var localeErr error
+	in.PreviewLocale, localeErr = emailtemplates.DecodeSyntheticPreviewLocaleV1(wire.PreviewLocale)
+	if localeErr != nil || (r.Method == http.MethodPut && wire.PreviewLocale != nil) {
+		s.writeEmailTemplateError(w, emailtemplates.ErrInput)
+		return "", emailtemplates.Input{}, false
 	}
 	return kind, in, true
 }

@@ -4,6 +4,7 @@ package emailtemplates
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -108,8 +109,48 @@ func (s Service) SavePreferencesV1(ctx context.Context, actor authoring.Actor, i
 	return out, nil
 }
 
-func syntheticContextV1(ctx context.Context, tx pgx.Tx, org uuid.UUID, kind string) (dispatch.TemplateContext, error) {
+// ValidSyntheticPreviewLocaleV1 accepts only the two native display variants.
+// Nil deliberately preserves the existing API/MCP default selection.
+func ValidSyntheticPreviewLocaleV1(value *string) bool {
+	return value == nil || *value == "en" || *value == "sv"
+}
+
+// DecodeSyntheticPreviewLocaleV1 distinguishes omission from null/empty/aliases.
+func DecodeSyntheticPreviewLocaleV1(raw json.RawMessage) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var value string
+	if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+		return nil, ErrInput
+	}
+	switch value {
+	case "en":
+		value = "en"
+	case "sv":
+		value = "sv"
+	default:
+		return nil, ErrInput
+	}
+	return &value, nil
+}
+
+func syntheticContextV1(ctx context.Context, tx pgx.Tx, org uuid.UUID, kind string, overrides ...*string) (dispatch.TemplateContext, error) {
 	out := SyntheticContext()
+	if len(overrides) > 1 {
+		return out, ErrInput
+	}
+	if len(overrides) == 1 && overrides[0] != nil {
+		if !ValidSyntheticPreviewLocaleV1(overrides[0]) {
+			return out, ErrInput
+		}
+		if *overrides[0] == "sv" {
+			out.Locale = "sv"
+		} else {
+			out.Locale = "en"
+		}
+		return out, nil
+	}
 	if kind == dispatch.KindQuotaWarning80 {
 		prefs, err := readPreferencesV1(ctx, tx, org)
 		if err != nil {
@@ -123,7 +164,7 @@ func syntheticContextV1(ctx context.Context, tx pgx.Tx, org uuid.UUID, kind stri
 // SavedSampleContextForOwnerV1 selects only inert synthetic values in the
 // original owner/test transaction. It grants no new recipient or transport
 // authority. The caller retains its original guard and admitted source owner.
-func SavedSampleContextForOwnerV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, guard *authoring.MemberGuard, kind string) (dispatch.TemplateContext, error) {
+func SavedSampleContextForOwnerV1(ctx context.Context, tx pgx.Tx, actor authoring.Actor, guard *authoring.MemberGuard, kind string, overrides ...*string) (dispatch.TemplateContext, error) {
 	if tx == nil || guard == nil || actor.OrgID == uuid.Nil || actor.UserID == uuid.Nil || actor.Authorize == nil || !dispatch.ServiceEmailKindV1(kind) {
 		return dispatch.TemplateContext{}, ErrInput
 	}
@@ -134,7 +175,7 @@ func SavedSampleContextForOwnerV1(ctx context.Context, tx pgx.Tx, actor authorin
 	if err := guard.Recheck(ctx); err != nil {
 		return dispatch.TemplateContext{}, err
 	}
-	out, err := syntheticContextV1(ctx, tx, actor.OrgID, kind)
+	out, err := syntheticContextV1(ctx, tx, actor.OrgID, kind, overrides...)
 	if err != nil {
 		return dispatch.TemplateContext{}, err
 	}

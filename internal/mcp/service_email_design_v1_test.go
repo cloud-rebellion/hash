@@ -93,3 +93,15 @@ func TestServiceEmailDesign760MCPProposalRefusesAmbiguousFields(t *testing.T) {
 		t.Fatal("proposal prompt smuggled into ordinary save")
 	}
 }
+
+func TestServiceEmailMCPProposalLocaleDoesNotChangePromptV1(t *testing.T) {
+	_, v, base := serviceEmailFixture(t)
+	fixture := &serviceEmailProposalFixture760{serviceEmailDelegationFixture: base}
+	server := NewServer()
+	registerServiceEmailToolsWithService(server, fixture)
+	args := strings.TrimSuffix(serviceEmailProposalArgs760, "}") + `,"preview_locale":"sv"}`
+	result := serviceEmailCall(t, server, v, "propose_service_email_design", args)
+	if result.Error != nil || decodedToolResult(t, result).IsError || fixture.input.PreviewLocale == nil || *fixture.input.PreviewLocale != "sv" || fixture.prompt != "Use our current workspace brand" || len(base.calls) != 1 || base.calls[0] != "propose" {
+		t.Fatal("proposal synthetic locale changed prompt, authority or operation")
+	}
+}

@@ -1,7 +1,7 @@
 import { APIError } from './client';
 import { automationJSON } from './automationSettings';
 import { emailDesignProblem, emailDesignLimits, readEmailDesign } from '../emailDesign';
-import { emailTemplateKinds, editableEmailTemplateKinds, isBuiltInEmailTemplate, emailPreviewLocale, checkedWorkspaceEmailPreferences, isWorkspaceEmailLocale, type WorkspaceEmailPreferences, type WorkspaceEmailLocale, type EmailTemplate, type EmailTemplateCatalog, type EmailTemplateInput,
+import { emailTemplateKinds, editableEmailTemplateKinds, isBuiltInEmailTemplate, emailPreviewLocale, checkedWorkspaceEmailPreferences, isWorkspaceEmailLocale, type WorkspaceEmailPreferences, type WorkspaceEmailLocale, type EmailTemplate, type EmailTemplateCatalog, type EmailTemplateInput, type EmailTemplatePreviewInput,
   type EmailDesignProposal, type EmailTemplateKind, type EmailTemplatePreview } from '../emailTemplateEditor';
 
 const variables = ['document_name', 'sender_name', 'sender_email', 'recipient_name', 'org_name'];
@@ -22,7 +22,7 @@ function validTemplate(value: unknown): value is EmailTemplate {
 }
 const singleSourceBound = 6 * (256 + 16384 + 8192 + emailDesignLimits.source) + 4096;
 const previewBound = 6 * (8192 + 2 * emailDesignLimits.rendered) + 4096;
-async function jsonResponse(method: 'GET' | 'PUT' | 'POST', path: string, signal: AbortSignal, body?: EmailTemplateInput & { prompt?: string }, maxBytes = singleSourceBound): Promise<unknown> {
+async function jsonResponse(method: 'GET' | 'PUT' | 'POST', path: string, signal: AbortSignal, body?: EmailTemplatePreviewInput & { prompt?: string }, maxBytes = singleSourceBound): Promise<unknown> {
   const response = await fetch(path, {
     method, signal, credentials: 'include', cache: 'no-store',
     headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -81,12 +81,17 @@ export async function saveEmailTemplate(kind: EmailTemplateKind, input: EmailTem
   await verifyDesignCommitment(value.design_json);
   return value;
 }
-export async function previewEmailTemplate(kind: EmailTemplateKind, input: EmailTemplateInput, signal: AbortSignal): Promise<EmailTemplatePreview> {
-  if (!validInput(input)) throw new Error('Email source contract rejected');
+function validPreviewInput(input: EmailTemplatePreviewInput): boolean {
+  if (!object(input) || input.preview_locale !== undefined && !isWorkspaceEmailLocale(input.preview_locale)) return false;
+  const { preview_locale: _locale, ...source } = input;
+  return validInput(source);
+}
+export async function previewEmailTemplate(kind: EmailTemplateKind, input: EmailTemplatePreviewInput, signal: AbortSignal): Promise<EmailTemplatePreview> {
+  if (!validPreviewInput(input)) throw new Error('Email source contract rejected');
   if (!emailTemplateKinds.includes(kind) || (!editableEmailTemplateKinds.includes(kind)
       && !isBuiltInEmailTemplate({ ...input, revision: input.expected_revision }))) throw new Error('Only the built-in email can be previewed');
   const value = await jsonResponse('POST', `/api/v1/email-templates/${encodeURIComponent(kind)}/preview`, signal, input, previewBound);
-  if (!object(value) || value.schema_version !== 1 || value.synthetic !== true || value.mandatory_content_preserved !== true || !emailPreviewLocale(kind, value.locale)
+  if (!object(value) || value.schema_version !== 1 || value.synthetic !== true || value.mandatory_content_preserved !== true || !emailPreviewLocale(kind, value.locale, input.preview_locale)
       || value.revision !== input.expected_revision || typeof value.subject !== 'string' || bytes(value.subject) > 8192
       || typeof value.html !== 'string' || bytes(value.html) > emailDesignLimits.rendered || typeof value.text !== 'string' || bytes(value.text) > emailDesignLimits.rendered) {
     throw new Error('Synthetic email preview contract rejected');
@@ -94,13 +99,13 @@ export async function previewEmailTemplate(kind: EmailTemplateKind, input: Email
   return value as unknown as EmailTemplatePreview;
 }
 
-export async function proposeEmailDesign(kind: EmailTemplateKind, input: EmailTemplateInput, prompt: string, signal: AbortSignal): Promise<EmailDesignProposal> {
-  if (!editableEmailTemplateKinds.includes(kind) || !validInput(input) || typeof prompt !== 'string' || !prompt.trim() || bytes(prompt) > 4096) throw new Error('Email proposal source contract rejected');
+export async function proposeEmailDesign(kind: EmailTemplateKind, input: EmailTemplatePreviewInput, prompt: string, signal: AbortSignal): Promise<EmailDesignProposal> {
+  if (!editableEmailTemplateKinds.includes(kind) || !validPreviewInput(input) || typeof prompt !== 'string' || !prompt.trim() || bytes(prompt) > 4096) throw new Error('Email proposal source contract rejected');
   const value = await jsonResponse('POST', `/api/v1/email-templates/${encodeURIComponent(kind)}/propose`, signal, { ...input, prompt }, singleSourceBound + previewBound + 4096);
   if (!object(value) || value.schema_version !== 1 || value.saved !== false || value.kind !== kind || value.expected_revision !== input.expected_revision
       || !object(value.input) || !validInput(value.input as unknown as EmailTemplateInput) || value.input.expected_revision !== input.expected_revision
       || typeof value.input.design_json !== 'string' || !value.input.design_json
-      || !object(value.preview) || value.preview.schema_version !== 1 || value.preview.synthetic !== true || value.preview.mandatory_content_preserved !== true || !emailPreviewLocale(kind, value.preview.locale)
+      || !object(value.preview) || value.preview.schema_version !== 1 || value.preview.synthetic !== true || value.preview.mandatory_content_preserved !== true || !emailPreviewLocale(kind, value.preview.locale, input.preview_locale)
       || value.preview.revision !== input.expected_revision || typeof value.preview.subject !== 'string' || bytes(value.preview.subject) > 8192
       || typeof value.preview.html !== 'string' || bytes(value.preview.html) > emailDesignLimits.rendered
       || typeof value.preview.text !== 'string' || bytes(value.preview.text) > emailDesignLimits.rendered) throw new Error('Email proposal response contract rejected');

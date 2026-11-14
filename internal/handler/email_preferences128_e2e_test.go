@@ -164,3 +164,39 @@ func TestWorkspaceEmail128EditionsConstraintAndPreviewLanguageE2E(t *testing.T) 
 		t.Fatal("rollback discarded retained preferences/editions", err)
 	}
 }
+
+func TestSyntheticEmailPreviewLocaleRequestDoesNotSavePolicyV1E2E(t *testing.T) {
+	f := email720Fixture(t)
+	before := email128Preferences(t, f)
+	var mailBefore, editionsBefore int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM email_deliveries),(SELECT count(*) FROM org_email_template_revisions_v1 WHERE org_id=$1)`, f.org).Scan(&mailBefore, &editionsBefore); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{dispatch.KindInvite, dispatch.KindDeclined, dispatch.KindQuotaWarning80} {
+		for _, locale := range []string{"en", "sv"} {
+			body := `{"expected_revision":0,"subject_template":"Keep this literal subject","html_template":"<p>Keep this literal introduction</p>","text_template":"Keep this literal introduction","preview_locale":"` + locale + `"}`
+			path := "/api/v1/email-templates/" + kind
+			r := f.request(http.MethodPost, path+"/preview", body)
+			var out emailtemplates.Preview
+			if r.Code != 200 || json.Unmarshal(r.Body.Bytes(), &out) != nil || out.Locale != locale || out.Subject != "Keep this literal subject" || !strings.Contains(out.HTML, "Keep this literal introduction") {
+				t.Fatal("exact synthetic locale/literal source lost", kind, locale, r.Code)
+			}
+			if r := f.request(http.MethodPut, path, body); r.Code != 400 {
+				t.Fatal("synthetic locale persisted on Save", r.Code)
+			}
+		}
+	}
+	for _, value := range []string{`null`, `""`, `"sv-SE"`, `true`} {
+		body := `{"expected_revision":0,"subject_template":"","html_template":"","text_template":"","preview_locale":` + value + `}`
+		if r := f.request(http.MethodPost, "/api/v1/email-templates/email.invite/preview", body); r.Code != 400 {
+			t.Fatal("invalid locale accepted by HTTP", value, r.Code)
+		}
+	}
+	if after := email128Preferences(t, f); after.Locale != before.Locale || after.Revision != before.Revision {
+		t.Fatal("synthetic override saved workspace policy")
+	}
+	var mailAfter, editions int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM email_deliveries),(SELECT count(*) FROM org_email_template_revisions_v1 WHERE org_id=$1)`, f.org).Scan(&mailAfter, &editions); err != nil || mailAfter != mailBefore || editions != editionsBefore {
+		t.Fatal("preview created mail or editions", err)
+	}
+}

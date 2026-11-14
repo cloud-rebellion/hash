@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { ArrowLeft, Check, ChevronRight, Code2, Eye, FileText, Mail, RotateCcw, Save, ShieldCheck, Sparkles, Palette, Upload, X } from 'lucide-svelte';
-  import { ui } from '$lib/staffPreferences';
-  import { createEmailTemplateEditor, createWorkspaceEmailPreferences, canEditEmailTemplate, emailDraftProblems, emailFieldBytes, emailPreviewDocument, type EmailTemplateKind, type EmailField } from '$lib/emailTemplateEditor';
+  import { ui, staffLocale } from '$lib/staffPreferences';
+  import { createEmailTemplateEditor, createWorkspaceEmailPreferences, canEditEmailTemplate, emailDraftProblems, emailFieldBytes, emailPreviewDocument, syntheticEmailLocale, isWorkspaceEmailLocale, type WorkspaceEmailLocale, type EmailTemplateKind, type EmailField } from '$lib/emailTemplateEditor';
   import { listEmailTemplates, previewEmailTemplate, saveEmailTemplate, proposeEmailDesign, getWorkspaceEmailPreferences, saveWorkspaceEmailPreferences } from '$lib/api/emailTemplates';
 
   import { emailDesignDraft, localEmailLogo, type EmailDesign } from '$lib/emailDesign';
@@ -12,6 +12,7 @@
   const editor = untrack(() => controller) ?? createEmailTemplateEditor({ load: listEmailTemplates, preview: previewEmailTemplate, save: saveEmailTemplate, propose: proposeEmailDesign });
   const preferences = untrack(() => preferenceController) ?? createWorkspaceEmailPreferences({ load: getWorkspaceEmailPreferences, save: saveWorkspaceEmailPreferences });
   let format = $state<'html' | 'text'>('html');
+  let previewLocaleOverride = $state<WorkspaceEmailLocale | ''>('');
   const info: Record<EmailTemplateKind, { name: string; description: string }> = {
     'email.invite': { name: 'Signature invitation', description: 'When a recipient is invited to review and sign.' },
     'email.reminder': { name: 'Signing reminder', description: 'A reminder for a recipient who has not finished.' },
@@ -35,11 +36,21 @@
   const languageBlocked = $derived($editor.busy !== null || logoBusy || ($editor.selected?.kind === 'email.quota_warning_80' && !!$editor.proposal));
   const busy = $derived($editor.busy !== null || logoBusy || $preferences.busy !== null);
   const languageLocked = $derived(languageBlocked || $preferences.busy !== null || !$preferences.authorized || !$preferences.saved || $preferences.unconfirmed || ($preferences.saved?.revision ?? 0) >= Number.MAX_SAFE_INTEGER);
-  const quotaLanguageBlocked = $derived($editor.selected?.kind === 'email.quota_warning_80' && (!$preferences.saved || !$preferences.authorized || $preferences.dirty || $preferences.unconfirmed));
+  const quotaLanguageBlocked = $derived($editor.selected?.kind === 'email.quota_warning_80' && previewLocaleOverride === '' && (!$preferences.saved || !$preferences.authorized || $preferences.dirty || $preferences.unconfirmed));
   const locked = $derived(busy || !$editor.authorized);
   const editable = $derived(canEditEmailTemplate($editor.selected));
   const editorLocked = $derived(locked || !editable);
   const previewHTML = $derived(activePreview ? emailPreviewDocument(activePreview.html) : '');
+  const previewLocale = $derived(syntheticEmailLocale($editor.selected?.kind, $staffLocale, $preferences.saved?.locale, previewLocaleOverride || undefined));
+  const previewLanguageLocked = $derived($editor.busy === 'saving' || $editor.busy === 'loading' || logoBusy || !$editor.authorized);
+  $effect.pre(() => {
+    const selected = previewLocale, phase = $editor.busy;
+    if (phase !== 'saving' && phase !== 'loading') untrack(() => editor.setPreviewLocale(selected));
+  });
+  function choosePreviewLocale(value: string) {
+    if (previewLanguageLocked || value !== 'default' && !isWorkspaceEmailLocale(value)) return;
+    previewLocaleOverride = value === 'default' ? '' : value as WorkspaceEmailLocale;
+  }
   onMount(() => { void editor.load(); void preferences.load(); return () => { alive = false; editor.dispose(); preferences.dispose(); }; });
 
   async function loadEmailLanguage() {
@@ -229,7 +240,15 @@
           <aside class="min-w-0 border-t border-border bg-bg-elevated p-5 xl:border-l xl:border-t-0" aria-label={$ui('Email preview')}>
             <div class="mb-4 flex items-center justify-between gap-3"><h3 class="text-xs font-medium text-text-primary">{$ui('Preview')}</h3><span class="rounded-full border border-border px-2 py-1 text-[9px] uppercase tracking-wider text-text-muted">{$ui($editor.proposal ? 'AI proposal · not saved' : 'Sample data')}</span></div>
             <p class="mb-4 text-xs leading-relaxed text-text-secondary">{$ui('No email is sent. Action links in this preview cannot be used.')}</p>
-            <p class="mb-4 text-xs leading-relaxed text-text-secondary">{$ui($editor.selected.kind === 'email.quota_warning_80' ? 'Usage-warning samples use the saved workspace email language.' : 'This sample uses English. Actual document emails use their saved document or recipient language.')}</p>
+            <div class="mb-4 space-y-2">
+              <label for="synthetic-email-language" class="block text-xs font-medium">{$ui('Synthetic preview and test language')}
+                <select id="synthetic-email-language" class="mt-2 block w-full rounded-lg border border-border bg-bg-primary px-3 py-2 text-sm" value={previewLocaleOverride || 'default'} disabled={previewLanguageLocked} onchange={(event) => choosePreviewLocale(event.currentTarget.value)} aria-describedby="synthetic-email-language-help">
+                  <option value="default">{$ui($editor.selected.kind === 'email.quota_warning_80' ? 'Use saved workspace language' : 'Use interface language')} · {$ui(previewLocale === 'sv' ? 'Swedish' : previewLocale === 'en' ? 'English' : 'Choose a language')}</option>
+                  <option value="en">{$ui('English')}</option><option value="sv">{$ui('Swedish')}</option>
+                </select>
+              </label>
+              <p id="synthetic-email-language-help" class="text-xs leading-relaxed text-text-secondary">{$ui('This choice changes only synthetic previews and test emails. Customer messages keep their document or recipient language; usage warnings keep the saved workspace language. Custom wording is never translated.')}</p>
+            </div>
             {#if quotaLanguageBlocked}<p class="mb-3 text-xs text-warning" role="note">{$ui('Save or reconcile the workspace email language before previewing or testing this usage warning.')}</p>{/if}
             {#if activePreview}
               {#if !$editor.proposal && $editor.previewOutdated}<p class="mb-3 text-xs text-warning" role="status">{$ui('This preview is out of date. Generate it again after editing.')}</p>{/if}
@@ -243,7 +262,7 @@
             {:else}
               <div class="flex min-h-[330px] flex-col items-center justify-center rounded-lg border border-dashed border-border px-6 text-center"><Mail class="mb-3 size-7 stroke-1 text-text-muted" /><p class="text-sm font-medium text-text-primary">{$ui('Review before saving')}</p><p class="mt-2 max-w-xs text-xs leading-relaxed text-text-secondary">{$ui('Generate a sample to see your design and introduction together with Hash’s required content.')}</p></div>
             {/if}
-            <div class="mt-5">{#key $editor.selected.kind + ':' + $editor.selected.revision}<EmailTemplateSampleSend kind={$editor.selected.kind} revision={$editor.selected.revision} disabled={busy || quotaLanguageBlocked || $editor.dirty || !$editor.authorized || $editor.conflict} />{/key}</div>
+            <div class="mt-5">{#key $editor.selected.kind + ':' + $editor.selected.revision}<EmailTemplateSampleSend kind={$editor.selected.kind} revision={$editor.selected.revision} {previewLocale} disabled={busy || quotaLanguageBlocked || $editor.dirty || !$editor.authorized || $editor.conflict} />{/key}</div>
           </aside>
         </div>
         <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-bg-elevated px-5 py-4">

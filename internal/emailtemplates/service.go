@@ -31,6 +31,8 @@ type Service struct {
 	Runtime *ai.Runtime
 }
 type Input struct {
+	// PreviewLocale is transient presentation only and is never saved.
+	PreviewLocale    *string `json:"preview_locale,omitempty"`
 	ExpectedRevision int64   `json:"expected_revision"`
 	DesignJSON       *string `json:"design_json,omitempty"`
 	SubjectTemplate  string  `json:"subject_template"`
@@ -191,7 +193,7 @@ func validate(kind string, in Input) (dispatch.ServiceEmailTemplateV1, error) {
 	return dispatch.ValidateServiceEmailTemplateV1(kind, dispatch.ServiceEmailTemplateV1{Revision: in.ExpectedRevision, SubjectTemplate: in.SubjectTemplate, HTMLTemplate: in.HTMLTemplate, TextTemplate: in.TextTemplate, DesignJSON: design})
 }
 func (s Service) Save(ctx context.Context, actor authoring.Actor, kind string, in Input) (out Template, err error) {
-	if !dispatch.ServiceEmailTemplateEditableKindV1(kind) {
+	if in.PreviewLocale != nil || !dispatch.ServiceEmailTemplateEditableKindV1(kind) {
 		return out, ErrInput
 	}
 	var owner *pdfadmission.ApplicationServiceEmailControlV1
@@ -254,6 +256,9 @@ func SyntheticContext() dispatch.TemplateContext {
 	return dispatch.TemplateContext{DocumentName: "Synthetic service preview", SenderName: "Example sender", SenderEmail: "sender@example.invalid", RecipientName: "Example recipient", OrgName: "Example workspace", Locale: "en", SignURL: "https://example.invalid/sign/preview", DownloadURL: "https://example.invalid/completed/preview", AuditCertURL: "https://example.invalid/audit/preview", PackagePortalURL: "https://example.invalid/package/preview", DownloadExpiresAt: "2030-01-01T12:00:00Z", OpenURL: "https://example.invalid/documents/preview", ApproveURL: "https://example.invalid/approve/preview", DenyURL: "https://example.invalid/decline/preview", DeclineReason: "Synthetic response", ChangeQuote: "Example clause", ChangeContext: "Example context", ChangeProposed: "Example wording", QuotaKind: "documents", QuotaUsed: 8, QuotaLimit: 10, QuotaPct: 80, PeriodResetAt: "2030-01-02", UpgradeURL: "https://example.invalid/settings", PlanName: "Example plan"}
 }
 func (s Service) Preview(ctx context.Context, actor authoring.Actor, kind string, in Input) (out Preview, err error) {
+	if !ValidSyntheticPreviewLocaleV1(in.PreviewLocale) {
+		return out, ErrInput
+	}
 	if !dispatch.ServiceEmailTemplateEditableKindV1(kind) && (in.SubjectTemplate != "" || in.HTMLTemplate != "" || in.TextTemplate != "" || (in.DesignJSON != nil && *in.DesignJSON != "")) {
 		return out, ErrInput
 	}
@@ -297,7 +302,7 @@ func (s Service) Preview(ctx context.Context, actor authoring.Actor, kind string
 			return e
 		}
 		defer closeRender()
-		previewContext, e := syntheticContextV1(ctx, tx, actor.OrgID, kind)
+		previewContext, e := syntheticContextV1(ctx, tx, actor.OrgID, kind, in.PreviewLocale)
 		if e != nil {
 			return e
 		}

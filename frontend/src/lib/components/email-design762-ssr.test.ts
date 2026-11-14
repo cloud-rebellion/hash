@@ -44,7 +44,9 @@ test('real compiled email designer renders loaded owner, AI review and builtin s
   } finally { controller.dispose(); m.setStaffLocale('en'); }
 });
 test('actual designer compiles for browser and server without accessibility warnings', () => {
-  for (const generate of ['client', 'server'] as const) expect(compile(readFileSync(filename, 'utf8'), { filename, generate }).warnings).toEqual([]);
+  for (const source of [filename, resolve(dirname(filename), 'EmailTemplateSampleSend.svelte')]) {
+    for (const generate of ['client', 'server'] as const) expect(compile(readFileSync(source, 'utf8'), { filename: source, generate }).warnings).toEqual([]);
+  }
 });
 
 
@@ -68,5 +70,24 @@ test('actual email settings keep saved workspace language independent of Swedish
     preferenceController.edit('en'); html = m.render(m.View, { props: { controller, preferenceController } }).body; expect(html).toContain('Spara eller stäm av arbetsytans e-postspråk');
     controller.select('email.voided'); html = m.render(m.View, { props: { controller, preferenceController } }).body;
     expect(html).not.toContain('id="email-layout-html"'); expect(html).toContain('Det här mejlet skickas inte när ett dokument makuleras.');
+  } finally { controller.dispose(); preferenceController.dispose(); m.setStaffLocale('en'); }
+});
+
+
+test('compiled synthetic-language selector starts from Swedish UI and quota workspace defaults without saves, previews or translation', async () => {
+  const m = await renderer(); let requests = 0;
+  const templates = m.emailTemplateKinds.map((kind: string) => ({ kind, revision: 0, editable: m.editableEmailTemplateKinds.includes(kind), subject_template: '', html_template: '', text_template: '', variables: ['org_name'], mandatory_content: 'appended_by_hash' }));
+  const controller = m.createEmailTemplateEditor({ load: async () => ({ schema_version: 1, preview_synthetic: true, limits: { subject_bytes: 256, html_bytes: 16384, text_bytes: 8192, design_bytes: 131072 }, templates }),
+    save: async () => { requests++; throw Error('No synthetic choice may save'); }, preview: async () => { requests++; throw Error('No implicit preview'); }, propose: async () => { requests++; throw Error('No automatic AI'); } });
+  const preferenceController = m.createWorkspaceEmailPreferences({ load: async () => ({ schema_version: 1, org_id: '22222222-2222-4222-8222-222222222222', revision: 0, locale: 'en', updated_at: null }), save: async () => { requests++; throw Error('No implicit workspace change'); } });
+  await controller.load(); await preferenceController.load();
+  try {
+    m.setStaffLocale('sv'); let html = m.render(m.View, { props: { controller, preferenceController } }).body;
+    expect(html).toContain('id="synthetic-email-language"'); expect(html).toContain('Språk för testvisning och testmejl');
+    expect(html).toContain('Använd gränssnittets språk'); expect(html).toContain('Egen text översätts aldrig.');
+    expect(html).not.toContain('This sample uses English.');
+    controller.select('email.quota_warning_80'); html = m.render(m.View, { props: { controller, preferenceController } }).body;
+    expect(html).toContain('Använd arbetsytans sparade språk'); expect(html).toContain('Sparat språk: English');
+    expect(requests).toBe(0);
   } finally { controller.dispose(); preferenceController.dispose(); m.setStaffLocale('en'); }
 });

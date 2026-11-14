@@ -45,10 +45,10 @@ type serviceEmailProposalSettings interface {
 func registerServiceEmailToolsWithService(s *Server, service serviceEmailSettings) {
 	s.RegisterTool(ToolDef{
 		Name: "propose_service_email_design", MinRole: auth.RoleOwner, Write: true,
-		Description: "Propose a branded email candidate and synthetic preview through the workspace's existing enabled AI provider. Owner and organization-wide write:authoring key required; document tokens denied. Supply the observed expected_revision, all three source strings and a bounded prompt. Optional design_json follows the preview contract. Logo bytes remain local. This incurs configured AI usage and records usage; it does not save, send or configure a provider. Human review and a separate exact-CAS save remain required.",
+		Description: "Propose a branded email candidate and synthetic preview through the workspace's existing enabled AI provider. Owner and organization-wide write:authoring key required; document tokens denied. Supply the observed expected_revision, all three source strings and a bounded prompt. Optional preview_locale (en/sv) selects only the synthetic native preview, never the provider prompt or saved wording. Omission preserves English except quota samples use saved workspace language. Optional design_json follows the preview contract. Logo bytes remain local. This incurs configured AI usage and records usage; it does not save, send or configure a provider. Human review and a separate exact-CAS save remain required.",
 		InputSchema: serviceEmailProposalInputSchemaV1(),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-			values, err := exactServiceEmailFieldsV1(args, false, true)
+			values, err := exactServiceEmailFieldsV1(args, false, true, true)
 			if err != nil {
 				return nil, err
 			}
@@ -65,6 +65,10 @@ func registerServiceEmailToolsWithService(s *Server, service serviceEmailSetting
 					return nil, errServiceEmailArguments
 				}
 				in.DesignJSON = &design
+			}
+			in.PreviewLocale, err = emailtemplates.DecodeSyntheticPreviewLocaleV1(values[7])
+			if err != nil {
+				return nil, errServiceEmailArguments
 			}
 			actor, err := serviceEmailActor(r, mcpScopeWriteAuthoring)
 			if err != nil {
@@ -98,16 +102,16 @@ func registerServiceEmailToolsWithService(s *Server, service serviceEmailSetting
 	})
 	for _, save := range []bool{false, true} {
 		name, scope := "preview_service_email_template", mcpScopeRead
-		description := "Preview service email subject and introductory content using synthetic data only; no save, send or AI provider call. Hash appends its protected action/security/legal content. Owner and organization-wide read key required; document tokens denied. Supply the observed expected_revision and all three source strings. Built-in-only kinds permit only revision zero with three empty strings. HTML supports safe formatting, no links/images/attributes/CSS; byte limits come from List. Optional design_json is the canonical full layout/palette/logo edition: exactly one {{native_content}} slot, validated embedded PNG/JPEG only; no remote resources or concealed native actions. Omit it to preserve the saved design, or use empty string to clear it."
+		description := "Preview service email subject and introductory content using synthetic data only; no save, send or AI provider call. Optional preview_locale (en/sv) selects native preview copy only, never translates custom wording. Omission preserves English except quota samples use saved workspace language. Hash appends its protected action/security/legal content. Owner and organization-wide read key required; document tokens denied. Supply the observed expected_revision and all three source strings. Built-in-only kinds permit only revision zero with three empty strings. HTML supports safe formatting, no links/images/attributes/CSS; byte limits come from List. Optional design_json is the canonical full layout/palette/logo edition: exactly one {{native_content}} slot, validated embedded PNG/JPEG only; no remote resources or concealed native actions. Omit it to preserve the saved design, or use empty string to clear it."
 		if save {
 			name, scope = "save_service_email_template", mcpScopeWriteAuthoring
 			description = "Save organization service email subject and introductory content through the owner settings transaction with exact expected_revision CAS. Only the eight editable kinds reported by List can be saved. Supply all three strings; all empty resets built-in content at a new revision. Hash retains protected action/security/legal content and its safe HTML/byte limits. A conflict requires reload and review. Owner and organization-wide write:authoring key required; document tokens denied. Affects future eligible messages, not frozen messages; no email send, SMTP, sender/tracking configuration, AI generation or implicit sending. Optional canonical design_json uses the same immutable revision; omission preserves the current design, empty explicitly clears it."
 		}
 		s.RegisterTool(ToolDef{
 			Name: name, Description: description, MinRole: auth.RoleOwner, Write: save,
-			InputSchema: serviceEmailInputSchema(false),
+			InputSchema: serviceEmailInputSchema(false, !save),
 			Handler: func(r *http.Request, args json.RawMessage) (any, error) {
-				values, err := exactServiceEmailArguments(args, false)
+				values, err := exactServiceEmailFieldsV1(args, false, false, !save)
 				if err != nil {
 					return nil, err
 				}
@@ -124,6 +128,10 @@ func registerServiceEmailToolsWithService(s *Server, service serviceEmailSetting
 						return nil, errServiceEmailArguments
 					}
 					in.DesignJSON = &design
+				}
+				in.PreviewLocale, err = emailtemplates.DecodeSyntheticPreviewLocaleV1(values[7])
+				if err != nil {
+					return nil, errServiceEmailArguments
 				}
 				actor, err := serviceEmailActor(r, scope)
 				if err != nil {
@@ -169,8 +177,8 @@ func exactServiceEmailArguments(raw []byte, list bool) ([6]json.RawMessage, erro
 	return values, err
 }
 
-func exactServiceEmailFieldsV1(raw []byte, list, proposal bool) ([7]json.RawMessage, error) {
-	var values [7]json.RawMessage
+func exactServiceEmailFieldsV1(raw []byte, list, proposal bool, preview ...bool) ([8]json.RawMessage, error) {
+	var values [8]json.RawMessage
 	if len(raw) < 2 || len(raw) > (160<<10)+6*dispatch.ServiceEmailDesignSourceBytesV1 || validateJSONUnicode(raw) != nil {
 		return values, errServiceEmailArguments
 	}
@@ -196,6 +204,9 @@ func exactServiceEmailFieldsV1(raw []byte, list, proposal bool) ([7]json.RawMess
 				break
 			}
 		}
+		if len(preview) == 1 && preview[0] && key == "preview_locale" {
+			index = 7
+		}
 		if index < 0 || values[index] != nil || d.Decode(&values[index]) != nil || bytes.Equal(bytes.TrimSpace(values[index]), []byte("null")) {
 			return values, errServiceEmailArguments
 		}
@@ -219,7 +230,7 @@ func exactServiceEmailFieldsV1(raw []byte, list, proposal bool) ([7]json.RawMess
 	return values, nil
 }
 
-func serviceEmailInputSchema(list bool) map[string]any {
+func serviceEmailInputSchema(list bool, preview ...bool) map[string]any {
 	properties := map[string]any{}
 	var required []string
 	if !list {
@@ -231,6 +242,9 @@ func serviceEmailInputSchema(list bool) map[string]any {
 			"text_template":     stringSchema("Introductory plain text only; at most 8192 UTF-8 bytes."),
 			"design_json":       stringSchema("Optional canonical v1 full email design JSON string; at most131072 UTF-8 bytes. One protected native_content slot; validated embedded logo only. Omitted preserves current design; empty string explicitly clears it."),
 		}
+		if len(preview) == 1 && preview[0] {
+			properties["preview_locale"] = map[string]any{"type": "string", "enum": []string{"en", "sv"}, "description": "Optional synthetic native preview language only; omission preserves English except quota uses saved workspace language. Does not translate or save custom wording."}
+		}
 		required = []string{"kind", "expected_revision", "subject_template", "html_template", "text_template"}
 	}
 	schema := schemaObject(properties, required)
@@ -239,7 +253,7 @@ func serviceEmailInputSchema(list bool) map[string]any {
 }
 
 func serviceEmailProposalInputSchemaV1() map[string]any {
-	schema := serviceEmailInputSchema(false)
+	schema := serviceEmailInputSchema(false, true)
 	properties := schema["properties"].(map[string]any)
 	properties["prompt"] = stringSchema("Design instruction; 1..4096 UTF-8 bytes. Existing configured workspace AI only; no credentials, remote resources or implicit save/send.")
 	schema["required"] = append(schema["required"].([]string), "prompt")

@@ -69,6 +69,44 @@ test('the closed EN/SV interface catalogue has identical keys/placeholders and n
   expect(signerRoomText('sv-SE','Select…')).toBe('Select…');
 });
 
+test('every application-owned PDF viewer label is localized for recipient review', () => {
+  const labels = new Set<string>();
+  function choices(node: any) {
+    if (node?.type === 'Literal' && typeof node.value === 'string') labels.add(node.value);
+    if (node?.type === 'ConditionalExpression') {
+      choices(node.consequent); choices(node.alternate);
+    }
+  }
+  function visit(node: any) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === 'translate') {
+      choices(node.arguments[0]);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') visit(value);
+    }
+  }
+  for (const name of ['VerifiedPDFPages', 'PDFPageStrip']) visit(parse(read(name), { modern: true }));
+  expect(labels.size).toBeGreaterThan(8);
+  for (const label of labels) {
+    expect(signerRoomViewerText('en', label)).toBe(label);
+    if (!Object.hasOwn(signerRoomEnglish, label) || !Object.hasOwn(signerRoomSwedish, label)) {
+      throw new Error('Unmapped application-owned viewer label: ' + label);
+    }
+    const key = label as SignerRoomText;
+    expect(signerRoomViewerText('sv', label)).toBe(signerRoomSwedish[key]);
+    if (label !== 'The request failed.') {
+      expect(signerRoomViewerText('en', label)).not.toBe('The request failed.');
+      expect(signerRoomViewerText('sv', label)).not.toBe('Begäran misslyckades.');
+    }
+  }
+  for (const locale of ['en', 'sv'] as const) {
+    expect(signerRoomViewerText(locale, 'Page review progress: private renderer detail'))
+      .toBe(signerRoomText(locale, 'The request failed.'));
+  }
+});
+
 test('actual child field/PDF controls, paused state, ARIA, package review gates and frozen content render in EN/SV', async () => {
   const view=await views();
   for (const selected of ['en','sv']) {

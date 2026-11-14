@@ -181,14 +181,29 @@ function reviewedRouteFixture(): string {
   visit(ast.fragment); if (paragraphs.length !== 2) throw Error('Actual route review copy missing');
   return `<script lang="ts">import {ui} from '$lib/staffPreferences'; import {documentPurpose} from '$lib/documentPurpose'; let {doc,htmlSource=null}=$props(); ${declarations.join('\n')}</script>${paragraphs.join('\n')}`;
 }
+function verifiedProgressFixture(): string {
+  const source = readFileSync(new URL('./VerifiedPDFPages.svelte', import.meta.url), 'utf8'), ast: any = parse(source, { modern: true });
+  let progress: any;
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object' || progress) return;
+    if (node.name === 'section' && source.slice(node.start, node.end).includes("aria-label={translate('Page review progress')}")) { progress = node; return; }
+    for (const value of Object.values(node)) { if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value === 'object') visit(value); }
+  };
+  visit(ast.fragment);
+  const next = ast.instance.content.body.find((node: any) => node.type === 'FunctionDeclaration' && node.id?.name === 'nextUnopenedPage');
+  if (!progress || !next) throw Error('Actual verified-page progress boundary missing');
+  return `<script lang="ts">let {seen=[],expectedPages,loading=false,rendering=false}=$props();const translate=(text:string)=>text;const openNextUnopenedPage=()=>{throw Error('SSR must not navigate');};${source.slice(next.start,next.end)}</script>${source.slice(progress.start,progress.end)}`;
+}
 async function views() {
   return renderer ??= (async () => {
     const lib = resolve(dirname(fileURLToPath(import.meta.url)), '..');
     const build = await Bun.build({ entrypoints: ['editor-view-entry'], target: 'bun', plugins: [{ name: 'actual-editor-views', setup(builder) {
       builder.onResolve({ filter: /^editor-view-entry$/ }, () => ({ path: 'entry', namespace: 'test' }));
-      builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: `export {default as Select} from ${JSON.stringify(resolve(lib, 'components/DocumentPurposeSelect.svelte'))}; export {default as Strip} from ${JSON.stringify(resolve(lib, 'components/PDFPageStrip.svelte'))}; export {default as Review} from ${JSON.stringify(resolve(lib, 'components/HtmlPDFReview.svelte'))}; export {default as Revision} from ${JSON.stringify(resolve(lib, 'components/HtmlDocumentRevision.svelte'))}; export {default as Designer} from ${JSON.stringify(resolve(lib, 'components/PdfFieldDesigner.svelte'))}; export {default as ReviewedRoute} from 'reviewed-route'; export {default as Toolbar} from 'editor-toolbar'; export {render} from 'svelte/server'; export {setStaffLocale} from ${JSON.stringify(resolve(lib, 'staffPreferences.ts'))};`, loader: 'ts', resolveDir: process.cwd() }));
+      builder.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: `export {default as Select} from ${JSON.stringify(resolve(lib, 'components/DocumentPurposeSelect.svelte'))}; export {default as Strip} from ${JSON.stringify(resolve(lib, 'components/PDFPageStrip.svelte'))}; export {default as Review} from ${JSON.stringify(resolve(lib, 'components/HtmlPDFReview.svelte'))}; export {default as Revision} from ${JSON.stringify(resolve(lib, 'components/HtmlDocumentRevision.svelte'))}; export {default as Designer} from ${JSON.stringify(resolve(lib, 'components/PdfFieldDesigner.svelte'))}; export {default as ReviewedRoute} from 'reviewed-route'; export {default as VerifiedProgress} from 'verified-progress'; export {default as Toolbar} from 'editor-toolbar'; export {render} from 'svelte/server'; export {setStaffLocale} from ${JSON.stringify(resolve(lib, 'staffPreferences.ts'))};`, loader: 'ts', resolveDir: process.cwd() }));
       builder.onResolve({ filter: /^editor-toolbar$/ }, () => ({ path: 'toolbar', namespace: 'actual-toolbar' }));
       builder.onLoad({ filter: /.*/, namespace: 'actual-toolbar' }, () => ({ contents: compile(blockToolbarFixture(), { filename: resolve(lib, 'components/BlockEditor/ToolbarFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() }));
+      builder.onResolve({ filter: /^verified-progress$/ }, () => ({ path: 'verified-progress', namespace: 'actual-progress-copy' }));
+      builder.onLoad({ filter: /.*/, namespace: 'actual-progress-copy' }, () => ({ contents: compile(verifiedProgressFixture(), { filename: resolve(lib, 'components/VerifiedProgressFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() }));
       builder.onResolve({ filter: /^reviewed-route$/ }, () => ({ path: 'reviewed-route', namespace: 'actual-review-copy' }));
       builder.onLoad({ filter: /.*/, namespace: 'actual-review-copy' }, () => ({ contents: compile(reviewedRouteFixture(), { filename: resolve(lib, 'components/ReviewedRouteFixture.svelte'), generate: 'server' }).js.code, loader: 'js', resolveDir: process.cwd() }));
       builder.onResolve({ filter: /^\$app\/navigation$/ }, () => ({ path: 'navigation', namespace: 'ssr-navigation' }));
@@ -266,4 +281,21 @@ test('actual new and changed components compile for both targets without accessi
     const filename = fileURLToPath(new URL(file, import.meta.url)), source = readFileSync(filename, 'utf8');
     for (const generate of ['client', 'server'] as const) expect(compile(source, { filename, generate }).warnings).toEqual([]);
   }
+});
+
+
+test('actual compiled verified progress explains remaining pages and keeps complete or busy navigation disabled', async () => {
+  const view = await views();
+  const partial = view.render(view.VerifiedProgress, {props:{seen:[1],expectedPages:3}}).body;
+  const text = partial.replace(/<[^>]*>/g,'').replace(/\s+/g,' ');
+  expect(text).toContain('Opened 1 of 3 pages');expect(text).toContain('Pages left to open: 2');expect(partial).toContain('Open next unopened page');expect(partial).not.toMatch(/<button[^>]*disabled/);
+  const complete = view.render(view.VerifiedProgress, {props:{seen:[1,2,3],expectedPages:3}}).body;
+  expect(complete).toContain('All pages opened.');expect(complete).toMatch(/<button[^>]*disabled/);
+  for(const flag of ['loading','rendering']) expect(view.render(view.VerifiedProgress,{props:{seen:[1],expectedPages:3,[flag]:true}}).body).toMatch(/<button[^>]*disabled/);
+});
+test('actual compiled page-strip opened markers are display-only and opt in without changing thumbnail bounds', async () => {
+  const view = await views(),props={doc:{numPages:3},activePage:2,paint:async()=>{throw Error('SSR must not paint');},onSelect(){}};
+  const plain = view.render(view.Strip,{props}).body;expect(plain).not.toContain('Opened in full size');expect(plain).not.toContain('Not opened yet');
+  const reviewed = view.render(view.Strip,{props:{...props,openedPages:[1,3]}}).body;
+  expect((reviewed.match(/<canvas/g)??[])).toHaveLength(3);expect((reviewed.match(/>Opened in full size</g)??[])).toHaveLength(2);expect((reviewed.match(/>Not opened yet</g)??[])).toHaveLength(1);expect(reviewed).toContain('Show page 2');
 });

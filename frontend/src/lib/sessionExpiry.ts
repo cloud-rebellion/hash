@@ -7,9 +7,9 @@ import { needsSession, STAFF_PREFIXES, routeSurface } from './routeSurface';
 // and /api/v1/me does not expose its expiry, so the client reacts to the 401 and
 // probes /api/v1/me on focus and on a slow timer.
 //
-// The guard never navigates by itself. It publishes the login URL and the root
-// layout shows a blocking notice, so unsaved work stays visible and copyable
-// until the user chooses to sign in.
+// The guard publishes a safe login URL. The root layout's notice returns the
+// expired staff session to sign-in in the same tab. Normal browser navigation
+// protection still applies to unsaved work; no draft is persisted by this guard.
 
 /** Login URL to offer once the session is known to be over; null while the session is fine. */
 export const sessionExpiredLoginUrl = writable<string | null>(null);
@@ -34,6 +34,12 @@ export function safeReturnPath(raw: string | null | undefined): string | null {
 export function loginUrlFor(pathname: string, search: string): string {
   const next = safeReturnPath(pathname + search);
   return next ? '/login?next=' + encodeURIComponent(next) : '/login';
+}
+
+/** Same safe return target, with an informational message on the sign-in screen. */
+export function expiredLoginUrlFor(pathname: string, search: string): string {
+  const login = loginUrlFor(pathname, search);
+  return login + (login.includes('?') ? '&' : '?') + 'expired=1';
 }
 
 function staffApiPath(input: RequestInfo | URL, origin: string): string | null {

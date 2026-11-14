@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui, staffLocale } from '$lib/staffPreferences';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { APIError, getMe, getTemplate, createHTMLTemplate, updateHTMLTemplate, previewHTMLTemplate, approveHTMLTemplate,
     type TemplateResponse, type HTMLTemplatePreview } from '$lib/api/client';
@@ -44,6 +44,8 @@
   let operation = 0;
   let rowKey = 0;
   let previewAbort: AbortController | null = null;
+  let autoPreviewAttemptKey = '';
+  let autoPreviewSchedule = 0;
   const current = () => !disposed && templateID === sourceID;
   const dirty = $derived(htmlAuthorFingerprint(draft) !== baseline);
   const sampleDirty = $derived(JSON.stringify({ values: samples, sections: sectionSamples }) !== sampleBaseline);
@@ -62,7 +64,7 @@
   const previewKey = $derived(`preview-${previewSequence}`);
   const previewValid = $derived(!!preview && !!saved && !dirty && !assetDraftDirty && !needsRefresh && !writeUncertain
     && preview.templateID === saved.id && preview.version === saved.version && preview.contentSHA256 === saved.content_sha256
-    && previewActor === me?.user_id && previewSamples === JSON.stringify({ values: samples, sections: sectionSamples }) && now < Date.parse(preview.expiresAt));
+    && saved.org_id === orgScope && me?.org_id === orgScope && previewActor === me?.user_id && previewSamples === JSON.stringify({ values: samples, sections: sectionSamples }) && now < Date.parse(preview.expiresAt));
   let observedDraft = untrack(() => htmlAuthorFingerprint(draft));
   let observedSamples = untrack(() => JSON.stringify({ values: samples, sections: sectionSamples }));
   let observedAssetIntent = '';
@@ -136,7 +138,7 @@
         adopt(detail(response, sourceID));
       }
     } catch (e) { if (current() && selected === operation) recordError(e); }
-    finally { if (current() && selected === operation) loading = false; }
+    finally { if (current() && selected === operation) { loading = false; void previewSavedVersionAutomatically(); } }
   }
   async function save(event: Event) {
     event.preventDefault();
@@ -175,7 +177,7 @@
             : 'We could not confirm the save. Check the saved revision or template library before another write. Your entered source, defaults and assets are retained here.';
         }
       }
-    } finally { if (current() && selected === operation) busy = null; }
+    } finally { if (current() && selected === operation) { busy = null; void previewSavedVersionAutomatically(); } }
   }
   async function readLatest() {
     if (!current() || !knownID || busy) return;
@@ -200,6 +202,7 @@
     if (!current() || busy || !latest) return;
     if ((dirty || sampleDirty || assetDraftDirty || writeUncertain) && !window.confirm('Discard local source, defaults, local file selections and preview values, and load this current saved revision? An earlier uncertain request may still complete.')) return;
     adopt(latest);
+    void previewSavedVersionAutomatically();
   }
   async function addAsset() {
     if (!current() || !canWrite || busy || loading) return;
@@ -276,9 +279,42 @@
     draft.contract_profile.terms[index] = target.startsWith('section:')
       ? { name: term.name, section: target.slice(8) } : { name: term.name, value: target.startsWith('value:') ? target.slice(6) : '' };
   }
+  function savedPreviewKey() {
+    if (!saved || !me || me.org_id !== orgScope) return '';
+    return JSON.stringify({ actor: me.user_id, org: me.org_id, id: saved.id, version: saved.version,
+      sha: saved.content_sha256, values: samples, sections: sectionSamples });
+  }
+  async function previewSavedVersionAutomatically() {
+    const scheduled = ++autoPreviewSchedule;
+    // Adoption changes several derived fields. Let their invalidation effect
+    // settle before starting one exact saved-version request, never a loop.
+    await tick();
+    if (!current() || scheduled !== autoPreviewSchedule || !canWrite || !saved || dirty || assetDraftDirty
+        || busy || loading || needsRefresh || writeUncertain) return;
+    const key = savedPreviewKey();
+    if (!key || autoPreviewAttemptKey === key) return;
+    autoPreviewAttemptKey = key;
+    await generatePreview();
+  }
+  function reviewReadiness() {
+    if (approved) return 'This saved revision is approved.';
+    if (!me) return 'Sign in again to review and approve this version.';
+    if (!canApprove) return 'Only a workspace owner can approve this saved version.';
+    if (writeUncertain || needsRefresh) return 'Inspect the current saved revision before continuing.';
+    if (dirty || assetDraftDirty) return 'Save or clear your changes before reviewing the saved version.';
+    if (busy === 'preview') return 'Preparing the PDF preview of this saved version…';
+    if (busy === 'approve') return 'Recording approval…';
+    if (busy) return 'Wait for the current request to finish.';
+    if (!preview) return 'Complete any required preview values, then retry the PDF preview.';
+    if (!previewValid) return 'This preview expired or changed. Refresh it before approving.';
+    if (!allPagesSeen) return 'Open every page in full size to enable the review checkbox.';
+    if (!acknowledged) return 'Confirm your review, then select Approve saved design revision.';
+    return 'Ready to record your approval of this exact saved version.';
+  }
   async function generatePreview() {
     if (!current() || !canWrite || !saved || dirty || assetDraftDirty || busy || loading || needsRefresh || writeUncertain) return;
-    const target = saved, actor = me!.user_id, fingerprint = JSON.stringify({ values: samples, sections: sectionSamples }), selected = ++operation;
+    autoPreviewAttemptKey = savedPreviewKey();
+    const target = saved, actor = me!.user_id, org = me!.org_id, fingerprint = JSON.stringify({ values: samples, sections: sectionSamples }), selected = ++operation;
     let values, sections;
     try {
       values = htmlValuesForSubmission(htmlTemplateFields(target), samples);
@@ -291,7 +327,7 @@
     busy = 'preview'; error = null;
     try {
       const response = await previewHTMLTemplate(target.id, target.version, target.content_sha256!, values, controller.signal, sections);
-      if (!current() || selected !== operation || !saved || !samePin(saved, target) || dirty || assetDraftDirty || controller.signal.aborted || JSON.stringify({ values: samples, sections: sectionSamples }) !== fingerprint || me?.user_id !== actor) return;
+      if (!current() || selected !== operation || !saved || !samePin(saved, target) || dirty || assetDraftDirty || controller.signal.aborted || JSON.stringify({ values: samples, sections: sectionSamples }) !== fingerprint || me?.user_id !== actor || me?.org_id !== org || orgScope !== org) return;
       preview = response; previewSamples = fingerprint; previewActor = actor; previewSequence++;
     } catch (e) { if (current() && selected === operation && !controller.signal.aborted) recordError(e); }
     finally { if (current() && selected === operation) busy = null; }
@@ -343,7 +379,7 @@
     window.addEventListener('beforeunload', protectUnload);
     return () => { clearInterval(timer); window.removeEventListener('beforeunload', protectUnload); };
   });
-  onDestroy(() => { disposed = true; operation++; previewAbort?.abort(); });
+  onDestroy(() => { disposed = true; operation++; autoPreviewSchedule++; previewAbort?.abort(); });
 </script>
 
 <div class="px-6 py-10 max-w-6xl mx-auto space-y-6">
@@ -364,7 +400,39 @@
     {#if knownID}<button class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>{$ui("Check current saved revision")}</button>{:else}<a href="/templates" class="underline">{$ui("Check the template library")}</a>{/if}</div>{/if}
   {#if latest}<div class="card p-4 space-y-3 text-sm"><p>{$ui("Current saved version")} {latest.version} · {$ui(isApprovedHTMLTemplate(latest) ? 'Approved' : 'Unapproved')}{$ui(". Loading it will replace local editor and preview inputs.")}</p>
     <button class="btn btn-secondary" disabled={!!busy} onclick={adoptLatest}>{$ui("Load this saved revision")}</button></div>{/if}
+  {#if saved}
+    <section bind:this={reviewPanel} id="saved-design-review" tabindex="-1" class="card p-6 space-y-4 scroll-mt-6" aria-label={$ui("Saved design preview and approval")}>
+      <h2 class="font-display text-lg">{$ui("Preview saved revision")} {saved.version}</h2>
+      <p id="saved-template-review-readiness" role="status" class="text-sm text-text-secondary">{$ui(reviewReadiness())}</p>
+      <p class="text-sm text-text-secondary">{$ui("These values and wording samples are for this preview only. They do not change saved defaults or wording. The exact saved PDF opens automatically. Open every page, confirm your review, then approve this saved revision.")}</p>
+      {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">{$ui("This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.")}</p>{/if}
+      {#if dirty}<p class="text-sm text-warning" role="note">{$ui("Save the editor changes before generating a new preview.")}</p>{/if}
+      <fieldset disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} class="space-y-3">
+        {#each htmlTemplateFields(saved) as field (field.name)}<label class="block text-sm capitalize">{$ui("Preview")} {field.label}{$ui(field.required ? ' (required)' : '')}<textarea bind:value={samples[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
+        {#each saved.html_master_json?.sections ?? [] as section (section.name)}<label class="block text-sm capitalize">{$ui("Preview-only")} {section.name.replaceAll('_', ' ')} {$ui("wording")}<textarea bind:value={sectionSamples[section.name]} rows="4" maxlength={section.max_chars * 2} placeholder={section.default_text ? undefined : 'Enter synthetic wording for owner preview'} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
+      </fieldset>
+      <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{$ui(busy === 'preview' ? 'Rendering saved design…' : 'Refresh PDF preview')}</button>
+      {#if preview}
+        {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} translate={(text) => $ui(text)} />{/key}
+      {:else}
+        <div class="rounded-lg border border-dashed border-border-light p-8 text-center text-sm text-text-secondary">
+          {$ui(busy === 'preview' ? 'Preparing the PDF preview of this saved version…' : 'Your saved design preview appears here. Required preview values stay editable above.')}
+        </div>
+      {/if}
+      {#if canApprove && !approved}
+        <div class="border-t border-border-light pt-4 space-y-3">
+          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} aria-describedby="saved-template-review-readiness" disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>{$ui("I have reviewed every PDF page, saved source, defaults, wording, local assets")}{$ui(saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : '')}{$ui(saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : '')}{$ui(". I am ready to record my approval of this exact saved version.")}</span></label>
+          <button type="button" class="btn btn-primary" aria-describedby="saved-template-review-readiness" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{$ui(busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision')}</button>
+        </div>
+      {/if}
+      {#if !canApprove && !approved}<p role="note" class="text-sm">{$ui("An owner must open this saved revision and generate their own preview before approving it.")}</p>{/if}
+      {#if approved}<p role="status" class="text-sm text-success">{$ui("This saved revision is approved. Return to the template library to populate a fresh document.")}</p>{/if}
+    </section>
+  {/if}
   {#if !loading}
+    <details open={!saved} class="card p-6 space-y-4">
+      <summary class="cursor-pointer font-medium">{$ui("Edit layout and saved content")}</summary>
+      <p class="text-sm text-text-secondary">{$ui("Advanced design settings. Saving changes creates a new revision for review.")}</p>
     {#if !canWrite}<p role="note" class="text-sm">{$ui("A sender or owner in this organisation may edit and preview designs. An owner must approve them.")}</p>{/if}
     <form onsubmit={save} class="space-y-6">
       <fieldset disabled={!canWrite || !!busy || writeUncertain || needsRefresh} class="space-y-6 min-w-0">
@@ -480,29 +548,6 @@
       <div class="flex flex-wrap gap-2"><button class="btn btn-primary" type="submit" disabled={!canWrite || !!busy || needsRefresh || writeUncertain || (!!saved && !dirty)}>{$ui(busy === 'save' ? 'Saving revision…' : saved ? 'Save new revision' : 'Save design')}</button>
         {#if saved}<button type="button" class="btn btn-secondary" disabled={!!busy} onclick={readLatest}>{$ui("Inspect saved revision")}</button>{/if}</div>
     </form>
-  {/if}
-  {#if saved}
-    <section bind:this={reviewPanel} id="saved-design-review" tabindex="-1" class="card p-6 space-y-4 scroll-mt-6" aria-label={$ui("Saved design preview and approval")}>
-      <h2 class="font-display text-lg">{$ui("Preview saved revision")} {saved.version}</h2>
-      <p class="text-sm text-text-secondary">{$ui("These values and wording samples are for this preview only. They do not change saved defaults or wording. Preview this saved design; an owner must personally review and approve it before use.")}</p>
-      {#if saved.html_master_json?.schema_version === 3}<p class="text-sm">{$ui("This preview includes the appended signing page. Review both printed party details, saved colours and logo, and the fixed signature locations on its final page.")}</p>{/if}
-      {#if dirty}<p class="text-sm text-warning" role="note">{$ui("Save the editor changes before generating a new preview.")}</p>{/if}
-      <fieldset disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} class="space-y-3">
-        {#each htmlTemplateFields(saved) as field (field.name)}<label class="block text-sm capitalize">{$ui("Preview")} {field.label}{$ui(field.required ? ' (required)' : '')}<textarea bind:value={samples[field.name]} rows="2" maxlength={field.max_chars * 2} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
-        {#each saved.html_master_json?.sections ?? [] as section (section.name)}<label class="block text-sm capitalize">{$ui("Preview-only")} {section.name.replaceAll('_', ' ')} {$ui("wording")}<textarea bind:value={sectionSamples[section.name]} rows="4" maxlength={section.max_chars * 2} placeholder={section.default_text ? undefined : 'Enter synthetic wording for owner preview'} class="mt-1 block w-full px-3 py-2 border border-border-light rounded-md bg-bg-elevated"></textarea></label>{/each}
-      </fieldset>
-      <button type="button" class="btn btn-secondary" disabled={!canWrite || !!busy || dirty || assetDraftDirty || needsRefresh || writeUncertain} onclick={generatePreview}>{$ui(busy === 'preview' ? 'Rendering saved design…' : 'Generate PDF preview')}</button>
-      {#if preview}
-        {#key previewKey}<VerifiedPDFPages bytes={preview.bytes} expectedPages={preview.pages} proofKey={previewKey} onProof={receiveProof} translate={(text) => $ui(text)} />{/key}
-        {#if !previewValid && !approved}<p role="note" class="text-sm text-warning">{$ui("This preview is no longer current. Generate a new preview before approving.")}</p>{/if}
-        {#if canApprove && !approved}
-          <label class="flex items-start gap-3 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={!!busy || !previewValid || !allPagesSeen} class="mt-1" /><span>{$ui("I have reviewed every PDF page, saved source, defaults, wording, local assets")}{$ui(saved.html_master_json?.schema_version !== 1 ? ', contract checks and intended party mappings' : '')}{$ui(saved.html_master_json?.schema_version === 3 ? ', appended signing page, saved branding and fixed signature locations' : '')}{$ui(", and approve this exact design revision. Preview sample values and wording are separate from saved defaults.")}</span></label>
-          {#if !allPagesSeen}<p class="text-sm text-text-secondary">{$ui("Open every page before approving this revision.")}</p>{/if}
-          <button type="button" class="btn btn-primary" disabled={!!busy || !previewValid || !allPagesSeen || !acknowledged} onclick={approve}>{$ui(busy === 'approve' ? 'Recording approval…' : 'Approve saved design revision')}</button>
-        {/if}
-      {/if}
-      {#if !canApprove && !approved}<p role="note" class="text-sm">{$ui("An owner must open this saved revision and generate their own preview before approving it.")}</p>{/if}
-      {#if approved}<p role="status" class="text-sm text-success">{$ui("This saved revision is approved. Return to the template library to populate a fresh document.")}</p>{/if}
-    </section>
+    </details>
   {/if}
 </div>

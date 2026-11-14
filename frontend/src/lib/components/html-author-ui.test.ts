@@ -35,12 +35,14 @@ function preview() {
 }
 function fixture(existing = true) {
   const calls: any[] = [];
+  const ticks: (() => void)[] = [];
   const initial = design(), local = draftFromHTMLTemplate(initial as any);
   const env: any = { templateID: existing ? templateID : null, sourceID: existing ? templateID : null, disposed: false,
     knownID: existing ? templateID : null, orgScope: orgID, me: { ...owner }, saved: existing ? initial : null, latest: null,
     draft: local, baseline: htmlAuthorFingerprint(existing ? local : blankHTMLAuthorDraft()),
     samples: { company: 'Preview sample' }, sectionSamples: {}, sampleBaseline: '{"values":{"company":"Approved default"},"sections":{}}',
     loading: false, busy: null, error: null, operation: 0, rowKey: 1, needsRefresh: false, writeUncertain: false, acknowledgedSave: null,
+    autoPreviewAttemptKey: '', autoPreviewSchedule: 0, tick: () => new Promise<void>((resolve) => ticks.push(resolve)),
     preview: null, previewAbort: null, previewSamples: '', previewActor: '', previewSequence: 0, allPagesSeen: false, acknowledged: false, now: Date.now(),
     assetName: '', pendingAssetFile: null, assetFile: { value: '' },
     APIError, htmlAuthorInput, htmlAuthorFingerprint, draftFromHTMLTemplate, htmlContractProfile, htmlPreviewSections, htmlProfileIssues, htmlSigningPageIssues, htmlTemplateFields, htmlValuesForSubmission, isApprovedHTMLTemplate, htmlAssetFromFile, blankHTMLSigningPage,
@@ -57,18 +59,18 @@ function fixture(existing = true) {
     previewKey: { get: () => `preview-${env.previewSequence}` },
     previewValid: { get: () => !!env.preview && !!env.saved && !env.dirty && !env.assetDraftDirty && !env.needsRefresh && !env.writeUncertain
       && env.preview.templateID === env.saved.id && env.preview.version === env.saved.version && env.preview.contentSHA256 === env.saved.content_sha256
-      && env.previewActor === env.me?.user_id && env.previewSamples === JSON.stringify({ values: env.samples, sections: env.sectionSamples }) && env.now < Date.parse(env.preview.expiresAt) },
+      && env.saved.org_id === env.orgScope && env.me?.org_id === env.orgScope && env.previewActor === env.me?.user_id && env.previewSamples === JSON.stringify({ values: env.samples, sections: env.sectionSamples }) && env.now < Date.parse(env.preview.expiresAt) },
   });
   for (const [name, kind] of [['getMe', 'me'], ['getTemplate', 'detail'], ['createHTMLTemplate', 'create'], ['updateHTMLTemplate', 'update'],
     ['previewHTMLTemplate', 'preview'], ['approveHTMLTemplate', 'approve']]) {
     env[name] = (...args: any[]) => new Promise((resolve, reject) => calls.push({ kind, args, resolve, reject }));
   }
   const names = ['invalidatePreview', 'detail', 'samePin', 'adopt', 'recordError', 'checkedIdentity', 'loadInitial', 'save', 'readLatest', 'adoptLatest',
-    'addAsset', 'changeSigningPage', 'changeSigningLogo', 'generatePreview', 'receiveProof', 'approve', 'reviewSavedVersion', 'protectNavigation', 'protectUnload'];
+    'addAsset', 'changeSigningPage', 'changeSigningLogo', 'savedPreviewKey', 'previewSavedVersionAutomatically', 'reviewReadiness', 'generatePreview', 'receiveProof', 'approve', 'reviewSavedVersion', 'protectNavigation', 'protectUnload'];
   const source = readFileSync(new URL('./HtmlTemplateEditor.svelte', import.meta.url), 'utf8');
   const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(names.map((name) => callback(source, name)).join('\n'));
   const actions = new Function('env', `with(env) { ${code}; return { ${names.join(',')} }; }`)(env);
-  return { env, calls, actions };
+  return { env, calls, actions, ticks };
 }
 async function step() { await Promise.resolve(); await Promise.resolve(); }
 function installPreview(state: ReturnType<typeof fixture>) {
@@ -266,4 +268,80 @@ test('late save/read responses cannot adopt into a disposed route or changed org
   state.calls[0].resolve(design(1)); await pending; expect(state.env.knownID).toBeNull(); expect(state.calls).toHaveLength(1);
   const refresh = fixture(), reading = refresh.actions.readLatest(); refresh.calls[0].resolve(owner); await step(); refresh.env.disposed = true;
   refresh.calls[1].resolve(design(4)); await reading; expect(refresh.env.latest).toBeNull(); expect(refresh.env.saved.version).toBe(3);
+});
+
+
+test('saved design automatically prepares one exact PDF after confirmed adoption and the Svelte flush', async () => {
+  const state = fixture(); state.env.saved = null; state.env.draft = blankHTMLAuthorDraft(); state.env.baseline = htmlAuthorFingerprint(state.env.draft);
+  const loading = state.actions.loadInitial(); state.calls[0].resolve(owner); await step();
+  state.calls[1].resolve(design()); await loading;
+  expect(state.calls.map((call) => call.kind)).toEqual(['me', 'detail']);
+  expect(state.ticks).toHaveLength(1); state.ticks.shift()!(); await step();
+  expect(state.calls.map((call) => call.kind)).toEqual(['me', 'detail', 'preview']);
+  expect(state.calls[2].args.slice(0, 4)).toEqual([templateID, 3, 'a'.repeat(64), { company: 'Approved default' }]);
+  state.calls[2].resolve(preview()); await step(); expect(state.env.preview?.version).toBe(3);
+  const duplicate = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await duplicate;
+  expect(state.calls.filter((call) => call.kind === 'preview')).toHaveLength(1);
+  expect(state.env.approved).toBe(false); expect(state.calls.filter((call) => call.kind === 'approve')).toHaveLength(0);
+});
+
+test('automatic preview waits for usable saved state and never runs a request loop or fills required values', async () => {
+  for (const mode of ['unsaved', 'disposed', 'org', 'viewer', 'dirty', 'asset', 'busy', 'loading', 'refresh', 'uncertain']) {
+    const state = fixture();
+    if (mode === 'unsaved') state.env.saved = null;
+    if (mode === 'disposed') state.env.disposed = true;
+    if (mode === 'org') state.env.me.org_id = templateID;
+    if (mode === 'viewer') state.env.me.role = 'viewer';
+    if (mode === 'dirty') state.env.draft.name += ' changed';
+    if (mode === 'asset') state.env.assetName = 'pending';
+    if (mode === 'busy') state.env.busy = 'save';
+    if (mode === 'loading') state.env.loading = true;
+    if (mode === 'refresh') state.env.needsRefresh = true;
+    if (mode === 'uncertain') state.env.writeUncertain = true;
+    const scheduled = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await scheduled;
+    expect(state.calls).toHaveLength(0);
+  }
+  const state = fixture(); state.env.samples.company = '';
+  const missing = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await missing;
+  expect(state.calls).toHaveLength(0); expect(state.env.error).toContain('company');
+  expect(state.env.samples.company).toBe('');
+  const repeated = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await repeated;
+  expect(state.calls).toHaveLength(0);
+});
+
+test('automatic render failure or expiry needs an explicit retry and late cross-scope results are ignored', async () => {
+  const state = fixture(); const automatic = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await step();
+  state.calls[0].reject(new APIError(503, 'Renderer unavailable')); await automatic;
+  const repeated = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await repeated;
+  expect(state.calls).toHaveLength(1); expect(state.env.preview).toBeNull();
+  const manual = state.actions.generatePreview(); expect(state.calls).toHaveLength(2);
+  state.calls[1].resolve(preview()); await manual;
+  state.env.preview.expiresAt = new Date(0).toISOString();
+  const expired = state.actions.previewSavedVersionAutomatically(); state.ticks.shift()!(); await expired;
+  expect(state.calls).toHaveLength(2);
+  const retry = state.actions.generatePreview(); expect(state.calls).toHaveLength(3);
+  state.env.me.org_id = templateID; state.env.orgScope = templateID;
+  state.calls[2].resolve(preview()); await retry; expect(state.env.preview).toBeNull();
+  expect(state.env.approved).toBe(false);
+});
+
+test('only the latest queued preview may start and a departed editor cannot dispatch after its deferred flush', async () => {
+  const state = fixture(); const first = state.actions.previewSavedVersionAutomatically(); const second = state.actions.previewSavedVersionAutomatically();
+  state.ticks.shift()!(); await first; expect(state.calls).toHaveLength(0);
+  state.env.disposed = true; state.ticks.shift()!(); await second; expect(state.calls).toHaveLength(0);
+});
+
+test('review readiness explains unopened pages and distinguishes acknowledgement from persisted approval', () => {
+  const state = fixture(); installPreview(state); state.env.allPagesSeen = false; state.env.acknowledged = false;
+  expect(state.actions.reviewReadiness()).toBe('Open every page in full size to enable the review checkbox.');
+  state.env.allPagesSeen = true;
+  expect(state.actions.reviewReadiness()).toBe('Confirm your review, then select Approve saved design revision.');
+  state.env.acknowledged = true;
+  expect(state.actions.reviewReadiness()).toBe('Ready to record your approval of this exact saved version.');
+  expect(state.env.approved).toBe(false);
+  state.env.preview.expiresAt = new Date(0).toISOString();
+  expect(state.actions.reviewReadiness()).toBe('This preview expired or changed. Refresh it before approving.');
+  const source = readFileSync(new URL('./HtmlTemplateEditor.svelte', import.meta.url), 'utf8');
+  expect(source.indexOf('id="saved-design-review"')).toBeLessThan(source.indexOf('<details open={!saved}'));
+  expect(source).toContain('aria-describedby="saved-template-review-readiness"');
 });

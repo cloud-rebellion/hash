@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { get } from 'svelte/store';
-import { installSessionExpiryGuard, isStaffApiRequest, loginUrlFor, safeReturnPath, sessionExpiredLoginUrl, type SessionExpiryEnv } from './sessionExpiry';
+import { installSessionExpiryGuard, isStaffApiRequest, loginUrlFor, expiredLoginUrlFor, safeReturnPath, sessionExpiredLoginUrl, type SessionExpiryEnv } from './sessionExpiry';
 import { needsSession } from './routeSurface';
 
 function harness(pathname: string, respond: (url: string) => Promise<Response> | Response, search = '') {
@@ -41,11 +41,22 @@ test('a confirmed 401 from a staff API call clears state and announces the login
   expect(h.cleared).toBe(1);
 });
 
-test('the guard never navigates and the browser env publishes the url to the store', () => {
+test('the guard publishes the safe login destination for the layout redirect', () => {
   expect(get(sessionExpiredLoginUrl)).toBeNull();
   sessionExpiredLoginUrl.set('/login?next=%2Fdashboard');
   expect(get(sessionExpiredLoginUrl)).toBe('/login?next=%2Fdashboard');
   sessionExpiredLoginUrl.set(null);
+});
+
+test('expired sign-in URLs retain only safe staff return paths and show the expiry message', () => {
+  const target = new URL(expiredLoginUrlFor('/documents/abc', '?tab=2&name=åäö'), 'https://hash.test');
+  expect(target.origin).toBe('https://hash.test');
+  expect(target.pathname).toBe('/login');
+  expect(target.searchParams.get('next')).toBe('/documents/abc?tab=2&name=%C3%A5%C3%A4%C3%B6');
+  expect(target.searchParams.get('expired')).toBe('1');
+  for (const invalid of ['//evil.test', '/..//evil.test', '/login', '/sign/private-token', '/api/v1/me']) {
+    expect(expiredLoginUrlFor(invalid, '')).toBe('/login?expired=1');
+  }
 });
 
 test('403, 503 and 200 do not announce', async () => {
@@ -320,7 +331,7 @@ test('N14: the restore has landed by the time the /me response reaches the calle
   expect(h.notified.length).toBe(1);
   answer = () => meOk();
   await h.fetch('/api/v1/me');
-  expect(h.restored).toBe(1); // no settle: "Check again" reads the store right after its await
+  expect(h.restored).toBe(1); // no settle: callers observe the restored state immediately after awaiting /me
 });
 
 test('N12: a different user on any /me 200 reloads even when no notice was open', async () => {

@@ -17,6 +17,7 @@
   let complete = $state(false);
   let error = $state<string | null>(null);
   let oidcEnabled = $state(false);
+  let sessionExpired = $state(false);
   let disposed = false;
   let request: { controller: AbortController; timer: ReturnType<typeof setTimeout> } | null = null;
   let statusRequest: { controller: AbortController; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -50,6 +51,7 @@
       if (!token) error = 'Open the complete link from your latest email. This page needs a valid email link to continue.';
     }
     if (mode === 'login') {
+      sessionExpired = new URLSearchParams(window.location.search).get('expired') === '1';
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10_000);
       statusRequest = { controller, timer };
@@ -115,6 +117,10 @@
       <p class="page-eyebrow mb-3">{$ui("Your workspace")}</p>
       <h1 id="staff-auth-title" class="font-display text-3xl font-extralight tracking-tight mb-3">{$ui(copy.title)}</h1>
       <p class="text-sm text-text-secondary leading-relaxed mb-6">{$ui(copy.description)}</p>
+
+      {#if mode === 'login' && sessionExpired}
+        <p class="mb-4 rounded-md border border-border-light bg-bg-elevated p-3 text-sm" role="status">{$ui('Your session has expired. Please sign in again.')}</p>
+      {/if}
 
       {#if error}<p id="staff-auth-error" class="mb-4 text-sm text-danger" role="alert">{$ui(error)}</p>{/if}
       {#if complete}

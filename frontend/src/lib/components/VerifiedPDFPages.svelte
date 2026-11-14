@@ -19,6 +19,7 @@
   let page = $state(1);
   let seen = $state<number[]>([]);
   let error = $state<string | null>(null);
+  let failedPage = $state<number | null>(null);
   let disposed = false;
   let pdfLoad: PdfLoad<PdfDoc> | null = null;
   let renderRevision = 0;
@@ -43,9 +44,22 @@
     if (typeof fit !== 'boolean' || !current() || loading || rendering || error) return;
     fitPage = fit;
   }
+  function nextUnopenedPage(): number | null {
+    for (let number = 1; number <= expectedPages; number++) if (!seen.includes(number)) return number;
+    return null;
+  }
+  async function openNextUnopenedPage() {
+    if (!current() || loading || rendering || !loadedPDF) return;
+    const number = nextUnopenedPage();
+    if (number !== null) await render(number);
+  }
+  async function retryFailedPage() {
+    if (!current() || loading || rendering || failedPage === null) return;
+    await render(failedPage);
+  }
   async function render(number: number) {
     if (!current() || !loadedPDF || rendering || number < 1 || number > expectedPages) return;
-    rendering = true; error = null;
+    rendering = true; error = null; failedPage = null;
     onProof({ key: sourceKey, allPagesSeen: false });
     const revision = ++renderRevision;
     try {
@@ -59,7 +73,7 @@
     } catch (e) {
       if (current() && revision === renderRevision) {
         if (!(e instanceof Error && (e.name === 'AbortError' || e.name === 'RenderingCancelledException'))) captureFlarePDFViewError();
-        error = (e as Error).message; onProof({ key: sourceKey, allPagesSeen: false });
+        error = (e as Error).message; failedPage = number; onProof({ key: sourceKey, allPagesSeen: false });
       }
     } finally { if (current() && revision === renderRevision) rendering = false; }
   }
@@ -105,7 +119,16 @@
 </script>
 
 {#if loading}<p class="text-sm" role="status">{translate('Loading verified PDF pages…')}</p>{/if}
-{#if error}<div role="alert" class="text-danger text-sm space-y-2"><p>{translate(error)}</p>{#if loadedPDF}<button type="button" class="btn btn-secondary" disabled={rendering} onclick={() => render(page)}>{translate('Retry this page')}</button>{/if}</div>{/if}
+{#if error}<div role="alert" class="text-danger text-sm space-y-2"><p>{translate(error)}</p>{#if loadedPDF && failedPage !== null}<button type="button" class="btn btn-secondary" disabled={rendering} onclick={retryFailedPage}>{translate('Retry this page')}</button>{/if}</div>{/if}
+{#if loadedPDF}
+  <section class="rounded-lg border border-border-light bg-bg-elevated p-3 flex flex-wrap items-center justify-between gap-3" aria-label={translate('Page review progress')}>
+    <div class="space-y-1">
+      <p class="text-sm font-medium" role="status">{translate('Opened')} {seen.length} {translate('of')} {expectedPages} {translate('pages')}{rendering ? ' · ' + translate('Rendering…') : ''}</p>
+      <p class="text-xs text-text-secondary">{#if seen.length === expectedPages}{translate('All pages opened.')}{:else}{translate('Pages left to open:')} {expectedPages - seen.length}{/if}</p>
+    </div>
+    <button type="button" class="btn btn-secondary text-sm" disabled={loading || rendering || nextUnopenedPage() === null} onclick={openNextUnopenedPage}>{translate('Open next unopened page')}</button>
+  </section>
+{/if}
 <div class="max-w-full overflow-auto border border-border-light rounded-md bg-bg-elevated p-2">
   <div class="flex justify-end gap-1 mb-3" role="group" aria-label={translate('Page size')}>
     <button type="button" class="btn text-xs {fitPage ? 'btn-primary' : 'btn-secondary'}" aria-pressed={fitPage} disabled={loading || rendering || !!error} onclick={() => setPageFit(true)}>{translate('Fit page')}</button>
@@ -114,5 +137,5 @@
   <canvas width="0" height="0" bind:this={canvas} aria-label={`${ariaLabel}, ${translate('page')} ${page}`} class="max-w-full h-auto mx-auto" style:max-height={fitPage ? PDF_FIT_PAGE_HEIGHT : undefined}></canvas>
 </div>
 {#if loadedPDF}
-  <PDFPageStrip doc={loadedPDF} activePage={page} paint={paintThumbnail} onSelect={render} busy={rendering} disabled={loading || rendering} {translate} />
+  <PDFPageStrip doc={loadedPDF} activePage={page} paint={paintThumbnail} onSelect={render} openedPages={seen} busy={rendering} disabled={loading || rendering} {translate} />
 {/if}

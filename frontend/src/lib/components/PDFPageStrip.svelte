@@ -4,9 +4,9 @@
   import { PDFThumbnailWindow, pdfThumbnailPages, type ThumbnailPaint, type ThumbnailState } from '$lib/pdfPageStrip';
   import { captureFlarePDFViewError } from '$lib/flare-client';
 
-  let { doc, activePage, paint, onSelect, disabled = false, busy = false, translate = (text: string) => text }: {
+  let { doc, activePage, paint, onSelect, disabled = false, busy = false, openedPages, translate = (text: string) => text }: {
     doc: PdfDoc; activePage: number; paint: ThumbnailPaint<PdfDoc>; onSelect: (page: number) => void;
-    disabled?: boolean; busy?: boolean; translate?: (text: string) => string;
+    disabled?: boolean; busy?: boolean; openedPages?: readonly number[]; translate?: (text: string) => string;
   } = $props();
   const source = untrack(() => doc);
   const slots = Array.from({ length: Math.min(source.numPages, 5) }, (_, index) => index);
@@ -49,12 +49,13 @@
       {@const number = numbers[slot]}
       {@const state = states[slot]?.page === number ? states[slot].state : 'loading'}
       <button type="button" class="thumbnail shrink-0 rounded-lg border border-border bg-bg-elevated p-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" class:selected={activePage === number}
-        disabled={disabled} aria-label={`${translate('Show page')} ${number}`} aria-current={activePage === number ? 'page' : undefined} onclick={() => select(number)}>
+        disabled={disabled} aria-label={`${translate('Show page')} ${number}`} title={openedPages ? translate(openedPages.includes(number) ? 'Opened in full size' : 'Not opened yet') : undefined} aria-current={activePage === number ? 'page' : undefined} onclick={() => select(number)}>
         <span class="relative flex h-40 w-28 items-center justify-center overflow-hidden rounded-sm bg-bg-surface">
           <canvas width="0" height="0" bind:this={canvases[slot]} aria-hidden="true" class="max-h-full max-w-full" style:visibility={state === 'ready' && !error ? 'visible' : 'hidden'}></canvas>
           {#if state !== 'ready' || error}<span class="absolute inset-2 flex items-center justify-center text-center text-[10px] leading-relaxed text-text-muted">{translate(error || state === 'released' ? 'Select to view this page' : 'Rendering thumbnail…')}</span>{/if}
         </span>
         <span class="mt-2 block text-xs font-medium text-text-primary">{translate('Page')} {number}</span>
+        {#if openedPages}<span class="mt-1 block min-h-7 text-[10px] leading-tight" class:text-success={openedPages.includes(number)} class:text-text-muted={!openedPages.includes(number)}>{translate(openedPages.includes(number) ? 'Opened in full size' : 'Not opened yet')}</span>{/if}
       </button>
     {/each}
   </div>

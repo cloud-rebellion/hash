@@ -1,21 +1,28 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { ui, staffLocale } from '$lib/staffPreferences';
-  import { sessionExpiredLoginUrl, loginUrlFor } from '$lib/sessionExpiry';
+  import { sessionExpiredLoginUrl, expiredLoginUrlFor } from '$lib/sessionExpiry';
   import { needsSession } from '$lib/routeSurface';
 
   let dialog = $state.raw<HTMLDialogElement>();
-  let checking = $state(false);
-  let stillSignedOut = $state(false);
+  let mounted = $state(false);
+  let redirectedTo = $state<string | null>(null);
+  onMount(() => { mounted = true; });
 
   // Shown only on a page that needs a session, and the link is computed from the page being shown.
   const visible = $derived($sessionExpiredLoginUrl !== null && needsSession($page.url.pathname));
-  const signInHref = $derived(loginUrlFor($page.url.pathname, $page.url.search));
+  const signInHref = $derived(expiredLoginUrlFor($page.url.pathname, $page.url.search));
 
-  // A native modal makes the page behind it inert and traps focus. The dialog cannot be dismissed
-  // with Escape; only a successful /api/v1/me check (here, or from the focus probe) clears it.
+  // Replace the expired page in this tab. A delayed or cancelled navigation must
+  // not leave the old workspace interactive. The modal remains a same-tab sign-in
+  // fallback; ordinary beforeunload protection is not bypassed.
   $effect(() => {
-    if (visible) stillSignedOut = false;
+    if (!mounted || !visible) { redirectedTo = null; return; }
+    const target = signInHref;
+    if (redirectedTo === target) return;
+    redirectedTo = target;
+    try { window.location.replace(target); } catch { /* retain the visible sign-in link */ }
   });
 
   $effect(() => {
@@ -27,16 +34,6 @@
     if (visible && dialog && !dialog.open) dialog.showModal();
   }
 
-  async function checkAgain() {
-    if (checking) return;
-    checking = true; stillSignedOut = false;
-    try {
-      // The session guard wraps fetch: a 2xx from /me clears the notice, a 401 keeps it.
-      await fetch('/api/v1/me', { credentials: 'include', cache: 'no-store' });
-    } catch { /* offline: keep the notice */ }
-    checking = false;
-    stillSignedOut = $sessionExpiredLoginUrl !== null;
-  }
 </script>
 
 {#if visible}
@@ -50,13 +47,9 @@
     class="card m-auto w-full max-w-md p-6 backdrop:bg-black/50"
   >
     <h2 id="session-expired-title" class="font-display text-lg">{$ui('Your session has expired')}</h2>
-    <p id="session-expired-body" class="mt-2 text-sm text-text-muted">{$ui('Sign in again in a new tab, then check again. Unsaved changes stay on this page.')}</p>
-    {#if stillSignedOut}
-      <p class="mt-2 text-sm text-danger" role="status">{$ui('You are still signed out.')}</p>
-    {/if}
+    <p id="session-expired-body" class="mt-2 text-sm text-text-muted">{$ui('Your session has expired. Please sign in again.')}</p>
     <div class="mt-4 flex flex-wrap gap-2">
-      <a class="btn btn-primary" href={signInHref} target="_blank" rel="noopener noreferrer">{$ui('Sign in again')}</a>
-      <button type="button" class="btn btn-secondary" onclick={checkAgain} disabled={checking} aria-busy={checking}>{$ui('Check again')}</button>
+      <a class="btn btn-primary" href={signInHref} data-sveltekit-reload>{$ui('Sign in again')}</a>
     </div>
   </dialog>
 {/if}

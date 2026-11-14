@@ -1288,11 +1288,11 @@ renderer_vulnerability_scan() {
   actual_h1="$(awk '$1 == "github.com/gotenberg/gotenberg/v8" && $2 == "v8.36.0" { print $3 }' gotenberg/go.sum)"
   actual_revision="$(sed -n 's/.*io.brightinteraction.hash.gotenberg.upstream.revision="\([0-9a-f]*\)".*/\1/p' gotenberg/Dockerfile)"
   jq -e \
-    --arg module 'github.com/gotenberg/gotenberg/v8' \
+    --arg reviewed_module 'github.com/gotenberg/gotenberg/v8' \
     --arg version "$actual_version" \
     --arg h1 "$actual_h1" \
     --arg revision "$actual_revision" '
-      .schema == 1 and .module == $module and .version == $version and
+      .schema == 1 and .module == $reviewed_module and .version == $version and
       .module_h1 == $h1 and .upstream_revision == $revision and
       .reviewed_on == "2026-11-07" and
       .review_expires_on == "2026-12-07" and

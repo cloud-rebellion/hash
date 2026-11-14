@@ -1,4 +1,4 @@
-import { test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 
 const mailboxURL = process.env.HASH_MAILHOG_URL || 'http://127.0.0.1:8025';
@@ -9,10 +9,53 @@ function requireCheck(ok: boolean, message: string): asserts ok {
 }
 
 async function postByButton(page: Page, path: string, button: string, status: number): Promise<void> {
-  const completed = page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
-  await page.getByRole('button', { name: button, exact: true }).click();
-  const response = await completed;
-  requireCheck(response.status() === status, 'Unexpected native account response status');
+  const before = new URL(page.url());
+  const submit = page.getByRole('button', { name: button, exact: true });
+  const responseForClick = async () => {
+    const completed = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.origin === before.origin && url.pathname === path && response.request().method() === 'POST';
+    });
+    await submit.click();
+    return await completed;
+  };
+  const response = await responseForClick();
+  if (response.status() === status) return;
+
+  // Retry only a known pre-handler refusal of a successful native auth action.
+  // Negative auth expectations and uncertain/network outcomes remain failures.
+  const recoverable = (status === 200 || status === 202) && [
+    '/api/v1/auth/register', '/api/v1/auth/verify-email', '/api/v1/auth/login',
+    '/api/v1/auth/forgot-password', '/api/v1/auth/reset-password'
+  ].includes(path) && response.status() === 429 && response.headers()['retry-after'] === '60';
+  requireCheck(recoverable, 'Unexpected native account response status');
+  const annotationType = 'hash-native-auth-throttle-recovery-v1';
+  const annotations = test.info().annotations;
+  requireCheck(!annotations.some(annotation => annotation.type === annotationType), 'Native auth throttle recovery budget was already used');
+  // Reserve this test's sole recovery before any awaited assertion. Descriptions
+  // contain only the closed action path, statuses and measured real wait.
+  const recovery = { type: annotationType, description: JSON.stringify({ path, expected_status: status, refused_status: 429, retry_after_seconds: 60, phase: 'observed' }) };
+  annotations.push(recovery);
+  const warning = page.getByRole('alert').filter({ hasText: /^Too many attempts\. Please wait a moment before trying again\.$/ });
+  const samePage = () => {
+    const current = new URL(page.url());
+    return current.origin === before.origin && current.pathname === before.pathname;
+  };
+  await expect(warning).toBeVisible();
+  requireCheck(samePage(), 'Native auth throttle refusal navigated away from its form');
+  await expect(submit).toBeEnabled();
+  const waitStarted = Date.now();
+  recovery.description = JSON.stringify({ path, expected_status: status, refused_status: 429, retry_after_seconds: 60, phase: 'waiting' });
+  await page.waitForTimeout(60_100);
+  const waited = Date.now() - waitStarted;
+  requireCheck(waited >= 60_000, 'Native auth throttle retry did not respect the real Retry-After delay');
+  requireCheck(samePage(), 'Native auth throttle wait navigated away from its form');
+  await expect(warning).toBeVisible();
+  await expect(submit).toBeEnabled();
+  recovery.description = JSON.stringify({ path, expected_status: status, refused_status: 429, retry_after_seconds: 60, waited_ms: waited, phase: 'retrying' });
+  const retried = await responseForClick();
+  recovery.description = JSON.stringify({ path, expected_status: status, refused_status: 429, retry_after_seconds: 60, waited_ms: waited, retry_status: retried.status(), phase: retried.status() === status ? 'recovered' : 'refused' });
+  requireCheck(retried.status() === status, 'Native account response remained unexpected after the single throttle retry');
 }
 
 async function atPath(page: Page, path: string): Promise<void> {
@@ -631,4 +674,39 @@ test.describe('native staff sales journey', () => {
       throw new Error('Native sales qualification failed at: ' + stage + counts);
     } finally { await Promise.allSettled(contexts.map(context => context.close())); }
   });
+});
+
+
+// Controlled API proof of the real Svelte form and real Retry-After wait only.
+// The two intercepted POSTs create no native account and deliver no email;
+// ordinary native account/sales journeys above retain their real backend proof.
+test('[auth-throttle] controlled register API refusal keeps the form and retries after the real delay', async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  await page.addInitScript(() => window.localStorage.setItem('hash_staff_locale', 'en'));
+  let posts = 0;
+  await page.route('**/api/v1/auth/register', async route => {
+    if (route.request().method() !== 'POST') { await route.continue(); return; }
+    posts++;
+    if (posts === 1) {
+      await route.fulfill({ status: 429, headers: { 'Retry-After': '60' }, contentType: 'text/plain', body: 'Too Many Requests' });
+    } else if (posts === 2) {
+      await route.fulfill({ status: 202, json: {} });
+    } else {
+      await route.abort('failed');
+    }
+  });
+  await page.goto('/register');
+  await page.getByLabel('Your name', { exact: true }).fill('Synthetic Controlled Owner');
+  await page.getByLabel('Company name', { exact: true }).fill('Synthetic Controlled Workspace');
+  await page.getByLabel('Email', { exact: true }).fill('controlled-throttle@example.test');
+  await page.getByLabel('New password', { exact: true }).fill('Synthetic controlled passphrase 20261114');
+  await page.getByLabel('Confirm password', { exact: true }).fill('Synthetic controlled passphrase 20261114');
+  await postByButton(page, '/api/v1/auth/register', 'Create workspace', 202);
+  requireCheck(posts === 2, 'Controlled auth throttle proof did not use exactly two form POSTs');
+  await expect(page.getByRole('status').getByText('If registration can proceed, verification instructions have been queued. Check your inbox and open the email link to finish setting up your workspace.', { exact: true })).toBeVisible();
+  const recoveries = testInfo.annotations.filter(annotation => annotation.type === 'hash-native-auth-throttle-recovery-v1');
+  requireCheck(recoveries.length === 1, 'Controlled auth throttle proof did not retain exactly one recovery annotation');
+  const recovery = JSON.parse(recoveries[0].description ?? '{}');
+  requireCheck(recovery.path === '/api/v1/auth/register' && recovery.refused_status === 429 && recovery.retry_after_seconds === 60
+    && recovery.waited_ms >= 60_000 && recovery.retry_status === 202 && recovery.phase === 'recovered', 'Controlled auth throttle proof did not verify real-delay UI recovery');
 });
